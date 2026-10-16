@@ -213,3 +213,18 @@ def test_watchdog_counts_new_lock_errors(tmp_path, monkeypatch):
     assert ops.new_lock_errors(st) == 3
     f.write_text("database is locked\n")         # rotated (copytruncate)
     assert ops.new_lock_errors(st) == 1
+
+
+def test_push_during_deploy_counts_as_success(repo, monkeypatch):
+    work, push, head, alerts = repo
+    push("a")
+    real = autoupdate.subprocess.run
+
+    def run(cmd, *a, **k):
+        if cmd[-1:] == ["update"]:
+            push("b")              # someone pushes while the update runs; the pull takes the newer head
+        return real(cmd, *a, **k)
+    monkeypatch.setattr(autoupdate.subprocess, "run", run)
+    res = autoupdate.run_once(alerts.append, health=lambda: (True, "ok"))
+    assert res.startswith("eingespielt") and (work / "b").exists()
+    assert "b" in alerts[-1] and "zurückgerollt" not in alerts[-1]

@@ -206,7 +206,12 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
     _save(st)
     r = subprocess.run([_python(), "mayham.py", "update"], cwd=ROOT, capture_output=True, text=True, timeout=1800)
     log((r.stdout + r.stderr).strip()[-4000:])
-    if git("rev-parse", "HEAD") != target:
+    # mayham.py update pulls the newest main, which may be past `target` when someone pushed during the backup
+    now_head = git("rev-parse", "HEAD")
+    if now_head != head and subprocess.run(["git", "merge-base", "--is-ancestor", target, now_head],
+                                           cwd=ROOT).returncode == 0:
+        target, subject = now_head, git("log", "-1", "--format=%h %s", now_head)[:90]
+    if now_head != target:
         st["bad"] = target
         _save(st)
         log(f"rolled back: {subject}")
