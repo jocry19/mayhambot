@@ -101,7 +101,7 @@ def due_for_trades(watch, now, cycle_seconds):
     return [r for *_, r in sorted(due, key=lambda x: x[:2])]  # smart-bought coins first, then most overdue
 
 
-def fetch_trades(conn, watch):
+def fetch_trades(conn, watch, budget=None):
     """Fetch pool trades of the tokens that are due (see refetch_interval), most overdue first, within
     TRADES_BUDGET_SECONDS per cycle, so a rate-limited API never blocks the cycle."""
     total, t0, done = 0, time.time(), 0
@@ -109,7 +109,7 @@ def fetch_trades(conn, watch):
     if len(due) < len(watch):
         log.info("trades: %d/%d tokens due, rest quiet since last fetch", len(due), len(watch))
     for r in due:
-        if time.time() - t0 > settings.trades_budget_seconds:
+        if time.time() - t0 > (settings.trades_budget_seconds if budget is None else budget):
             log.info("trades budget used after %d/%d due tokens, rest next cycle", done, len(due))
             break
         done += 1
@@ -203,8 +203,11 @@ _backfiller = None
 def cycle(conn, i):
     t0 = time.time()
     watch = refresh_watchlist(conn, i)
+    # coins smart wallets are buying first, evaluated and alerted right after; the quiet rest is fetched once the
+    # alerts are out (it feeds the next cycle), so the trades budget no longer sits between a smart buy and its alert
+    hot = [r for r in watch if "smart_n" in r.keys() and (r["smart_n"] or 0) > 0]
     t_fetch = time.time()
-    new_trades = fetch_trades(conn, watch)
+    new_trades = fetch_trades(conn, hot)
     t_fetch = time.time() - t_fetch
     if _backfiller is not None:  # history arrives in the background; picked up by this rescore
         bf = _backfiller.take()
@@ -220,7 +223,10 @@ def cycle(conn, i):
     mints = list(dict.fromkeys([r["mint"] for r in watch] + smart_active_mints(conn)))
     sigs = engine.evaluate(conn, mints)
     notifier.notify(conn, sigs)
-    engine.last_funnel.update(cycle_s=round(time.time() - t0, 1), fetch_s=round(t_fetch, 1))
+    engine.last_funnel.update(alert_s=round(time.time() - t0, 1), fetch_s=round(t_fetch, 1))
+    hot_mints = {r["mint"] for r in hot}
+    new_trades += fetch_trades(conn, [r for r in watch if r["mint"] not in hot_mints],
+                               budget=max(10, settings.trades_budget_seconds - t_fetch))
     engine.update_outcomes(conn)
     try:
         notifier.notify_followups(plan.check_levels(conn))  # target / stop reached: follow-up alert for manual trading

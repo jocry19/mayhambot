@@ -181,3 +181,9 @@ def test_big_cluster_is_a_chain_not_one_owner():
     assert qc.entity("A") == qc.entity("B") == "cluster:c1"            # 2 tiered wallets: one owner
     assert qc.entity("W0") == "W0" and qc.entity("W1") == "W1"          # 6 in one cluster: a chain, counted apart
     assert qc.entity("X") == "X"
+
+
+def test_single_bad_low_print_is_no_dip():
+    from signals.backtest import confirmed
+    assert confirmed([1.0, 1.1, 0.004, 1.15, 1.3]) == [1.0, 1.1, 1.1, 1.15, 1.3]   # BERT's -99.6 % print
+    assert confirmed([1.0, 0.7, 0.5, 0.45]) == [1.0, 0.7, 0.5, 0.45]                # a real slide stays

@@ -141,15 +141,21 @@ CONFIRM = 1.25  # a print above both neighbours by more than this is a single ba
 
 
 def confirmed(prices, trusted=None):
-    """Prices with single bad prints replaced: a value only stands if a direct neighbour is within CONFIRM of it
-    (as core.scoring._price_index, stricter), so one stray print never counts as a +50 % high. trusted[i] True
-    (a DexScreener snapshot, already an aggregated pool price) always stands."""
-    out = []
-    for i, p in enumerate(prices):
-        nb = [prices[j] for j in (i - 1, i + 1) if 0 <= j < len(prices)]
-        ok = not nb or (trusted is not None and trusted[i]) or any(p <= CONFIRM * x for x in nb)
-        out.append(p if ok else max(x for x in nb if x < p))
-    return out
+    """Prices with single bad prints replaced: a print above both direct neighbours by more than CONFIRM is a
+    spike (replaced by the higher neighbour), one below both by that factor a dip (replaced by the lower one), as
+    core.scoring._price_index but stricter and both ways, so one stray print is never a +50 % high or a -99 % dip.
+    The first and last print and trusted[i] True (a DexScreener snapshot, an aggregated pool price) always stand."""
+    def one_pass(xs, bad, fix):
+        out = []
+        for i, p in enumerate(xs):
+            nb = [xs[j] for j in (i - 1, i + 1) if 0 <= j < len(xs)]
+            keep = len(nb) < 2 or (trusted is not None and trusted[i]) or not all(bad(p, x) for x in nb)
+            out.append(p if keep else fix(nb))
+        return out
+    # spikes above both neighbours first, then dips below both on the de-spiked series
+    # (BERT: one -99.6 % print before its high)
+    xs = one_pass(list(prices), lambda p, x: p > CONFIRM * x, max)
+    return one_pass(xs, lambda p, x: p * CONFIRM < x, min)
 
 
 def robust_max(prices, trusted=None):
