@@ -700,3 +700,21 @@ def test_second_strategy_does_not_buy_a_coin_already_held_or_being_bought(env):
     assert st.open("signal", "auto", MINT, 0.1, state["snap"], pre, tp=0.5, hold=60, reason="t", intent="signal:9") is None
     msgs = [r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'")]
     assert any("Kauf läuft schon" in m for m in msgs) and any("schon gehalten" in m for m in msgs)
+
+
+def test_live_sell_runs_in_a_worker_and_stops_use_the_exit_quote(env):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    pid = st.on_whale_buy(whale_buy())
+    conn.execute("UPDATE ct_positions SET mode='live' WHERE id=?", (pid,))
+    conn.commit()
+    p = conn.execute("SELECT * FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    st.exs["live"] = ex
+    ex.exit_value = lambda mint, tokens, dec: (p["entry_cost_sol"] * 0.5, 0)  # a sell now brings -50 %
+    st.update()  # DexScreener price is unchanged, the quote says stop
+    for _ in range(50):
+        if conn.execute("SELECT status FROM ct_positions WHERE id=?", (pid,)).fetchone()[0] == "closed":
+            break
+        time.sleep(0.05)
+    r = conn.execute("SELECT status, exit_reason FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    assert tuple(r) == ("closed", "stop")

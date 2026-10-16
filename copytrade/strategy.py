@@ -49,6 +49,7 @@ class Strategy:
             executors = {executors.mode: executors}
         self.exs = executors
         self._missing: dict[int, int] = {}
+        self._noroute: dict[int, float] = {}  # last 'no sell route' alarm per live position
         self._pending: list[tuple[float, Swap]] = []  # whale buys waiting for the learned entry delay
         control.init(conn)
         try:  # a sell that never finished (crash mid-close): back to open so the exits can retry
@@ -472,12 +473,41 @@ class Strategy:
                     data={"position": pid, **meta})
         return pid
 
-    def close(self, p, snap, reason: str) -> bool:
+    def close(self, p, snap, reason: str, wait: bool = True) -> bool:
+        """Sell a position. wait=False (real-money swaps, up to LIVE_CONFIRM_TIMEOUT_S): claim it here and sell in a
+        worker thread with its own connection, so the price loop keeps checking the other stops meanwhile."""
         # claim it first: the whale-sell path and the price loop (other threads) may try to close the same position
         if self.conn.execute("UPDATE ct_positions SET status='closing', closed_at=? WHERE id=? AND status='open'",
                              (int(time.time()), p["id"])).rowcount != 1:
             return False
         self.conn.commit()
+        if not wait:
+            threading.Thread(target=self._close_worker, args=(dict(p), snap, reason), daemon=True,
+                             name=f"sell-{p['id']}").start()
+            return True
+        return self._sell_claimed(p, snap, reason)
+
+    def _close_worker(self, p, snap, reason) -> None:
+        conn = store.connect(self.s)
+        try:
+            Strategy.__new__(Strategy)._init_light(conn, self.s, self.exs)._sell_claimed(p, snap, reason)
+        except Exception as e:
+            log.error("sell worker %s failed: %s", p["id"], e)
+            try:
+                conn.execute("UPDATE ct_positions SET status='open', closed_at=NULL WHERE id=? AND status='closing'",
+                             (p["id"],))
+                conn.commit()
+            except Exception:
+                pass  # the start-up recovery reopens it after 300 s
+        finally:
+            conn.close()
+
+    def _init_light(self, conn, s, exs):
+        self.conn, self.s, self.exs = conn, s, exs
+        self._missing, self._pending, self._noroute = {}, [], {}
+        return self
+
+    def _sell_claimed(self, p, snap, reason: str) -> bool:
         ex = self._ex_for_position(p)
         try:
             fill = ex.sell(p["mint"], p["tokens"], p["token_decimals"] or 6, snap, p["last_price_sol"] or 0)
@@ -524,7 +554,7 @@ class Strategy:
                 store.event(self.conn, "hint", f"VERKAUFS-HINWEIS {p['symbol']}: {EXIT_NAMES.get(reason, reason)}",
                             data={"position": p["id"], "reason": reason})
             return
-        self.close(p, snap, reason)
+        self.close(p, snap, reason, wait=p["mode"] == "paper")
 
     def _smart_exit(self, p) -> bool:
         try:
@@ -563,6 +593,15 @@ class Strategy:
                 continue
             self._missing.pop(p["id"], None)
             price = snap.price_sol
+            if p["mode"] != "paper":  # real money: judge the stop on what a sell would bring now (Jupiter quote)
+                ev = getattr(self._ex_for_position(p), "exit_value", None)
+                v = ev(p["mint"], p["tokens"], p["token_decimals"] or 6) if ev else False
+                if v is None and time.time() - self._noroute.get(p["id"], 0) > 600:
+                    self._noroute[p["id"]] = time.time()
+                    store.event(self.conn, "error", f"{p['symbol']}: kein Verkaufsweg (Jupiter), Position "
+                                                    f"{p['id']} wird beobachtet", "error")
+                elif v and p["tokens"]:
+                    price = v[0] / p["tokens"]
             high = max(p["high_price_sol"] or price, price)
             peak_buys = max(p["peak_buys_m5"] or 0, snap.buys_m5)
             self.conn.execute(
