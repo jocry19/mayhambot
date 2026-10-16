@@ -145,6 +145,11 @@ Neustart höchstens alle 15 min. Geprüft wird:
 - Daten bleiben immer auf dem Mac (`data/`, nie im Repo). Für Analysen woanders: ein Backup nehmen und mit
   `ops.py restore <datei> --no-stop` in eine zweite Kopie einspielen.
 - Nie zwei Bots gleichzeitig mit derselben Wallet live handeln lassen.
+- Code kommt nur über `main` und das Auto-Update auf den Mac: keine Sitzung auf dem Mac ändert den Checkout
+  (`git pull/reset/checkout`) oder ruft `mayham.py update` von Hand auf.
+- Tests dürfen nicht von Zeitfenstern abhängen (kein `sleep` mit Millisekunden, keine knappen `window=`):
+  der Testlauf im Auto-Update läuft unter launchd mit ProcessType Background, dort drosselt macOS die Timer
+  stark. Zeit über eine Fake-Uhr (`monkeypatch.setattr(modul, "time", ...)`) oder Zähler steuern.
 
 ## Später: Server (Option)
 

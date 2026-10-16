@@ -186,16 +186,31 @@ def test_unhealthy_deploy_rolls_back(repo):
     assert "übersprungen" in autoupdate.run_once(alerts.append, now=9e9)
 
 
+class FakeClock:
+    """health_check only sees this clock: no real sleeping, so a throttled launchd job (ProcessType Background
+    on the Mac stretches short sleeps a lot) cannot change the outcome."""
+    def __init__(self, t=1_000_000.0):
+        self.t = t
+
+    def time(self):
+        return self.t
+
+    def sleep(self, d):
+        self.t += d
+
+
 def test_health_check_detects_crash_loop(repo, monkeypatch):
     work, push, head, alerts = repo
+    clock = FakeClock()
+    monkeypatch.setattr(autoupdate, "time", clock)
     monkeypatch.setattr(autoupdate, "_services_now", lambda: ["a", "b"])
     monkeypatch.setattr(ops, "check_dashboard", lambda: True)
-    seq = iter([{"a": 1, "b": 2}, {"a": 1, "b": 3}, {"a": 1, "b": 4}])
-    monkeypatch.setattr(autoupdate, "_pids", lambda names: next(seq))
-    ok, detail = autoupdate.health_check(window=0.02, interval=0.01)
+    n = []
+    monkeypatch.setattr(autoupdate, "_pids", lambda names: {"a": 1, "b": len(n.append(1) or n)})
+    ok, detail = autoupdate.health_check(window=180, interval=15)
     assert not ok and "b" in detail
     monkeypatch.setattr(autoupdate, "_pids", lambda names: {"a": 1, "b": 2})
-    assert autoupdate.health_check(window=0.2, interval=0.01)[0]
+    assert autoupdate.health_check(window=180, interval=15)[0]
 
 
 def test_lock_count_reads_only_new_log_lines(repo):
@@ -298,23 +313,29 @@ def _plan(root, service, ts, reason="model v7 active since start (was v6), 5 fal
 
 def test_planned_restart_is_no_crash(repo, monkeypatch):
     work, push, head, alerts = repo
+    clock = FakeClock()
+    monkeypatch.setattr(autoupdate, "time", clock)
     monkeypatch.setattr(autoupdate, "_services_now", lambda: ["a", "b"])
     monkeypatch.setattr(ops, "check_dashboard", lambda: True)
-    monkeypatch.setattr(autoupdate, "PLANNED_GRACE_S", 0.4)
-    _plan(work, "b", time.time())
-    # pid sequence by call count, not by time: a slow machine (the Intel Mac) must not change the outcome
-    calls = []
-    seq = [{"a": 1, "b": 2}, {"a": 1, "b": None}]
+    # signals-like service b exits with code 3 at 165 s, late in the 180 s window, and is back 15 s later
+    _plan(work, "b", clock.t + 165)
+    real_planned = ops.planned_restarts
+    monkeypatch.setattr(ops, "planned_restarts", lambda since=0.0: [e for e in real_planned(since) if e["ts"] <= clock.t])
+    start = clock.t
 
     def pids(names):
-        calls.append(1)
-        return seq[len(calls) - 1] if len(calls) <= len(seq) else {"a": 1, "b": 3}
+        dt = clock.t - start
+        return {"a": 1, "b": 2 if dt < 165 else (None if dt < 180 else 3)}
     monkeypatch.setattr(autoupdate, "_pids", pids)
-    ok, detail = autoupdate.health_check(window=0.2, interval=0.01)
+    ok, detail = autoupdate.health_check(window=180, interval=15)
     assert ok and "b: geplanter Neustart nach Modellwechsel" in detail, detail
-    _plan(work, "b", time.time() + 1)           # a second one in the same window is a restart loop
-    monkeypatch.setattr(autoupdate, "_pids", lambda names: {"a": 1, "b": len(calls.append(1) or calls)})
-    assert not autoupdate.health_check(window=0.2, interval=0.01)[0]
+    # planned restarts every 30 s are a restart loop, not one model switch
+    clock.t, start = 2_000_000.0, 2_000_000.0
+    for k in range(1, 10):
+        _plan(work, "b", clock.t + 30 * k)
+    monkeypatch.setattr(autoupdate, "_pids", lambda names: {"a": 1, "b": 100 + int((clock.t - start) // 30)})
+    ok, detail = autoupdate.health_check(window=180, interval=15)
+    assert not ok and "b startet neu" in detail
 
 
 def test_watchdog_reports_planned_restart_once(tmp_path, monkeypatch):
