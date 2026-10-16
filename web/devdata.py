@@ -64,7 +64,7 @@ def _inflight_demo(conn, r, tokens, now):
         t = r.choice(tok)
         row = {"mode": mode, "strategy": "whale", "mint": t["mint"], "symbol": t["symbol"], "opened_at": now - (20 if st == "opening" else 3600),
                "entry_price_sol": 0, "size_sol": .5, "tokens": 0, "entry_cost_sol": 0, "status": st, "exit_reason": why,
-               "intent": json.dumps({"size_sol": .5, "source": "whale"})}
+               "intent": f"whale:demo-{mode}-{st}"}
         row = {k: v for k, v in row.items() if k in pcols}
         conn.execute(f"INSERT INTO ct_positions({','.join(row)}) VALUES ({','.join('?' * len(row))})", list(row.values()))
     # second paper account 'explore': smaller, wider buys (copytrade/strategy.py ExploreExecutor)
