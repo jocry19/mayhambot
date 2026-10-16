@@ -445,3 +445,18 @@ def test_run_group_kills_the_whole_tree_on_timeout(repo, tmp_path):
     import time as _t
     _t.sleep(3.5)
     assert not marker.exists()          # the grandchild died with the group
+
+
+def test_run_group_kills_leftovers_after_a_normal_exit(repo, tmp_path):
+    """A process a test left behind (output redirected, so the pipes close) dies with the round."""
+    marker = tmp_path / "leftover_alive"
+    child = tmp_path / "child.py"
+    child.write_text(f"import time\ntime.sleep(1)\nopen({str(marker)!r}, 'w')\n")
+    parent = tmp_path / "parent.py"
+    parent.write_text(f"import subprocess, sys\nsubprocess.Popen([sys.executable, {str(child)!r}], "
+                      "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n")
+    r = autoupdate._run_group([sys.executable, str(parent)], 30)
+    assert r.returncode == 0
+    import time as _t
+    _t.sleep(1.5)
+    assert not marker.exists()

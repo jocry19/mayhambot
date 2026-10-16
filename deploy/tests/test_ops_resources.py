@@ -89,3 +89,35 @@ def test_watchdog_caps_restarts_per_hour(tmp_path, monkeypatch):
         clock[0] += 300
     assert len(restarts) == 3
     assert sum("Neustarts in der letzten Stunde" in m for m in sent) == 1
+
+
+def test_watchdog_leaves_restarts_to_a_running_update(tmp_path, monkeypatch):
+    """Mid-round the updater restarts the app itself; a watchdog restart then would race it."""
+    import json as _json
+    import types
+    _setup(tmp_path, monkeypatch)
+    state, restarts = {"last_summary": 2e9}, []
+    clock = [1_000_000.0]
+    monkeypatch.setattr(ops.time, "time", lambda: clock[0])
+    monkeypatch.setattr(ops, "load_state", lambda: state)
+    monkeypatch.setattr(ops, "save_state", lambda s: None)
+    monkeypatch.setattr(ops, "send_alert", lambda m: True)
+    monkeypatch.setattr(ops, "restart_app", lambda why: restarts.append(why) or "App neu gestartet")
+    monkeypatch.setattr(ops, "rotate_logs", lambda **k: 0)
+    monkeypatch.setattr(ops, "new_lock_errors", lambda st: 0)
+    monkeypatch.setattr(ops, "collect", lambda: {"problems": {"service_down": "brain läuft nicht"}})
+    monkeypatch.setattr(ops, "build_summary", lambda: "x")
+    for name in ("nightly_maintenance", "check_planned_restarts", "check_credit_alerts", "check_service_budgets"):
+        monkeypatch.setattr(ops, name, lambda *a, **k: None)
+    monkeypatch.setattr(ops, "RESTART_COOLDOWN", 0)
+    f = ops.ROOT / "data" / "autoupdate_state.json"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(_json.dumps({"deploying": {"head": "a", "target": "b", "at": clock[0] - 60}}))
+    args = types.SimpleNamespace(no_restart=False)
+    for _ in range(3):
+        ops.watchdog(args)
+        clock[0] += 120
+    assert restarts == []
+    f.write_text(_json.dumps({}))           # round over: a service still down is the watchdog's again
+    ops.watchdog(args)
+    assert len(restarts) == 1

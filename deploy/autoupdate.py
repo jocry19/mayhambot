@@ -280,11 +280,15 @@ def _run_group(cmd, timeout_s: float, env=None) -> subprocess.CompletedProcess:
     which subprocess.run's timeout would leave running) and report it as a failed run (returncode -9)."""
     p = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
                          start_new_session=True)
+    import signal  # noqa: PLC0415
     try:
         out, err = p.communicate(timeout=timeout_s)
+        try:   # a test that left a process behind must not keep running against anything after the gate
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
         return subprocess.CompletedProcess(cmd, p.returncode, out, err)
     except subprocess.TimeoutExpired:
-        import signal  # noqa: PLC0415
         try:
             os.killpg(p.pid, signal.SIGKILL)
         except OSError:

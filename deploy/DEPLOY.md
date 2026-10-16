@@ -105,6 +105,12 @@ sein, sonst geht es automatisch zurück auf die laufende Version. Danach `mayham
   (60 min), wird es genommen (ein Backup der großen Datenbank dauert auf dem Mac ~10 min).
 - Die Tests laufen in einer frischen Kopie des Codes (git worktree) ohne `data/`, `logs/` und `.env` des Bots
   und ohne Zugangsdaten in der Umgebung: der Mac prüft also dieselbe Welt wie eine frische Kopie in der Cloud.
+- Der Live-Checkout bleibt während der Prüfung auf der laufenden Version und wechselt erst nach grünen Tests
+  (fetch, Prüfung im Worktree von origin/main, dann `merge --ff-only`). Ein Dienst, den Supervisor oder Wächter in
+  dieser Zeit neu startet, bekommt so nie ungeprüften Code. `MAYHAM_DB_PATH` und `MAYHAM_LOG_DIR` zeigen in der
+  Prüfung in den Worktree, und Prozesse, die ein Test zurücklässt, werden nach der Runde beendet.
+- Solange eine Update-Runde läuft (`deploying` in data/autoupdate_state.json), startet der Wächter nichts neu, er
+  alarmiert nur. Den Neustart macht der Updater selbst.
 - Eine Runde (Pull, pip, Tests) darf höchstens `AUTO_UPDATE_TIMEOUT_MIN` (45) dauern, sonst wird sie samt allen
   Unterprozessen abgebrochen und wie ein roter Test behandelt. Der Updater verlässt dafür die gedrosselte
   Hintergrund-Priorität von launchd (sonst dauerte der Testlauf auf dem Mac über 16 min statt ~3).

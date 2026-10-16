@@ -14,6 +14,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -226,15 +227,19 @@ def logs(name=None):
     subprocess.call(["tail", "-n", "40", "-F", *[str(f) for f in files]])
 
 
-def _checks_ok():
+def _checks_ok(ref="HEAD"):
     """Tests must pass before a new version goes live. They run in a throwaway git worktree of HEAD: no data/,
     logs/ or .env of the live bot, so the gate on the Mac sees the same world as a fresh clone (tests that read
     data/ by relative path would otherwise trip over the bot's real state files)."""
     import tempfile
     with tempfile.TemporaryDirectory(prefix="mayham-gate-") as td:
         wt = Path(td) / "wt"
-        subprocess.run(["git", "worktree", "add", "-q", "--detach", str(wt), "HEAD"], cwd=ROOT, check=True,
+        subprocess.run(["git", "worktree", "add", "-q", "--detach", str(wt), ref], cwd=ROOT, check=True,
                        capture_output=True)
+        # paths a test might resolve absolutely stay inside the throwaway tree, never the live DB or logs/
+        (wt / "data").mkdir(parents=True, exist_ok=True)
+        (wt / "logs").mkdir(parents=True, exist_ok=True)
+        env = {**os.environ, "MAYHAM_DB_PATH": str(wt / "data" / "mayhambot.db"), "MAYHAM_LOG_DIR": str(wt / "logs")}
         try:
             dirs = ["tests"] + sorted(str(p.relative_to(wt)) for p in wt.glob("*/tests")
                                       if p.is_dir() and not p.parent.name.startswith(".")
@@ -242,7 +247,7 @@ def _checks_ok():
             print("Tests: " + ", ".join(dirs))
             for cmd in ([PY, "tests/test_logic.py"], [PY, "-m", "pytest", *dirs, "-q", "-x", "-p", "no:cacheprovider"]):
                 t0 = time.time()
-                r = subprocess.run(cmd, cwd=wt, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                r = subprocess.run(cmd, cwd=wt, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
                 last = ((r.stdout or "").strip().splitlines() or [""])[-1]
                 print(f"{cmd[-1] if len(cmd) == 2 else 'pytest'}: {time.time() - t0:.0f} s ({last[:120]})")
                 if r.returncode != 0:
@@ -258,21 +263,30 @@ def _checks_ok():
 def update():
     """Pull main, install requirements, back up, run tests; restart only on green tests.
     On red tests the previous commit is restored, so a broken push never goes live."""
-    old = None
+    old = target = None
     if (ROOT / ".git").exists():
         old = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-        subprocess.check_call(["git", "pull", "--ff-only", "origin", "main"], cwd=ROOT)
-    pip = [PY, "-m", "pip", "install", "-q", "-r", "requirements.txt"]
+        subprocess.check_call(["git", "fetch", "-q", "origin", "main"], cwd=ROOT)
+        target = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=ROOT, text=True).strip()
+    # The live checkout stays on the running, tested version until the gate is green: a service the supervisor
+    # or the watchdog restarts meanwhile must never pick up untested code (a new service was started that way).
+    reqs = "requirements.txt"
+    if target and target != old:
+        reqs = os.path.join(tempfile.mkdtemp(prefix="mayham-req-"), "requirements.txt")
+        Path(reqs).write_text(subprocess.check_output(["git", "show", f"{target}:requirements.txt"], cwd=ROOT,
+                                                      text=True))
+    pip = [PY, "-m", "pip", "install", "-q", "-r", reqs]
     installed = subprocess.call(pip, cwd=ROOT) == 0
     if not installed:
         print("pip install fehlgeschlagen")
-    if not installed or not _checks_ok():
-        # a failed install must not leave the new commit checked out: the supervisor would start it untested
+    if not installed or not _checks_ok(target or "HEAD"):
         if old:
-            subprocess.call(["git", "reset", "-q", "--hard", old], cwd=ROOT)
-            subprocess.call(pip, cwd=ROOT)  # back to the packages the running version was tested with
+            subprocess.call(["git", "reset", "-q", "--hard", old], cwd=ROOT)  # no-op unless something moved it
+            subprocess.call([PY, "-m", "pip", "install", "-q", "-r", "requirements.txt"], cwd=ROOT)
             print(f"Update abgebrochen, zurück auf {old[:7]}. Die laufende Version bleibt aktiv.")
         return False
+    if target and target != old:
+        subprocess.check_call(["git", "merge", "-q", "--ff-only", target], cwd=ROOT)
     if (ROOT / "deploy" / "ops.py").exists() and not os.environ.get("MAYHAM_SKIP_BACKUP"):
         subprocess.call([PY, "deploy/ops.py", "backup"], cwd=ROOT)  # the auto-updater backs up before the pull
     if PLIST.exists():

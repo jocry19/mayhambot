@@ -97,9 +97,37 @@ def test_failed_pip_rolls_back(monkeypatch, tmp_path):
     monkeypatch.setattr(mayham.subprocess, "check_output", lambda *a, **k: "oldsha\n")
     monkeypatch.setattr(mayham.subprocess, "check_call", lambda *a, **k: 0)
     monkeypatch.setattr(mayham.subprocess, "call", call)
-    monkeypatch.setattr(mayham, "_checks_ok", lambda: pytest.fail("no tests on a failed install"))
+    monkeypatch.setattr(mayham, "_checks_ok", lambda *a: pytest.fail("no tests on a failed install"))
     assert mayham.update() is False
     assert ["git", "reset", "-q", "--hard", "oldsha"] in calls
+
+
+def test_update_tests_the_target_before_the_live_checkout_moves(monkeypatch, tmp_path):
+    """While the gate runs, a service restarted by the supervisor or watchdog must still get the tested code."""
+    events = []
+    monkeypatch.setattr(mayham, "ROOT", tmp_path)
+    monkeypatch.setattr(mayham, "PLIST", tmp_path / "none.plist")
+    (tmp_path / ".git").mkdir()
+    shas = {("git", "rev-parse", "HEAD"): "old\n", ("git", "rev-parse", "origin/main"): "new\n"}
+    monkeypatch.setattr(mayham.subprocess, "check_output",
+                        lambda cmd, **k: shas.get(tuple(cmd), "requests\n" if cmd[1] == "show" else "x\n"))
+    monkeypatch.setattr(mayham.subprocess, "check_call", lambda cmd, **k: events.append(tuple(cmd[:2])) or 0)
+    monkeypatch.setattr(mayham.subprocess, "call", lambda cmd, **k: events.append(tuple(cmd[:2])) or 0)
+    monkeypatch.setattr(mayham, "_pid", lambda n: None)
+    monkeypatch.setenv("MAYHAM_SKIP_BACKUP", "1")
+
+    def gate(ref):
+        events.append(("gate", ref))
+        assert ("git", "merge") not in events, "checkout moved before the gate was green"
+        return True
+    monkeypatch.setattr(mayham, "_checks_ok", gate)
+    assert mayham.update() is True
+    assert ("gate", "new") in events and events.index(("gate", "new")) < events.index(("git", "merge"))
+
+    events.clear()
+    monkeypatch.setattr(mayham, "_checks_ok", lambda ref: events.append(("gate", ref)) and False)
+    assert mayham.update() is False
+    assert ("git", "merge") not in events
 
 
 def test_red_gate_prints_the_failing_test(monkeypatch, capsys):

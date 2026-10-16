@@ -493,6 +493,16 @@ def ops_report() -> str:
     return "🛠 <b>Betrieb</b>\n" + "\n".join(lines)
 
 
+def update_in_progress(now: float | None = None) -> bool:
+    """True while an auto-update round is between its pull/gate and the end of its health check."""
+    try:
+        d = json.loads((ROOT / "data" / "autoupdate_state.json").read_text()).get("deploying") or {}
+    except (OSError, ValueError):
+        return False
+    limit = (cfg("AUTO_UPDATE_TIMEOUT_MIN", 45) + 10) * 60
+    return bool(d.get("at")) and 0 <= (now or time.time()) - d["at"] < limit
+
+
 def watchdog(args) -> int:
     st = load_state()
     now = time.time()
@@ -529,6 +539,8 @@ def watchdog(args) -> int:
     action = None
     recent = [t for t in st.get("restarts", []) if now - t < 3600]
     st["restarts"] = recent
+    if need_restart and update_in_progress(now):
+        need_restart = []   # the updater restarts the app itself; a second restart mid-round would race it
     if need_restart and not args.no_restart and now - st.get("last_restart", 0) > RESTART_COOLDOWN:
         if len(recent) >= cfg("MAX_RESTARTS_PER_HOUR", 3):
             # a real defect must not turn into a restart loop: alarm once per hour, leave the bot as it is
