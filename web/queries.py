@@ -1817,13 +1817,21 @@ def backup_status(now=None):
     wd = _json_file(os.path.join(ROOT_DIR, "data", "watchdog_state.json")) or {}
     au = _json_file(os.path.join(ROOT_DIR, "data", "autoupdate_state.json")) or {}
     problems = {k: v.get("msg") for k, v in (wd.get("problems") or {}).items() if isinstance(v, dict)}
+    if int(au.get("red_streak") or 0) >= 2:
+        problems["autoupdate_red"] = (f"Auto-Update hängt: Tests seit {int(au['red_streak'])} Runden rot, "
+                                      f"der Mac bleibt auf {(au.get('deployed') or '?')[:7]}")
     return {"last_name": os.path.basename(last) if last else None, "last_ts": ts,
             "last_size": os.path.getsize(last) if last else None, "count": len(files),
             "age_s": int(now - ts) if ts else None, "ok": bool(ts and now - ts <= 3 * 3600),
             "watchdog_ts": int(wd["last_run"]) if wd.get("last_run") else None, "problems": problems,
             "autoupdate": {"deployed": (au.get("deployed") or "")[:7] or None, "last_deploy": au.get("last_deploy"),
                            "bad": (au.get("bad") or "")[:7] or None,
-                           "disabled": os.path.exists(os.path.join(ROOT_DIR, "data", "NO_AUTO_UPDATE"))}}
+                           "disabled": os.path.exists(os.path.join(ROOT_DIR, "data", "NO_AUTO_UPDATE")),
+                           # rounds in a row whose test gate failed; from the 3rd the failing tests are named
+                           "red_streak": int(au.get("red_streak") or 0),
+                           "red_tests": [_redact(x)[:200] for x in (au.get("red_tests") or [])
+                                         if isinstance(x, str)][:12] if isinstance(au.get("red_tests"), list)
+                           else ([_redact(au["red_tests"])[:600]] if au.get("red_tests") else [])}}
 
 
 def services_health(conn, now=None):

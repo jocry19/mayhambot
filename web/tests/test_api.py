@@ -536,3 +536,22 @@ def test_schema_cache_per_database(tmp_path):
     assert has(b, "x", "y") and not has(a, "x", "y")
     a.execute("ALTER TABLE x ADD COLUMN y TEXT")             # schema_version bump: seen at once, no 20 s wait
     assert has(a, "x", "y") and "x" in tables(a)
+
+
+def test_autoupdate_red_streak(tmp_path, monkeypatch):
+    import json
+
+    from web import queries as Q
+
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr(Q, "ROOT_DIR", str(tmp_path))
+    monkeypatch.setenv("BACKUP_DIR", str(tmp_path / "none"))
+    st = {"deployed": "abcdef1234", "last_deploy": 1, "red_streak": 1}
+    (tmp_path / "data" / "autoupdate_state.json").write_text(json.dumps(st))
+    b = Q.backup_status()
+    assert b["autoupdate"]["red_streak"] == 1 and "autoupdate_red" not in b["problems"]
+    st.update(red_streak=3, red_tests=["FAILED web/tests/test_api.py::test_x - assert 1 https://h.example/?api-key=K"])
+    (tmp_path / "data" / "autoupdate_state.json").write_text(json.dumps(st))
+    b = Q.backup_status()
+    assert b["problems"]["autoupdate_red"].startswith("Auto-Update hängt: Tests seit 3 Runden rot")
+    assert b["autoupdate"]["red_tests"][0].startswith("FAILED web/tests") and "api-key=K" not in b["autoupdate"]["red_tests"][0]

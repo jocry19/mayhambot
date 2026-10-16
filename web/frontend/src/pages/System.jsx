@@ -184,9 +184,18 @@ function Ops({ b }) {
         <Tile label="Letztes Backup" value={b.last_ts ? <span className={b.ok ? "" : "down"}>{ago(b.last_ts)}</span> : <span className="down">keins</span>}
           sub={b.last_ts ? `${n(b.count)} Backups · ${n((b.last_size || 0) / 1e6, 1)} MB · stündlich erwartet` : "Backups liegen in BACKUP_DIR (Standard ~/mayhambot-backups)"} />
         <Tile label="Wächter" value={b.watchdog_ts ? ago(b.watchdog_ts) : "–"} sub={b.watchdog_ts ? (probs.length ? `${probs.length} offene Probleme` : "keine offenen Probleme") : "läuft auf diesem Rechner nicht"} />
-        <Tile label="Auto-Update" value={au.disabled ? "aus" : au.deployed ? <span className="mono" style={{ fontSize: 17 }}>{au.deployed}</span> : "–"}
-          sub={au.disabled ? "abgeschaltet (data/NO_AUTO_UPDATE)" : au.last_deploy ? `eingespielt ${ago(au.last_deploy)}${au.bad ? ` · ${au.bad} zurückgerollt` : ""}` : "noch kein automatisches Update"} />
+        <Tile label="Auto-Update" value={au.disabled ? "aus" : au.red_streak >= 2 ? <span className="down">hängt</span>
+          : au.deployed ? <span className="mono" style={{ fontSize: 17 }}>{au.deployed}</span> : "–"}
+          sub={au.disabled ? "abgeschaltet (data/NO_AUTO_UPDATE)"
+            : au.red_streak >= 2 ? <span className="down">Tests {au.red_streak}× in Folge rot · bleibt auf {au.deployed || "?"}</span>
+            : au.last_deploy ? `eingespielt ${ago(au.last_deploy)}${au.red_streak ? " · letzte Runde rot" : ""}${au.bad ? ` · ${au.bad} zurückgerollt` : ""}` : "noch kein automatisches Update"} />
       </div>
+      {au.red_tests?.length > 0 && (
+        <Callout kind="bad" icon="alert">
+          <div className="b">Diese Tests halten das Update auf:</div>
+          <div className="mono" style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{au.red_tests.join("\n")}</div>
+        </Callout>
+      )}
       {probs.length > 0 && <Callout kind="bad" icon="alert">Wächter meldet: {probs.join(" · ")}</Callout>}
     </>
   );
