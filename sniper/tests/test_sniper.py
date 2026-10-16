@@ -429,3 +429,53 @@ def test_rpc_stream_feeds_engine_and_bonk_is_marked(conn):
     assert eng.launches["MINTRPC"].n_seen == 30
     r = conn.execute("SELECT skip_reason, dev_buy_pct FROM sniper_launches WHERE mint='BONKMINT'").fetchone()
     assert r["skip_reason"] == "no_stream" and r["dev_buy_pct"] == 0
+
+
+def _create_event(name, symbol, uri, mint_b, curve_b, user_b, extra=True):
+    import base64
+    import struct
+    from sniper import rpcws
+    raw = rpcws.CREATE_DISC
+    for t in (name, symbol, uri):
+        b = t.encode()
+        raw += struct.pack("<I", len(b)) + b
+    raw += mint_b + curve_b + user_b
+    if extra:
+        raw += user_b + struct.pack("<qQQQQ", 1_760_000_000, 1_073_000_000_000_000, 30_000_000_000, 793_100_000_000_000,
+                                    1_000_000_000_000_000)
+    return base64.b64encode(raw).decode()
+
+
+def test_rpc_create_stream_and_dedupe(tmp_path):
+    from sniper import rpcws
+    from sniper.service import Service
+    mint_b, curve_b, user_b = bytes([7]) * 32, bytes([8]) * 32, bytes([9]) * 32
+    dev_buy = _trade_event(mint_b, user_b, 1_000_000_000, 34_000_000_000_000, True, 31_000_000_000, 1_039_000_000_000_000)
+    note = {"method": "logsNotification", "params": {"result": {"context": {"slot": 5}, "value": {
+        "signature": "CSIG", "err": None, "logs": ["Program log: Instruction: Create",
+                                                   "Program data: " + _create_event("Moon", "MOON", "https://m/x.json",
+                                                                                    mint_b, curve_b, user_b),
+                                                   "Program data: " + dev_buy]}}}}
+    msgs = rpcws.parse_creates(note)
+    assert len(msgs) == 1
+    c = msgs[0]
+    assert c["mint"] == rpcws.b58(mint_b) and c["traderPublicKey"] == rpcws.b58(user_b) and c["symbol"] == "MOON"
+    assert c["initialBuy"] == 34_000_000 and c["solAmount"] == 1.0 and c["vSolInBondingCurve"] == 31.0
+    # old layout without creator/reserves still parses
+    old = dict(note)
+    old["params"] = {"result": {"context": {}, "value": {"signature": "s", "err": None, "logs": [
+        "Program data: " + _create_event("A", "A", "u", mint_b, curve_b, user_b, extra=False)]}}}
+    assert rpcws.parse_creates(old)[0]["vSolInBondingCurve"] == 30.0
+    svc = Service(cfg(), db_path=str(tmp_path / "s.db"))
+    svc._on_create(c, "rpc")
+    pp = dict(c, src=None)
+    svc._on_create(pp, "pumpportal")  # same mint later from PumpPortal: counted as seen, not as a new launch
+    assert svc.engine.counters["creates"] == 1
+    r = svc.launch_rates()
+    assert r["rpc"]["first_per_min"] == 0.2 and r["pumpportal"]["per_min"] == 0.2 and r["pumpportal"]["first_per_min"] == 0
+    svc.creates.connected = True
+    svc.heartbeat()
+    hb = json.loads(store.get_state(svc.conn, "service_status"))
+    assert hb["active_launch_source"] == "rpc" and hb["launches_per_min"] == 0.2
+    assert set(hb["launch_sources"]) == {"pumpportal", "rpc"}
+    assert svc.creates.want == {rpcws.PUMP_MINT_AUTHORITY}

@@ -34,6 +34,11 @@ class SniperSettings:
     # per-coin trades: PumpPortal only with a funded key; without one the free RPC log stream is used
     trade_source: str = field(default_factory=lambda: _s("SNIPER_TRADE_SOURCE", "auto"))   # auto | pumpportal | rpc
     ws_url: str = field(default_factory=lambda: _s("SNIPER_WS_URL", "wss://api.mainnet-beta.solana.com"))
+    # launches: PumpPortal and the RPC create stream run side by side; the first to deliver a mint wins (no gap
+    # when one fails). both | pumpportal | rpc
+    launch_sources: str = field(default_factory=lambda: _s("SNIPER_LAUNCH_SOURCES", "both"))
+    create_mention: str = field(default_factory=lambda: _s("SNIPER_CREATE_MENTION", "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"))
+    stale_sec: int = field(default_factory=lambda: _i("SNIPER_STALE_SEC", 180))   # no launch that long -> reconnect
     ws_max_subs: int = field(default_factory=lambda: _i("SNIPER_WS_MAX_SUBS", 150))
     pump_api_url: str = field(default_factory=lambda: _s("SNIPER_PUMP_API_URL", "https://frontend-api-v3.pump.fun").rstrip("/"))
     use_pump_api: bool = field(default_factory=lambda: _b("SNIPER_USE_PUMP_API", False))  # v3 paths answer 400/404 (10/2026)

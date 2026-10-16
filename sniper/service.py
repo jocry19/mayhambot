@@ -2,6 +2,7 @@
 Started by the launcher as service "sniper" (python -m sniper run, log logs/sniper.log)."""
 import asyncio
 import json
+from collections import deque
 import logging
 import os
 import queue
@@ -36,12 +37,41 @@ class Service:
             log.warning("SNIPER_TRADE_SOURCE=pumpportal ohne SNIPER_PUMPPORTAL_API_KEY: PumpPortal liefert Trades "
                         "nur mit aufgeladenem Key, nehme den RPC-Log-Datenstrom")
         self.logs = rpcws.LogStream(cfg.ws_url, self._on_rpc_trade, cfg.ws_max_subs)
+        srcs = cfg.launch_sources.lower()
+        self.use_pp = srcs in ("both", "pumpportal")
+        self.creates = rpcws.LogStream(cfg.ws_url, lambda m: self._on_create(m, "rpc"), 1, parser=rpcws.parse_creates,
+                                       name="RPC-Launch-Datenstrom", stale_sec=cfg.stale_sec) \
+            if srcs in ("both", "rpc") else None
+        if self.creates:
+            self.creates.subscribe({cfg.create_mention})
+        self.launch_log = {"pumpportal": deque(maxlen=5000), "rpc": deque(maxlen=5000)}   # times of creates seen
+        self.first_log = {"pumpportal": deque(maxlen=5000), "rpc": deque(maxlen=5000)}    # creates this source delivered first
         self._warned_reject = False
         self.engine.stream_pools = None if self.trades_via == "pumpportal" else {"pump"}
         self.connected = False
         self.ws_msgs = 0
         self._dex_conn = None
         self._hb_conn = store.connect(db_path)
+
+    def _on_create(self, m, src):
+        now = time.time()
+        if self.record and src == "rpc":
+            self.record.write(json.dumps({"t": round(now, 3), "m": json.dumps(m)}) + "\n")
+        self.launch_log[src].append(now)
+        if self.engine.handle(m, now) is not None:
+            self.first_log[src].append(now)
+
+    def launch_rates(self, now=None):
+        now = now or time.time()
+        out = {}
+        for src in ("pumpportal", "rpc"):
+            seen = sum(1 for t in self.launch_log[src] if now - t <= 300)
+            first = sum(1 for t in self.first_log[src] if now - t <= 300)
+            connected = self.connected if src == "pumpportal" else bool(self.creates and self.creates.connected)
+            out[src] = {"enabled": self.use_pp if src == "pumpportal" else self.creates is not None,
+                        "connected": connected, "per_min": round(seen / 5, 1), "first_per_min": round(first / 5, 1),
+                        "last_ts": int(self.launch_log[src][-1]) if self.launch_log[src] else None}
+        return out
 
     def _on_rpc_trade(self, m):
         now = time.time()
@@ -78,6 +108,8 @@ class Service:
 
     # ---------------------------------------------------------------- websocket
     async def ws_loop(self):
+        if not self.use_pp:
+            return
         try:
             import websockets
         except ImportError:
@@ -103,7 +135,12 @@ class Service:
                     log.info("PumpPortal verbunden (%d Coins im Trade-Abo)", len(resub))
                     sender = asyncio.create_task(self._sender(ws))
                     try:
-                        async for raw in ws:
+                        while True:
+                            try:
+                                raw = await asyncio.wait_for(ws.recv(), timeout=self.cfg.stale_sec)
+                            except asyncio.TimeoutError:
+                                log.warning("PumpPortal: %d s keine Nachricht, verbinde neu", self.cfg.stale_sec)
+                                break
                             now = time.time()
                             self.ws_msgs += 1
                             if self.record:
@@ -120,7 +157,9 @@ class Service:
                                     with self.engine.lock:
                                         self.logs.subscribe({k for k, s in self.engine.launches.items()
                                                              if s.subscribed and s.pool == "pump"})
-                            if m:
+                            if m and (m.get("txType") or "").lower() == "create":
+                                self._on_create(m, "pumpportal")
+                            elif m:
                                 self.engine.handle(m, now)
                             if self.stop.is_set():
                                 break
@@ -202,7 +241,15 @@ class Service:
             "queue": self.q.qsize(), "open_positions": len(self.engine.book.open), "budget": budget,
             "counters": dict(self.engine.counters), "pump_api_ok": self.enricher.pump_ok,
             "trade_source": self.trades_via, "rpc_ws_connected": self.logs.connected, "rpc_ws_subs": len(self.logs.subs),
-            "rpc_ws_msgs": self.logs.msgs}))
+            "rpc_ws_msgs": self.logs.msgs, **self._launch_status(now)}))
+
+    def _launch_status(self, now):
+        rates = self.launch_rates(now)
+        ok = [s for s, r in rates.items() if r["connected"] and r["first_per_min"] > 0]
+        active = max(ok, key=lambda s: rates[s]["first_per_min"]) if ok else \
+            next((s for s, r in rates.items() if r["connected"]), None)
+        return {"launch_sources": rates, "active_launch_source": active,
+                "launches_per_min": round(sum(r["first_per_min"] for r in rates.values()), 1)}
 
     def prune_round(self):
         store.prune(self.conn, self.cfg.keep_days)
@@ -213,6 +260,10 @@ class Service:
             subs = sum(1 for s in e.launches.values() if s.subscribed)
             n = len(e.launches)
         c = e.counters
+        lr = self.launch_rates()
+        log.info("Launch-Quellen (5 min): PumpPortal %s %.1f/min, RPC %s %.1f/min",
+                 "verbunden" if lr["pumpportal"]["connected"] else "getrennt", lr["pumpportal"]["per_min"],
+                 "verbunden" if lr["rpc"]["connected"] else "getrennt", lr["rpc"]["per_min"])
         log.info("Stand: %d Launches, %d Trades, %d Migrationen | Stufe 1: %d, tief geprüft: %d, Käufe: %d | "
                  "%d im Speicher, %d im Trade-Abo (%s, RPC-Logs %d Abos), Warteschlange %d | Calls gesamt RPC %d, API/Metadaten %d | offen %d, "
                  "Papier-Guthaben %.3f SOL", c["creates"], c["trades"], c["migrations"], c["stage1"], c["stage2"],
@@ -225,6 +276,7 @@ class Service:
         self._stop_ev = stop_ev
         tasks = [asyncio.create_task(self.ws_loop()), asyncio.create_task(self.tick_loop()),
                  asyncio.create_task(self.logs.run(stop_ev)),
+                 *([asyncio.create_task(self.creates.run(stop_ev))] if self.creates else []),
                  asyncio.create_task(self.every(300, self.sol_round)),
                  asyncio.create_task(self.every(10, self.heartbeat, 1)),
                  asyncio.create_task(self.every(self.cfg.dex_every_sec, self.dex_round, 10)),

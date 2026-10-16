@@ -54,6 +54,12 @@ Wünsche an andere Pakete (über den Coordinator):
    pump.funs `TradeEvent` aus der Zeile `Program data:` dekodiert (Mint, SOL, Tokens, Seite, Trader, Curve-Reserven,
    Slot). Lehnt PumpPortal Trade-Abos ab, wechselt der Dienst automatisch auf diesen Weg und meldet es als WARNING.
    bonk-Launches haben dort keinen Decoder: sie werden erfasst und gemessen, aber mit `no_stream` übersprungen.
+   **Launches kommen aus zwei Quellen zugleich** (`SNIPER_LAUNCH_SOURCES=both`): PumpPortal und ein
+   RPC-Launch-Datenstrom (`logsSubscribe` auf pump.funs Mint-Authority `TSLvdd1p…`, die nur in Erstellungen vorkommt;
+   `CreateEvent` und der erste Dev-Kauf aus den Logs dekodiert). Wer einen Coin zuerst liefert, gewinnt, der andere
+   zählt nur mit; fällt eine Quelle aus (PumpPortal lieferte am 16.10. ab 12:37 UTC HTTP 502), läuft die andere ohne
+   Lücke weiter. Beide verbinden sich mit Back-off neu und auch dann, wenn `SNIPER_STALE_SEC` (180 s) lang nichts kommt.
+   Last des RPC-Launch-Datenstroms: ein Abo, etwa 10–30 Nachrichten pro Minute, keine HTTP-Calls, keine Credits.
 2. **Stufe 1** nach `SNIPER_DECIDE_SEC` (20 s), **kostenlos** aus dem Datenstrom: organische Käufer, Netto-SOL,
    Kaufdruck, Smart Money (`wallets.tier`), Dev-Anteil und -Verkäufe, Top-10, Sniper-Bots in den ersten 2 s und die
    **Curve-Schätzung für Bundles**: Was die Curve seit der Erstellung verloren hat, minus was die gesehenen Trades
@@ -133,6 +139,7 @@ entries}` (seit Start), `pump_api_ok`. Beim Beenden wird einmal `connected: fals
 | `SNIPER_RPC_URL` | öffentlicher RPC | RPC für Launch-Slot und Geldquellen |
 | `SNIPER_TRADE_SOURCE` | auto | `auto` (PumpPortal mit Key, sonst RPC-Logs), `pumpportal`, `rpc` |
 | `SNIPER_PUMPPORTAL_API_KEY` | – | PumpPortal-Key mit ≥ 0,02 SOL Guthaben (nur der Nutzer legt ihn an) |
+| `SNIPER_LAUNCH_SOURCES` / `SNIPER_STALE_SEC` | both / 180 | Launch-Quellen (`both`, `pumpportal`, `rpc`), Neuverbindung bei Stille |
 | `SNIPER_WS_URL` / `SNIPER_WS_MAX_SUBS` | wss://api.mainnet-beta.solana.com / 150 | RPC-Log-Datenstrom |
 | `SNIPER_RPC_PER_MIN` / `SNIPER_MAX_RPC_PER_LAUNCH` | 10 / 5 | RPC-Deckel |
 | `SNIPER_PUMP_API_PER_MIN` | 40 | pump.fun-API-Deckel |

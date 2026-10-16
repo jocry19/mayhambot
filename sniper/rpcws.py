@@ -11,6 +11,10 @@ import struct
 log = logging.getLogger("sniper.rpcws")
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 TRADE_DISC = hashlib.sha256(b"event:TradeEvent").digest()[:8]
+CREATE_DISC = hashlib.sha256(b"event:CreateEvent").digest()[:8]
+# pump.fun's mint authority signs into every create (and nothing else): mentioning it streams creates only
+PUMP_MINT_AUTHORITY = "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"
+PUMP_INITIAL_V_SOL, PUMP_INITIAL_V_TOK = 30.0, 1_073_000_000.0
 _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 
@@ -52,6 +56,74 @@ def to_stream_msg(ev, signature, slot=None):
             "pool": "pump", "slot": slot, "chainTs": ev["ts"], "src": "rpc_logs"}
 
 
+def decode_create(data_b64):
+    """pump.fun CreateEvent -> dict: name, symbol, uri (u32-length strings), mint, bonding_curve, user (32 each),
+    then in newer program versions creator, timestamp, virtual/real reserves (read only when present)."""
+    try:
+        raw = base64.b64decode(data_b64)
+    except (ValueError, TypeError):
+        return None
+    if len(raw) < 8 or raw[:8] != CREATE_DISC:
+        return None
+    o, out = 8, {}
+    try:
+        for k in ("name", "symbol", "uri"):
+            n = struct.unpack_from("<I", raw, o)[0]
+            if n > 2000:
+                return None
+            out[k] = raw[o + 4:o + 4 + n].decode("utf-8", "replace")
+            o += 4 + n
+        for k in ("mint", "bonding_curve", "user"):
+            out[k] = b58(raw[o:o + 32])
+            o += 32
+        if len(raw) >= o + 32:
+            out["creator"] = b58(raw[o:o + 32])
+            o += 32
+        if len(raw) >= o + 24:
+            out["ts"], out["v_tok_raw"], out["v_sol_lamports"] = struct.unpack_from("<qQQ", raw, o)
+    except struct.error:
+        return None
+    return out if len(out.get("mint", "")) >= 32 else None
+
+
+def parse_creates(m):
+    """logsNotification of a create tx -> list of PumpPortal-shaped create messages. The dev's first buy in the
+    same tx sets initialBuy and the curve state after it (it is not fed again as a trade)."""
+    if m.get("method") != "logsNotification":
+        return []
+    res = (m.get("params") or {}).get("result") or {}
+    v = res.get("value") or {}
+    if v.get("err"):
+        return []
+    creates, trades = [], []
+    for line in v.get("logs") or []:
+        if line.startswith("Program data: "):
+            d = line[14:].strip()
+            c = decode_create(d)
+            if c:
+                creates.append(c)
+                continue
+            t = decode_trade(d)
+            if t:
+                trades.append(t)
+    out = []
+    for c in creates:
+        dev = c.get("creator") or c["user"]
+        buy = next((t for t in trades if t["mint"] == c["mint"] and t["is_buy"]), None)
+        if buy:
+            v_sol, v_tok = buy["v_sol_lamports"] / 1e9, buy["v_tok_raw"] / 1e6
+        elif c.get("v_tok_raw"):
+            v_sol, v_tok = c["v_sol_lamports"] / 1e9, c["v_tok_raw"] / 1e6
+        else:
+            v_sol, v_tok = PUMP_INITIAL_V_SOL, PUMP_INITIAL_V_TOK
+        out.append({"signature": v.get("signature") or "", "mint": c["mint"], "traderPublicKey": dev, "txType": "create",
+                    "initialBuy": buy["token_raw"] / 1e6 if buy else 0.0, "solAmount": buy["sol_lamports"] / 1e9 if buy else 0.0,
+                    "bondingCurveKey": c["bonding_curve"], "vTokensInBondingCurve": v_tok, "vSolInBondingCurve": v_sol,
+                    "marketCapSol": v_sol / v_tok * 1e9 if v_tok else 0.0, "name": c["name"], "symbol": c["symbol"],
+                    "uri": c["uri"], "pool": "pump", "slot": (res.get("context") or {}).get("slot"), "src": "rpc_logs"})
+    return out
+
+
 def parse_notification(m):
     """logsNotification -> list of stream messages (one tx can hold several trades)."""
     if m.get("method") != "logsNotification":
@@ -71,8 +143,9 @@ def parse_notification(m):
 
 
 class LogStream:
-    def __init__(self, url, on_msg, max_subs=150):
-        self.url, self.on_msg, self.max_subs = url, on_msg, max_subs
+    def __init__(self, url, on_msg, max_subs=150, parser=None, name="RPC-Log-Datenstrom", stale_sec=None):
+        self.url, self.on_msg, self.max_subs, self.stale_sec = url, on_msg, max_subs, stale_sec
+        self.parser, self.name = parser or parse_notification, name
         self.want, self.subs = set(), {}       # mint -> subscription id
         self.pending = {}                      # request id -> mint
         self.next_id = 1
@@ -107,7 +180,7 @@ class LogStream:
                 async with websockets.connect(self.url, ping_interval=20, ping_timeout=20, max_size=2 ** 22,
                                               open_timeout=15) as ws:
                     self.connected, backoff, self.subs, self.pending = True, 2, {}, {}
-                    log.info("RPC-Log-Datenstrom verbunden (%s)", self.url.split("?")[0])
+                    log.info("%s verbunden (%s)", self.name, self.url.split("?")[0])
 
                     async def syncer():
                         while True:
@@ -115,7 +188,14 @@ class LogStream:
                             await asyncio.sleep(0.25)
                     task = asyncio.create_task(syncer())
                     try:
-                        async for raw in ws:
+                        while True:
+                            try:
+                                raw = await asyncio.wait_for(ws.recv(), timeout=self.stale_sec or 3600)
+                            except asyncio.TimeoutError:
+                                if self.stale_sec and self.subs:
+                                    log.warning("%s: %d s keine Daten, verbinde neu", self.name, self.stale_sec)
+                                    break
+                                continue
                             self.msgs += 1
                             try:
                                 m = json.loads(raw)
@@ -129,7 +209,7 @@ class LogStream:
                                     log.warning("logsSubscribe abgelehnt: %s", str(m.get("error"))[:160])
                                     self.want.discard(mint)
                                 continue
-                            for msg in parse_notification(m):
+                            for msg in self.parser(m):
                                 self.on_msg(msg)
                             if stop.is_set():
                                 break
@@ -138,7 +218,7 @@ class LogStream:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
-                log.warning("RPC-Log-Datenstrom getrennt (%s), neuer Versuch in %d s", e, backoff)
+                log.warning("%s getrennt (%s), neuer Versuch in %d s", self.name, e, backoff)
             self.connected = False
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60)
