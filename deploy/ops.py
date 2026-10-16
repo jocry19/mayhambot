@@ -171,6 +171,7 @@ HEARTBEATS = {  # name -> SQL returning the newest unix ts of fresh data
     "Marktdaten": "SELECT MAX(ts) FROM token_prices",
     "Trades": "SELECT MAX(ts) FROM trades",
     "Copy-Trading-Polling": "SELECT MAX(last_polled) FROM ct_wallets WHERE active=1",
+    "Sniper-Heartbeat": "SELECT json_extract(value, '$.ts') FROM sniper_state WHERE key='service_status'",
 }
 
 
@@ -238,6 +239,9 @@ def collect() -> dict:
     cp = feed.get("Copy-Trading-Polling")
     if cp and now - cp > stall:
         problems["copytrade_stalled"] = f"Copy-Trader pollt seit {(now - cp) / 60:.0f} min keine Wallets."
+    sn = feed.get("Sniper-Heartbeat")
+    if sn and "sniper" in SERVICES and now - float(sn) > 5 * 60:   # heartbeat every 10 s
+        problems["sniper_stalled"] = f"Sniper-Heartbeat steht seit {(now - float(sn)) / 60:.0f} min."
     try:
         free_gb = shutil.disk_usage(db_path().parent if db_path().parent.exists() else ROOT).free / 1e9
         if free_gb < 2:
@@ -308,7 +312,8 @@ def watchdog(args) -> int:
     r = collect()
     seen = st.setdefault("problems", {})     # key -> {first, count, alerted, msg}
     repeat = cfg("ALERT_REPEAT_HOURS", 6) * 3600
-    restartable = {"app_down", "service_down", "dashboard_down", "feed_stalled", "copytrade_stalled"}
+    restartable = {"app_down", "service_down", "dashboard_down", "feed_stalled", "copytrade_stalled",
+                   "sniper_stalled"}
     need_restart = []
 
     for key, msg in r["problems"].items():
