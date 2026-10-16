@@ -79,6 +79,21 @@ Neuen Key eintragen (nur du, nie in einen Chat oder ins Repo):
    `.env` nur beim Start, deshalb alle neu starten).
    Der Credit-Zähler startet für den neuen Key neu ("Helius key changed, credit ledger reset" im Log).
 
+## Automatische Updates (opt-in)
+
+Einschalten (einmal im Terminal): `bash deploy/mac/install-updater.sh`. Dann prüft launchd (`de.mayhambot.updater`)
+alle 10 min, ob auf `main` eine neue Version liegt, und spielt sie mit `mayham.py update` ein: Tests müssen grün
+sein, sonst geht es automatisch zurück auf die laufende Version. Danach `mayham.py install-autostart`.
+
+- Telegram: "⬆️ Update eingespielt: <hash>, Tests grün, 6 von 6 Dienste laufen" bzw. "↩️ Update zurückgerollt".
+  Alles steht auch in `logs/update.log`.
+- Höchstens ein Deploy pro 10 min. Ein an den Tests gescheiterter Commit wird nicht wieder probiert, erst der nächste.
+- **Kein Update, solange Echtgeld im Spiel ist:** `LIVE_TRADING=true` in `.env` oder offene Echtgeld-Positionen.
+  Dann kommt einmal "Update wartet", einspielen von Hand mit `.venv/bin/python mayham.py update`.
+- Lokale Änderungen im Ordner blockieren das Update (Meldung kommt einmal).
+- Not-Aus: `touch data/NO_AUTO_UPDATE` (wieder an: `rm data/NO_AUTO_UPDATE`) oder `AUTO_UPDATE=0` in `.env`.
+  Ganz aus: `bash deploy/mac/install-updater.sh --off`. Stand: `.venv/bin/python deploy/autoupdate.py --status`.
+
 ## Alarme (Telegram)
 
 Ein Problem muss in zwei Runden hintereinander auftauchen (≈4 min), dann kommt 🔴, bei Neustart 🔁,
@@ -107,7 +122,7 @@ Neustart höchstens alle 15 min. Geprüft wird:
 ## Entwickeln, während der Bot läuft
 
 - Claude arbeitet im GitHub-Repo und pusht nach `main`; der Mac holt neue Versionen mit `mayham.py update`
-  (bzw. `deploy/update.sh` für die Variante mit Tests und Backup vorher).
+  (bzw. `deploy/update.sh` für die Variante mit Tests und Backup vorher), oder von selbst mit dem Auto-Update.
 - Daten bleiben immer auf dem Mac (`data/`, nie im Repo). Für Analysen woanders: ein Backup nehmen und mit
   `ops.py restore <datei> --no-stop` in eine zweite Kopie einspielen.
 - Nie zwei Bots gleichzeitig mit derselben Wallet live handeln lassen.
