@@ -11,6 +11,7 @@ import pytest  # noqa: E402
 
 from sniper import feed, research, store  # noqa: E402
 from sniper.engine import Engine  # noqa: E402
+from sniper.paper import PaperBook  # noqa: E402
 from sniper.tests.test_sniper import T0, Curve, FakeEnricher, cfg, early_from, organic  # noqa: E402
 
 
@@ -258,3 +259,69 @@ def test_old_rug_labels_are_fixed_once(conn):
     got = {r["mint"]: r["rugged"] for r in conn.execute("SELECT mint, rugged FROM sniper_launches")}
     assert got == {"CRASH": 1, "OLDCRASH": 0, "BROKEN": None, "FINE": 0}   # before the outcome fix min is unclean
     assert store.relabel_rugs(conn, research.MIN_BASE_MCAP) == 0         # once per label version
+
+
+def _bal(c):
+    return float(c.execute("SELECT value FROM sniper_state WHERE key='paper_balance_sol'").fetchone()[0])
+
+
+def test_sale_is_credited_once_even_if_killed_between_credit_and_close(monkeypatch, conn):
+    """Audit: the balance was committed before status='closed'; a lock or kill in between sold it twice."""
+    c = cfg()
+    eng = _enter(conn, c)
+    path = conn.execute("PRAGMA database_list").fetchone()["file"]
+    p = eng.book.open["RESTART"]
+    before = _bal(conn)
+    st = eng.launches["RESTART"]
+
+    def boom(_conn, _delta):
+        raise RuntimeError("killed")
+    monkeypatch.setattr(PaperBook, "_credit", staticmethod(boom))
+    with pytest.raises(RuntimeError):
+        eng.book.sell(conn, st, p, 1.0, "time", T0 + 300)
+    conn.rollback()
+    monkeypatch.undo()
+    other = store.connect(path)                         # what a restarted process sees
+    assert _bal(other) == before
+    assert other.execute("SELECT status FROM sniper_positions").fetchone()["status"] == "open"
+    assert "RESTART" in eng.book.open and p["remaining"] > 0      # memory did not run ahead of the database
+    sol = eng.book.sell(conn, st, p, 1.0, "time", T0 + 301)
+    assert sol > 0 and abs(_bal(other) - (before + sol)) < 1e-9
+    other.close()
+
+
+def test_dead_curve_position_closes_after_a_restart(conn):
+    """Audit: a restarted curve position without trades never closed (no price, max_hold never checked)."""
+    c = cfg()
+    _enter(conn, c)
+    eng2 = Engine(c, conn, enricher=FakeEnricher())
+    assert "RESTART" in eng2.due_external(T0 + 200)          # no live price: DexScreener/Jupiter are asked
+    eng2.apply_external({}, now=T0 + 200)
+    assert "RESTART" in eng2.book.open                        # not yet: no price is no reason to sell
+    eng2.apply_external({}, now=T0 + 100 + c.max_hold_min * 60 + 1)
+    r = conn.execute("SELECT status, exit_reason, events_json FROM sniper_positions").fetchone()
+    assert r["status"] == "closed" and r["exit_reason"] in ("time", "max_hold")
+    assert json.loads(r["events_json"])[-1]["src"] == "no_market"     # booked at 0, not at a guessed price
+
+
+def test_position_without_a_launch_row_is_still_watched(conn):
+    c = cfg()
+    _enter(conn, c)
+    conn.execute("DELETE FROM sniper_launches")
+    conn.commit()
+    eng2 = Engine(c, conn, enricher=FakeEnricher())
+    assert "RESTART" in eng2.due_external(T0 + 200)
+
+
+def test_migrated_coin_with_a_frozen_price_exits_as_no_market(conn):
+    """Audit: after migration a vanished pair kept its last price; the stop never fired, time exit sold at 95 %."""
+    c = cfg()
+    eng = _enter(conn, c)
+    st = eng.launches["RESTART"]
+    st.migrated = True
+    p = eng.book.open["RESTART"]
+    p["exit"] = {"time_stop_min": 999, "max_hold_min": 999}
+    st.external_mcap_sol, st.external_ts = st.mcap_sol, T0 + 200
+    assert eng.book.check(conn, st, T0 + 210, None, quoted=True) is None     # fresh price, no exit rule hit
+    assert eng.book.check(conn, st, T0 + 210 + PaperBook.STALE_SEC + 1, None, quoted=True) == "no_market"
+    assert p["status"] == "closed" and p["realized_sol"] == 0.0

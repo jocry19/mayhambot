@@ -86,8 +86,11 @@ Wünsche an andere Pakete (über den Coordinator):
    (`TP1_PCT`, verkauft `TP1_FRAC`), danach Trailing-Stop vom Hoch, Stop-Loss, Zeit-Stop ohne TP1, maximale
    Haltedauer, und sofortiger Verkauf, sobald Bundle-, Insider- oder Dev-Wallets ≥ `INSIDER_SELL_MIN_PCT` ihrer
    Tokens verkaufen. Alle Parameter stehen je Position in `params_json` (für späteres Lernen).
+   Ohne verlässlichen Preis (tote Curve nach Neustart, Pair nach Migration verschwunden oder seit 10 min
+   eingefroren) feuern keine Kursregeln; Zeit-Regeln gelten weiter, und ohne Jupiter-Route wird zu 0 gebucht
+   (`no_market`), nie zu einem geschätzten Altpreis. Guthaben und Positionszeile werden in einem Commit geschrieben.
 7. **Ergebnis** nach 1, 5, 15, 60 min für **jeden** entschiedenen Launch: Datenstrom solange abonniert, sonst
-   DexScreener im Stapel (30 Coins je Call). `rugged` = nach 60 min ≤ −80 % oder Dump der Insider und ≤ −50 %.
+   DexScreener im Stapel (30 Coins je Call). `rugged` siehe unten (Forschung).
 
 ## Score
 

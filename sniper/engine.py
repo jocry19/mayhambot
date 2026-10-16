@@ -111,6 +111,11 @@ class Engine:
             r = self.conn.execute("SELECT * FROM sniper_launches WHERE mint=?", (m,)).fetchone()
             if r:
                 self.launches[m] = self._stub(r)
+            else:   # position without a launch row: still watched (price from DexScreener/Jupiter, time exits)
+                p = self.book.open[m]
+                self.launches[m] = LaunchState(mint=m, created_ts=p["opened_ts"], source="pumpportal", pool="pump",
+                                               symbol=p.get("symbol") or "", creator="", create_sig="")
+                self.launches[m].decision, self.launches[m].stage, self.launches[m].done = "enter", 2, True
         for m in open_mints:
             if m in self.launches and not self.launches[m].migrated:
                 self.launches[m].subscribed = True
@@ -207,8 +212,9 @@ class Engine:
                     if st.decision == "queued":
                         cands.append(st)
                 self._outcomes(st, now)
-                if mint in self.book.open and st.subscribed and not st.migrated:
-                    self.book.check(self.conn, st, now)  # on the curve: no network in the loop thread
+                if mint in self.book.open and st.subscribed and not st.migrated and self.book.mark(st, now) > 0:
+                    self.book.check(self.conn, st, now)  # on the curve: no network in the loop thread (no live
+                    #                                      price yet: apply_external quotes and exits it)
                 self._prune_sub(st, now)
                 if st.done and mint not in self.book.open:
                     self.launches.pop(mint, None)
@@ -370,8 +376,8 @@ class Engine:
         with self.lock:
             for m, st in self.launches.items():
                 live = st.subscribed and not st.migrated
-                if m in self.book.open and not live:
-                    out.append(m)
+                if m in self.book.open and (not live or self.book.mark(st, now) <= 0):
+                    out.append(m)     # also a curve position without a live price (dead curve after a restart)
                 elif not live and st.decided_ts and not st.done and any(
                         h not in st.outcomes and st.decided_ts + h * 60 <= now + ahead for h in self.cfg.horizons_min):
                     out.append(m)
@@ -392,7 +398,7 @@ class Engine:
                         st.min_mcap_sol = min(st.min_mcap_sol or v, v)
             for m in list(self.book.open):
                 st = self.launches.get(m)
-                if st and (st.migrated or not st.subscribed):
+                if st and (st.migrated or not st.subscribed or self.book.mark(st, now) <= 0):
                     check.append(st)
         for st in check:
             # the Jupiter quote is fetched here, outside the lock (network); the exit itself runs under the lock,
@@ -405,7 +411,7 @@ class Engine:
             qf = (lambda _m, tokens, _side, q=q, n=n: dict(q, out=q["out"] * tokens / n)) if q and q.get("out") else None
             with self.lock:
                 if st.mint in self.book.open:
-                    self.book.check(conn or self.conn, st, now, qf)
+                    self.book.check(conn or self.conn, st, now, qf, quoted=self.quote_fn is not None)
 
     # ------------------------------------------------------------------ stage 2
     def skip_budget(self, st, now=None):

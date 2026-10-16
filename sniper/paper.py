@@ -26,6 +26,9 @@ class PaperBook:
             p["exit"] = prm if prm.get("learned") else None
             self.open[p["mint"]] = p
 
+    # price older than this (or none at all) is no market: stops can't fire on it and a sale books 0
+    STALE_SEC = 600
+
     # ---- balance
     def balance(self, conn):
         v = store.get_state(conn, "paper_balance_sol")
@@ -34,8 +37,11 @@ class PaperBook:
             return self.cfg.paper_start_sol
         return float(v)
 
-    def _adjust(self, conn, delta):
-        store.set_state(conn, "paper_balance_sol", self.balance(conn) + delta)
+    @staticmethod
+    def _credit(conn, delta):
+        """Balance change inside the caller's transaction (committed together with the position row, so a lock or a
+        kill in between can neither credit a sale twice nor lose a debit)."""
+        conn.execute("UPDATE sniper_state SET value = CAST(value AS REAL) + ? WHERE key='paper_balance_sol'", (delta,))
 
     def capacity(self, conn, now):
         if len(self.open) >= self.cfg.max_open:
@@ -66,9 +72,20 @@ class PaperBook:
         tokens *= 1 - self.cfg.adverse_slippage
         return tokens, abs(impact), src
 
-    def fill_sell(self, st, tokens, quote_fn=None):
+    def mark(self, st, now):
+        """Current price per token, or 0 when there is none we can trust: the live curve (after a real trade), else a
+        DexScreener price younger than STALE_SEC. A frozen price after migration or a restart is no price."""
+        if st is None:
+            return 0.0
+        if st.subscribed and not st.migrated and st.mcap_sol > 0 and st.v_tok > 0:
+            return st.price_sol
+        if st.external_mcap_sol and st.supply and now - (st.external_ts or 0) <= self.STALE_SEC:
+            return st.external_mcap_sol / st.supply
+        return 0.0
+
+    def fill_sell(self, st, tokens, quote_fn=None, now=None):
         gross, src = 0.0, ""
-        on_curve = st is not None and st.subscribed and not st.migrated and st.v_sol > 0
+        on_curve = st is not None and st.subscribed and not st.migrated and st.v_sol > 0 and st.mcap_sol > 0
         if on_curve:
             gross, src = curve_sell(st.v_sol, st.v_tok, tokens, self.cfg.curve_fee_pct), "bonding_curve"
         elif quote_fn:
@@ -76,8 +93,8 @@ class PaperBook:
             if q and q.get("out", 0) > 0:
                 gross, src = q["out"], "jupiter_quote"
         if not src:
-            price = (st.current_mcap_sol() / st.supply) if st else 0.0
-            gross, src = tokens * price * 0.95, "price_estimate"
+            price = self.mark(st, now) if now is not None else 0.0
+            gross, src = (tokens * price * 0.95, "price_estimate") if price > 0 else (0.0, "no_market")
         gross *= 1 - self.cfg.adverse_slippage
         return max(0.0, gross - self._fees()), src
 
@@ -102,6 +119,8 @@ class PaperBook:
                          "impact": round(impact, 4), "src": src}]}
         p["insider_base"] = dict(st.insider_sold)
 
+        self.balance(conn)          # creates the balance row on first use
+
         def write():
             cur = conn.execute(
                 """INSERT INTO sniper_positions(mint, symbol, mode, opened_ts, entry_price_sol, entry_mcap_sol,
@@ -111,16 +130,16 @@ class PaperBook:
                 (p["mint"], p["symbol"], "paper", p["opened_ts"], price, p["entry_mcap_sol"], p["entry_mcap_usd"],
                  size, tokens, tokens, p["fees_sol"], src, score, price, price, 0, 0.0, "open", p["params_json"],
                  store.j(p["events"])))
+            self._credit(conn, -size)
             conn.commit()
             return cur.lastrowid
         p["id"] = db.retry_locked(conn, write)
-        self._adjust(conn, -size)
         self.open[st.mint] = p
         log.info("PAPIER-KAUF %s %s: %.3f SOL zu MCAP %.1f SOL (%s, Score %.0f)", st.symbol, st.mint[:6], size,
                  p["entry_mcap_sol"], src, score)
         return p, None
 
-    def _save(self, conn, p):
+    def _save(self, conn, p, credit=0.0):
         def write():
             conn.execute(
                 """UPDATE sniper_positions SET remaining=?, peak_price_sol=?, last_price_sol=?, tp1_done=?,
@@ -129,6 +148,8 @@ class PaperBook:
                 (p["remaining"], p["peak_price_sol"], p["last_price_sol"], p["tp1_done"], p["realized_sol"],
                  p["status"], p.get("closed_ts"), p.get("exit_reason"), p.get("pnl_sol"), p.get("pnl_pct"),
                  store.j(p["events"]), p["id"]))
+            if credit:
+                self._credit(conn, credit)
             conn.commit()
         db.retry_locked(conn, write)
 
@@ -136,23 +157,27 @@ class PaperBook:
         qty = p["remaining"] if frac >= 0.999 else p["remaining"] * frac
         if qty <= 0:
             return 0.0
-        sol, src = self.fill_sell(st, qty, quote_fn)
-        p["remaining"] -= qty
-        p["realized_sol"] += sol
-        p["events"].append({"ts": int(now), "kind": "sell", "reason": reason, "tokens": qty, "sol": round(sol, 6),
-                            "price": round(sol / qty, 12) if qty else None, "src": src})
-        self._adjust(conn, sol)
-        if p["remaining"] <= p["tokens"] * 1e-6:
-            p.update(status="closed", closed_ts=int(now), exit_reason=reason, remaining=0.0,
-                     pnl_sol=p["realized_sol"] - p["size_sol"], pnl_pct=p["realized_sol"] / p["size_sol"] - 1)
+        sol, src = self.fill_sell(st, qty, quote_fn, now)
+        q = dict(p, events=p["events"] + [{"ts": int(now), "kind": "sell", "reason": reason, "tokens": qty,
+                                           "sol": round(sol, 6), "price": round(sol / qty, 12) if qty else None,
+                                           "src": src}])
+        q["remaining"] -= qty
+        q["realized_sol"] += sol
+        closed = q["remaining"] <= q["tokens"] * 1e-6
+        if closed:
+            q.update(status="closed", closed_ts=int(now), exit_reason=reason, remaining=0.0,
+                     pnl_sol=q["realized_sol"] - q["size_sol"], pnl_pct=q["realized_sol"] / q["size_sol"] - 1)
+        self._save(conn, q, credit=sol)      # row and balance in one commit; memory follows only once it is stored
+        p.update(q)
+        if closed:
             self.open.pop(p["mint"], None)
-            log.info("PAPIER-VERKAUF %s %s (%s): %+.4f SOL (%+.0f %%)", p["symbol"], p["mint"][:6], reason,
+            log.info("PAPIER-VERKAUF %s %s (%s, %s): %+.4f SOL (%+.0f %%)", p["symbol"], p["mint"][:6], reason, src,
                      p["pnl_sol"], 100 * p["pnl_pct"])
-        self._save(conn, p)
         return sol
 
-    def check(self, conn, st, now, quote_fn=None):
-        """Apply the exit rules to the open position of this launch (if any). Returns the exit reason or None."""
+    def check(self, conn, st, now, quote_fn=None, quoted=False):
+        """Apply the exit rules to the open position of this launch (if any). Returns the exit reason or None.
+        quoted: a Jupiter sell quote was asked for (quote_fn is None then means: no route)."""
         p = self.open.get(st.mint)
         if not p or st is None:
             return None
@@ -161,16 +186,23 @@ class PaperBook:
         stop_pct, tp1_pct = ep.get("stop_pct", c.stop_pct), ep.get("tp1_pct", c.tp1_pct)
         tp1_frac, trail_pct = ep.get("tp1_frac", c.tp1_frac), ep.get("trail_pct", c.trail_pct)
         time_stop, max_hold = ep.get("time_stop_min", c.time_stop_min), ep.get("max_hold_min", c.max_hold_min)
-        mcap = st.current_mcap_sol()
-        if mcap <= 0:
-            return None
-        price = mcap / st.supply
-        if not st.migrated and st.subscribed and st.v_tok > 0:
-            price = st.price_sol
-        p["last_price_sol"] = price
-        p["peak_price_sol"] = max(p["peak_price_sol"], price)
         entry, held = p["entry_price_sol"], (now - p["opened_ts"]) / 60
         reason, frac = None, 1.0
+        price = self.mark(st, now)
+        if price <= 0:
+            # no trustworthy price (dead curve after a restart, migrated pair gone or frozen): the time rules still
+            # apply, and a market silent for STALE_SEC with no quote route is closed at 0 instead of held forever
+            seen = p.setdefault("price_ts", now)
+            if (not p["tp1_done"] and held >= time_stop) or held >= max_hold:
+                reason = "time" if not p["tp1_done"] and held >= time_stop else "max_hold"
+            elif quoted and quote_fn is None and now - seen >= self.STALE_SEC:
+                reason = "no_market"
+            if reason:
+                self.sell(conn, st, p, 1.0, reason, now, quote_fn)
+            return reason
+        p["price_ts"] = now
+        p["last_price_sol"] = price
+        p["peak_price_sol"] = max(p["peak_price_sol"], price)
         base = p.get("insider_base") or {}
         if c.exit_on_insider_sell and any(100 * (s - base.get(w, 0.0)) >= c.insider_sell_min_pct
                                           for w, s in st.insider_sold.items()):
