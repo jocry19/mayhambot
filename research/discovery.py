@@ -17,7 +17,7 @@ from collections import Counter
 from core import db
 from core.models import Token
 from core.sources import market
-from research import credits, funding, rpc, seeds, sources
+from research import credits, funding, mining, rpc, seeds, sources
 from research.config import rsettings
 from research.store import add_research_wallets, connect, retry, store_candles, upsert_research_token
 
@@ -159,6 +159,11 @@ def run_once(conn=None):
     for r in top:
         add_research_wallets(conn, [r[0]], "top_trader", min(10.0, r[1] / 1000))
     summary["candidates_top"] = len(top)
+    # wallets that recently turned a coin into >= 2x after costs (from our own trades, no API calls)
+    try:
+        summary["candidates_realized"] = mining.run(conn, now=now)
+    except Exception as e:  # noqa: BLE001
+        log.warning("winner mining failed: %s", e)
     user = _user_wallets(conn)
     add_research_wallets(conn, user, "user", 100.0)
     # wallets signals tracks that the model has not scored yet: backfill them before new candidates

@@ -107,10 +107,11 @@ def run(ds, ms=msettings, max_points=24):
             lab = ev.labels_at(x[1], x[2], ds.pidx, [h for h in ms.horizons if h[0] == h_wallet]).get(h_wallet)
             if lab is None:
                 continue
-            d = res["tier_forward"].setdefault(tier, [0, 0, []])
+            d = res["tier_forward"].setdefault(tier, [0, 0, [], []])
             d[0] += 1
             d[1] += lab["pumped"]
             d[2].append(lab["max_ret"])
+            d[3].append(lab["net"])
         cev = _coin_events(ds, tmap, c, nxt, ms)
         train = res["events"]
         for name, sec, _ in ms.horizons:
@@ -202,8 +203,10 @@ def metrics(res, ms):
             quintiles=q, learned_share=sum(1 for p in P if p["model"] != "prior") / len(P),
             calibration=calibration(ps, y), net=net_metrics(P))
     tf = {}
-    for tier, (n, k, mr) in res["tier_forward"].items():
+    for tier, (n, k, mr, nets) in res["tier_forward"].items():
         r, lo, hi = stats.wilson(k, n)
-        tf[tier] = dict(n=n, pump_rate=r, ci_low=lo, ci_high=hi, median_max_ret=stats.median(mr))
+        wins = sum(1 for x in nets if x > 0)
+        tf[tier] = dict(n=n, pump_rate=r, ci_low=lo, ci_high=hi, median_max_ret=stats.median(mr),
+                        mean_net=sum(nets) / len(nets) if nets else None, win_rate_net=wins / len(nets) if nets else None)
     out["tier_forward"] = tf
     return out

@@ -216,13 +216,14 @@ def render(d):
     tf = d["tier_forward"]
     if tf:
         L.append(f"## Sagen die Tiers etwas voraus? (nächste Käufe, Pump ≥ Schwelle in {d['horizon']}, ohne Blick in die Zukunft)\n")
-        L.append("| Tier | Käufe | Pump-Quote | 95 %-Bereich | Median max. Anstieg (max. +5000 %) |")
-        L.append("|---|---|---|---|---|")
+        L.append("| Tier | Käufe | Pump-Quote | 95 %-Bereich | Median max. Anstieg (max. +5000 %) | Ø nach Kosten (nachgekauft) | Gewinnquote nach Kosten |")
+        L.append("|---|---|---|---|---|---|---|")
         for t in ("ultra", "smart", "good", "none"):
             if t in tf:
                 v = tf[t]
                 L.append(f"| {TIER_LABELS.get(t, 'ohne Tier')} | {v['n']} | {_pct(v['pump_rate'])} | "
-                         f"{_pct(v['ci_low'])}–{_pct(v['ci_high'])} | {_pct(v['median_max_ret'])} |")
+                         f"{_pct(v['ci_low'])}–{_pct(v['ci_high'])} | {_pct(v['median_max_ret'])} | "
+                         f"{_pct(v.get('mean_net'))} | {_pct(v.get('win_rate_net'))} |")
         L.append("")
     for dname, rows in d["combos"].items():
         if not rows:

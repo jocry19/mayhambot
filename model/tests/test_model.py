@@ -213,3 +213,21 @@ def test_ensure_schema_keeps_callers_busy_timeout():
     conn.execute("PRAGMA busy_timeout=5000")
     ensure_schema(conn)
     assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+
+def test_realized_winner_mining():
+    from research import mining
+    from research.store import ensure_schema
+    conn = ensure_schema(db.connect(os.path.join(tempfile.mkdtemp(), "m.db")))
+    now = 1_800_000_000
+    tr = [Trade("a1", "WIN", "M1", "buy", now - 3600, 1000, 1.0, 150, 0.15, "rpc"),
+          Trade("a2", "WIN", "M1", "sell", now - 1800, 1000, 4.0, 600, 0.6, "rpc"),
+          Trade("b1", "LOSE", "M1", "buy", now - 3600, 1000, 1.0, 150, 0.15, "rpc"),
+          Trade("b2", "LOSE", "M1", "sell", now - 1800, 1000, 1.5, 225, 0.225, "rpc"),
+          Trade("c1", "OLD", "M1", "buy", now - 30 * 86400, 1000, 1.0, 150, 0.15, "rpc"),
+          Trade("c2", "OLD", "M1", "sell", now - 29 * 86400, 1000, 9.0, 1350, 1.35, "rpc")]
+    db.insert_trades(conn, tr)
+    w = mining.realized_winners(conn, now=now)
+    assert set(w) == {"WIN"}
+    assert mining.run(conn, now=now) == 1
+    assert conn.execute("SELECT discovered_via FROM research_wallets WHERE address='WIN'").fetchone()[0] == "realized_winner"
