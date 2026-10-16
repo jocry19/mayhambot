@@ -11,14 +11,15 @@ export default function Overview() {
   return (
     <div className={`col ${loading ? "" : ""}`} style={{ gap: 16 }}>
       {d.tier_source !== "model" && <Callout icon="info">{TIER_SOURCE[d.tier_source]}. Die Ränge werden genauer, sobald das Forschungsmodell trainiert hat.</Callout>}
-      <div className="tiles">
+      <div className="tiles dense">
         <Tile label="Tier-Wallets" value={<TierCounts tiers={d.tiers} />} sub={`${n(d.wallets_total)} Wallets beobachtet`} />
         <Tile label="Signale 24 h" value={n(d.signals_24h)} sub={`${n(d.tokens_tracked)} Coins im Blick · ${n(d.trades_24h)} Trades`} />
-        <Tile label="Smart-Money-Inflow 24 h" value={usdSigned(d.net_tiered_24h, 1)} cls={d.net_tiered_24h >= 0 ? "up" : "down"} sub="netto, alle Tier-Wallets" />
+        <Tile label="Smart-Inflow 24 h" value={usdSigned(d.net_tiered_24h, 1)} cls={d.net_tiered_24h >= 0 ? "up" : "down"} sub="netto, alle Tier-Wallets" />
         <Tile label="Signal-Trefferquote" value={d.signal_perf?.hit_rate != null ? pct(d.signal_perf.hit_rate) : "–"}
           sub={d.signal_perf?.n ? `${d.signal_perf.hits} von ${d.signal_perf.n} mit +${pct(d.signal_perf.pump_threshold)} in 1 h` : "noch keine ausgewerteten Signale"} />
         <Tile label="Copy-Trading Papier" value={paper?.pnl_sol != null ? solSigned(paper.pnl_sol, 2) : "–"} cls={(paper?.pnl_sol || 0) >= 0 ? "up" : "down"}
           sub={paper?.trades ? `${paper.trades} Trades · ${pct(paper.win_rate)} Gewinner · ${paper.open} offen` : "noch keine Trades"} />
+        {d.sniper && <SniperTile s={d.sniper} />}
         <Tile label="Betriebsart" value={<span style={{ fontSize: 17 }}>{MODE_SHORT[ctl.modes?.whale] || "–"} / {MODE_SHORT[ctl.modes?.signal] || "–"}</span>}
           sub={`Wale / Signale · ${ctl.paused ? "Käufe pausiert" : ctl.live_ready ? "Echtgeld an" : "Papier"}`} />
       </div>
@@ -91,3 +92,16 @@ export default function Overview() {
 }
 
 export { STRAT_LABEL };
+
+/** Launch-sniper (paper only): launches today, result, last buy. */
+function SniperTile({ s }) {
+  const lb = s.last_buy;
+  const sym = lb ? (lb.symbol || `${lb.mint.slice(0, 4)}…`) : null;
+  return (
+    <Tile label={<a href="#/sniper" className="linkish">Launch-Sniper Papier</a>} value={solSigned(s.pnl_sol, 2)} cls={sign(s.pnl_sol)}
+      title={s.service_up === false ? "Der Dienst sniper meldet sich nicht" : undefined}
+      sub={<>{n(s.launches_today)} Launches heute · {n(s.entered_today)} gekauft
+        {sym ? <> · zuletzt {sym} {ago(lb.opened_ts)}</> : " · noch kein Kauf"}
+        {s.service_up === false && <> · <span className="down">Dienst steht</span></>}</>} />
+  );
+}

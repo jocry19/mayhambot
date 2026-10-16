@@ -45,6 +45,9 @@ def status() -> None:
     cl = credits_line()
     if cl:
         con.print(cl)
+    sl = sniper_line(s.get("sniper"))
+    if sl:
+        con.print(sl)
     con.print()
     _signals(s["signals"][:8])
     con.print()
@@ -191,3 +194,17 @@ def credits_line() -> str:
     refused = sum(r.get("refused") or 0 for r in u.get("rows", []))
     return (f"Helius-Credits diesen Monat: {n(t['used'])} von {n(t['limit'])} [{st}]({pct(ld, 1)})[/]"
             + (f" · [red]{n(refused)} Aufrufe abgewiesen[/]" if refused else ""))
+
+
+def sniper_line(sn: dict | None) -> str:
+    """'Launch-Sniper (Papier): n Launches heute, k gekauft, Ergebnis +x SOL, letzter Kauf SYM vor 5 min'."""
+    if not sn:
+        return ""
+    pnl = sn.get("pnl_sol")
+    tone_ = "green" if (pnl or 0) > 0 else "red" if (pnl or 0) < 0 else "dim"
+    lb = sn.get("last_buy")
+    last = f"letzter Kauf {escape(lb.get('symbol') or lb['mint'][:6] + '…')} {ago(lb['opened_ts'])}" if lb else "noch kein Kauf"
+    down = " · [red]Dienst steht[/]" if sn.get("service_up") is False else \
+        " · [yellow]Websocket getrennt[/]" if sn.get("service_up") and not sn.get("connected") else ""
+    return (f"Launch-Sniper (Papier): {n(sn.get('launches_today'))} Launches heute, {n(sn.get('entered_today'))} gekauft, "
+            f"Ergebnis [{tone_}]{sol(pnl, 3, signed=True)}[/] aus {n(sn.get('closed'))} Trades, {last}{down}")

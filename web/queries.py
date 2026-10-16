@@ -1273,6 +1273,194 @@ def retrain_schedule(conn, now=None):
     return out
 
 
+# ====================================================================== launch sniper (sniper/, paper only)
+SNIPER_SOURCE = {"pumpportal": "pump.fun", "migration": "Migration", "geckoterminal": "neuer Pool"}
+
+
+def _sniper_cfg():
+    try:
+        from sniper.config import settings as scfg  # type: ignore
+        return scfg
+    except Exception:
+        return None
+
+
+def _pid_running(name):
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        pid = int(open(os.path.join(root, "data", "pids", f"{name}.pid")).read().strip())
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return None  # unknown (no pid file: launchd, other machine, tests)
+
+
+SNIPER_HB_STALE_S = 30      # the service writes every 10 s; older means it is stopped
+_SNIPER_HIST = []           # (ts, counters) samples of the heartbeat, for per-hour rates (counters are totals since start)
+
+
+def _sniper_rates(ts, counters):
+    """Per-hour rates from the heartbeat counters over the samples seen in the last hour; None until 60 s are covered."""
+    if not isinstance(counters, dict):
+        return None
+    if _SNIPER_HIST and (ts < _SNIPER_HIST[-1][0] or any(counters.get(k, 0) < v for k, v in _SNIPER_HIST[-1][1].items())):
+        _SNIPER_HIST.clear()   # service restarted: counters began again at 0
+    if not _SNIPER_HIST or ts > _SNIPER_HIST[-1][0]:
+        _SNIPER_HIST.append((ts, dict(counters)))
+    while len(_SNIPER_HIST) > 2 and _SNIPER_HIST[1][0] <= ts - 3600:
+        _SNIPER_HIST.pop(0)
+    t0, c0 = _SNIPER_HIST[0]
+    span = ts - t0
+    if span < 60:
+        return None
+    return {"span_s": span, **{k: _f((v - c0.get(k, 0)) * 3600 / span, 1) for k, v in counters.items()}}
+
+
+def sniper_stream(conn, now=None):
+    """Data-stream status from the service's own heartbeat (sniper_state 'service_status', every 10 s): connected,
+    budget per minute, counters. Without a fresh heartbeat the service counts as stopped. Per-hour numbers come from
+    the counters once a minute of samples exists, until then from the stored launches."""
+    now = int(now or time.time())
+    hb = _j(scalar(conn, "SELECT value FROM sniper_state WHERE key='service_status'"), None) \
+        if has(conn, "sniper_state") else None
+    hb = hb if isinstance(hb, dict) and hb.get("ts") else None
+    last = scalar(conn, "SELECT MAX(COALESCE(created_ts, decided_ts)) FROM sniper_launches") or None
+    lh = scalar(conn, "SELECT COUNT(*) FROM sniper_launches WHERE COALESCE(created_ts, decided_ts) >= ?", (now - 3600,), 0)
+    dh = scalar(conn, "SELECT COUNT(*) FROM sniper_launches WHERE stage=2 AND decided_ts >= ?", (now - 3600,), 0)
+    eh = scalar(conn, "SELECT COUNT(*) FROM sniper_launches WHERE decision='enter' AND decided_ts >= ?", (now - 3600,), 0)
+    cfg = _sniper_cfg()
+    out = {"last_launch_ts": last, "launches_1h": lh, "deep_1h": dh, "entered_1h": eh, "rate_source": "db",
+           "deep_per_hour_cap": cfg.deep_per_min * 60 if cfg else None, "running": _pid_running("sniper"),
+           "heartbeat_ts": hb["ts"] if hb else None, "heartbeat_age_s": now - hb["ts"] if hb else None}
+    fresh = bool(hb) and now - hb["ts"] <= SNIPER_HB_STALE_S
+    out["service_up"] = fresh
+    if not hb:
+        out.update(source="none", connected=False)
+    elif not fresh:
+        out.update(source="stale", connected=False)
+    else:
+        budget = {}
+        for k, b in (hb.get("budget") or {}).items():
+            if isinstance(b, dict):
+                pm = b.get("per_min") or 0
+                budget[k] = {"used_last_min": b.get("used_last_min"), "per_min": pm, "total": b.get("total"),
+                             "load": _f((b.get("used_last_min") or 0) / pm, 3) if pm else None}
+        out.update(source="heartbeat", connected=bool(hb.get("connected")), ws_msgs=hb.get("ws_msgs"),
+                   subscribed=hb.get("subscribed"), in_memory=hb.get("in_memory"), queue=hb.get("queue"),
+                   open_positions=hb.get("open_positions"), pump_api_ok=hb.get("pump_api_ok"),
+                   counters=hb.get("counters") or {}, budget=budget)
+        rates = _sniper_rates(hb["ts"], hb.get("counters"))
+        if rates:
+            out.update(rate_source="counters", rate_span_s=rates["span_s"], migrations_1h=rates.get("migrations"),
+                       launches_1h=rates.get("creates", lh), deep_1h=rates.get("stage2", dh), entered_1h=rates.get("entries", eh))
+    cap = out["deep_per_hour_cap"]
+    deep = (out.get("budget") or {}).get("deep")
+    out["load_deep"] = deep["load"] if deep and deep.get("load") is not None else (_f(out["deep_1h"] / cap, 3) if cap else None)
+    out["api"] = [r for r in api_usage().get("rows", []) if r["service"] == "sniper"]
+    return out
+
+
+def sniper_view(conn, hours=24, limit=300):
+    """Everything for the Launch-Sniper page. Read-only: the sniper trades on paper only."""
+    if not has(conn, "sniper_launches"):
+        return {"available": False, "note": "Der Launch-Sniper hat noch keine Daten (Dienst sniper läuft noch nicht)."}
+    try:
+        import sniper  # type: ignore
+        from sniper.analytics import EXIT_LABELS  # type: ignore
+    except Exception as e:
+        return {"available": False, "note": f"sniper/ fehlt: {e}"[:200]}
+    now = now_ts()
+    st = sniper.stats(conn, hours=hours, now=now)
+    cfg = _sniper_cfg()
+    size = cfg.size_sol if cfg else 0.1
+    start = cfg.paper_start_sol if cfg else None
+    # filter value: what each skip reason would have earned with the same stake, held 60 min (no fees)
+    per = defaultdict(lambda: {"sum": 0.0, "n": 0})
+    for r in rows(conn, "SELECT skip_reason, ret_60m FROM sniper_launches WHERE decision='skip' AND decided_ts>=? "
+                        "AND ret_60m IS NOT NULL", (now - int(hours * 3600) if hours else 0,)):
+        d = per[r["skip_reason"] or "?"]
+        d["sum"] += max(-1.0, r["ret_60m"])
+        d["n"] += 1
+    for f in st.get("filters", []):
+        d = per.get(f["code"], {"sum": 0.0, "n": 0})
+        f["avg_ret_60m"] = _f(d["sum"] / d["n"], 4) if d["n"] else None
+        f["pnl_without_sol"] = _f(d["sum"] * size, 4) if d["n"] else None   # bought anyway: result
+        f["filter_value_sol"] = _f(-d["sum"] * size, 4) if d["n"] else None  # positive = the filter saved money
+    without = sum(d["sum"] for d in per.values()) * size
+    paper = st.get("paper") or {}
+    st["filter_total"] = {"with_sol": _f(paper.get("pnl_sol"), 4), "skipped_sol": _f(without, 4),
+                          "without_sol": _f((paper.get("pnl_sol") or 0) + without, 4), "size_sol": size,
+                          "measured": sum(d["n"] for d in per.values())}
+    launches = sniper.recent(conn, limit=limit)
+    for x in launches:
+        x["source_label"] = SNIPER_SOURCE.get(x.get("source"), x.get("source") or "–")
+        if x.get("migrated") and x.get("source") == "pumpportal":
+            x["source_label"] = "pump.fun → migriert"
+    reasons_by_mint = {x["mint"]: x for x in launches}
+    pos = rows(conn, "SELECT * FROM sniper_positions ORDER BY COALESCE(closed_ts, opened_ts) DESC LIMIT 300")
+    missing = [p["mint"] for p in pos if p["mint"] not in reasons_by_mint]
+    if missing:
+        for r in rows(conn, f"SELECT mint, score, reasons_json, positives_json FROM sniper_launches WHERE mint IN ({','.join('?' * len(missing))})", missing):
+            reasons_by_mint[r["mint"]] = {"score": r["score"], "reasons": _j(r["reasons_json"], []) or [],
+                                          "positives": _j(r["positives_json"], []) or []}
+    positions = []
+    for p in pos:
+        L = reasons_by_mint.get(p["mint"]) or {}
+        ev = _j(p.get("events_json"), []) or []
+        pp = {k: p.get(k) for k in ("id", "mint", "symbol", "mode", "opened_ts", "closed_ts", "status", "entry_mcap_sol",
+                                    "entry_mcap_usd", "size_sol", "fees_sol", "fill_src", "score", "tp1_done",
+                                    "realized_sol", "exit_reason", "pnl_sol", "pnl_pct", "entry_price_sol", "last_price_sol",
+                                    "peak_price_sol")}
+        pp["exit_label"] = EXIT_LABELS.get(p.get("exit_reason"), p.get("exit_reason"))
+        pp["entry_why"] = (L.get("positives") or [])[:3]
+        pp["sells"] = [{"ts": e.get("ts"), "reason": EXIT_LABELS.get(e.get("reason"), e.get("reason")), "sol": e.get("sol")}
+                       for e in ev if e.get("kind") == "sell"]
+        if p["status"] == "open" and p.get("entry_price_sol") and p.get("last_price_sol"):
+            pp["unrealized_pct"] = _f(p["last_price_sol"] / p["entry_price_sol"] - 1, 4)
+        if p.get("peak_price_sol") and p.get("entry_price_sol"):
+            pp["peak_pct"] = _f(p["peak_price_sol"] / p["entry_price_sol"] - 1, 4)
+        positions.append(pp)
+    # paper balance over time: start + realized results in closing order
+    curve, acc = [], start
+    if start is not None:
+        closed = sorted((p for p in positions if p["status"] == "closed" and p.get("closed_ts")), key=lambda p: p["closed_ts"])
+        first = min([p["opened_ts"] for p in positions if p.get("opened_ts")] or [now])
+        curve.append({"ts": first, "balance_sol": start})
+        for p in closed:
+            acc += p.get("pnl_sol") or 0
+            curve.append({"ts": p["closed_ts"], "balance_sol": _f(acc, 4), "symbol": p.get("symbol"), "pnl_sol": p.get("pnl_sol")})
+    return {"available": True, "hours": hours, "stats": st, "launches": launches, "positions": positions,
+            "balance_curve": curve, "paper_start_sol": start, "stream": sniper_stream(conn, now),
+            "settings": {k: getattr(cfg, k, None) for k in ("min_score", "max_risk", "size_sol", "deep_per_min",
+                                                             "max_open", "max_entries_per_hour")} if cfg else {},
+            "sources": SNIPER_SOURCE}
+
+
+def sniper_summary(conn, now=None):
+    """Overview tile and terminal line: launches today, paper result, last buy."""
+    if not has(conn, "sniper_launches"):
+        return None
+    now = int(now or time.time())
+    day0 = now - now % 86400
+    out = {"launches_today": scalar(conn, "SELECT COUNT(*) FROM sniper_launches WHERE COALESCE(created_ts, decided_ts)>=?", (day0,), 0),
+           "entered_today": scalar(conn, "SELECT COUNT(*) FROM sniper_launches WHERE decision='enter' AND decided_ts>=?", (day0,), 0)}
+    if has(conn, "sniper_positions"):
+        out["pnl_sol"] = _f(scalar(conn, "SELECT SUM(pnl_sol) FROM sniper_positions WHERE status='closed'", default=0) or 0, 4)
+        out["closed"] = scalar(conn, "SELECT COUNT(*) FROM sniper_positions WHERE status='closed'", default=0)
+        out["open"] = scalar(conn, "SELECT COUNT(*) FROM sniper_positions WHERE status='open'", default=0)
+        lb = one(conn, "SELECT mint, symbol, opened_ts FROM sniper_positions ORDER BY opened_ts DESC LIMIT 1")
+        out["last_buy"] = lb
+    if has(conn, "sniper_state"):
+        v = scalar(conn, "SELECT value FROM sniper_state WHERE key='paper_balance_sol'")
+        out["balance_sol"] = _f(float(v), 4) if v is not None else None
+        hb = _j(scalar(conn, "SELECT value FROM sniper_state WHERE key='service_status'"), None)
+        hb = hb if isinstance(hb, dict) and hb.get("ts") else None
+        out["service_up"] = bool(hb) and now - hb["ts"] <= SNIPER_HB_STALE_S
+        out["connected"] = out["service_up"] and bool(hb.get("connected"))
+        out["heartbeat_ts"] = hb["ts"] if hb else None
+    return out
+
+
 # ====================================================================== overview + system
 def overview(conn):
     now = now_ts()
@@ -1295,7 +1483,7 @@ def overview(conn):
                 ct[mode]["equity"] = eq
                 ct[mode]["equity_now"] = eq[-1]["equity_sol"] if eq else None
     return {
-        "now": now, "tier_source": tier_source(conn), "tiers": tiers,
+        "now": now, "tier_source": tier_source(conn), "tiers": tiers, "sniper": sniper_summary(conn, now),
         "wallets_total": scalar(conn, "SELECT COUNT(*) FROM wallets", default=0),
         "tokens_tracked": scalar(conn, "SELECT COUNT(*) FROM tokens WHERE tracked=1", default=0),
         "trades_24h": scalar(conn, "SELECT COUNT(*) FROM trades WHERE ts>=?", (day,), 0),

@@ -5,6 +5,7 @@ import { TIER_LABEL, pctSigned, sign, short, toast, useToasts } from "./lib.js";
 const P = {
   home: "M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z",
   bolt: "M13 2 4 14h7l-1 8 9-12h-7z",
+  target: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM12 1v4M12 19v4M1 12h4M19 12h4",
   coins: "M8 8a6 3 0 1 0 12 0 6 3 0 1 0-12 0M8 8v4c0 1.7 2.7 3 6 3s6-1.3 6-3V8M4 12a6 3 0 0 0 6 3M4 12v4c0 1.7 2.7 3 6 3 1 0 2-.1 2.8-.4M4 12c0-1.2 1.4-2.3 3.5-2.7",
   wallet: "M3 7a2 2 0 0 1 2-2h13v4M3 7v11a2 2 0 0 0 2 2h15V9H5a2 2 0 0 1-2-2zM16 14.5h.01",
   copy: "M4 17 9 12l4 4 7-8M15 8h5v5",

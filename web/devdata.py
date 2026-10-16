@@ -179,6 +179,122 @@ def _safety_demo(conn, r, tokens, now):
     conn.commit()
 
 
+SNIPER_NAMES = ["FROGZ", "MOONPUP", "GIGACAT", "WOJAK2", "BONKER", "TRUMPY", "SOLDOGE", "PNUTX", "CHILLAX", "RIZZ",
+                "MEOWW", "HAMSTR", "LUMPY", "ZOOMR", "GOOBER", "TOAD", "FWOG2", "BRRR", "PEPU", "SKIBI"]
+
+
+def _sniper_demo(conn, r, now):
+    """Launch-sniper tables (sniper/): stage-1 and deep-checked launches with outcomes, paper positions."""
+    try:
+        from sniper import store as sst
+    except Exception:
+        return
+    sst.ensure_schema(conn)
+    sst.LAUNCH_COLS = None
+    start, size, bal = 5.0, 0.1, 5.0
+    t, i = now - 30 * 3600, 0
+    pos = []
+    while t < now - 20:
+        t += r.randint(8, 70)
+        i += 1
+        mint = "".join(r.choice("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz") for _ in range(40)) + "pump"
+        src = r.choices(["pumpportal", "migration", "geckoterminal"], [0.9, 0.06, 0.04])[0]
+        sym = r.choice(SNIPER_NAMES) + ("" if r.random() < .5 else str(r.randint(2, 99)))
+        deep = r.random() < 0.12
+        row = {"mint": mint, "source": src, "pool": "pump", "symbol": sym, "name": sym.title(), "creator": f"Dev{r.randint(1, 400)}",
+               "created_ts": t - 20, "decided_ts": t, "stage": 2 if deep else 1, "n_buyers": r.randint(1, 40),
+               "net_sol": round(r.uniform(-1, 12), 2), "dev_buy_pct": round(r.uniform(0, 18), 1), "dev_sold_pct": 0.0,
+               "unseen_pct": round(r.uniform(0, 30), 1), "bundle_pct": round(r.uniform(0, 25), 1), "bundle_wallets": r.randint(0, 6),
+               "top10_pct": round(r.uniform(15, 70), 1), "fast_buyers": r.randint(0, 5), "curve_progress": round(r.uniform(.02, .4), 3),
+               "mcap_decide_sol": round(r.uniform(28, 120), 1), "sol_usd": 182.0, "calls_rpc": r.randint(0, 3) if deep else None,
+               "calls_api": r.randint(3, 4) if deep else None}
+        row["mcap_decide_usd"] = round(row["mcap_decide_sol"] * 182, 0)
+        reasons, positives = [], []
+        if row["bundle_pct"] >= 15:
+            reasons.append({"check": "bundle", "risk": 70.0, "text": f"{row['bundle_pct']:.1f} % des Supplies im Erstellungs-Slot gekauft (Bundle)."})
+        if row["dev_buy_pct"] >= 10:
+            reasons.append({"check": "dev", "risk": 35.0, "text": f"Dev hält {row['dev_buy_pct']:.1f} %."})
+        if row["top10_pct"] >= 50:
+            reasons.append({"check": "holders", "risk": 30.0, "text": f"Top-10 halten {row['top10_pct']:.0f} %."})
+        if row["bundle_pct"] < 5:
+            positives.append(f"Kein Bundle: im Erstellungs-Slot nur {row['bundle_pct']:.1f} % gekauft.")
+        if row["dev_buy_pct"] < 5:
+            positives.append(f"Dev hält nur {row['dev_buy_pct']:.1f} %.")
+        if row["n_buyers"] > 20:
+            positives.append(f"{row['n_buyers']} organische Käufer in 20 s.")
+        if not deep:
+            dec, why = "skip", ("activity" if row["n_buyers"] < 6 else r.choice(["activity", "dev_sold", "budget"]))
+        else:
+            row["bundle_flag"] = int(row["bundle_pct"] >= 15)
+            row["insider_flag"] = int(r.random() < .15)
+            row["momentum"] = round(r.uniform(20, 95), 1)
+            row["risk"] = round(min(95, sum(x["risk"] for x in reasons) * .8 + r.uniform(0, 20)), 1)
+            row["score"] = round(row["momentum"] * (1 - row["risk"] / 100), 1)
+            if row["bundle_flag"]:
+                dec, why = "skip", "bundle"
+            elif row["insider_flag"]:
+                dec, why = "skip", "insider"
+                reasons.append({"check": "funders", "risk": 60.0, "text": "3 erste Käufer mit gemeinsamer Geldquelle."})
+            elif row["risk"] > 45:
+                dec, why = "skip", "risk"
+            elif row["score"] < 50:
+                dec, why = "skip", "score"
+            else:
+                dec, why = "enter", None
+        row.update(decision=dec, skip_reason=why, reasons_json=json.dumps(reasons, ensure_ascii=False),
+                   positives_json=json.dumps(positives, ensure_ascii=False))
+        # outcome relative to the decision market cap; bundles and insiders rug more often
+        bad = row.get("bundle_flag") or row.get("insider_flag") or why == "dev_sold"
+        good = dec == "enter"
+        mx = r.choice([r.uniform(-.2, .5), r.uniform(.5, 3.5) if r.random() < (.35 if good else .12) else r.uniform(0, .6)])
+        end = r.uniform(-.95, -.8) if r.random() < (.55 if bad else .25 if good else .4) else r.uniform(-.7, mx)
+        if t + 3600 <= now:
+            row.update(ret_1m=round(r.uniform(-.3, .4), 3), ret_5m=round(r.uniform(-.5, mx), 3), ret_15m=round(r.uniform(-.7, mx), 3),
+                       ret_60m=round(end, 3), max_ret_60m=round(max(mx, end), 3), min_ret_60m=round(min(end, -.1), 3),
+                       rugged=int(end <= -.8), done=1)
+        sst.save_launch(conn, row)
+        if dec == "enter":
+            pos.append((t, mint, sym, row, mx, end))
+    for k, (t, mint, sym, row, mx, end) in enumerate(pos):
+        p_in = row["mcap_decide_sol"] / 1e9
+        is_open = t > now - 25 * 60 and k >= len(pos) - 3
+        if is_open:
+            last = p_in * (1 + r.uniform(-.3, .9))
+            conn.execute("""INSERT INTO sniper_positions(mint, symbol, mode, opened_ts, entry_price_sol, entry_mcap_sol, entry_mcap_usd,
+                            size_sol, tokens, remaining, fees_sol, fill_src, score, peak_price_sol, last_price_sol, status, params_json,
+                            events_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         (mint, sym, "paper", t + 2, p_in, row["mcap_decide_sol"], row["mcap_decide_usd"], size, size / p_in,
+                          size / p_in, .004, "curve", row["score"], max(p_in, last), last, "open", "{}",
+                          json.dumps([{"ts": t + 2, "kind": "buy", "sol": size}])))
+            bal -= size
+            continue
+        if mx >= .6:
+            reason, pct = r.choice(["trail", "trail", "tp1"]), r.uniform(.25, min(mx, 1.8))
+        elif end <= -.5:
+            reason, pct = r.choice(["stop", "insider_sell"]), r.uniform(-.38, -.22)
+        else:
+            reason, pct = "time", r.uniform(-.15, .1)
+        pnl = round(size * pct - .006, 4)
+        closed = t + r.randint(120, 3000)
+        bal += pnl
+        conn.execute("""INSERT INTO sniper_positions(mint, symbol, mode, opened_ts, entry_price_sol, entry_mcap_sol, entry_mcap_usd, size_sol,
+                        tokens, remaining, fees_sol, fill_src, score, peak_price_sol, last_price_sol, tp1_done, realized_sol, status,
+                        closed_ts, exit_reason, pnl_sol, pnl_pct, params_json, events_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     (mint, sym, "paper", t + 2, p_in, row["mcap_decide_sol"], row["mcap_decide_usd"], size, size / p_in, 0, .006,
+                      r.choice(["curve", "jupiter"]), row["score"], p_in * (1 + max(mx, 0)), p_in * (1 + pct), int(mx >= .6),
+                      size + pnl, "closed", closed, reason, pnl, round(pnl / size, 4), "{}",
+                      json.dumps([{"ts": t + 2, "kind": "buy", "sol": size}, {"ts": closed, "kind": "sell", "reason": reason, "sol": size + pnl}])))
+    conn.execute("INSERT OR REPLACE INTO sniper_state VALUES ('paper_balance_sol', ?)", (str(round(bal, 4)),))
+    # heartbeat as sniper/service.py writes it every 10 s (counters are totals since the service started)
+    conn.execute("INSERT OR REPLACE INTO sniper_state VALUES ('service_status', ?)", (json.dumps({
+        "ts": int(now), "connected": True, "ws_msgs": 412_877, "subscribed": 38, "in_memory": 640, "queue": 2, "open_positions": 3,
+        "budget": {"rpc": {"used_last_min": 41, "per_min": 120, "total": 58_210}, "api": {"used_last_min": 22, "per_min": 30, "total": 21_904},
+                   "deep": {"used_last_min": 3, "per_min": 4, "total": 3_310}},
+        "counters": {"creates": 27_480, "trades": 391_200, "migrations": 212, "stage1": 9_870, "stage2": 3_310, "entries": 604},
+        "pump_api_ok": True}),))
+    conn.commit()
+
+
 def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wallets: int = 700) -> str:
     try:
         from .db import db_path
@@ -560,6 +676,7 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
         pass
     _learn_demo(conn, r, now)
     _safety_demo(conn, r, tokens, now)
+    _sniper_demo(conn, r, now)
     try:
         from research.events import FEATURE_LABELS, FEATURE_NAMES
     except Exception:

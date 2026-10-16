@@ -133,8 +133,8 @@ class MayhamTUI(App):
         try:
             snap = data.snapshot()
             try:
-                from .report import api_line, credits_line
-                snap["api_line"] = "\n".join(x for x in (api_line(), credits_line()) if x)
+                from .report import api_line, credits_line, sniper_line
+                snap["api_line"] = "\n".join(x for x in (api_line(), credits_line(), sniper_line(snap.get("sniper"))) if x)
             except Exception:
                 snap["api_line"] = ""
         except Exception as e:  # DB busy or missing: keep the last picture

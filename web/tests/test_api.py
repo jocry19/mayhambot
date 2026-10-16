@@ -16,7 +16,8 @@ sys.path.insert(0, str(ROOT))
 
 GET = ["/api/overview", "/api/signals", "/api/signals/performance", "/api/coins", "/api/wallets", "/api/wallets/stats",
        "/api/copytrade", "/api/copytrade?mode=live", "/api/model", "/api/system", "/api/control", "/api/search?search=a",
-       "/api/copytrade/backtest?strategy=whale", "/api/copytrade/learn?strategy=whale", "/api/copytrade/learn?strategy=signal", "/api/safety"]
+       "/api/copytrade/backtest?strategy=whale", "/api/copytrade/learn?strategy=whale", "/api/copytrade/learn?strategy=signal", "/api/safety",
+       "/api/sniper", "/api/sniper?hours=6"]
 
 
 def _client(db: str):
@@ -271,3 +272,62 @@ def test_wallet_tiers_from_wallets_table(demo, tmp_path, monkeypatch):
     cache.clear()
     r = c.get("/api/model").json()["retrain"]
     assert r["source"] == "log" and r["next_ts"] == __import__("calendar").timegm((2099, 1, 2, 3, 4, 0)) and not r["due"] and not r["failed"]
+
+
+def test_sniper_page(demo, empty, capsys):
+    c = _client(empty)
+    assert c.get("/api/sniper").json()["available"] is False
+    assert c.get("/api/overview").json()["sniper"] is None
+    c = _client(demo)
+    d = c.get("/api/sniper?hours=24").json()
+    assert d["available"] and d["launches"] and d["positions"] and d["balance_curve"]
+    assert {x["source_label"] for x in d["launches"]} <= {"pump.fun", "Migration", "neuer Pool"}
+    ft = d["stats"]["filter_total"]
+    assert ft["measured"] > 0 and abs(ft["without_sol"] - ((ft["with_sol"] or 0) + ft["skipped_sol"])) < 1e-3
+    assert any(f.get("filter_value_sol") is not None for f in d["stats"]["filters"])
+    mint = d["launches"][0]["mint"]
+    assert c.get(f"/api/sniper/{mint}").status_code == 200
+    o = c.get("/api/overview").json()["sniper"]
+    assert o["launches_today"] >= 0 and o["last_buy"]["mint"] and "pnl_sol" in o
+    from cli import data as cdata
+    from cli.report import sniper_line
+
+    line = sniper_line(cdata.snapshot(n_signals=5, n_wallets=0)["sniper"])
+    assert line.startswith("Launch-Sniper (Papier):") and "Launches heute" in line
+    assert sniper_line(None) == ""
+
+
+def test_sniper_heartbeat(tmp_path):
+    import json
+
+    from web import queries as Q
+
+    p = str(tmp_path / "hb.db")
+    conn = sqlite3.connect(p)
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE sniper_state(key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("CREATE TABLE sniper_launches(mint TEXT, created_ts INT, decided_ts INT, stage INT, decision TEXT)")
+
+    def beat(ts, creates, connected=True):
+        conn.execute("INSERT OR REPLACE INTO sniper_state VALUES ('service_status', ?)", (json.dumps({
+            "ts": ts, "connected": connected, "subscribed": 5, "queue": 0, "open_positions": 1, "pump_api_ok": True,
+            "budget": {"rpc": {"used_last_min": 30, "per_min": 120, "total": 900}, "deep": {"used_last_min": 4, "per_min": 4, "total": 40}},
+            "counters": {"creates": creates, "stage2": creates // 10, "entries": creates // 100}}),))
+
+    Q._SNIPER_HIST.clear()
+    assert Q.sniper_stream(conn, now=1000)["source"] == "none"
+    beat(1000, 1000)
+    s = Q.sniper_stream(conn, now=1005)
+    assert s["source"] == "heartbeat" and s["connected"] and s["service_up"] and s["rate_source"] == "db"
+    assert s["budget"]["rpc"]["load"] == 0.25 and s["load_deep"] == 1.0
+    beat(1600, 1500)     # 500 launches in 10 min -> 3000 per hour
+    s = Q.sniper_stream(conn, now=1610)
+    assert s["rate_source"] == "counters" and s["launches_1h"] == 3000 and s["deep_1h"] == 300
+    beat(1700, 10)       # counters dropped: service restarted, no rate until a minute of samples
+    assert Q.sniper_stream(conn, now=1700)["rate_source"] == "db"
+    s = Q.sniper_stream(conn, now=1700 + 31)
+    assert s["source"] == "stale" and not s["connected"] and not s["service_up"] and "budget" not in s
+    beat(1800, 20, connected=False)
+    s = Q.sniper_stream(conn, now=1800)
+    assert s["service_up"] and not s["connected"]
+    Q._SNIPER_HIST.clear()

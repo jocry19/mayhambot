@@ -4,7 +4,7 @@ import { Card, Empty, Table, Tile } from "../ui.jsx";
 const GROUP = { helius: "Helius (RPC)", geckoterminal: "GeckoTerminal" };
 
 /** Share of a limit as a thin bar + number; warning colour from 80 %, critical from 100 %. */
-function LoadBar({ v }) {
+export function LoadBar({ v }) {
   if (v == null) return <span className="dim">–</span>;
   const cls = v >= 1 ? "bad" : v >= 0.8 ? "warn" : "";
   return (

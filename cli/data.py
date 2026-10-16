@@ -41,6 +41,7 @@ def snapshot(n_signals: int = 60, n_wallets: int = 150) -> dict:
         "wallets": wl.get("items", []) if isinstance(wl, dict) else wl,
         "control": Q.control_state(conn),
         "model": Q.model_active(conn),
+        "sniper": Q.sniper_summary(conn, now),
     }
 
 

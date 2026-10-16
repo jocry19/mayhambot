@@ -276,6 +276,25 @@ def model():
     return ok(cache.get(("model",), 20, lambda: q.model_view(read_conn())))
 
 
+@app.get("/api/sniper")
+def sniper_page(hours: float = 24, limit: int = 300):
+    hours = max(0.0, min(hours, 24 * 30))
+    return ok(cache.get(("sniper", hours, limit), 5, lambda: q.sniper_view(read_conn(), hours=hours, limit=min(limit, 1000))))
+
+
+@app.get("/api/sniper/{mint}")
+def sniper_launch(mint: str):
+    conn = read_conn()
+    if not q.has(conn, "sniper_launches"):
+        raise HTTPException(404, "Launch unbekannt")
+    import sniper  # type: ignore
+    d = sniper.launch(conn, mint.strip())
+    if not d:
+        raise HTTPException(404, "Launch unbekannt")
+    d.pop("features", None)
+    return ok(d)
+
+
 @app.get("/api/system")
 def system():
     return ok(q.system(read_conn()))
