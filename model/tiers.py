@@ -84,6 +84,18 @@ def wallet_tiers(conn=None, tier=None, limit=None):
     return [_row(r) for r in conn.execute(q, args)]
 
 
+def tier_sync(conn=None):
+    """Source of truth for every other package once a model version exists.
+    -> None before the first successful retrain (callers fall back to their own heuristic), else
+    {address: {"tier", "score", "cluster_id", "exit_capture", "version"}} for every wallet the active model scored
+    (tier None = scored but not good enough). Wallets missing from the dict were not scored by the model."""
+    conn = _conn(conn)
+    if not conn.execute("SELECT 1 FROM model_versions WHERE active=1 LIMIT 1").fetchone():
+        return None
+    return {r[0]: {"tier": r[1], "score": r[2], "cluster_id": r[3], "exit_capture": r[4], "version": r[5]}
+            for r in conn.execute("SELECT address, tier, score, cluster_id, exit_capture, version FROM model_wallet_stats")}
+
+
 def tier_map(conn):
     """wallet -> (tier, score, influence_usd, cluster_id, exit_capture) for tiered wallets (live predictor)."""
     return {r[0]: (r[1], r[2] or 0.0, r[3] or 0.0, r[4], r[5]) for r in conn.execute(

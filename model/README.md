@@ -36,6 +36,26 @@ the rest fall through to the next tier. Components: win rate, early entries (≥
 
 Bots (core `is_bot`, or > `BOT_MAX_TRADES_PER_TOKEN` trades in a coin) never get a tier.
 
+### One source of truth for tiers (signals, dashboard, copy-trader)
+
+After the first successful retrain, `model_wallet_stats` (read via `tier_sync` / `tier_of`) is the truth.
+It only ever holds the active model version (replaced in one transaction per retrain).
+
+```python
+from model import tier_sync
+tier_sync(conn=None) -> None | {address: {"tier", "score", "cluster_id", "exit_capture", "version"}}
+```
+
+- `None`: no model version yet. Callers use their own heuristic tiers as a fallback.
+- Address in the dict: the model scored it. Copy `tier` (None = scored, not good enough), `score` (0-100),
+  `cluster_id` (wallets with the same id are one entity: same funder or repeated co-buys within 60 s,
+  so count them once) and `exit_capture` (median sell price / peak since entry, 0..1, None = no exits yet).
+- Address missing: the model has no positions for it, so it gets no tier from the model. Signals may keep a
+  heuristic tier for it only until the next retrain has backfilled it.
+- Read-only for other packages. Never write into `model_*` tables.
+
+`tier_of(address)` returns the same values for one wallet plus components and stats.
+
 ## Coin prediction — `model.predict`
 
 ```python

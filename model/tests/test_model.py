@@ -117,3 +117,25 @@ def test_retrain_if_due_keeps_last_success_on_failure(monkeypatch):
     assert calls
     monkeypatch.setattr(train, "run_once", lambda c: None)
     assert train.retrain_if_due(conn, 3600, time.time() - 60) > 0  # not due: untouched, no call
+
+
+def test_selection_log_explains_rejections():
+    from model.train import selection_log
+    sel = {"6h": {"status": "prior", "n": 0, "pos": 0, "need_n": 80, "need_pos": 12},
+           "1h": {"status": "prior", "n": 42, "pos": 9, "need_n": 80, "need_pos": 12},
+           "15m": {"status": "selected", "chosen": {"algo": "logistic", "drop": None}, "why": "bester Kandidat", "n": 98,
+                   "n_train": 60, "n_test": 30, "base_logloss": 0.69, "holdout": {"logloss": 0.62},
+                   "candidates": [{"cfg": {"algo": "logistic", "drop": None}, "logloss": 0.62, "auc": 0.6},
+                                  {"cfg": {"algo": "gbm", "drop": None}, "logloss": 0.71, "auc": 0.55},
+                                  {"cfg": {"algo": "gbm", "drop": "tiers"}, "error": "boom"}]}}
+    text = "\n".join(selection_log(sel))
+    assert "6h: prior (n 0" in text and "no outcomes" in text
+    assert "need >= 80" in text
+    assert "gbm rejected: lost in holdout, logloss 0.7100 vs champion 0.6200" in text
+    assert "gbm-tiers rejected: not trainable" in text
+
+
+def test_tier_sync_none_before_first_model():
+    from model import tier_sync
+    conn = db.connect(os.path.join(tempfile.mkdtemp(), "s.db"))
+    assert tier_sync(conn) is None

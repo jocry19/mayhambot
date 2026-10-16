@@ -44,6 +44,8 @@ def run_once(conn=None, now=None, write_files=True):
         champ = {h: m.get("cfg") for h, m in json.loads(v[0] or "{}").items() if m.get("cfg")}
     models, selection = learn.select_models(bt["events"], champion=champ, now=now)
     bt.setdefault("metrics", {})["selection"] = selection
+    for line in selection_log(selection):
+        log.info(line)
     tiered = [w for w, (t, _, _) in tiers.items() if t]
     cl = wallet_stats.clusters(ds, tiered, now + 1)
     counts = {t: sum(1 for v in tiers.values() if v[0] == t) for t in ("ultra", "smart", "good")}
@@ -85,6 +87,40 @@ def run_once(conn=None, now=None, write_files=True):
     log.info("model v%d: %d wallets scored, tiers %s, %d events, %.0fs", vid, len(st), counts, len(bt["events"]),
              time.time() - t0)
     return vid
+
+
+def _cfg(c):
+    return f"{c.get('algo')}" + (f"-{c['drop']}" if c.get("drop") else "")
+
+
+def selection_log(selection):
+    """One log line per horizon and candidate: chosen, lost in the holdout (both log-losses), not trainable,
+    or why the horizon stayed on the prior."""
+    out = []
+    for h, r in selection.items():
+        if r.get("status") == "prior":
+            why = ("no outcomes for this horizon yet" if not r.get("n") else
+                   f"need >= {r.get('need_n')} labelled events and >= {r.get('need_pos')} pumps")
+            if r.get("n") and r.get("pos") == r.get("n"):
+                why = "every event pumped, nothing to separate"
+            out.append(f"selection {h}: prior (n {r.get('n')}, pumps {r.get('pos')}): {why}")
+            continue
+        ch = r.get("chosen") or {}
+        hold = r.get("holdout") or {}
+        out.append(f"selection {h}: champion {_cfg(ch)} ({r.get('why')}), n {r.get('n')} "
+                   f"(train {r.get('n_train')}, holdout {r.get('n_test')}), holdout logloss "
+                   f"{hold.get('logloss', float('nan')):.4f} vs base rate {r.get('base_logloss', float('nan')):.4f}")
+        if r.get("skipped"):
+            out.append(f"selection {h}: no candidate evaluated: {r['skipped']}")
+        for c in r.get("candidates") or []:
+            if c["cfg"] == ch:
+                continue
+            if "error" in c:
+                out.append(f"selection {h}: {_cfg(c['cfg'])} rejected: not trainable ({c['error']})")
+            else:
+                out.append(f"selection {h}: {_cfg(c['cfg'])} rejected: lost in holdout, logloss {c['logloss']:.4f} "
+                           f"vs champion {hold.get('logloss', float('nan')):.4f} (auc {c.get('auc') or 0:.3f})")
+    return out
 
 
 def last_success(conn):

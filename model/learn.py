@@ -158,7 +158,8 @@ def select_models(events, champion=None, horizons=None, l2=None, now=None, min_g
             m = prior_model(name)
             m.update(n=len(rows), pos=pos)
             models[name] = m
-            report[name] = dict(status="prior", n=len(rows), pos=pos, reason="zu wenig Fälle für einen ehrlichen Test")
+            report[name] = dict(status="prior", n=len(rows), pos=pos, reason="zu wenig Fälle für einen ehrlichen Test",
+                                need_n=2 * msettings.min_train_events, need_pos=2 * msettings.min_train_pos)
             continue
         cut = rows[int(len(rows) * 0.7)]["ts"]
         train = [e for e in rows if e["ts"] + sec <= cut]
@@ -176,6 +177,11 @@ def select_models(events, champion=None, horizons=None, l2=None, now=None, min_g
                     res.append(dict(cfg=cfg, logloss=_logloss(ps, yt), auc=stats.auc(ps, yt)))
                 except Exception as ex:  # noqa: BLE001
                     res.append(dict(cfg=cfg, error=str(ex)[:80]))
+        skipped = None
+        if not res:
+            skipped = (f"Kandidaten nicht trainierbar: Training {len(train)} Fälle/{sum(ytr)} Pumps, "
+                       f"Holdout {len(test)}/{sum(yt)} (nötig: Training ≥ {msettings.min_train_events}, "
+                       "beide Klassen in Training und Holdout)")
         ok = [r for r in res if "logloss" in r]
         champ_cfg = champion.get(name) or {"algo": "logistic", "drop": None}
         champ = next((r for r in ok if r["cfg"] == champ_cfg), None)
@@ -191,6 +197,6 @@ def select_models(events, champion=None, horizons=None, l2=None, now=None, min_g
         m.update(n=len(rows), pos=pos)
         models[name] = m
         report[name] = dict(status="selected", chosen=chosen, why=why, n=len(rows), pos=pos, n_train=len(train),
-                            n_test=len(test), base_logloss=base_ll, candidates=res,
+                            n_test=len(test), base_logloss=base_ll, candidates=res, skipped=skipped,
                             holdout=next((r for r in ok if r["cfg"] == chosen), None))
     return models, report
