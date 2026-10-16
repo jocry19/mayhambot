@@ -1,4 +1,6 @@
 """install-autostart against a fake launchctl that unloads the agent with a delay (the exit 5 race)."""
+import pytest
+
 import mayham
 
 
@@ -75,3 +77,26 @@ def test_stop_reports_services_stopped_by_launchd(monkeypatch, tmp_path, capsys)
     mayham.stop()
     out = capsys.readouterr().out
     assert "signals: gestoppt" in out and "läuft nicht" not in out
+
+
+def test_stale_pid_of_another_program_is_not_ours(monkeypatch, tmp_path):
+    import os
+    monkeypatch.setattr(mayham, "PIDS", tmp_path)
+    (tmp_path / "web.pid").write_text(str(os.getpid()))  # the pytest process, not `python -m web`
+    assert mayham._pid("web") is None and not (tmp_path / "web.pid").exists()
+
+
+def test_failed_pip_rolls_back(monkeypatch, tmp_path):
+    calls = []
+
+    def call(cmd, **kw):
+        calls.append(cmd)
+        return 1 if "pip" in cmd else 0
+    monkeypatch.setattr(mayham, "ROOT", tmp_path)
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(mayham.subprocess, "check_output", lambda *a, **k: "oldsha\n")
+    monkeypatch.setattr(mayham.subprocess, "check_call", lambda *a, **k: 0)
+    monkeypatch.setattr(mayham.subprocess, "call", call)
+    monkeypatch.setattr(mayham, "_checks_ok", lambda: pytest.fail("no tests on a failed install"))
+    assert mayham.update() is False
+    assert ["git", "reset", "-q", "--hard", "oldsha"] in calls

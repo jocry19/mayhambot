@@ -39,6 +39,17 @@ if (ROOT / "model" / "__main__.py").exists():
     SERVICES["research"] = [PY, "-m", "model", "service"]
 
 
+def _is_service(pid, name):
+    """True unless `ps` shows that `pid` now belongs to another program (a pid file left by a crash or power
+    loss; after a reboot the number can be any of the user's processes, and stop would kill its group)."""
+    try:
+        cmd = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)], capture_output=True,
+                             text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return True  # no ps: keep the old behaviour
+    return not cmd or " ".join(SERVICES[name][1:]) in cmd
+
+
 def _pid(name):
     f = PIDS / f"{name}.pid"
     if not f.exists():
@@ -46,6 +57,8 @@ def _pid(name):
     try:
         pid = int(f.read_text())
         os.kill(pid, 0)
+        if not _is_service(pid, name):
+            raise ProcessLookupError
         return pid
     except (ValueError, ProcessLookupError, PermissionError):
         f.unlink(missing_ok=True)
@@ -196,10 +209,15 @@ def update():
     if (ROOT / ".git").exists():
         old = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
         subprocess.check_call(["git", "pull", "--ff-only", "origin", "main"], cwd=ROOT)
-    subprocess.check_call([PY, "-m", "pip", "install", "-q", "-r", "requirements.txt"], cwd=ROOT)
-    if not _checks_ok():
+    pip = [PY, "-m", "pip", "install", "-q", "-r", "requirements.txt"]
+    installed = subprocess.call(pip, cwd=ROOT) == 0
+    if not installed:
+        print("pip install fehlgeschlagen")
+    if not installed or not _checks_ok():
+        # a failed install must not leave the new commit checked out: the supervisor would start it untested
         if old:
             subprocess.call(["git", "reset", "-q", "--hard", old], cwd=ROOT)
+            subprocess.call(pip, cwd=ROOT)  # back to the packages the running version was tested with
             print(f"Update abgebrochen, zurück auf {old[:7]}. Die laufende Version bleibt aktiv.")
         return False
     if (ROOT / "deploy" / "ops.py").exists():
