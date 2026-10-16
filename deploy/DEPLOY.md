@@ -57,11 +57,12 @@ und Laufzeit, Datenfeed, beobachtete Coins, neue Trades, Smart Wallets nach Tier
 Signal), Papier-/Echtgeld-Positionen, PnL und Kapital. Von Hand: `.venv/bin/python deploy/ops.py summary`.
 
 Telegram einrichten (einmalig, 2 Minuten):
-1. In Telegram `@BotFather` öffnen, `/newbot` schicken, Namen vergeben, den **Token** kopieren.
-2. Deinem neuen Bot irgendeine Nachricht schicken, dann `https://api.telegram.org/bot<TOKEN>/getUpdates` im
-   Browser öffnen und die Zahl bei `"chat":{"id":...` kopieren (deine **Chat-ID**).
-3. In `.env` eintragen: `TELEGRAM_BOT_TOKEN=<Token>` und `TELEGRAM_CHAT_ID=<Chat-ID>`, dann
-   `.venv/bin/python deploy/ops.py test-alert`. Signale, Alarme und Berichte kommen dann alle dort an.
+1. In Telegram `@BotFather` öffnen, `/newbot` (oder für einen neuen Token `/revoke`), den **Token** kopieren.
+2. `open -e .env` und `TELEGRAM_BOT_TOKEN=<Token>` eintragen, speichern. Den Token nie in einen Chat posten.
+3. Deinem Bot in Telegram `/start` schicken.
+4. `.venv/bin/python deploy/ops.py setup-telegram`: findet deine Chat-ID, trägt sie in `.env` ein und schickt
+   eine Testnachricht plus den ersten Bericht. Danach `.venv/bin/python mayham.py restart`, damit auch die
+   Signale über Telegram kommen.
 
 ## Alarme (Telegram)
 

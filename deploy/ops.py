@@ -11,6 +11,7 @@ Run from anywhere; paths are relative to the mayhambot folder (parent of deploy/
   python deploy/ops.py list-backups
   python deploy/ops.py restore <archive>      # stops the app, restores, starts it again
   python deploy/ops.py rotate-logs
+  python deploy/ops.py setup-telegram         # after /start to your bot: finds + saves TELEGRAM_CHAT_ID, sends test
   python deploy/ops.py test-alert             # sends a Telegram test message
   python deploy/ops.py summary [--send]       # hourly status report (watchdog sends it every SUMMARY_EVERY_HOURS)
 
@@ -504,6 +505,62 @@ def rotate_logs(args=None, quiet=False) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- telegram setup
+def _set_env(key: str, value: str):
+    f = ROOT / ".env"
+    lines = f.read_text().splitlines() if f.exists() else []
+    out, done = [], False
+    for line in lines:   # replace the first occurrence, drop duplicates (later lines would win in dotenv)
+        if line.split("=", 1)[0].strip() == key:
+            if not done:
+                out.append(f"{key}={value}")
+                done = True
+            continue
+        out.append(line)
+    lines = out if done else out + [f"{key}={value}"]
+    f.write_text("\n".join(lines) + "\n")
+    os.chmod(f, 0o600)
+
+
+def setup_telegram(args) -> int:
+    """Finds the chat id from the bot's updates (after you sent /start), writes it to .env, sends a test.
+    The token is read from .env and never printed."""
+    token = cfg("TELEGRAM_BOT_TOKEN", "")
+    if not token:
+        print("TELEGRAM_BOT_TOKEN fehlt in .env (Token von @BotFather eintragen).")
+        return 1
+    api = f"https://api.telegram.org/bot{token}"
+    try:
+        with urllib.request.urlopen(f"{api}/getMe", timeout=15) as r:
+            me = json.loads(r.read())["result"]
+        with urllib.request.urlopen(f"{api}/getUpdates", timeout=15) as r:
+            ups = json.loads(r.read()).get("result", [])
+    except Exception as e:  # noqa: BLE001 - never echo the URL (contains the token)
+        print(f"Telegram nicht erreichbar oder Token ungültig ({type(e).__name__}).")
+        return 1
+    chats = {}
+    for u in ups:
+        m = u.get("message") or u.get("edited_message") or {}
+        c = m.get("chat") or {}
+        if c.get("type") == "private":
+            chats[c["id"]] = c.get("first_name", "")
+    print(f"Bot: @{me.get('username')}")
+    if not chats:
+        print(f"Noch keine Nachricht an den Bot gefunden: schick @{me.get('username')} in Telegram /start "
+              "und starte diesen Befehl dann nochmal.")
+        return 1
+    chat_id = list(chats)[-1]
+    _set_env("TELEGRAM_CHAT_ID", str(chat_id))
+    ENV["TELEGRAM_CHAT_ID"] = str(chat_id)
+    print(f"Chat-ID gefunden ({chats[chat_id]}) und in .env eingetragen.")
+    ok = send_alert("Telegram eingerichtet ✅ Ab jetzt kommen hier Signale, Alarme und der stündliche Bericht.")
+    if ok:
+        send_alert(build_summary())
+    print("Testnachricht gesendet." if ok else "Senden fehlgeschlagen.")
+    print("Damit auch die Signale über Telegram kommen, die App neu starten: .venv/bin/python mayham.py restart")
+    return 0 if ok else 1
+
+
 # ---------------------------------------------------------------- hourly summary
 def _q(conn, sql, args=(), default=None):
     try:
@@ -628,11 +685,12 @@ def main(argv=None) -> int:
     r.add_argument("--no-stop", action="store_true", help="App nicht stoppen/starten (z.B. auf neuem Server)")
     sub.add_parser("rotate-logs")
     sub.add_parser("test-alert")
+    sub.add_parser("setup-telegram")
     sm = sub.add_parser("summary")
     sm.add_argument("--send", action="store_true", help="per Telegram senden")
     a = ap.parse_args(argv)
     fn = {"status": status, "health": health, "watchdog": watchdog, "backup": backup,
-          "list-backups": list_backups, "summary": summary, "restore": restore, "rotate-logs": rotate_logs,
+          "list-backups": list_backups, "summary": summary, "setup-telegram": setup_telegram, "restore": restore, "rotate-logs": rotate_logs,
           "test-alert": lambda _: 0 if send_alert("Test: Watchdog-Alarme kommen an ✅") else 1}[a.cmd]
     return fn(a)
 
