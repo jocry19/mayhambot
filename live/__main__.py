@@ -3,6 +3,7 @@
   run                  live watchdog + Telegram Not-Aus (started by mayham.py as service 'live')
   status               mode, stage limits, open live/dry positions, go-live check
   check                go-live check in detail (exit code 0 = passed)
+  setup                new trading wallet (or the existing one) + .env for the dry run in one step
   new-wallet [PFAD]    new separate trading wallet (keypair file, chmod 600); prints only the public key
   kill [GRUND]         Not-Aus: no more live buys
   resume               lift the Not-Aus, reset the failure streak
@@ -19,7 +20,7 @@ import sys
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m live")
-    ap.add_argument("cmd", choices=["run", "status", "check", "new-wallet", "kill", "resume", "orders", "orphans",
+    ap.add_argument("cmd", choices=["run", "status", "check", "setup", "new-wallet", "kill", "resume", "orders", "orphans",
                                     "dryrun"])
     ap.add_argument("args", nargs="*")
     a = ap.parse_args(argv)
@@ -38,6 +39,22 @@ def main(argv=None) -> int:
             return 1
         print(f"Neue Trading-Wallet: {pub}\nSchlüsseldatei: {path} (nur für dich lesbar, nie teilen, nicht ins Repo)")
         print(f"In .env eintragen:  SOLANA_KEYPAIR_PATH={path}\nDann nur einen kleinen Betrag an {pub} schicken.")
+        return 0
+
+    if a.cmd == "setup":
+        from .config import ROOT
+        from .wallet import DEFAULT_KEYFILE, _from_text, new_wallet, pubkey_of, set_env
+
+        path = DEFAULT_KEYFILE
+        if path.exists():
+            pub = pubkey_of(_from_text(path.read_text()))
+            print(f"Trading-Wallet existiert schon: {pub}")
+        else:
+            pub = new_wallet(path)
+            print(f"Neue Trading-Wallet: {pub}")
+        set_env(ROOT / ".env", {"SOLANA_KEYPAIR_PATH": str(path), "LIVE_TRADING": "true", "LIVE_DRY_RUN": "true"})
+        print("In .env gesetzt: SOLANA_KEYPAIR_PATH, LIVE_TRADING=true, LIVE_DRY_RUN=true (nur Dry-Run, sendet nichts).")
+        print(f"Jetzt: .venv/bin/python mayham.py restart  und 1 SOL an {pub} schicken.")
         return 0
 
     cfg = load()

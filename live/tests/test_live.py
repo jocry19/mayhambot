@@ -386,6 +386,16 @@ def test_gate_blocks_real_buys_until_paper_and_dry_run_pass(env, monkeypatch):
     for i in range(3):
         store.new_order(conn, dry=True, side="sell", mint=MINT, in_raw=1, status="dry_built")
     rep = readiness.report(conn, cfg(require_gate=True))
+    assert not rep["ready"] and [c["key"] for c in rep["checks"] if not c["ok"]] == ["learn:whale"]
+    from copytrade import learn
+
+    learn.init(conn)
+    conn.execute("INSERT INTO ct_param_versions(ts, strategy, scope, params, n_train, n_test, train_gain, test_gain, "
+                 "baseline_test_gain, accepted, active) VALUES (?, 'whale', 'mode', '{}', 60, 20, 0.04, -0.01, -0.03,"
+                 " 1, 1)", (now,))
+    assert not readiness.report(conn, cfg(require_gate=True))["ready"]  # learned rules lose out of sample
+    conn.execute("UPDATE ct_param_versions SET test_gain=0.02")
+    rep = readiness.report(conn, cfg(require_gate=True))
     assert rep["ready"], [c for c in rep["checks"] if not c["ok"]]
     guard._gate_cache.clear()
     rpc.side = "buy"
@@ -431,3 +441,60 @@ def test_coin_check_blocks_red_flags_for_every_live_buy(env):
         ex.assess = lambda m, c, deep=False, a=a: a
         f = ex.buy(MINT, 0.1, snap())
         assert not f.ok and word in f.error and not rpc.sent
+
+
+def test_partial_sell_keeps_token_account(env, monkeypatch):
+    s, conn, rpc, jup, make = env
+    ex = make()
+    rpc.side = "sell"
+    rpc.tokens = 1_000_000
+    orig = rpc._land
+
+    def land_half(sig, tx):  # only half of the balance leaves (e.g. a token with a transfer limit)
+        before = rpc.tokens
+        orig(sig, tx)
+        rpc.tokens = before // 2
+    monkeypatch.setattr(rpc, "_land", land_half)
+    f = ex.sell(MINT, 1.0, 6, None, 0)
+    assert f.ok and rpc.closed == 0  # tokens left: the account stays open
+
+
+def test_dry_simulation_failure_is_no_fill(env, monkeypatch):
+    s, conn, rpc, jup, make = env
+    ex = make(c=cfg(dry_run=True), dry=True)
+    real = rpc.call
+
+    def call(method, params, priority="live"):
+        if method == "simulateTransaction":
+            return {"value": {"err": {"InstructionError": [3, {"Custom": 6001}]}, "logs": ["slippage exceeded"]}}
+        return real(method, params, priority)
+    monkeypatch.setattr(rpc, "call", call)
+    f = ex.buy(MINT, 0.1, snap())
+    assert not f.ok and "Dry-Run" in f.error
+    assert store.recent(conn)[0]["status"] == "dry_sim_failed"
+
+
+def test_swap_build_failure_and_sell_without_quote(env):
+    s, conn, rpc, jup, make = env
+    ex = make()
+
+    def boom(*a, **k):
+        raise RuntimeError("Jupiter 500")
+    jup.swap_tx = boom
+    f = ex.buy(MINT, 0.1, snap())
+    assert not f.ok and "Swap-Aufbau" in f.error and not rpc.sent
+    rpc.tokens = 1_000_000
+    jup.fail_quote = True
+    f = ex.sell(MINT, 1.0, 6, None, 0)
+    assert not f.ok and len([o for o in store.recent(conn) if o["side"] == "sell"]) == 3  # 3 attempts, no send
+    assert not rpc.sent
+
+
+def test_set_env_replaces_and_keeps_others(tmp_path):
+    from live.wallet import set_env
+
+    f = tmp_path / ".env"
+    f.write_text("A=1\nLIVE_TRADING=false\nLIVE_TRADING=false\n# x\n")
+    set_env(f, {"LIVE_TRADING": "true", "LIVE_DRY_RUN": "true"})
+    assert f.read_text() == "A=1\nLIVE_TRADING=true\n# x\nLIVE_DRY_RUN=true\n"
+    assert f.stat().st_mode & 0o077 == 0

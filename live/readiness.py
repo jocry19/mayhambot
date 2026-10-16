@@ -26,6 +26,18 @@ def paper_edge(conn, strategy: str, days: float) -> dict:
             "win_rate": sum(p > 0 for p in pnl) / len(pnl) if pnl else 0.0}
 
 
+def learned_edge(conn, strategy: str) -> dict | None:
+    """The strategy's active learned parameter version (copytrade/learn.py): out-of-sample mean gain per trade after
+    calibrated costs, number of test entries, baseline. None when the learner has no active version."""
+    try:
+        r = conn.execute("SELECT id, n_train, n_test, train_gain, test_gain, baseline_test_gain, ts FROM "
+                         "ct_param_versions WHERE strategy=? AND scope='mode' AND active=1 ORDER BY id DESC LIMIT 1",
+                         (strategy,)).fetchone()
+    except Exception:
+        return None
+    return dict(r) if r else None
+
+
 def dry_stats(conn, days: float = 7) -> dict:
     t0 = int(time.time() - days * 86400)
     cnt = {(r["side"], r["status"]): r["n"] for r in conn.execute(
@@ -76,6 +88,19 @@ def report(conn, cfg: LiveConfig) -> dict:
                f"{e['n']} Trades (min. {cfg.gate_min_trades}), netto {e['net_sol']:+.3f} SOL, Profit-Faktor "
                f"{e['profit_factor']:.2f} (min. {cfg.gate_min_profit_factor:g}), Hälften {e['first_half']:+.3f} / "
                f"{e['second_half']:+.3f} SOL (beide > 0)")
+
+        try:
+            from copytrade import learn  # type: ignore
+
+            autotune, min_test = learn.enabled(conn, s), learn.MIN_MODE_TEST
+        except Exception:
+            autotune, min_test = False, 12
+        le = learned_edge(conn, s)
+        ok = bool(le) and (le["test_gain"] or 0) > 0 and (le["n_test"] or 0) >= min_test
+        _check(checks, f"learn:{s}", f"Gelernte Regeln out-of-sample im Plus ({s})", ok,
+               (f"Version {le['id']}: Test {le['test_gain']:+.1%} pro Trade nach Kosten über {le['n_test']} "
+                f"Test-Einstiege (min. {min_test}), Ausgangswert {(le['baseline_test_gain'] or 0):+.1%}") if le
+               else "noch keine aktive gelernte Version", required=autotune)
 
     d = dry_stats(conn)
     ok = (d["buys_ok"] >= cfg.gate_min_dry_buys and d["sells_built"] >= cfg.gate_min_dry_sells

@@ -48,7 +48,8 @@ etwas SOL (mindestens die Positionsgröße). Einzeltest: `python -m live dryrun 
 Pflicht vor echten Sends (`LIVE_REQUIRE_GATE=true`): Trading-Wallet mit Schlüssel; mindestens ein Modus auf
 Echtgeld; je Echtgeld-Modus Papier-Plus nach Kosten über 7 Tage (≥ 30 Trades, netto > 0, Profit-Faktor ≥ 1,2,
 beide Wochenhälften im Plus); Dry-Run (≥ 5 simulierte Käufe, ≥ 3 gebaute Verkäufe, ≥ 3 gebuchte Dry-Runden);
-Telegram eingerichtet; Live-Wächter läuft; kein Not-Aus, keine unklare Order.
+je Modus mit Selbstlernen eine aktive gelernte Version, die out-of-sample nach Kosten im Plus ist
+(`ct_param_versions.test_gain > 0`, mindestens 12 Test-Einstiege); Telegram eingerichtet; Live-Wächter läuft; kein Not-Aus, keine unklare Order.
 
 ## Not-Aus
 
@@ -62,6 +63,15 @@ Telegram eingerichtet; Live-Wächter läuft; kein Not-Aus, keine unklare Order.
 
 Alle 30 s Lebenszeichen, unklare Orders klären, Datenausfall prüfen, Verlustalarm; alle 10 min (Echtgeld) Token in
 der Wallet ohne Position melden. Nur öffentliche RPC, keine Helius-Credits.
+
+## Einrichten (Mac, einmalig)
+
+```bash
+.venv/bin/python -m live setup       # Trading-Wallet + .env (LIVE_TRADING=true, LIVE_DRY_RUN=true)
+.venv/bin/python mayham.py restart
+```
+
+Danach 1 SOL an die angezeigte Adresse. `python -m live check` zeigt, was bis Echtgeld noch fehlt.
 
 ## Schlüssel
 
