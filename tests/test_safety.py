@@ -460,3 +460,41 @@ def test_sweep_and_launch_evaluation():
     assert blk["doublers_flagged"] == 1 and blk["false_alarm_rate"] == 0.1
     rep = learn.learn(c, CFG)
     assert "Sniper-Launches (20, davon 10 Rugs)" in learn.report_text(rep)
+
+
+def test_exit_check_from_intel_features_and_young_coins_get_deep():
+    import intel
+    from intel import store as istore
+    c = conn()
+    istore.ensure_schema(c)
+    feats = {"liq_usd": 20000, "liq_chg_60m": -0.6, "flow_insider_sell_usd_60m": 5000, "flow_smart_exit_share": 0.8}
+    c.execute("INSERT OR REPLACE INTO intel_latest(kind, key, ts, coverage, features_json, meta_json) VALUES (?,?,?,?,?,?)",
+              ("coin", MINT, NOW, 1.0, json.dumps(feats), "{}"))
+    c.commit()
+    assert intel.latest(c, "coin", MINT)
+    a = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
+    text = " ".join(r["text"] for r in a.reasons)
+    assert a.checks["exit"]["risk"] >= 60 and "steigen aus" in text and "gefallen" in text
+    assert a.level in ("high", "critical")
+    # young tracked coin without deep check: the refresher runs the deep checks once
+    c2 = conn()
+    c2.execute("INSERT INTO tokens(mint, tracked, last_updated, pair_created_at) VALUES (?, 1, ?, ?)", (MINT, NOW, NOW - 1800))
+    c2.commit()
+    a2 = safety.refresh(c2, cfg=CFG, fetcher_factory=lambda cfg: FakeFetcher(ruggy()))[0]
+    assert a2.deep_ts and a2.checks["bundles"]["status"] == "ok"
+
+
+def test_owner_without_sol_account_counts_as_wallet():
+    s = clean()
+    s["holders"] = [(POOL, 300_000_000), ("DRAINED", 200_000_000)] + [(f"H{i}", 5_000_000) for i in range(10)]
+    f = FakeFetcher(s)
+    orig = f.rpc
+
+    def rpc(m, p):
+        r = orig(m, p)
+        if m == "getMultipleAccounts" and p[1].get("encoding") == "base64":
+            r["value"] = [None if o == "DRAINED" else v for o, v in zip(p[0], r["value"])]
+        return r
+    f.rpc = rpc
+    a = safety.assess(MINT, conn(), deep=False, fetcher=f, cfg=CFG, force=True)
+    assert a.checks["holders"]["data"]["top1_pct"] == 20.0

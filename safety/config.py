@@ -77,6 +77,11 @@ class SafetySettings:
     liq_drop_pct: float = field(default_factory=lambda: _f("SAFETY_LIQ_DROP_PCT", 90))   # vs 7-day peak -> hard flag
     lp_locked_ok_pct: float = field(default_factory=lambda: _f("SAFETY_LP_LOCKED_OK_PCT", 90))
 
+    # soft rug in progress (intel features, no network)
+    exit_max_age_sec: int = field(default_factory=lambda: _i("SAFETY_EXIT_MAX_AGE_SEC", 900))
+    exit_liq_drop_warn: float = field(default_factory=lambda: _f("SAFETY_EXIT_LIQ_DROP_WARN", 0.3))
+    exit_insider_sell_warn: float = field(default_factory=lambda: _f("SAFETY_EXIT_INSIDER_SELL_WARN", 0.05))
+    deep_young_h: float = field(default_factory=lambda: _f("SAFETY_DEEP_YOUNG_H", 3))   # one deep check per young coin
     # wash trading (from the pool trades signals/ already stores)
     wash_window_min: int = field(default_factory=lambda: _i("SAFETY_WASH_WINDOW_MIN", 120))
     wash_min_trades: int = field(default_factory=lambda: _i("SAFETY_WASH_MIN_TRADES", 20))

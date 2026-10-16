@@ -212,8 +212,10 @@ class Context:
                     kind = "burn"
                 elif o == pool:
                     kind = "pool"
-                elif o in KNOWN_PROGRAM_OWNERS or inf is None or inf.get("owner") != SYSTEM_PROGRAM:
+                elif o in KNOWN_PROGRAM_OWNERS or (inf is not None and inf.get("owner") != SYSTEM_PROGRAM):
                     kind = "program"   # PDA of a pool, bonding curve or locker
+                # inf None = the owner has no SOL account at all: an emptied burner wallet, i.e. a person.
+                # (Counted as "program" before Oct 2026, which hid insiders who drained their SOL, e.g. SYCAMORE.)
                 else:
                     kind = "wallet"
                 out.append({"owner": o, "amount": by_owner[o], "pct": 100 * by_owner[o] / supply, "kind": kind})
@@ -734,6 +736,45 @@ def check_rugcheck(ctx):
     return r.finish(cap=45)
 
 
+def check_exit(ctx):
+    """Soft rug in progress, from the intel service's latest coin features (no network): insiders selling,
+    liquidity leaving, smart buyers getting out. Most rugs of young coins with burned LP look like this."""
+    r = CheckResult("exit", "Ausstieg Insider/Liquidität")
+    try:
+        import intel
+        lt = intel.latest(ctx.conn, "coin", ctx.mint)
+    except Exception:  # noqa: BLE001 - intel not installed or its tables missing
+        lt = None
+    if not lt or ctx.now - (lt.get("ts") or 0) > ctx.cfg.exit_max_age_sec:
+        r.status = "unknown"
+        return r.finish()
+    f = lt.get("features") or {}
+    c = ctx.cfg
+    liq = f.get("liq_usd") or 0.0
+    chg = f.get("liq_chg_60m")
+    sells = f.get("flow_insider_sell_usd_60m")
+    smart_exit = f.get("flow_smart_exit_share")
+    flash = f.get("liq_flash_60m")
+    r.data.update(liq_chg_60m=chg, insider_sell_usd_60m=sells, smart_exit_share=smart_exit, liq_flash_60m=flash,
+                  features_ts=lt.get("ts"))
+    if chg is not None and -chg >= c.exit_liq_drop_warn:
+        r.add(ramp(-chg, c.exit_liq_drop_warn, 0.8, 30, 80),
+              f"Liquidität ist in der letzten Stunde um {100 * -chg:.0f} % gefallen: Geld verlässt den Pool.")
+    if sells and liq:
+        share = sells / liq
+        r.add(ramp(share, c.exit_insider_sell_warn, 0.4, 30, 75),
+              f"Dev, Bundle- und Insider-Wallets haben in 60 min {sells:,.0f} $ verkauft "
+              f"({100 * share:.0f} % der Liquidität): sie steigen aus.".replace(",", "."))
+    if smart_exit is not None and smart_exit >= 0.5:
+        r.add(ramp(smart_exit, 0.5, 1.0, 15, 40),
+              f"{100 * smart_exit:.0f} % der Smart-Käufer haben schon wieder verkauft.")
+    if flash is not None and flash >= 0.5:
+        r.add(40, f"Liquidität kam kurz (+{100 * flash:.0f} %) und ging sofort wieder: typisch für Köder-Liquidität.")
+    if not r.reasons:
+        r.positives.append("Kein Ausstieg von Insidern oder Liquidität in der letzten Stunde.")
+    return r.finish(cap=85)
+
+
 QUICK = [check_authorities, check_sell_sim, check_liquidity, check_lp, check_socials, check_wash,
-         check_rugcheck, check_holders]
+         check_rugcheck, check_holders, check_exit]
 DEEP = [check_dev, check_insiders, check_bundles]

@@ -294,7 +294,8 @@ def candidates(conn, extra=(), cfg=None):
     urgent, never, due = [], [], []
     for m in mints:
         a = get(conn, m, cfg)
-        if m in hot and (a is None or time.time() - a.ts >= cfg.ttl_young_sec or deep_due(a, cfg)):
+        if (m in hot and (a is None or time.time() - a.ts >= cfg.ttl_young_sec or deep_due(a, cfg))) \
+                or (not (a and a.deep_ts) and _young(conn, m, cfg)):
             urgent.append(m)
         elif a is None:
             never.append(m)
@@ -309,6 +310,14 @@ def open_positions(conn):
         return [r[0] for r in conn.execute("SELECT DISTINCT mint FROM ct_positions WHERE status='open' AND mint IS NOT NULL")]
     except Exception:  # noqa: BLE001 - table missing
         return []
+
+
+def _young(conn, mint, cfg):
+    """Pair younger than SAFETY_DEEP_YOUNG_H: gets one deep check (insiders, launch bundles, dev) even without
+    a signal. The Oct 2026 measurement: every rug among tracked coins was a young pump coin whose deep checks
+    had never run, so its first check said 'niedrig'."""
+    r = conn.execute("SELECT pair_created_at FROM tokens WHERE mint=?", (mint,)).fetchone()
+    return bool(r and r[0] and time.time() - r[0] < cfg.deep_young_h * 3600)
 
 
 QUICK_RPC_CALLS, DEEP_RPC_CALLS = 4, 12   # typical RPC cost of a re-check, for planning a pass
@@ -349,7 +358,8 @@ def refresh(conn=None, extra=(), budget_sec=None, max_tokens=None, cfg=None, fet
         for m in candidates(conn, extra, cfg)[:limit]:
             if time.time() - t0 > budget_s:
                 break
-            deep = m in hot and deep_due(get(conn, m, cfg), cfg)
+            prev = get(conn, m, cfg)
+            deep = (m in hot and deep_due(prev, cfg)) or (not (prev and prev.deep_ts) and _young(conn, m, cfg))
             need = DEEP_RPC_CALLS if deep else QUICK_RPC_CALLS
             if fetcher_factory is None and rpc_room(cfg) < need:
                 log.info("safety: RPC budget for this minute used, %s waits for the next pass", m[:6])
