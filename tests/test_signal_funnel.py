@@ -60,3 +60,17 @@ def test_funnel_counts_stored_metrics(tmp_path):
     assert f["all_pass"] == 1                      # B only: C misses the fixed 40
     assert f["all_pass_calibrated"] == 2           # C passes 2 x 10 % = 20
     assert f["max_score_model"] == 50.0 and f["trades"] == 0
+
+
+def test_outcomes_by_band_after_costs(tmp_path):
+    c = conn_with(None, tmp_path)
+    now = 50_000
+    for score, r1, mx in ((25, 0.10, 0.6), (28, -0.20, 0.1), (45, 0.30, 0.9)):
+        c.execute("INSERT INTO signals(ts, mint, score, ret_1h, max_ret_1h) VALUES (?,?,?,?,?)",
+                  (now - 100, "M", score, r1, mx))
+    c.execute("INSERT INTO signals(ts, mint, score) VALUES (?,?,30)", (now - 100, "OPEN"))   # no result yet
+    c.commit()
+    b = {x["band"]: x for x in funnel.outcomes(c, hours=1, now=now)}
+    assert b["20-30"]["n"] == 2 and b["20-30"]["hit_50"] == 0.5
+    assert b["20-30"]["mean_ret_1h_after_cost"] == round(-0.05 - 0.06, 3)
+    assert b["40-50"]["n"] == 1 and "30-40" not in b

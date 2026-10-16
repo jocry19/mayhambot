@@ -82,11 +82,39 @@ def funnel(conn, hours=10, cfg=settings, now=None):
     return out
 
 
+COST = 0.06  # round trip: fees + slippage + priority, as in copytrade paper trading
+
+
+def outcomes(conn, hours=168, cost=COST, now=None, bands=(0, 20, 30, 40, 50, 60, 101)):
+    """Signal results by score band after costs: hit rate (+50% max within 1h), median max_ret_1h, mean ret_1h
+    minus costs. This is what the score bands get calibrated on."""
+    now = now or int(time.time())
+    rows = conn.execute("SELECT score, ret_1h, max_ret_1h FROM signals WHERE ts>=? AND ret_1h IS NOT NULL",
+                        (now - int(hours * 3600),)).fetchall()
+    out = []
+    for lo, hi in zip(bands, bands[1:]):
+        b = [r for r in rows if lo <= (r["score"] or 0) < hi]
+        if not b:
+            continue
+        mx = sorted(r["max_ret_1h"] or 0 for r in b)
+        out.append(dict(band=f"{lo}-{hi - 1 if hi > 100 else hi}", n=len(b),
+                        hit_50=round(sum(1 for r in b if (r["max_ret_1h"] or 0) >= 0.5) / len(b), 3),
+                        median_max_ret_1h=round(mx[len(mx) // 2], 3),
+                        mean_ret_1h_after_cost=round(sum(r["ret_1h"] for r in b) / len(b) - cost, 3)))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description="signal funnel: where coins drop out")
     ap.add_argument("--hours", type=float, default=10)
+    ap.add_argument("--outcomes", action="store_true", help="signal results by score band after costs")
     a = ap.parse_args()
-    f = funnel(db.connect(), a.hours)
+    conn = db.connect()
+    if a.outcomes:
+        for b in outcomes(conn, a.hours):
+            print(b)
+        return
+    f = funnel(conn, a.hours)
     for k, v in f.items():
         print(f"{k:22s} {v}")
 
