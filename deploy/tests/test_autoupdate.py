@@ -133,3 +133,18 @@ def test_dirty_checkout_waits(repo):
     before = head()
     assert "lokale Änderungen" in autoupdate.run_once(alerts.append)
     assert head() == before
+
+
+def test_index_only_problems_are_repairable(tmp_path):
+    assert ops._index_only(["row 5 missing from index idx_trades_wallet_ts",
+                            "wrong # of entries in index sqlite_autoindex_trades_1"])
+    assert not ops._index_only(["Page 12: btreeInitPage() returns error code 11"])
+    assert not ops._index_only([])
+    db = tmp_path / "x.db"
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE t (a, b)")
+    c.execute("CREATE INDEX i ON t(a)")
+    c.executemany("INSERT INTO t VALUES (?,?)", [(i, i) for i in range(100)])
+    c.commit()
+    c.close()
+    assert ops._repair_indexes(db) == []

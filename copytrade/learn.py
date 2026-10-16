@@ -54,6 +54,10 @@ TRAIN_SHARE = 0.7
 GAIN_CLIP = (-0.6, 2.0)
 RETRY_S = 2 * 86400  # entries without candles are retried this long, then recorded as unevaluable
 TRADE_WEIGHT = 2  # our own trades count double vs. hypothetical whale buys / signals
+HALF_LIFE_H = 72.0  # older entries count less: weight halves every 3 days (markets and whales change)
+ROLLBACK_MIN_TRADES = 10  # own trades under a learned version before it can be rolled back
+ROLLBACK_MARGIN = 0.05  # roll back when real trades are this far below the version's test result and negative
+EDGE_SIZE_UNIT = 0.03  # size factor = lower edge bound / this, clamped to 0.5..1.5
 CALIB_MIN_TRADES = 10  # own trades needed before the paper/sim cost gap is applied
 CALIB_MAX_EXTRA = 0.10  # never add more than 10 %-points of extra cost per round trip
 
@@ -258,7 +262,7 @@ def _rows(conn, strategy: str, wallet: str | list[str] | None = None,
             except ValueError:
                 pass
         out.append({"kind": r["kind"], "ts": r["ts"], "gains": json.loads(r["gains"]), "features": f,
-                    "w": TRADE_WEIGHT if r["kind"] == "trade" else 1, "actual": r["actual_gain"],
+                    "w": (TRADE_WEIGHT if r["kind"] == "trade" else 1) * decay(r["ts"]), "actual": r["actual_gain"],
                     "sim_actual": r["sim_actual"]})
     return out
 
@@ -294,12 +298,20 @@ def extra_cost(conn, strategy: str) -> float:
     return max(0.0, min(CALIB_MAX_EXTRA, med))
 
 
+def decay(ts, now: float | None = None, half_life_h: float = HALF_LIFE_H) -> float:
+    """Weight of an entry from ts: 1 now, 0.5 after half_life_h, 0.25 after twice that."""
+    age_h = max(0.0, ((now or time.time()) - (ts or 0)) / 3600)
+    return 0.5 ** (age_h / half_life_h) if half_life_h > 0 else 1.0
+
+
 def wallet_edge(conn, wallet: str) -> dict:
     """What copying this whale (or its cluster) with our current exits made on its past buys, after costs.
 
     Uses every replayed buy in ct_evals (whale buys and our own trades), the variant closest to the
-    parameters the bot would use now, and the calibrated extra cost. Only the past is used, so gating on
-    mean > 0 is a walk-forward decision. -> {"n", "mean", "variant"}"""
+    parameters the bot would use now, the calibrated extra cost and time decay (HALF_LIFE_H). Only the past
+    is used, so gating on it is a walk-forward decision. `lower` = mean minus one standard error: a whale
+    counts as proven only when even that is in the black, so a few lucky buys are not enough.
+    -> {"n", "n_eff", "mean", "lower", "size_factor", "variant", "extra_cost"}"""
     from . import store
 
     ws = [wallet]
@@ -312,15 +324,45 @@ def wallet_edge(conn, wallet: str) -> dict:
     variants = sim.GRID
     idx = sim.nearest(current_params(conn, "whale", wallet), variants)
     q = ",".join("?" * len(ws))
-    vals = []
-    for r in conn.execute(f"SELECT gains FROM ct_evals WHERE strategy='whale' AND grid_version=? AND gains!='[]' "
+    vals, wts = [], []
+    now = time.time()
+    for r in conn.execute(f"SELECT gains, ts FROM ct_evals WHERE strategy='whale' AND grid_version=? AND gains!='[]' "
                           f"AND kind IN ('whale_buy','trade') AND wallet IN ({q})", (sim.GRID_VERSION, *ws)):
         g = json.loads(r[0])
         if len(g) == len(variants) and g[idx] is not None:
             vals.append(max(GAIN_CLIP[0], min(GAIN_CLIP[1], g[idx])))
+            wts.append(decay(r[1], now))
     cost = extra_cost(conn, "whale")
-    mean = (sum(vals) / len(vals) - cost) if vals else 0.0
-    return {"n": len(vals), "mean": mean, "variant": variants[idx].key(), "extra_cost": cost}
+    out = {"n": len(vals), "n_eff": 0.0, "mean": 0.0, "lower": 0.0, "size_factor": 0.0,
+           "variant": variants[idx].key(), "extra_cost": cost}
+    sw = sum(wts)
+    if not vals or sw <= 0:
+        return out
+    mean = sum(w * v for w, v in zip(wts, vals)) / sw
+    var = sum(w * (v - mean) ** 2 for w, v in zip(wts, vals)) / sw
+    n_eff = sw * sw / sum(w * w for w in wts)
+    lower = mean - cost - (var / n_eff) ** 0.5 if n_eff > 1 else mean - cost - abs(mean)
+    out.update(n_eff=round(n_eff, 1), mean=mean - cost, lower=lower,
+               size_factor=max(0.5, min(1.5, lower / EDGE_SIZE_UNIT)) if lower > 0 else 0.0)
+    return out
+
+
+def rollback(conn) -> list[int]:
+    """Deactivate learned versions whose own trades fall clearly short of what the test promised."""
+    out = []
+    for v in conn.execute("SELECT id, strategy, scope, test_gain FROM ct_param_versions WHERE active=1").fetchall():
+        r = conn.execute("SELECT COUNT(*), AVG(pnl_pct) FROM ct_positions WHERE param_version=? AND status='closed'",
+                         (v["id"],)).fetchone()
+        n, avg = r[0] or 0, r[1]
+        if n >= ROLLBACK_MIN_TRADES and avg is not None and avg < 0 and avg < (v["test_gain"] or 0) - ROLLBACK_MARGIN:
+            conn.execute("UPDATE ct_param_versions SET active=0 WHERE id=?", (v["id"],))
+            from . import store
+
+            store.event(conn, "learn", f"[{v['strategy']}] Version {v['id']} zurückgerollt: {n} echte Trades "
+                                       f"Ø {avg:+.1%} statt Test {(v['test_gain'] or 0):+.1%}",
+                        data={"version": v["id"], "trades": n, "avg": avg})
+            out.append(v["id"])
+    return out
 
 
 def _allowed(variants: Sequence[sim.Variant], cap_sl: float, cap_hold: float) -> list[int]:
@@ -437,6 +479,7 @@ def run(conn, s: Settings) -> dict:
     init(conn)
     n = {"trades": evaluate_trades(conn, s), "whale_buys": evaluate_whale_buys(conn, s),
          "signals": evaluate_signals(conn, s)}
+    n["rolled_back"] = rollback(conn)
     n["tuned"] = tune(conn, s)
     return n
 

@@ -466,9 +466,10 @@ def test_ranked_whale_needs_edge_after_costs(env):
     assert any("Vorteil" in r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'"))
     conn.execute("DELETE FROM ct_evals")
     _evals(conn, 0.12)
-    assert st.on_whale_buy(whale_buy())  # proven: copied at full size
+    assert st.on_whale_buy(whale_buy())  # proven, clear edge: copied with the largest conviction size
     p = conn.execute("SELECT * FROM ct_positions").fetchone()
-    assert p["size_sol"] == pytest.approx(s.position_size_sol)
+    assert p["size_sol"] == pytest.approx(s.position_size_sol * 1.5)
+    assert "Vorteil" in conn.execute("SELECT reason FROM ct_alerts WHERE action='bought'").fetchone()[0]
 
 
 def test_extra_cost_from_own_trades_lowers_the_edge(env):
@@ -482,7 +483,38 @@ def test_extra_cost_from_own_trades_lowers_the_edge(env):
                      (str(i), "whale", "other", MINT, i, -0.07, -0.03))
     assert learn.extra_cost(conn, "whale") == pytest.approx(0.04)
     e = learn.wallet_edge(conn, W)
-    assert e["n"] == 10 and e["mean"] == pytest.approx(0.02 - 0.04)
+    assert e["n"] == 10 and e["mean"] == pytest.approx(0.02 - 0.04) and e["lower"] < 0 and e["size_factor"] == 0
+
+
+def test_noisy_edge_is_not_proven_and_old_data_decays():
+    from copytrade import learn
+    now = time.time()
+    assert learn.decay(now, now) == 1 and learn.decay(now - 72 * 3600, now) == pytest.approx(0.5)
+
+
+def test_noisy_wallet_edge_needs_lower_bound(env):
+    import json as _json
+
+    from copytrade import learn, sim
+    s, conn, ex, state = env
+    for i, g in enumerate([0.6, -0.3, -0.3, 0.5, -0.3, -0.3, 0.4, -0.2]):  # mean +1 %, but pure noise
+        conn.execute("INSERT INTO ct_evals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                     ("whale_buy", f"n{i}", "whale", W, MINT, int(time.time()) - 100 + i, sim.GRID_VERSION,
+                      _json.dumps([g] * len(sim.GRID)), None, None, "{}", 0))
+    e = learn.wallet_edge(conn, W)
+    assert e["mean"] > 0 and e["lower"] < 0
+
+
+def test_rollback_when_real_trades_miss_the_test(env):
+    from copytrade import learn
+    s, conn, ex, state = env
+    conn.execute("INSERT INTO ct_param_versions(id, ts, strategy, scope, params, train_gain, test_gain, accepted, "
+                 "active) VALUES (50, 0, 'whale', 'mode', '{}', 0.05, 0.04, 1, 1)")
+    for i in range(10):
+        conn.execute("INSERT INTO ct_positions(mode, strategy, mint, status, pnl_pct, param_version) "
+                     "VALUES ('paper','whale',?, 'closed', -0.06, 50)", (f"m{i}",))
+    assert learn.rollback(conn) == [50]
+    assert conn.execute("SELECT active FROM ct_param_versions WHERE id=50").fetchone()[0] == 0
 
 
 def test_wash_traded_coin_and_coin_limit(env, monkeypatch):

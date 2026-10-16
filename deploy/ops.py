@@ -356,17 +356,55 @@ def watchdog(args) -> int:
 
 
 # ---------------------------------------------------------------- backup
+INDEX_ONLY = ("missing from index", "wrong # of entries in index", "non-unique entry in index")
+
+
+def _index_only(problems) -> bool:
+    """True when integrity_check found only broken indexes (rebuildable from the tables, no data lost)."""
+    return bool(problems) and all(any(k in p for k in INDEX_ONLY) for p in problems)
+
+
+def _repair_indexes(path: Path, timeout: float = 60) -> list[str]:
+    """REINDEX the database (seconds for ~200k rows, waits for the services' write lock), then re-check."""
+    c = sqlite3.connect(path, timeout=timeout)
+    try:
+        c.execute(f"PRAGMA busy_timeout={int(timeout * 1000)}")
+        c.execute("REINDEX")
+        return [r[0] for r in c.execute("PRAGMA integrity_check").fetchall() if r[0] != "ok"]
+    finally:
+        c.close()
+
+
 def _snapshot_db(src: Path, dst: Path):
-    """Online-consistent copy via SQLite's backup API (safe while the app writes)."""
+    """Online-consistent copy via SQLite's backup API (safe while the app writes).
+
+    Broken indexes (10/2026: rows missing from idx_trades_wallet_ts and ct_swaps' key) are rebuilt in the copy
+    and, natively on this machine, in the live database (user's choice); damaged tables still abort."""
     s = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=60)
     d = sqlite3.connect(dst)
     s.backup(d, pages=4096, sleep=0.05)
     s.close()
-    ok = d.execute("PRAGMA quick_check").fetchone()[0]
+    # full integrity_check: quick_check does not compare indexes with their tables on every SQLite version
+    problems = [r[0] for r in d.execute("PRAGMA integrity_check").fetchall() if r[0] != "ok"]
+    ok = problems[0] if problems else "ok"
+    if ok != "ok":
+        d.close()
+        if not _index_only(problems):
+            raise RuntimeError(f"Integritätsprüfung der Kopie fehlgeschlagen: {ok}")
+        left = _repair_indexes(dst)
+        if left:
+            raise RuntimeError(f"Integritätsprüfung der Kopie fehlgeschlagen nach REINDEX: {left[0]}")
+        live_left = _repair_indexes(src)
+        msg = (f"🛠️ Datenbank: {len(problems)} kaputte Index-Einträge neu aufgebaut "
+               f"({'Live-DB jetzt ok' if not live_left else 'Live-DB noch: ' + live_left[0]}), keine Daten verloren.")
+        print(msg)
+        try:
+            send_alert(msg)
+        except Exception:  # noqa: BLE001
+            pass
+        d = sqlite3.connect(dst)
     d.execute("PRAGMA journal_mode=DELETE")
     d.close()
-    if ok != "ok":
-        raise RuntimeError(f"Integritätsprüfung der Kopie fehlgeschlagen: {ok}")
 
 
 def _redacted_env() -> str:

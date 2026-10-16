@@ -141,7 +141,7 @@ class Strategy:
         p = control.preset(self.conn, "whale")
         ex = self.executor("whale")
         rank = ranking.wallet_rank(self.conn, swap.wallet)
-        size, explore = p.size_sol, False
+        size, explore, edge = p.size_sol, False, None
         if rank is None or rank["samples"] < s.min_wallet_samples:
             if not (s.explore_unranked and ex.mode == "paper"):
                 return self._skip("whale", swap.mint, "Wallet noch nicht bewertet (nur mitgemessen)",
@@ -152,10 +152,12 @@ class Strategy:
                               wallet=swap.wallet)
         elif s.require_edge:
             edge = learn.wallet_edge(self.conn, swap.wallet)
-            if edge["n"] < s.edge_min_n or edge["mean"] <= 0:
+            if edge["n"] < s.edge_min_n or edge["lower"] <= 0:
                 return self._skip("whale", swap.mint,
                                   f"Vorteil nach Kosten nicht nachgewiesen ({edge['n']} Käufe, "
-                                  f"Ø {edge['mean']:+.1%}; nur mitgemessen)", wallet=swap.wallet, edge=edge)
+                                  f"Ø {edge['mean']:+.1%}, sicher nur {edge['lower']:+.1%}; nur mitgemessen)",
+                                  wallet=swap.wallet, edge=edge)
+            size *= edge["size_factor"]  # conviction: more size for a clearer edge, never above 1.5x
         if s.max_copies_per_coin and self._coin_copies(swap.mint) >= s.max_copies_per_coin:
             return self._skip("whale", swap.mint, f"schon {s.max_copies_per_coin}× in diesem Coin kopiert (6 h)",
                               wallet=swap.wallet)
@@ -208,9 +210,11 @@ class Strategy:
                 "wallet_hit_rate": rank["hit_rate"] if rank else None, "model_tier": tier,
                 "model_score": winfo.get("model_score"), "cluster": ent if ent != swap.wallet else None,
                 "exit_capture": winfo.get("exit_capture"), "capture": feats["capture"],
-                "param_version": exits["version"], "safety": safe}
+                "param_version": exits["version"], "safety": safe, "edge": edge}
         reason = (f"Wal {swap.wallet[:6]}… kaufte {swap.sol_amount:.1f} SOL"
-                  + (f", Wal-Score {info['wallet_score']}" if rank else ", unbewertet"))
+                  + (f", Wal-Score {info['wallet_score']}" if rank else ", unbewertet")
+                  + (f", Vorteil Ø {edge['mean']:+.1%} aus {edge['n']} Käufen, Größe ×{edge['size_factor']:.2f}"
+                     if edge else ""))
         if m == "manual":
             control.alert(self.conn, "whale", swap.mint, snap.symbol, "signal", reason, wallet=swap.wallet,
                           price_sol=snap.price_sol, price_usd=snap.price_usd, mcap_usd=snap.fdv,
