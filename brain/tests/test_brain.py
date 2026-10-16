@@ -221,7 +221,8 @@ def sell(conn, sig, wallet=WHALE, mint=MINT, ts=None):
     conn.execute("INSERT INTO ct_swaps VALUES (?,?,?,?,?,?,?,?,?)", (sig, wallet, mint, "sell", ts, 1e6, 3, 1e-6, ts))
 
 
-def test_no_copy_when_the_whale_is_already_out_or_flips(conn, s):
+def test_no_copy_when_the_whale_is_already_out_or_flips(conn, s, caplog):
+    caplog.set_level("INFO", logger="brain")
     set_tier(conn, WHALE, "ultra")
     mk = Market()
     mk.snaps[MINT] = snap()
@@ -233,6 +234,7 @@ def test_no_copy_when_the_whale_is_already_out_or_flips(conn, s):
     t.scan()
     o = conn.execute("SELECT decision, note FROM brain_opps").fetchone()
     assert o["decision"] == "skip" and "schon wieder verkauft" in o["note"]
+    assert any(r.message.startswith("PASS whale") and "schon wieder verkauft" in r.message for r in caplog.records)
     # a wallet that sells most coins within two minutes: no copy, and its habit is a token the model learns from
     w2 = "Flip111111111111111111111111111111111111111"
     set_tier(conn, w2, "ultra")
