@@ -338,3 +338,29 @@ def test_launch_analysis_resumes_across_runs():
     assert part["state"] == "txs" and part["idx"] == 2
     full = checks.Context(c, MINT, FakeFetcher(ruggy()), CFG).launch()
     assert full["state"] == "done" and full["creator"] == DEV and len(full["buyers"]) == 4
+
+
+def test_exhausted_helius_credits_fall_back_to_public_or_skip(monkeypatch):
+    from core import http
+    from safety import sources
+    hel, pub = _uniq("helius"), _uniq("public")
+    cfg = SafetySettings()
+    cfg.helius_spacing_sec = cfg.public_spacing_sec = 0
+    cfg.public_rpc_url = f"https://{pub}"
+
+    def post(url, payload, **kw):
+        if hel in url:
+            raise http.CreditsExhausted("helius credits used")
+        return {"result": "public"}
+    monkeypatch.setattr(sources.http, "post_json", post)
+    try:
+        live = sources.Fetcher(cfg, rpc_url=f"https://{hel}/?api-key=x", priority=True)
+        assert live.rpc("getSlot", []) == "public"   # live reserve keeps working through the public RPC
+        cfg.public_per_min = 0                         # no public overflow: the check is skipped, no traceback
+        try:
+            sources.Fetcher(cfg, rpc_url=f"https://{hel}/?api-key=x", priority=False).rpc("getSlot", [])
+            raise AssertionError("expected BudgetExceeded")
+        except BudgetExceeded:
+            pass
+    finally:
+        _cleanup(hel, pub)

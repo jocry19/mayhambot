@@ -77,13 +77,16 @@ class Fetcher:
     def rpc(self, method, params):
         self._spend()
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        last = None
+        last, exhausted = None, False
         for url, host in self._targets():
             if not self._take(host):
                 continue
             self.rpc_calls[host] += 1
             try:
                 j = http.post_json(url, payload, retries=2)
+            except getattr(http, "CreditsExhausted", ()):  # Helius monthly/daily credits used: next endpoint
+                exhausted = True
+                continue
             except Exception as e:  # noqa: BLE001 - e.g. public RPC refuses a heavy method: try the next one
                 last = e
                 continue
@@ -91,7 +94,7 @@ class Fetcher:
                 last = RuntimeError(f"{method}: {j['error']}")
                 continue
             return j.get("result")
-        if last is not None:
+        if last is not None and not exhausted:
             raise last
         raise BudgetExceeded(f"RPC budget used up for this minute ({method})")
 
