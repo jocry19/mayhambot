@@ -106,7 +106,25 @@ POSITION_COLUMNS = {
 }
 
 
+WALLET_COLUMNS = {
+    "backfilled_at": "INTEGER DEFAULT 0",  # history loaded once (0 = still to do)
+    "backfill_tries": "INTEGER DEFAULT 0",  # failed attempts; gives up after 3 so no wallet blocks the slots
+}
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
+    have_w = {r[1] for r in conn.execute("PRAGMA table_info(ct_wallets)")}
+    for col, typ in WALLET_COLUMNS.items():
+        if col not in have_w:
+            try:
+                conn.execute(f"ALTER TABLE ct_wallets ADD COLUMN {col} {typ}")
+            except sqlite3.OperationalError as e:  # another service migrated at the same moment
+                if "duplicate column" not in str(e).lower():
+                    raise
+    if "backfilled_at" not in have_w:
+        # existing wallets with real history count as done; the rest get their history loaded
+        conn.execute("""UPDATE ct_wallets SET backfilled_at=? WHERE address IN
+                        (SELECT wallet FROM ct_swaps GROUP BY wallet HAVING COUNT(*) >= 5)""", (int(time.time()),))
     have = {r[1] for r in conn.execute("PRAGMA table_info(ct_positions)")}
     for col, typ in POSITION_COLUMNS.items():
         if col not in have:

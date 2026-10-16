@@ -39,15 +39,10 @@ class Engine:
             except Exception as e:
                 log.warning("discover failed: %s", e)
         # backfill wallets we have no history for yet (a few per round, RPC is the bottleneck)
-        fresh = c.execute(
-            """SELECT w.address FROM ct_wallets w WHERE w.active=1 AND NOT EXISTS
-               (SELECT 1 FROM ct_swaps s WHERE s.wallet=w.address AND s.seen_at < ?) LIMIT 4""",
-            (int(time.time()) - 60,),
-        ).fetchall()
-        for r in fresh:
+        for addr in tracker.backfill_due(c):
             try:
-                n = tracker.backfill(c, s, self.rpc, r["address"])
-                log.info("backfill %s… %d swaps", r["address"][:6], n)
+                n = tracker.backfill(c, s, self.rpc, addr)
+                log.info("backfill %s… %d swaps", addr[:6], n)
             except Exception as e:
                 log.warning("backfill failed: %s", e)
         try:

@@ -297,3 +297,70 @@ def test_websocket_path_applies_the_same_entry_rules(env, monkeypatch):
     assert conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0] == 0
     assert watch.ENTRY_LOCK.acquire(blocking=False)  # released again after the decision
     watch.ENTRY_LOCK.release()
+
+
+class _SigRpc:
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    def signatures(self, wallet, limit=80, **kw):
+        if self.fail:
+            raise RuntimeError("rpc down")
+        return [{"signature": "sigB", "blockTime": int(time.time())}]
+
+    def transaction(self, sig, **kw):
+        return None
+
+
+def test_backfill_loads_new_finds_once_best_first_and_gives_up_on_dead_wallets(env):
+    s, conn, ex, state = env
+    old, new, ultra = (f"Bbbb{i:040d}"[:44] for i in range(3))
+    store.add_wallets(conn, [old], "auto")
+    conn.execute("UPDATE ct_wallets SET added_at=added_at-100 WHERE address=?", (old,))
+    store.add_wallets(conn, [new, ultra], "auto")
+    conn.execute("INSERT OR REPLACE INTO wallets(address, tier) VALUES (?, 'ultra')", (ultra,))
+    store.add_wallets(conn, [W], "manual")
+    # a fresh find that already has one live swap (the old query skipped it forever)
+    conn.execute("INSERT INTO ct_swaps(sig, wallet, mint, side, ts, seen_at) VALUES ('x', ?, ?, 'buy', 1, 1)",
+                 (new, MINT))
+    assert tracker.backfill_due(conn, 10) == [W, ultra, new, old]
+    tracker.backfill(conn, s, _SigRpc(), W)
+    assert W not in tracker.backfill_due(conn, 10)  # done once, never again
+    for _ in range(3):
+        with pytest.raises(RuntimeError):
+            tracker.backfill(conn, s, _SigRpc(fail=True), old)
+    assert tracker.backfill_due(conn, 10) == [ultra, new]  # dead wallet no longer blocks a slot
+
+
+def test_migration_marks_wallets_with_history_as_backfilled(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    raw = sqlite3.connect(db)
+    raw.executescript("""CREATE TABLE ct_wallets (address TEXT PRIMARY KEY, label TEXT DEFAULT '',
+        source TEXT DEFAULT 'auto', added_at INTEGER, last_sig TEXT, last_polled INTEGER DEFAULT 0,
+        active INTEGER DEFAULT 1);
+        CREATE TABLE ct_swaps (sig TEXT, wallet TEXT, mint TEXT, side TEXT, ts INTEGER, token_amount REAL,
+        sol_amount REAL, price_sol REAL, seen_at INTEGER, PRIMARY KEY (sig, wallet, mint));""")
+    raw.executemany("INSERT INTO ct_wallets(address, added_at) VALUES (?, 1)", [("rich",), ("empty",)])
+    raw.executemany("INSERT INTO ct_swaps(sig, wallet, mint) VALUES (?, 'rich', 'm')", [(f"s{i}",) for i in range(6)])
+    raw.commit()
+    raw.close()
+    conn = store.connect(Settings(db_path=db))
+    assert tracker.backfill_due(conn, 10) == ["empty"]
+
+
+def test_failed_decimals_lookup_is_not_cached(monkeypatch):
+    real = chain.token_decimals
+    class R:
+        n = 0
+
+        def read(self, method, params, priority="live", **kw):
+            R.n += 1
+            if R.n == 1:
+                raise RuntimeError("429")
+            return {"value": {"decimals": 9}}
+
+    chain._decimals_cache.pop("MintX", None)
+    assert real(R(), "MintX") == 6
+    assert real(R(), "MintX") == 9 and real(R(), "MintX") == 9 and R.n == 2

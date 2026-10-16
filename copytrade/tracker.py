@@ -221,12 +221,18 @@ def due_wallets(conn, s: Settings, now: float | None = None, covered: set | froz
 
 def backfill(conn, s: Settings, rpc: chain.Rpc, wallet: str, limit: int = 80) -> int:
     """Load a wallet's recent history so it can be ranked. Flags obvious bots."""
-    sigs = rpc.signatures(wallet, limit=limit)
+    try:
+        sigs = rpc.signatures(wallet, limit=limit)
+    except Exception:
+        conn.execute("UPDATE ct_wallets SET backfill_tries=COALESCE(backfill_tries, 0)+1 WHERE address=?", (wallet,))
+        conn.commit()
+        raise
     if len(sigs) >= limit:
         span = (sigs[0].get("blockTime") or 0) - (sigs[-1].get("blockTime") or 0)
         if 0 <= span < 15 * 60:  # >80 tx in 15 min: MEV/bot, not a whale to copy
             conn.execute("UPDATE ct_wallets SET active=0, label='bot' WHERE address=? AND source!='manual'",
                          (wallet,))
+            conn.execute("UPDATE ct_wallets SET backfilled_at=? WHERE address=?", (int(time.time()), wallet))
             conn.commit()
             return 0
     solusd = market.sol_usd(s)
@@ -242,10 +248,29 @@ def backfill(conn, s: Settings, rpc: chain.Rpc, wallet: str, limit: int = 80) ->
             swaps.append(sw)
     n = store.save_swaps(conn, swaps, solusd)
     newest = sigs[0]["signature"] if sigs else None
-    conn.execute("UPDATE ct_wallets SET last_sig=COALESCE(last_sig, ?), last_polled=? WHERE address=?",
-                 (newest, int(time.time()), wallet))
+    now = int(time.time())
+    conn.execute("UPDATE ct_wallets SET last_sig=COALESCE(last_sig, ?), last_polled=?, backfilled_at=? WHERE address=?",
+                 (newest, now, now, wallet))
     conn.commit()
     return n
+
+
+def backfill_due(conn, limit: int = 4) -> list[str]:
+    """Wallets whose history was never loaded: manual first, then Ultra/Smart tier, then the newest finds.
+    Wallets that failed 3 times are skipped, so a dead address never blocks the slots."""
+    try:
+        rows = conn.execute(
+            """SELECT w.address FROM ct_wallets w LEFT JOIN wallets m ON m.address=w.address
+               WHERE w.active=1 AND COALESCE(w.backfilled_at, 0)=0 AND COALESCE(w.backfill_tries, 0)<3
+               ORDER BY (w.source='manual') DESC,
+                        CASE LOWER(COALESCE(m.tier, '')) WHEN 'ultra' THEN 0 WHEN 'smart' THEN 1 ELSE 2 END,
+                        w.added_at DESC LIMIT ?""", (limit,)).fetchall()
+    except Exception:  # core's wallets table missing
+        rows = conn.execute(
+            """SELECT address FROM ct_wallets WHERE active=1 AND COALESCE(backfilled_at, 0)=0
+               AND COALESCE(backfill_tries, 0)<3 ORDER BY (source='manual') DESC, added_at DESC LIMIT ?""",
+            (limit,)).fetchall()
+    return [r[0] for r in rows]
 
 
 def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk",

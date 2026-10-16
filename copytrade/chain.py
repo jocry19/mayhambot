@@ -158,12 +158,12 @@ _decimals_cache: dict[str, int] = {}
 def token_decimals(rpc: Rpc, mint: str) -> int:
     if mint in _decimals_cache:
         return _decimals_cache[mint]
-    dec = 6
     try:
         r = rpc.read("getTokenSupply", [mint], priority="live") if hasattr(rpc, "read") else rpc.call("getTokenSupply", [mint])
         dec = int(r["value"]["decimals"])
     except Exception as e:
         log.debug("decimals %s failed: %s", mint, e)
+        return 6  # pump.fun default for now, but not cached: the next call asks again
     _decimals_cache[mint] = dec
     return dec
 
