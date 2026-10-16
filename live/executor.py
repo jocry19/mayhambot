@@ -17,9 +17,9 @@ import logging
 import threading
 import time
 
-from copytrade import chain, market  # type: ignore
+from copytrade import market  # type: ignore
 from copytrade.config import SOL_MINT, Settings  # type: ignore
-from copytrade.execution import Fill, PaperExecutor, paper_adverse  # type: ignore
+from copytrade.execution import Fill, PaperExecutor, decimals as token_decimals, implausible, paper_adverse  # type: ignore  # noqa: E501
 
 from . import guard, jupiter, store
 from .config import LiveConfig, load
@@ -262,7 +262,9 @@ class GuardedLiveExecutor(PaperExecutor):
             if why:
                 store.event_safe(self.conn, f"[{self.mode}] Kauf {snap.symbol if snap else mint[:6]} blockiert: {why}")
                 return Fill(False, error=why)
-            dec = chain.token_decimals(self.rpc, mint)
+            dec = token_decimals(self.rpc, mint)
+            if dec is None:
+                return Fill(False, error="Token-Dezimalen unbekannt (kein Kauf auf Verdacht)")
             try:
                 oid, r = self._swap("buy", mint, int(size * 1e9), self.cfg.buy_slippage_bps, 1, snap, dec)
             except Exception as e:  # never let the live path crash the trading loop
@@ -274,8 +276,11 @@ class GuardedLiveExecutor(PaperExecutor):
                     return Fill(False, error=f"Dry-Run: {r.get('error') or r['status']}")
                 fees = self.s.network_fee_sol + (r.get("priority_lamports") or 0) / 1e9
                 tokens = int(q["outAmount"]) / 10 ** dec * (1 - paper_adverse()) * (size - fees) / size
+                bad = implausible(size / tokens, snap)
+                if bad:
+                    return Fill(False, error=bad)
                 return Fill(True, tokens=tokens, sol=size, price_sol=size / tokens, price_impact=r["impact"],
-                            fees_sol=fees, tx=f"dry-{oid}", source="dry_run")
+                            fees_sol=fees, tx=f"dry-{oid}", source="dry_run", decimals=dec)
             if r["status"] == "unknown":  # may still land: the watchdog books it into the 'opening' row (service.py)
                 return Fill(False, error=f"{UNCONFIRMED} Kauf {r.get('sig', '')[:12]}… wird geprüft")
             if r["status"] != "landed":
@@ -293,7 +298,7 @@ class GuardedLiveExecutor(PaperExecutor):
                 tokens, spent, fees = (held or int(q["outAmount"])) / 10 ** dec, size, 0.0
             return Fill(True, tokens=tokens, sol=spent, price_sol=spent / tokens if tokens else 0,
                         price_impact=r["impact"], fees_sol=fees, tx=r["sig"],
-                        source="live" if d else "live_quote_only")
+                        source="live" if d else "live_quote_only", decimals=dec)
 
     def sell(self, mint: str, tokens: float, decimals: int, snap, last_price_sol: float) -> Fill:
         if self.dry:

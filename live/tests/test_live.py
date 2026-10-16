@@ -611,3 +611,19 @@ def test_dry_positions_never_reach_the_real_wallet(env, monkeypatch, tmp_path):
                  "VALUES ('dry','whale','m1','open',?,0.1,10)", (int(time.time()),))
     exs = execution.make_executors(s, rpc)
     assert exs["live"] is None and exs["dry"].dry  # new buys stay paper, dry leftovers close the dry way
+
+
+def test_unknown_decimals_and_implausible_fill_block_buys(env, monkeypatch):
+    s, conn, rpc, jup, make = env
+    ex = make(c=cfg(dry_run=True), dry=True)
+    from copytrade import execution
+
+    monkeypatch.setattr(execution, "decimals", lambda r, m: None)
+    import live.executor as lx
+    monkeypatch.setattr(lx, "token_decimals", lambda r, m: None)
+    f = ex.buy(MINT, 0.1, snap())
+    assert not f.ok and "Dezimalen" in f.error
+    monkeypatch.setattr(lx, "token_decimals", lambda r, m: 9)  # wrong: quote says 1e9 raw = 1000 tokens at 6
+    monkeypatch.setattr(lx, "implausible", execution.implausible)
+    f = ex.buy(MINT, 0.1, snap())
+    assert not f.ok and "Marktpreis" in f.error

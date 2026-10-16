@@ -47,6 +47,26 @@ class Fill:
     tx: str = ""
     source: str = ""
     error: str = ""
+    decimals: int | None = None  # token decimals the amounts were computed with (book these, not a guess)
+
+
+def decimals(rpc, mint: str) -> int | None:
+    """Token decimals, None when unknown: never guess 6 for a buy (a 9-decimal coin would be booked 1000x off).
+    Uses chain.token_decimals(strict=True) where available."""
+    try:
+        return chain.token_decimals(rpc, mint, strict=True)
+    except TypeError:  # chain.py without strict (or a test stub): plain call; implausible() still guards the fill
+        return chain.token_decimals(rpc, mint)
+    except Exception:
+        return None
+
+
+def implausible(price_sol: float, snap) -> str | None:
+    """A fill price 20x away from the market price is a units error (decimals), not a market move."""
+    ref = getattr(snap, "price_sol", 0) or 0
+    if ref > 0 and price_sol > 0 and not (1 / 20 < price_sol / ref < 20):
+        return f"Fill-Preis {price_sol:.3g} passt nicht zum Marktpreis {ref:.3g} (Einheiten/Dezimalen?)"
+    return None
 
 
 def _cp_impact(size_sol: float, snap: market.PairSnapshot, sol_usd: float) -> float:
@@ -67,7 +87,9 @@ class PaperExecutor:
     def buy(self, mint: str, size_sol: float, snap: market.PairSnapshot) -> Fill:
         fees = self.s.network_fee_sol + self.s.priority_fee_sol
         spend = size_sol - fees
-        dec = chain.token_decimals(self.rpc, mint)
+        dec = decimals(self.rpc, mint)
+        if dec is None:
+            return Fill(False, error="Token-Dezimalen unbekannt (kein Kauf auf Verdacht)")
         q = market.jupiter_quote(self.s, SOL_MINT, mint, int(spend * 1e9))
         if q and int(q.get("outAmount", 0)) > 0:
             tokens = int(q["outAmount"]) / 10 ** dec
@@ -80,8 +102,11 @@ class PaperExecutor:
         tokens *= 1 - _adverse
         if tokens <= 0:
             return Fill(False, error="no price")
+        bad = implausible(size_sol / tokens, snap)
+        if bad:
+            return Fill(False, error=bad)
         return Fill(True, tokens=tokens, sol=size_sol, price_sol=size_sol / tokens, price_impact=impact,
-                    fees_sol=fees, tx=f"paper-{int(time.time() * 1000)}", source=src)
+                    fees_sol=fees, tx=f"paper-{int(time.time() * 1000)}", source=src, decimals=dec)
 
     def sell(self, mint: str, tokens: float, decimals: int, snap: market.PairSnapshot | None,
              last_price_sol: float) -> Fill:
