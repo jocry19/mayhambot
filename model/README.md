@@ -153,3 +153,8 @@ Wallets in the `wallets` table that the model has not scored yet are backfilled 
 - Tiers need net PnL > 0. Launch/dev bots (≥ 50 % of buys within 3 s of pool creation, or always the first buyer)
   and second-flippers (median hold < 15 s) get no tier (`model.tiers.uncopyable`).
 - Walk-forward checkpoints ignore today's `is_bot` flags and use only trades before the cutoff.
+
+**Two wallet measures, side by side:** `net_pnl_usd` / `net_roi` = what the wallet earned itself after costs (tier
+basis). `tier_of(addr, with_edge=True)["copy_edge"]` / `wallet_tiers(..., with_edge=True)` = what copying it earned
+us (`copytrade.learn.wallet_edge`: our delay, exits, measured costs; `lower` > 0 = proven). Off by default because
+copytrade calls `tier_of` itself.

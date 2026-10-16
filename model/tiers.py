@@ -81,13 +81,29 @@ def _conn(conn):
     return connect()
 
 
-def tier_of(address, conn=None):
+def copy_edge(conn, address):
+    """What copying this wallet earned US (copytrade.learn.wallet_edge: our delay, exits and costs), next to the
+    model's view of what the wallet earned itself. None when copytrade has no replays for it."""
+    try:
+        from copytrade import learn as ct_learn
+        e = ct_learn.wallet_edge(conn, address)
+    except Exception:  # noqa: BLE001  (copytrade tables missing or package not installed)
+        return None
+    return e if e and e.get("n") else None
+
+
+def tier_of(address, conn=None, with_edge=False):
     conn = _conn(conn)
     r = conn.execute("SELECT * FROM model_wallet_stats WHERE address=?", (address,)).fetchone()
-    return _row(r) if r else None
+    if not r:
+        return None
+    out = _row(r)
+    if with_edge:
+        out["copy_edge"] = copy_edge(conn, address)
+    return out
 
 
-def wallet_tiers(conn=None, tier=None, limit=None):
+def wallet_tiers(conn=None, tier=None, limit=None, with_edge=False):
     conn = _conn(conn)
     q, args = "SELECT * FROM model_wallet_stats", []
     if tier:
@@ -98,7 +114,11 @@ def wallet_tiers(conn=None, tier=None, limit=None):
     q += " ORDER BY score DESC"
     if limit:
         q += f" LIMIT {int(limit)}"
-    return [_row(r) for r in conn.execute(q, args)]
+    out = [_row(r) for r in conn.execute(q, args)]
+    if with_edge:
+        for d in out:
+            d["copy_edge"] = copy_edge(conn, d["address"])
+    return out
 
 
 def tier_sync(conn=None):
