@@ -10,6 +10,8 @@
     python -m cli preset whale|signal NAME
     python -m cli sell POSITION_ID
     python -m cli buy MINT [--sol 0.5]
+    python -m cli safety [MINT]        Rug-Schutz: gesperrte Coins oder Prüfung eines Coins
+    python -m cli safety block|allow|clear MINT [Grund]
 
 Liest die gemeinsame Datenbank (MAYHAM_DB_PATH oder core.config). Schreibt nur Steuerwerte über
 copytrade.control; der Echtgeld-Hauptschalter in .env wird nie angefasst oder angezeigt.
@@ -49,6 +51,8 @@ def main(argv=None) -> int:
     p = sub.add_parser("buy", help="Coin kaufen (Auftrag an den Bot)")
     p.add_argument("mint")
     p.add_argument("--sol", type=float, default=None)
+    p = sub.add_parser("safety", help="Rug-Schutz: anzeigen, sperren, freigeben")
+    p.add_argument("args", nargs="*", help="[MINT] | block|allow|clear MINT [Grund]")
     a = ap.parse_args(argv)
 
     if a.cmd in (None, "tui"):
@@ -80,6 +84,13 @@ def main(argv=None) -> int:
             print(data.sell(a.position_id))
         elif a.cmd == "buy":
             print(data.buy(a.mint, a.sol))
+        elif a.cmd == "safety":
+            if a.args and a.args[0] in ("block", "allow", "clear"):
+                if len(a.args) < 2:
+                    raise ValueError("Mint fehlt: python -m cli safety block MINT [Grund]")
+                print(data.safety_override(a.args[1], a.args[0], " ".join(a.args[2:])))
+            else:
+                report.safety(a.args[0] if a.args else None)
     except (ValueError, ImportError) as e:
         print(f"Fehler: {e}", file=sys.stderr)
         return 1

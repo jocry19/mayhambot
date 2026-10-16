@@ -6,8 +6,8 @@ from rich.markup import escape
 from rich.table import Table
 
 from . import data
-from .fmt import (EXIT_LABEL, MODE_SHORT, STRAT_SHORT, TIER_LABEL, TIER_STYLE, ago, clock, n, pct, short, sol, tiers,
-                  tone, usd, usd_signed)
+from .fmt import (EXIT_LABEL, MODE_SHORT, RISK_LABEL, STRAT_SHORT, TIER_LABEL, TIER_STYLE, ago, clock, n, pct, risk, short, sol,
+                  tiers, tone, usd, usd_signed)
 
 con = Console()
 
@@ -46,10 +46,11 @@ def status() -> None:
 
 
 def _signals(ss) -> None:
-    t = _t("Letzte Signale", "Zeit", "Coin", "MC", "Note", "Score", "Wallets U/S/G", "Inflow", "Prognose", "1 h", "Max 1 h")
+    t = _t("Letzte Signale", "Zeit", "Coin", "MC", "Note", "Score", "Rug-Risiko", "Wallets U/S/G", "Inflow", "Prognose", "1 h", "Max 1 h")
     for x in ss:
         o = x["outcome"]
-        t.add_row(clock(x["ts"]), _c(x["symbol"], "bold"), usd(x["mcap_usd"]), x["grade"], n(x["score"]), tiers(x["tiers"]),
+        t.add_row(clock(x["ts"]), _c(x["symbol"], "bold"), usd(x["mcap_usd"]), x["grade"], n(x["score"]),
+                  risk(x.get("safety") or x.get("safety_now"), x.get("safety_now")), tiers(x["tiers"]),
                   usd(x["inflow_usd"]), pct(x["prediction"]) if x["prediction"] is not None else "–",
                   _c(pct(o["ret_1h"], 0, True), tone(o["ret_1h"])), _c(pct(o["max_ret_1h"], 0, True), tone(o["max_ret_1h"])))
     con.print(t if ss else "[dim]Noch keine Signale.[/]")
@@ -60,17 +61,21 @@ def signals(limit: int = 15) -> None:
     _signals(s["signals"])
     for x in s["signals"][:3]:
         con.print(f"\n[b]{escape(x['symbol'] or '')}[/] {clock(x['ts'])} · Score {n(x['score'])} ({x['grade']}) · {x['model_version']}")
+        for why in (x.get("safety") or {}).get("reasons") or []:
+            con.print(f"  [#ec835a]Rug-Schutz:[/] {escape(str(why))}")
         for b in x.get("breakdown") or []:
             share = b.get("share") or 0
             con.print(f"  {escape(str(b.get('label') or '')):<30} [#5598e7]{'█' * int(round(share * 30)):<30}[/] {pct(share)}  [dim]{escape(str(b.get('why') or ''))}[/]")
 
 
 def _open(op) -> None:
-    t = _t("Offene Positionen", "#", "Coin", "Modus", "Konto", "Seit", "Größe", "Ergebnis")
+    t = _t("Offene Positionen", "#", "Coin", "Modus", "Konto", "Seit", "Größe", "Ergebnis", "Version", "Rug-Risiko")
     for p in op:
         t.add_row(str(p["id"]), _c(p.get("symbol"), "bold"), STRAT_SHORT.get(p.get("strategy") or "whale", ""),
                   "Echtgeld" if p["mode"] == "live" else "Papier", ago(p.get("opened_at")), sol(p.get("size_sol")),
-                  _c(pct(p.get("unrealized_pct"), 1, True), tone(p.get("unrealized_pct"))))
+                  _c(pct(p.get("unrealized_pct"), 1, True), tone(p.get("unrealized_pct"))),
+                  f"v{p['param_version']}" if p.get("param_version") else "Preset",
+                  risk({"level": p.get("safety_level"), "score": p.get("safety_score")}))
     con.print(t if op else "[dim]Keine offenen Positionen.[/]")
 
 
@@ -102,3 +107,38 @@ def wallets(limit: int = 25, tier: str | None = None) -> None:
                   _c(usd_signed(w.get("total_pnl_usd")), tone(w.get("total_pnl_usd"))), n(w.get("influence_followers"), 1),
                   ago(w.get("last_trade_ts")))
     con.print(t if items else "[dim]Noch keine bewerteten Wallets.[/]")
+
+
+def safety(mint: str | None = None) -> None:
+    """Without mint: blocked coins and manual decisions. With mint: the stored assessment with reasons."""
+    from web import queries as Q
+    from web.db import read_conn
+
+    conn = read_conn()
+    if not mint:
+        d = Q.safety_list(conn)
+        if not d["available"]:
+            con.print("[dim]Der Rug-Schutz hat noch keine Coins geprüft.[/]")
+        c = d.get("counts") or {}
+        con.print("Geprüft: " + " · ".join(f"{n(c.get(k, 0))} {RISK_LABEL[k]}" for k in ("low", "caution", "high", "critical")))
+        t = _t("Gesperrt oder von dir entschieden", "Coin", "Risiko", "Konto", "Grund")
+        for r in d["items"]:
+            t.add_row(_c(r.get("symbol") or r["mint"][:6], "bold"), risk(r),
+                      {"block": "von dir gesperrt", "allow": "von dir freigegeben"}.get(r.get("override"), "automatisch"),
+                      _c(r.get("override_reason") or (r.get("reasons") or ["–"])[0]))
+        con.print(t if d["items"] else "[dim]Kein Coin gesperrt.[/]")
+        con.print(f"[dim]{escape('python -m cli safety block|allow|clear MINT [Grund]')}[/]")
+        return
+    s = Q.safety_detail(conn, mint)
+    if not s["checked"]:
+        con.print(f"[dim]{escape(mint)} wurde noch nicht geprüft.[/]" + (" [bold red]Manuell gesperrt.[/]" if s["blocked"] else ""))
+        return
+    con.print(f"[b]{escape(mint)}[/]  Rug-Risiko {risk(s)} von 100 · Stand {clock(s['ts'])} ({ago(s['ts'])}) · "
+              f"Copy-Trading {'[bold red]gesperrt[/]' if s['blocked'] else '[green]erlaubt[/]'}")
+    if s.get("override"):
+        o = s["override"]
+        con.print(f"Manuell {'gesperrt' if o['action'] == 'block' else 'freigegeben'}: {escape(o.get('reason') or '')}")
+    for r in s["reasons"]:
+        con.print(f"  [#ec835a]{n(r.get('risk')):>3}[/] {escape(str(r.get('text') or ''))}")
+    for p in s.get("positives") or []:
+        con.print(f"  [green]  ✓[/] {escape(str(p))}")

@@ -123,11 +123,16 @@ def _buy_preview(conn, mint: str) -> dict:
         blocked = f"Schon im Coin (Position #{held[mint]})"
     elif mint in pending:
         blocked = "Ein Kaufauftrag für diesen Coin wartet schon"
+    safety = q.safety_map(conn, [mint]).get(mint)
+    if not blocked and safety and safety.get("blocked"):
+        why = "; ".join((safety.get("reasons") or [])[:2]) or ("manuell gesperrt" if safety.get("override") == "block" else "")
+        blocked = f"Rug-Schutz blockiert diesen Coin ({why}). Freigeben geht auf der Coin-Seite." if why else \
+            "Rug-Schutz blockiert diesen Coin. Freigeben geht auf der Coin-Seite."
     return {"available": True, "mint": mint, "symbol": (tok or {}).get("symbol"), "mcap_usd": (tok or {}).get("mcap_usd"),
             "liquidity_usd": (tok or {}).get("liquidity_usd"), "strategy": strategy, "mode": (ctl.get("modes") or {}).get(strategy),
             "preset": name, "size_sol": p.get("size_sol"), "take_profit": p.get("take_profit"), "stop_loss": p.get("stop_loss"),
             "max_hold_min": p.get("max_hold_min"), "account": "live" if live else "paper",
-            "open_position_id": held.get(mint), "pending_buy_id": pending.get(mint), "blocked": blocked}
+            "open_position_id": held.get(mint), "pending_buy_id": pending.get(mint), "blocked": blocked, "safety": safety}
 
 
 @app.get("/api/buy/preview")
@@ -395,6 +400,44 @@ async def buy(request: Request):
     acct = "Echtgeld" if pv.get("account") == "live" else "Papier"
     return _done(f"Kauf beauftragt ({acct}, Preset {pv.get('preset')}); der Bot führt ihn in Sekunden aus", command_id=cid,
                  account=pv.get("account"))
+
+
+@app.get("/api/safety")
+def safety_list():
+    return ok(cache.get(("safety_list",), 10, lambda: q.safety_list(read_conn())))
+
+
+@app.get("/api/safety/{mint}")
+def safety_detail(mint: str):
+    return ok(q.safety_detail(read_conn(), mint.strip()))
+
+
+SAFETY_ACTIONS = {"block": "gesperrt", "allow": "freigegeben", "clear": "wieder automatisch"}
+
+
+@app.post("/api/safety/{mint}")
+async def safety_override(mint: str, request: Request):
+    """Manual block / allow / back to automatic, only through safety.block / allow / clear_override."""
+    mint = mint.strip()
+    if not (32 <= len(mint) <= 50):
+        raise HTTPException(400, "Mint-Adresse ungültig")
+    b = await request.json()
+    action = b.get("action")
+    if action not in SAFETY_ACTIONS:
+        raise HTTPException(400, "Aktion muss block, allow oder clear sein")
+    reason = str(b.get("reason") or "").strip()[:200]
+    try:
+        import safety
+    except Exception as e:
+        raise HTTPException(503, f"Rug-Schutz (safety/) fehlt: {e}")
+    conn = write_conn()
+    if action == "block":
+        safety.block(conn, mint, reason or "manuell im Dashboard gesperrt")
+    elif action == "allow":
+        safety.allow(conn, mint, reason or "manuell im Dashboard freigegeben")
+    else:
+        safety.clear_override(conn, mint)
+    return _done(f"Coin {SAFETY_ACTIONS[action]}")
 
 
 @app.post("/api/commands/{cid}/cancel")

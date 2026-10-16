@@ -90,6 +90,95 @@ def _learn_demo(conn, r, now):
                 conn.execute("UPDATE ct_positions SET param_version=? WHERE id=?", (vs[0] if opened < now - 86400 else vs[-1], pid))
     conn.commit()
 
+SAFETY_REASONS = [
+    ("holders", 35, "Top-10 Halter besitzen 48 % des Angebots"),
+    ("insiders", 40, "6 frische Wallets unter den Top-Haltern, 3 mit demselben Geldgeber"),
+    ("bundles", 30, "18 % des Angebots im Startblock gekauft (Bundle)"),
+    ("dev", 45, "Entwickler hat 70 % seiner Tokens schon verkauft"),
+    ("liquidity", 25, "Liquidität nur 4 % der Market Cap"),
+    ("lp", 30, "LP nicht gesperrt oder verbrannt"),
+    ("socials", 10, "keine Website und keine Socials"),
+    ("sell_sim", 20, "Rundreise-Verlust 9 % über dem erwarteten Slippage"),
+]
+SAFETY_HARD = [("authorities", 95, "Freeze-Authority aktiv: Tokens können eingefroren werden"),
+               ("sell_sim", 95, "Kein Verkauf möglich (Honeypot)")]
+SAFETY_LABELS = {"authorities": "Mint/Freeze-Rechte", "sell_sim": "Verkaufs-Test", "holders": "Halter-Verteilung",
+                 "insiders": "Insider", "bundles": "Bundles beim Start", "dev": "Entwickler", "liquidity": "Liquidität",
+                 "lp": "LP-Sperre", "wash": "Wash-Trading", "socials": "Socials", "rugcheck": "RugCheck"}
+
+
+def _safety_demo(conn, r, tokens, now):
+    """Rug-protection results (safety/ tables) for every coin, plus the copies signals/ and copytrade/ store."""
+    try:
+        from safety import store as sstore
+    except Exception:
+        return
+    sstore.ensure_schema(conn)
+    level = lambda sc: "critical" if sc >= 75 else "high" if sc >= 50 else "caution" if sc >= 25 else "low"
+    info = {}
+    for i, tok in enumerate(tokens):
+        hard = i % 9 == 4
+        picks = r.sample(SAFETY_REASONS, r.choice([0, 1, 1, 2, 2, 3]))
+        reasons = [(c, rk * r.uniform(.5, 1.1), t) for c, rk, t in picks]
+        if hard:
+            reasons.insert(0, r.choice(SAFETY_HARD))
+        prod = 1.0
+        for _, rk, _ in reasons:
+            prod *= 1 - rk / 100
+        score = 100 * (1 - prod)
+        if hard:
+            score = max(score, 90)
+        lv = level(score)
+        reasons.sort(key=lambda x: -x[1])
+        checks = {c: {"label": lab, "status": "ok" if r.random() > .08 else "unknown", "risk": 0.0, "hard": False, "data": {}}
+                  for c, lab in SAFETY_LABELS.items()}
+        for c, rk, _ in reasons:
+            checks[c].update(risk=round(rk, 1), status="ok", hard=rk >= 90)
+        pos = [x for x in ("Mint-Authority abgegeben", "LP verbrannt", "Verkauf möglich, Steuer 0 %", "Website und X vorhanden")
+               if r.random() < .6 and not (hard and x.startswith("Verkauf"))]
+        rs = [{"check": c, "risk": round(rk, 1), "text": t} for c, rk, t in reasons]
+        conn.execute("INSERT OR REPLACE INTO safety_tokens(mint, ts, score, level, blocked, coverage, hard_flags_json, reasons_json, "
+                     "positives_json, checks_json, creator, pair_created_at, version, calls) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (tok["mint"], now - r.randint(60, 1800), round(score, 1), lv, int(lv == "critical"), .91,
+                      json.dumps([rs[0]["text"]] if hard else []), json.dumps(rs), json.dumps(pos), json.dumps(checks),
+                      None, tok["born"], "safety-v1", r.randint(15, 60)))
+        h, t = score, now - 3 * 86400
+        while t < now:
+            h = min(100, max(0, h + r.uniform(-6, 6)))
+            conn.execute("INSERT OR REPLACE INTO safety_history VALUES (?,?,?,?)", (tok["mint"], t, round(h, 1), level(h)))
+            t += r.randint(900, 7200)
+        conn.execute("INSERT OR REPLACE INTO safety_history VALUES (?,?,?,?)", (tok["mint"], now, round(score, 1), lv))
+        info[tok["mint"]] = (round(score, 1), lv, [x["text"] for x in rs[:3]])
+    sstore.set_override(conn, tokens[1]["mint"], "block", "Dev-Wallet bekannt von früheren Rugs")
+    crit = [m for m, v in info.items() if v[1] == "critical"]
+    if crit:
+        sstore.set_override(conn, crit[0], "allow", "geprüft, Freeze-Authority gehört dem Launchpad")
+    cols = lambda tb: {c[1] for c in conn.execute(f"PRAGMA table_info({tb})")}
+    if "safety_level" in cols("signals"):
+        for sid, mint, score, cj in conn.execute("SELECT id, mint, score, contributions_json FROM signals").fetchall():
+            sc, lv, why = info.get(mint, (None, "unchecked", []))
+            f = 0.0 if lv == "critical" else 1.0 if sc is None or sc <= 25 else round(1 - .8 * min(1, (sc - 25) / 50), 3)
+            contrib = json.loads(cj or "{}")
+            if f < 1 and isinstance(contrib, dict):  # same shape as signals.engine.apply_safety
+                contrib["safety"] = {"weight": None, "value": f, "points": round(score * f - score, 1),
+                                     "why": f"Risiko {sc:.0f} ({lv}): " + "; ".join(why)}
+            conn.execute("UPDATE signals SET score_raw=?, score=?, safety_factor=?, safety_risk=?, safety_level=?, safety_reasons_json=?, "
+                         "contributions_json=? WHERE id=?", (score, round(score * f, 1), f, sc, lv, json.dumps(why), json.dumps(contrib), sid))
+    if "safety_level" in cols("ct_positions"):
+        for pid, mint in conn.execute("SELECT id, mint FROM ct_positions").fetchall():
+            sc, lv, why = info.get(mint, (None, "unchecked", []))
+            conn.execute("UPDATE ct_positions SET safety_level=?, safety_score=?, safety_reasons=? WHERE id=?", (lv, sc, json.dumps(why), pid))
+    for aid, mint in conn.execute("SELECT id, mint FROM ct_alerts").fetchall():
+        sc, lv, why = info.get(mint, (None, "unchecked", []))
+        conn.execute("UPDATE ct_alerts SET data=? WHERE id=?",
+                     (json.dumps({"safety": {"level": lv, "score": sc, "blocked": lv == "critical", "reasons": why}}), aid))
+    for m in crit[1:3]:
+        tok = next(t for t in tokens if t["mint"] == m)
+        conn.execute(_named(conn, "INSERT INTO ct_events VALUES (?,?,?,?,?)"),
+                     (now - r.randint(300, 7000), "info", "skip", f"[whale] {tok['symbol']}: Rug-Schutz blockiert ({info[m][2][0]})", None))
+    conn.commit()
+
+
 def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wallets: int = 700) -> str:
     try:
         from .db import db_path
@@ -464,6 +553,7 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
     conn.execute(_named(conn, "INSERT INTO ct_events VALUES (?,?,?,?,?)"), (now - 60, "info", "hint", "VERKAUFS-HINWEIS: Ziel erreicht", None))
     control.set_mode(conn, "signal", "semi")
     _learn_demo(conn, r, now)
+    _safety_demo(conn, r, tokens, now)
     try:
         from research.events import FEATURE_LABELS, FEATURE_NAMES
     except Exception:

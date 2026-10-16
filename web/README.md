@@ -47,6 +47,17 @@ Konto (Papier/Echtgeld), Preset von Modus 2, Betrag sowie Ziel und Stop und schi
 wurde. Gesperrt ist der Knopf, wenn die Notbremse an ist, der Coin schon gehalten wird oder ein Auftrag für ihn wartet.
 Echtgeld nur, wenn Echtgeld für Modus 2 an ist und der Hauptschalter in `.env` steht; sonst Papier.
 
+
+## Rug-Schutz (safety/)
+
+- Signal-Feed, Coins-Liste, Copy-Trading (offene/abgeschlossene Positionen, Einstiege) und Kauf-Dialog zeigen das Rug-Risiko
+  als Badge (niedrig/erhöht/hoch/kritisch + Score 0–100, "gesperrt" wenn der Bot den Coin nicht kauft). Signale und Positionen
+  zeigen den Stand beim Signal bzw. Kauf (`signals.safety_*`, `ct_positions.safety_*`), Sperre und Kaufknopf folgen dem
+  aktuellen Stand (`safety_tokens` + `safety_overrides`).
+- Coin-Seite: Score, Gründe, positive Befunde, alle Prüfungen, Verlauf (`safety_history`) und die Knöpfe Sperren /
+  Trotzdem freigeben / Automatisch entscheiden (mit Bestätigung). Steuerung: Liste aller gesperrten und manuell entschiedenen Coins.
+- Geschrieben wird nur über `safety.block`, `safety.allow`, `safety.clear_override` (`POST /api/safety/{mint}`, nur von localhost).
+- Terminal: `python -m cli safety [MINT]`, `python -m cli safety block|allow|clear MINT [Grund]`.
 ## Logs
 
 `python -m web` schreibt mit Zeitstempel zeilenweise nach stdout (unter dem Starter: `logs/web.log`): Start, Fehler,

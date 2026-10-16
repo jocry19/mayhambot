@@ -3,6 +3,7 @@ import { EChart, baseOption, catAxis, tierColor, timeAxis, tipRow, valueAxis } f
 import { TIER_LABEL, dt, go, mc, n, pct, pctSigned, sign, usd, usdSigned, ago, short } from "./lib.js";
 import { Addr, Bars, Delta, Empty, Legend, Score, Table, Tier, TierCounts } from "./ui.jsx";
 import { BuyButton } from "./buy.jsx";
+import { RiskBadge } from "./safety.jsx";
 
 export const CoinLink = ({ mint, symbol }) => (
   <a href={`#/coin/${mint}`} onClick={(e) => e.stopPropagation()} className="b">{symbol || short(mint)}</a>
@@ -134,6 +135,7 @@ export function SignalTable({ rows, showCoin = true, max = 300, initialSort, pau
     ...(showCoin ? [{ k: "symbol", l: "Coin", fmt: (r) => <CoinLink mint={r.mint} symbol={r.symbol} /> }] : []),
     { k: "mcap_usd", l: "MC beim Signal", r: true, fmt: (r) => mc(r.mcap_usd) },
     { k: "score", l: "Score", fmt: (r) => <Score v={r.score} g={r.grade} /> },
+    { k: "safety", l: "Rug-Risiko", title: "Rug- und Insider-Risiko beim Signal (0–100); gesperrt = Copy-Trading kauft nicht", sort: (r) => r.safety?.score ?? -1, fmt: (r) => <RiskBadge s={r.safety || r.safety_now} now={r.safety_now} /> },
     { k: "tiers", l: "Wallets U/S/G", fmt: (r) => <TierCounts tiers={r.tiers} />, sort: (r) => r.tiers.ultra * 100 + r.tiers.smart * 10 + r.tiers.good },
     { k: "inflow_usd", l: "Smart-Inflow", r: true, fmt: (r) => <span title={r.inflow_sol != null ? `${n(r.inflow_sol, 2)} SOL` : ""}>{usd(r.inflow_usd)}</span> },
     { k: "prediction", l: "Prognose", r: true, title: "Chance auf +50 % innerhalb 1 h", fmt: (r) => (r.prediction != null ? pct(r.prediction) : "–") },
@@ -141,7 +143,7 @@ export function SignalTable({ rows, showCoin = true, max = 300, initialSort, pau
     { k: "r1", l: "1 h", r: true, sort: (r) => r.outcome.ret_1h, fmt: (r) => <Delta v={r.outcome.ret_1h} d={0} arrow={false} /> },
     { k: "m1", l: "Max 1 h", r: true, sort: (r) => r.outcome.max_ret_1h, fmt: (r) => <Delta v={r.outcome.max_ret_1h} d={0} arrow={false} /> },
     { k: "m24", l: "Max 24 h", r: true, sort: (r) => r.outcome.max_ret_24h, fmt: (r) => <Delta v={r.outcome.max_ret_24h} d={0} arrow={false} /> },
-    ...(buy ? [{ k: "buy", l: "", sort: false, fmt: (r) => <BuyButton mint={r.mint} symbol={r.symbol} signal={r} heldId={r.open_position_id} pendingId={r.pending_buy_id} paused={paused} /> }] : []),
+    ...(buy ? [{ k: "buy", l: "", sort: false, fmt: (r) => <BuyButton mint={r.mint} symbol={r.symbol} signal={r} heldId={r.open_position_id} pendingId={r.pending_buy_id} paused={paused} blocked={r.safety_now?.blocked} /> }] : []),
   ];
   return <Table rows={rows} cols={cols} max={max} rowKey={(r) => r.id} expand={(r) => <SignalDetail s={r} />} initialSort={initialSort}
     empty="Noch keine Signale. Sobald genug Smart Money in einen Coin fließt, erscheinen sie hier." />;

@@ -4,6 +4,7 @@ import { ALGO_LABEL, EXIT_LABEL, STRAT_LABEL, TIER_LABEL, TIER_SOURCE, act, ago,
 import { Breakdown, FlowChart, Outcome, SignalDetail, WalletLink } from "../parts.jsx";
 import { Addr, Callout, Card, Delta, Empty, Icon, Legend, Modal, Score, Seg, Switch, Table, Tier, TierCounts, Tile } from "../ui.jsx";
 import { BuyModal } from "../buy.jsx";
+import { PosRisk, RiskBadge, SafetyCard } from "../safety.jsx";
 
 function PriceChart({ d, showTrades, hl, onPick }) {
   const sigs = [...d.signals].sort((a, b) => a.ts - b.ts);
@@ -148,6 +149,8 @@ export default function Coin({ mint, hl }) {
               <span className="t2">{tok?.name}</span>
               {st.signals > 0 && <span className="badge accent">{st.signals} Signal{st.signals > 1 ? "e" : ""}</span>}
               {st.tiers.ultra > 0 && <span className="badge">{st.tiers.ultra} Ultra drin</span>}
+              {d.safety?.checked && <RiskBadge s={d.safety} />}
+              {!d.safety?.checked && d.safety?.blocked && <span className="badge risk bad">manuell gesperrt</span>}
             </div>
             <div className="row dim" style={{ marginTop: 4, fontSize: 12 }}>
               <Addr a={mint} k={6} />
@@ -178,6 +181,7 @@ export default function Coin({ mint, hl }) {
         <Tile label="Bester Score" value={st.best_score ? n(st.best_score, 0) : "–"} sub={`${n(st.trades)} Trades erfasst`} />
       </div>
       {d.tier_source !== "model" && <Callout>{TIER_SOURCE[d.tier_source]}.</Callout>}
+      <SafetyCard mint={mint} symbol={sym} s={d.safety} />
 
       <Card title={`${sym}: Market Cap, Signale und Smart-Money-Käufe`} sub="Nummern = Signale (Klick öffnet sie unten) · Punkte = Käufe der Tier-Wallets, Größe = Betrag · Dreiecke = Bot-Käufe/-Verkäufe · Mausrad zoomt"
         actions={<label className="row nowrap dim" style={{ fontSize: 12 }}>Tier-Käufe <Switch on={showTrades} onChange={setShowTrades} label="Tier-Käufe einblenden" /></label>}>
@@ -246,6 +250,7 @@ export default function Coin({ mint, hl }) {
             { k: "mode", l: "Konto", fmt: (r) => <span className={`badge ${r.mode === "live" ? "live" : ""}`}>{r.mode === "live" ? "Echtgeld" : "Papier"}</span> },
             { k: "entry_mcap_usd", l: "Einstieg MC", r: true, fmt: (r) => mc(r.entry_mcap_usd) },
             { k: "size_sol", l: "Größe", r: true, fmt: (r) => sol(r.size_sol) },
+            { k: "safety_score", l: "Risiko beim Kauf", fmt: (r) => <PosRisk r={r} /> },
             { k: "status", l: "Status", fmt: (r) => (r.status === "open" ? <span className="badge accent">offen</span> : EXIT_LABEL[r.exit_reason] || r.exit_reason) },
             { k: "pnl_pct", l: "Ergebnis", r: true, fmt: (r) => <Delta v={r.status === "open" ? r.unrealized_pct : r.pnl_pct} d={1} /> },
             { k: "pnl_sol", l: "SOL", r: true, fmt: (r) => solSigned(r.status === "open" ? r.unrealized_sol : r.pnl_sol) },

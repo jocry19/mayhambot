@@ -1,6 +1,28 @@
 import { useEffect, useState } from "react";
 import { act, dt, n, usePoll } from "../lib.js";
 import { Callout, Card, Icon, Modal, Switch, Table } from "../ui.jsx";
+import { CoinLink } from "../parts.jsx";
+import { RISK, RiskBadge, SafetyButtons } from "../safety.jsx";
+
+function SafetyList() {
+  const { data: d } = usePoll("/api/safety", 15000);
+  if (!d) return null;
+  const c = d.counts || {};
+  const total = Object.values(c).reduce((a, b) => a + b, 0);
+  return (
+    <Card title="Rug-Schutz: gesperrte Coins" flush
+      sub={d.available ? `${n(total)} Coins geprüft · ${["low", "caution", "high", "critical"].map((k) => `${n(c[k] || 0)} ${RISK[k].l}`).join(" · ")}. Gesperrte Coins kauft der Bot in keinem Modus.`
+        : "Der Rug-Schutz (safety) hat noch keine Coins geprüft."}>
+      <Table rows={d.items} rowKey={(r) => r.mint} empty="Kein Coin gesperrt oder manuell entschieden" cols={[
+        { k: "symbol", l: "Coin", fmt: (r) => <CoinLink mint={r.mint} symbol={r.symbol || `${r.mint.slice(0, 6)}…`} /> },
+        { k: "score", l: "Risiko", fmt: (r) => <RiskBadge s={r} /> },
+        { k: "override", l: "Entscheidung", fmt: (r) => (r.override === "block" ? "von dir gesperrt" : r.override === "allow" ? "von dir freigegeben" : "automatisch") },
+        { k: "reasons", l: "Grund", sort: false, fmt: (r) => <span className="t2" style={{ whiteSpace: "normal" }}>{r.override_reason || (r.reasons || [])[0] || "–"}</span> },
+        { k: "act", l: "", sort: false, fmt: (r) => <SafetyButtons mint={r.mint} symbol={r.symbol} s={r} sm /> },
+      ]} />
+    </Card>
+  );
+}
 
 const MODES = [
   ["off", "Aus", "Dieser Modus handelt nicht."],
@@ -190,7 +212,8 @@ export default function Control() {
           ]} />
         </Card>
       </div>
-      <div className="dim row" style={{ fontSize: 12 }}><Icon name="terminal" size={14} />Dasselbe im Terminal: <span className="mono">python -m cli</span> oder <span className="mono">python -m copytrade mode signal semi</span></div>
+      <SafetyList />
+      <div className="dim row" style={{ fontSize: 12 }}><Icon name="terminal" size={14} />Dasselbe im Terminal: <span className="mono">python -m cli</span> oder <span className="mono">python -m copytrade mode signal semi</span>, Coins sperren mit <span className="mono">python -m cli safety block MINT</span></div>
     </div>
   );
 }

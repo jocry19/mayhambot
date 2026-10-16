@@ -4,6 +4,7 @@ import { EXIT_LABEL, MODE_LABEL, STRAT_LABEL, act, ago, dt, dur, go, mc, n, pct,
 import { CoinLink, HistBars, PnlCurve, WalletLink } from "../parts.jsx";
 import { Callout, Card, Delta, Empty, Modal, Seg, Table, Tabs, Tier, Tile } from "../ui.jsx";
 import Learn from "./Learn.jsx";
+import { PosRisk, RiskBadge } from "../safety.jsx";
 
 const ver = (r) => (r.param_version ? <span className="badge" title={r.use_inflow_exit ? "mit Verkauf am Ansturm-Ende" : undefined}>v{r.param_version}</span> : <span className="dim">Preset</span>);
 
@@ -152,6 +153,7 @@ export default function CopyTrade() {
             { k: "unrealized_pct", l: "Ergebnis", r: true, fmt: (r) => <Delta v={r.unrealized_pct} /> },
             { k: "take_profit", l: "Ziel / Stop", r: true, fmt: (r) => `+${pct(r.take_profit)} / −${pct(r.stop_loss)}` },
             { k: "param_version", l: "Version", title: "Welche gelernte Parameter-Version die Ausstiege festlegt", fmt: ver },
+            { k: "safety_score", l: "Rug-Risiko", title: "Rug-Risiko beim Kauf (0–100)", fmt: (r) => <PosRisk r={r} /> },
             { k: "exit_hint", l: "Hinweis", fmt: (r) => (r.exit_hint ? <span className="badge good">{EXIT_LABEL[r.exit_hint] || r.exit_hint}: verkaufen</span> : "–") },
             { k: "sell", l: "", sort: false, fmt: (r) => <SellButton p={r} /> },
           ]} />
@@ -167,6 +169,7 @@ export default function CopyTrade() {
             { k: "hold_min", l: "Haltedauer", r: true, fmt: (r) => dur(r.hold_min) },
             { k: "exit_reason", l: "Ausstieg", fmt: (r) => EXIT_LABEL[r.exit_reason] || r.exit_reason },
             { k: "param_version", l: "Version", title: "Welche gelernte Parameter-Version die Ausstiege festlegte", fmt: ver },
+            { k: "safety_score", l: "Rug-Risiko", title: "Rug-Risiko beim Kauf (0–100)", fmt: (r) => <PosRisk r={r} /> },
             { k: "pnl_pct", l: "Ergebnis", r: true, fmt: (r) => <Delta v={r.pnl_pct} /> },
             { k: "pnl_sol", l: "SOL", r: true, fmt: (r) => <span className={r.pnl_sol >= 0 ? "up" : "down"}>{solSigned(r.pnl_sol)}</span> },
           ]} />
@@ -179,6 +182,7 @@ export default function CopyTrade() {
             { k: "strategy", l: "Modus", fmt: (r) => STRAT_LABEL[r.strategy] || r.strategy },
             { k: "mcap_usd", l: "MC", r: true, fmt: (r) => mc(r.mcap_usd) },
             { k: "score", l: "Score", r: true, fmt: (r) => n(r.score, 0) },
+            { k: "safety", l: "Rug-Risiko", sort: (r) => r.safety?.score ?? -1, fmt: (r) => <RiskBadge s={r.safety} /> },
             { k: "reason", l: "Grund", fmt: (r) => <span className="t2">{r.reason}</span> },
           ]} />
         )}

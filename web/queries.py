@@ -241,7 +241,8 @@ def _engine_breakdown(s):
             "quality": {"weight": 0.3, "value": q / 100, "why": f"Ø Wallet-Score {q:.0f}"}}
 
 
-FEATURE_LABELS = {"inflow": "Netto-Inflow Smart Money", "breadth": "Anzahl Smart Wallets", "quality": "Ø Wallet-Qualität"}
+FEATURE_LABELS = {"inflow": "Netto-Inflow Smart Money", "breadth": "Anzahl Smart Wallets", "quality": "Ø Wallet-Qualität",
+                  "safety": "Abzug Rug-Schutz"}
 
 
 def breakdown_from(contrib, score=None):
@@ -302,6 +303,11 @@ def _norm_signal(conn, s, tm):
             "prediction": _f(s.get("prediction"), 4), "prediction_label": s.get("prediction_label") or "",
             "model_version": mv, "is_model": mv.startswith("model"),
             "breakdown": breakdown_from(contrib, s.get("score")), "wallets": wallets, "notified": bool(s.get("notified")),
+            "score_raw": _f(s.get("score_raw"), 1),
+            # rug protection when the signal fired (signals/ stores it; NULL level = safety/ not installed then)
+            "safety": {"level": s.get("safety_level"), "score": _f(s.get("safety_risk"), 1),
+                       "factor": _f(s.get("safety_factor"), 3), "blocked": (s.get("safety_factor") == 0),
+                       "reasons": _j(s.get("safety_reasons_json"), []) or []} if s.get("safety_level") else None,
             "outcome": {k: _f(s.get(k), 4) for k in ("ret_5m", "ret_15m", "ret_1h", "ret_6h", "max_ret_1h",
                                                       "max_ret_24h", "max_mcap_1h")}}
 
@@ -339,6 +345,9 @@ def signals(conn, since=None, mint=None, min_score=0.0, limit=300, tier=None, mi
         out = [s for s in out if s["tiers"][tier] > 0]
     if min_wallets:
         out = [s for s in out if s["wallets_total"] >= min_wallets]
+    sm = safety_map(conn, [s["mint"] for s in out])
+    for s in out:  # current state too: the buy button and "gesperrt" follow it, not the state at the signal
+        s["safety_now"] = sm.get(s["mint"])
     return out
 
 
@@ -381,6 +390,90 @@ def signal_performance(conn, since=None):
     daily = [{"ts": d, **grp(xs)} for d, xs in sorted(days.items())]
     return {"pump_threshold": PUMP_1H, **grp(items), "by_bucket": by_bucket, "by_ultra": by_ultra,
             "by_wallets": by_wallets, "by_mcap": by_mcap, "scatter": scatter, "daily": daily}
+
+
+# ====================================================================== safety (rug / honeypot / insider)
+SAFETY_LEVEL_DE = {"low": "niedrig", "caution": "erhöht", "high": "hoch", "critical": "kritisch", "unchecked": "ungeprüft"}
+
+
+def _overrides(conn, mints=None):
+    if not has(conn, "safety_overrides"):
+        return {}
+    if mints is None:
+        rs = rows(conn, "SELECT * FROM safety_overrides")
+    else:
+        ms = list(mints)
+        rs = []
+        for i in range(0, len(ms), 500):
+            chunk = ms[i:i + 500]
+            rs += rows(conn, f"SELECT * FROM safety_overrides WHERE mint IN ({','.join('?' * len(chunk))})", chunk)
+    return {r["mint"]: r for r in rs if r.get("action") in ("block", "allow")}
+
+
+def safety_map(conn, mints):
+    """Short risk info per mint for badges: {mint: {score, level, blocked, override, reasons[:3], ts}}.
+    Manual overrides win over the automatic result (same rule as safety.is_blocked)."""
+    ms = list({m for m in mints if m})
+    if not ms:
+        return {}
+    out = {}
+    if has(conn, "safety_tokens"):
+        for i in range(0, len(ms), 500):
+            chunk = ms[i:i + 500]
+            for r in rows(conn, f"""SELECT mint, ts, score, level, blocked, reasons_json FROM safety_tokens
+                                    WHERE mint IN ({','.join('?' * len(chunk))})""", chunk):
+                out[r["mint"]] = {"score": _f(r["score"], 1), "level": r["level"], "blocked": bool(r["blocked"]),
+                                  "override": None, "ts": r["ts"],
+                                  "reasons": [x.get("text") for x in (_j(r["reasons_json"], []) or [])[:3] if isinstance(x, dict)]}
+    for m, o in _overrides(conn, ms).items():
+        d = out.setdefault(m, {"score": None, "level": "unchecked", "blocked": False, "reasons": [], "ts": None})
+        d["override"] = o["action"]
+        d["blocked"] = o["action"] == "block"
+    return out
+
+
+def safety_detail(conn, mint):
+    """Full stored assessment for the coin page, with manual override and score history. No network."""
+    ov = _overrides(conn, [mint]).get(mint)
+    row = one(conn, "SELECT * FROM safety_tokens WHERE mint=?", (mint,)) if has(conn, "safety_tokens") else None
+    hist = rows(conn, "SELECT ts, score, level FROM safety_history WHERE mint=? ORDER BY ts", (mint,)) \
+        if has(conn, "safety_history") else []
+    if not row:
+        return {"checked": False, "level": "unchecked", "level_de": SAFETY_LEVEL_DE["unchecked"],
+                "blocked": bool(ov and ov["action"] == "block"), "override": ov, "history": hist,
+                "available": has(conn, "safety_tokens")}
+    checks = _j(row.get("checks_json"), {}) or {}
+    blocked = bool(row["blocked"])
+    if ov:
+        blocked = ov["action"] == "block"
+    return {"checked": True, "available": True, "ts": row["ts"], "score": _f(row["score"], 1), "level": row["level"],
+            "level_de": SAFETY_LEVEL_DE.get(row["level"], row["level"]), "blocked": blocked,
+            "auto_blocked": bool(row["blocked"]), "override": ov, "coverage": _f(row.get("coverage"), 3),
+            "hard_flags": _j(row.get("hard_flags_json"), []) or [], "reasons": _j(row.get("reasons_json"), []) or [],
+            "positives": _j(row.get("positives_json"), []) or [], "creator": row.get("creator"),
+            "version": row.get("version"), "error": row.get("error"),
+            # per check without the raw data blob (can be large and carries wallet lists)
+            "checks": [{"check": k, "label": v.get("label") or k, "status": v.get("status"), "risk": _f(v.get("risk"), 1),
+                        "hard": bool(v.get("hard"))} for k, v in checks.items() if isinstance(v, dict)],
+            "history": hist}
+
+
+def safety_list(conn):
+    """Blocked coins and manual decisions for the control page."""
+    ovs = _overrides(conn)
+    auto = rows(conn, "SELECT mint FROM safety_tokens WHERE blocked=1 ORDER BY ts DESC LIMIT 300") \
+        if has(conn, "safety_tokens") else []
+    mints = list(dict.fromkeys([r["mint"] for r in auto] + list(ovs)))
+    sm = safety_map(conn, mints)
+    syms = {}
+    if mints and has(conn, "tokens"):
+        syms = {r["mint"]: r["symbol"] for r in rows(conn, f"SELECT mint, symbol FROM tokens WHERE mint IN ({','.join('?' * len(mints))})", mints)}
+    counts = {}
+    if has(conn, "safety_tokens"):
+        counts = {r["level"]: r["n"] for r in rows(conn, "SELECT level, COUNT(*) n FROM safety_tokens GROUP BY level")}
+    items = [{"mint": m, "symbol": syms.get(m), **sm.get(m, {}), "override_reason": (ovs.get(m) or {}).get("reason"),
+              "override_ts": (ovs.get(m) or {}).get("ts")} for m in mints]
+    return {"available": has(conn, "safety_tokens"), "counts": counts, "items": items}
 
 
 # ====================================================================== coins
@@ -449,6 +542,8 @@ def coins(conn, sort="strength", limit=100, q=None, window_min=30):
             })
         return out
     data = cache.get(("coins", window_min), 15, calc)
+    sm = safety_map(conn, [c["mint"] for c in data])
+    data = [{**c, "safety": sm.get(c["mint"])} for c in data]
     if q:
         ql = q.lower()
         data = [c for c in data if ql in (c["symbol"] or "").lower() or ql in (c["name"] or "").lower() or ql in c["mint"].lower()]
@@ -574,7 +669,7 @@ def coin_detail(conn, mint):
             "predictions": [{k: p[k] for k in ("ts", "score", "p_1h", "p_6h", "mcap_usd", "tiers", "inflow_usd")} for p in preds],
             "alerts": alerts, "wallets": wl[:300], "tiered_trades": tiered_tape,
             "trades": tape[:150], "positions": [_pos(p) for p in cpos], "tier_source": tier_source(conn),
-            "prediction_live": _live_prediction(mint)}
+            "prediction_live": _live_prediction(mint), "safety": safety_detail(conn, mint)}
 
 
 def _live_prediction(mint):
@@ -775,6 +870,10 @@ def _pos(p):
                                            "wallet_score", "model", "manual_buy", "take_profit") if k in meta}
     now = now_ts()
     p["hold_min"] = _f(((p.get("closed_at") or now) - (p.get("opened_at") or now)) / 60, 1)
+    p["safety_reasons"] = _j(p.get("safety_reasons"), []) or []
+    if p.get("safety_level") is None and isinstance(meta.get("safety"), dict):
+        sf = meta["safety"]
+        p.update(safety_level=sf.get("level"), safety_score=sf.get("score"), safety_reasons=sf.get("reasons") or [])
     if p.get("whale_ts") and p.get("opened_at"):
         p["entry_delay_s"] = p["opened_at"] - p["whale_ts"]
     if p.get("status") == "open" and p.get("entry_price_sol") and p.get("last_price_sol"):
@@ -926,6 +1025,8 @@ def copytrade(conn, mode="paper", strategy=None):
     }
     alerts = rows(conn, "SELECT * FROM ct_alerts ORDER BY ts DESC LIMIT 150") if has(conn, "ct_alerts") else []
     for a_ in alerts:
+        sf = (_j(a_.get("data"), {}) or {}).get("safety") if isinstance(a_.get("data"), str) else None
+        a_["safety"] = {k: sf.get(k) for k in ("level", "score", "blocked", "reasons")} if isinstance(sf, dict) else None
         a_["data"] = None  # can be large; the alert row itself carries the essentials
     events = rows(conn, "SELECT ts, level, kind, message FROM ct_events ORDER BY ts DESC LIMIT 200") if has(conn, "ct_events") else []
     cmds = rows(conn, "SELECT * FROM ct_commands ORDER BY id DESC LIMIT 30") if has(conn, "ct_commands") else []

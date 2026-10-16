@@ -13,7 +13,7 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, Label, Static, TabbedContent, TabPane
 
 from . import data
-from .fmt import (EXIT_LABEL, MODE_SHORT, STRAT_SHORT, TIER_LABEL, TIER_STYLE, ago, clock, compact, n, pct, short, sol,
+from .fmt import (EXIT_LABEL, MODE_SHORT, STRAT_SHORT, TIER_LABEL, TIER_STYLE, ago, clock, compact, n, pct, risk, short, sol,
                   tiers, tone, usd, usd_signed)
 
 MODE_CYCLE = ["off", "manual", "semi", "auto"]
@@ -116,8 +116,8 @@ class MayhamTUI(App):
     def on_mount(self) -> None:
         cols = {
             "coins": ["Coin", "Note", "Stärke", "Käufer 30 min", "Inflow 30 min", "MC", "1 h", "Signale"],
-            "sigs": ["Zeit", "Coin", "MC", "Note", "Score", "Wallets", "Inflow", "Prognose", "1 h", "Max 1 h"],
-            "open": ["#", "Coin", "Modus", "Konto", "Seit", "Größe", "Ergebnis", "Ziel / Stop", "Wer verkauft"],
+            "sigs": ["Zeit", "Coin", "MC", "Note", "Score", "Rug-Risiko", "Wallets", "Inflow", "Prognose", "1 h", "Max 1 h"],
+            "open": ["#", "Coin", "Modus", "Konto", "Seit", "Größe", "Ergebnis", "Ziel / Stop", "Wer verkauft", "Version", "Rug-Risiko"],
             "closed": ["Zu", "Coin", "Modus", "Konto", "Haltedauer", "Ergebnis", "SOL", "Grund"],
             "wallets": ["#", "Wallet", "Tier", "Score", "Coins", "Treffer", "ROI", "Gewinn", "Einfluss", "Zuletzt"],
             "alerts": ["Zeit", "Modus", "Coin", "Aktion", "Grund"],
@@ -190,7 +190,8 @@ class MayhamTUI(App):
     def _fill_signals(self, ss: list[dict]) -> None:
         self._refill("sigs", [(
             cell(clock(x["ts"])), cell(x["symbol"] or x["mint"][:6], "bold"), right(usd(x["mcap_usd"])),
-            cell(x["grade"]), right(n(x["score"])), cell(tiers(x["tiers"])), right(usd(x["inflow_usd"])),
+            cell(x["grade"]), right(n(x["score"])), cell(risk(x.get("safety") or x.get("safety_now"), x.get("safety_now"))),
+            cell(tiers(x["tiers"])), right(usd(x["inflow_usd"])),
             right(pct(x["prediction"]) if x["prediction"] is not None else "–"),
             right(pct(x["outcome"]["ret_1h"], 0, True), tone(x["outcome"]["ret_1h"])),
             right(pct(x["outcome"]["max_ret_1h"], 0, True), tone(x["outcome"]["max_ret_1h"])),
@@ -209,6 +210,8 @@ class MayhamTUI(App):
             cell(ago(p.get("opened_at"))), right(sol(p.get("size_sol"))),
             right(pct(p.get("unrealized_pct"), 1, True), tone(p.get("unrealized_pct"))),
             right(f"{pct(p.get('take_profit'), 0, True)} / -{pct(p.get('stop_loss'))}"), cell(who(p)),
+            cell(f"v{p['param_version']}" if p.get("param_version") else "Preset"),
+            cell(risk({"level": p.get("safety_level"), "score": p.get("safety_score")})),
         ) for p in op], [str(p["id"]) for p in op])
         self._refill("closed", [(
             cell(clock(p.get("closed_at"))), cell(p.get("symbol") or p["mint"][:6], "bold"),
@@ -252,6 +255,8 @@ class MayhamTUI(App):
             bar = "█" * int(round((share or 0) * 30))
             label = escape(str(b.get("label") or b.get("feature") or ""))[:32]
             lines.append(f"  {label:<32} [#5598e7]{bar:<30}[/] {pct(share) if share is not None else ''}  [dim]{escape(str(b.get('why') or ''))}[/]")
+        for why in (sig.get("safety") or {}).get("reasons") or []:
+            lines.append(f"  [#ec835a]Rug-Schutz:[/] {escape(str(why))}")
         ws = ", ".join(f"[{TIER_STYLE.get(w['tier'], 'dim')}]{short(w['address'])}[/] {usd(w['buy_usd'])}" for w in sig["wallets"][:6])
         if ws:
             lines.append(f"  Wallets: {ws}")

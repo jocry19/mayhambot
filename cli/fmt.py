@@ -13,6 +13,20 @@ EXIT_LABEL = {
     "manual": "von dir verkauft",
 }
 
+RISK_LABEL = {"low": "niedrig", "caution": "erhöht", "high": "hoch", "critical": "kritisch", "unchecked": "ungeprüft"}
+RISK_STYLE = {"low": "green", "caution": "yellow", "high": "#ec835a", "critical": "bold red", "unchecked": "dim"}
+
+
+def risk(sf: dict | None, now: dict | None = None) -> str:
+    """Rich markup for a rug-risk badge: level + score, or 'gesperrt' when the copy trader skips the coin."""
+    if not sf or not sf.get("level"):
+        return "[dim]–[/]"
+    if (now or sf).get("blocked"):
+        return "[bold red]gesperrt[/]"
+    lv = sf["level"]
+    sc = sf.get("score")
+    return f"[{RISK_STYLE.get(lv, 'dim')}]{RISK_LABEL.get(lv, lv)}{'' if sc is None else ' ' + n(sc)}[/]"
+
 
 def _de(s: str) -> str:
     return s.replace(",", "§").replace(".", ",").replace("§", ".")

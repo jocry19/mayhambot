@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ago, go, mc, n, pct, usdSigned, usePoll } from "../lib.js";
 import { CoinLink } from "../parts.jsx";
+import { RiskBadge } from "../safety.jsx";
 import { Card, Delta, Score, Seg, Table, TierCounts } from "../ui.jsx";
 
 const SORTS = [["strength", "Signalstärke"], ["inflow", "Inflow 30 min"], ["inflow24", "Inflow 24 h"], ["wallets", "Tier-Käufer"],
@@ -22,6 +23,7 @@ export default function Coins() {
           { k: "rank", l: "#", sort: false, fmt: (r) => <span className="dim">{data.indexOf(r) + 1}</span> },
           { k: "symbol", l: "Coin", fmt: (r) => <span><CoinLink mint={r.mint} symbol={r.symbol} /> <span className="dim">{r.age_h != null ? `${n(r.age_h, r.age_h < 10 ? 1 : 0)} h alt` : ""}</span></span> },
           { k: "strength", l: "Stärke", fmt: (r) => <Score v={r.strength} g={r.grade} /> },
+          { k: "safety", l: "Rug-Risiko", sort: (r) => r.safety?.score ?? -1, fmt: (r) => <RiskBadge s={r.safety} /> },
           { k: "p_1h", l: "Pump-Chance", r: true, title: "Chance auf +50 % innerhalb 1 h", fmt: (r) => (r.p_1h != null ? pct(r.p_1h) : "–") },
           { k: "buyers_win", l: "Käufer 30 min", fmt: (r) => <TierCounts tiers={r.buyers_win} />, sort: (r) => r.buyers_win.ultra * 100 + r.buyers_win.smart * 10 + r.buyers_win.good },
           { k: "net_tiered_win", l: "Inflow 30 min", r: true, fmt: (r) => <span className={r.net_tiered_win > 0 ? "up" : r.net_tiered_win < 0 ? "down" : "dim"}>{usdSigned(r.net_tiered_win)}</span> },

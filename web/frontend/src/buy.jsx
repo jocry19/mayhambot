@@ -1,19 +1,21 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, mc, n, pct, refreshAll, sol, usd } from "./lib.js";
+import { RiskBadge } from "./safety.jsx";
 import { Callout, Modal } from "./ui.jsx";
 
 const MODE_TXT = { off: "Aus", manual: "Manuell", semi: "Halbautomatisch", auto: "Automatisch" };
 
 /** Buy button for a signal row or a coin: disabled while paused, already held or an order is waiting. */
-export function BuyButton({ mint, symbol, signal, heldId, pendingId, paused, sm = true }) {
+export function BuyButton({ mint, symbol, signal, heldId, pendingId, paused, blocked, sm = true }) {
   const [open, setOpen] = useState(false);
-  const why = paused ? "Käufe sind pausiert" : heldId ? `Schon im Coin (Position #${heldId})` : pendingId ? "Kaufauftrag wartet schon" : "";
+  const why = paused ? "Käufe sind pausiert" : heldId ? `Schon im Coin (Position #${heldId})` : pendingId ? "Kaufauftrag wartet schon"
+    : blocked ? "Rug-Schutz blockiert diesen Coin (Freigeben auf der Coin-Seite)" : "";
   return (
     <>
       <button className={`btn ${sm ? "sm" : ""} primary`} disabled={!!why} title={why || `${symbol || "Coin"} kaufen`}
         onClick={(e) => { e.stopPropagation(); setOpen(true); }}>
-        {heldId ? "Gekauft" : pendingId ? "Wartet …" : "Kaufen"}
+        {heldId ? "Gekauft" : pendingId ? "Wartet …" : blocked ? "Gesperrt" : "Kaufen"}
       </button>
       {open && createPortal(
         // portal: outside the table cell (no nowrap); the span keeps clicks from toggling the table row
@@ -85,6 +87,7 @@ export function BuyModal({ mint, symbol, signal, onClose }) {
             {signal && <div className="kv"><span className="k">MC beim Signal</span><span className="v">{mc(signal.mcap_usd)}</span></div>}
             {signal && <div className="kv"><span className="k">Score</span><span className="v">{n(signal.score)} ({signal.grade})</span></div>}
             <div className="kv"><span className="k">Liquidität</span><span className="v">{usd(pv.liquidity_usd)}</span></div>
+            <div className="kv"><span className="k">Rug-Risiko</span><span className="v"><RiskBadge s={pv.safety} /></span></div>
           </div>
           <label className="fld">Betrag in SOL <small>leer = {sol(pv.size_sol)} aus dem Preset</small>
             <input className="in" inputMode="decimal" value={size} onChange={(e) => setSize(e.target.value)} placeholder={pv.size_sol != null ? n(pv.size_sol, 2) : "0,5"} />

@@ -92,5 +92,30 @@ def buy(mint: str, size_sol: float | None = None) -> str:
         raise ValueError("Käufe sind pausiert (p schaltet die Pause aus)")
     if conn.execute("SELECT 1 FROM ct_positions WHERE mint=? AND status='open'", (mint,)).fetchone():
         raise ValueError("Schon im Coin")
+    if (Q.safety_map(conn, [mint]).get(mint) or {}).get("blocked"):
+        raise ValueError("Rug-Schutz blockiert diesen Coin (freigeben: python -m cli safety allow MINT)")
     control.request_buy(conn, mint, size_sol, strategy="signal")
     return f"Kauf von {mint[:6]}… beauftragt" + (f" ({size_sol} SOL)" if size_sol else " (Preset-Größe)")
+
+
+SAFETY_DONE = {"block": "gesperrt", "allow": "freigegeben", "clear": "wieder automatisch geprüft"}
+
+
+def safety_override(mint: str, action: str, reason: str = "") -> str:
+    """Manual block / allow / back to automatic, only through safety.block / allow / clear_override."""
+    mint = mint.strip()
+    if not (32 <= len(mint) <= 50) or not mint.isalnum():
+        raise ValueError("Das sieht nicht wie eine Mint-Adresse aus")
+    import safety  # type: ignore
+
+    conn = write_conn()
+    if action == "block":
+        safety.block(conn, mint, reason or "manuell im Terminal gesperrt")
+    elif action == "allow":
+        safety.allow(conn, mint, reason or "manuell im Terminal freigegeben")
+    elif action == "clear":
+        safety.clear_override(conn, mint)
+    else:
+        raise ValueError("Aktion muss block, allow oder clear sein")
+    cache.clear()
+    return f"{mint[:6]}… {SAFETY_DONE[action]}"

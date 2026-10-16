@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 GET = ["/api/overview", "/api/signals", "/api/signals/performance", "/api/coins", "/api/wallets", "/api/wallets/stats",
        "/api/copytrade", "/api/copytrade?mode=live", "/api/model", "/api/system", "/api/control", "/api/search?search=a",
-       "/api/copytrade/backtest?strategy=whale", "/api/copytrade/learn?strategy=whale", "/api/copytrade/learn?strategy=signal"]
+       "/api/copytrade/backtest?strategy=whale", "/api/copytrade/learn?strategy=whale", "/api/copytrade/learn?strategy=signal", "/api/safety"]
 
 
 def _client(db: str):
@@ -145,3 +145,50 @@ def test_learn_view(demo, empty):
         assert d["surface"] and d["exit_rules"] and d["attribution"]
     pos = c.get("/api/copytrade").json()
     assert any(p.get("param_version") for p in pos["open"] + pos["closed"])
+
+
+def test_safety_views_and_overrides(demo, empty):
+    assert _client(empty).get("/api/safety").json()["available"] is False
+    c = _client(demo)
+    sigs = c.get("/api/signals").json()
+    assert any(s["safety"] and s["safety"]["level"] for s in sigs)
+    coins = c.get("/api/coins").json()
+    held = {p["mint"] for p in c.get("/api/copytrade").json()["open"]}
+    mint = next(x["mint"] for x in coins if x.get("safety") and not x["safety"]["blocked"] and x["mint"] not in held)
+    d = c.get(f"/api/coins/{mint}").json()["safety"]
+    assert d["checked"] and 0 <= d["score"] <= 100 and d["checks"] and d["history"]
+    assert all("data" not in ch for ch in d["checks"])
+    ct = c.get("/api/copytrade").json()
+    assert any(p.get("safety_level") for p in ct["open"] + ct["closed"])
+    assert isinstance(ct["closed"][0]["safety_reasons"], list)
+    assert any(a.get("safety") for a in ct["alerts"])
+    # block -> buy refused, listed; allow; clear
+    assert c.post(f"/api/safety/{mint}", json={"action": "nope"}).status_code == 400
+    assert c.post(f"/api/safety/{mint}", json={"action": "block", "reason": "test"}).status_code == 200
+    assert c.get(f"/api/coins/{mint}").json()["safety"]["blocked"] is True
+    pv = c.get(f"/api/buy/preview?mint={mint}").json()
+    assert pv["blocked"] and "Rug-Schutz" in pv["blocked"]
+    assert c.post("/api/buy", json={"mint": mint}).status_code == 409
+    assert any(i["mint"] == mint and i["override"] == "block" for i in c.get("/api/safety").json()["items"])
+    assert c.post(f"/api/safety/{mint}", json={"action": "clear"}).status_code == 200
+    assert c.get(f"/api/coins/{mint}").json()["safety"]["override"] is None
+    from web.tests.asgi import Client
+    from web.server import app
+    assert Client(app, client=("192.168.1.20", 5000)).post(f"/api/safety/{mint}", json={"action": "block"}).status_code in (401, 403)
+
+
+def test_cli_safety(demo, capsys):
+    os.environ["MAYHAM_DB_PATH"] = demo
+    from web import db as wdb
+    wdb.cache.clear()
+    from cli.__main__ import main
+    assert main(["safety"]) == 0
+    out = capsys.readouterr().out
+    assert "Gesperrt" in out or "Kein Coin" in out
+    mint = sqlite3.connect(demo).execute("SELECT mint FROM safety_tokens LIMIT 1").fetchone()[0]
+    assert main(["safety", mint]) == 0
+    assert "Rug-Risiko" in capsys.readouterr().out
+    assert main(["safety", "block", mint, "test"]) == 0
+    assert sqlite3.connect(demo).execute("SELECT action FROM safety_overrides WHERE mint=?", (mint,)).fetchone()[0] == "block"
+    assert main(["safety", "clear", mint]) == 0
+    assert main(["signals", "-n", "3"]) == 0 and main(["positions"]) == 0
