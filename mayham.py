@@ -33,7 +33,7 @@ SERVICES = {
 }
 # research + retraining loop from model/ (other thread), started only once it exists
 if (ROOT / "model" / "__main__.py").exists():
-    SERVICES["model"] = [PY, "-m", "model", "service"]
+    SERVICES["research"] = [PY, "-m", "model", "service"]
 
 
 def _pid(name):
@@ -128,7 +128,7 @@ def logs(name=None):
 
 def _checks_ok():
     """Tests must pass before a new version goes live."""
-    for cmd in ([PY, "tests/test_logic.py"], [PY, "-m", "pytest", "tests", "-q", "-x"]):
+    for cmd in ([PY, "tests/test_logic.py"], [PY, "-m", "pytest", "tests", *(["model/tests"] if (ROOT / "model" / "tests").exists() else []), "-q", "-x"]):
         if subprocess.call(cmd, cwd=ROOT, stdout=subprocess.DEVNULL) != 0:
             print("Tests rot:", " ".join(cmd[1:]))
             return False

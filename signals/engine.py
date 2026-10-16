@@ -102,8 +102,9 @@ def apply_model(conn, mint, now, m):
         return m
     try:
         r = _score_token(mint, now=now, conn=conn, store=True)
-    except Exception as e:  # noqa: BLE001
-        log.warning("model.score_token %s failed, using heuristic: %s", mint[:6], e)
+    except Exception as e:  # noqa: BLE001 - incl. model.predict.ModelNotTrained before the first retrain
+        (log.debug if type(e).__name__ == "ModelNotTrained" else log.warning)(
+            "model.score_token %s not used, heuristic instead: %s", mint[:6], e)
         return m
     tiers = r.get("tiers") or {}
     h1 = (r.get("horizons") or {}).get("1h") or {}
@@ -121,11 +122,16 @@ def apply_model(conn, mint, now, m):
              prediction=h1.get("p_pump"), prediction_label=f"P(+{(h1.get('threshold') or 0.5)*100:.0f}% in 1h), Note {r.get('grade', '')}",
              contributions=contrib or m["contributions"])
     m["smart_buyers"] = m["n_ultra"] + m["n_smart"]
+    m["min_score"] = cfg_min_model()
     if r.get("wallets"):
         m["wallets"] = [dict(wallet=w["address"], tier=w.get("tier"), score=w.get("score", 0), n_tokens=None,
                              buy_usd=0.0, buy_sol=w.get("net_sol", 0), sell_usd=0.0, first_ts=w.get("first_ts"))
                         for w in r["wallets"]]
     return m
+
+
+def cfg_min_model():
+    return settings.model_signal_min_score  # model score = P(pump within 1h) x 100
 
 
 def calibrated_prediction(conn, score, min_n=8):
@@ -161,7 +167,7 @@ def evaluate(conn, mints, cfg=settings, now=None):
             (now, mint, m["window_min"], m["buy_usd"], m["sell_usd"], m["net_usd"], m["smart_buyers"],
              m["avg_quality"], m["score"], tok["price_usd"] if tok else None, m["buy_sol"], m["net_sol"],
              tok["mcap_usd"] if tok else None, m["n_ultra"], m["n_smart"], m["n_good"], pred, contrib))
-        if not (m["score"] >= cfg.signal_min_score and m["smart_buyers"] >= cfg.signal_min_wallets
+        if not (m["score"] >= m.get("min_score", cfg.signal_min_score) and m["smart_buyers"] >= cfg.signal_min_wallets
                 and m["net_usd"] >= cfg.signal_min_net_usd):
             continue
         last = conn.execute("SELECT ts, score FROM signals WHERE mint=? ORDER BY ts DESC LIMIT 1", (mint,)).fetchone()
