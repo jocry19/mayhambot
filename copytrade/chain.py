@@ -16,12 +16,31 @@ from .config import QUOTE_MINTS, SOL_MINT, Settings
 log = logging.getLogger("copytrade.chain")
 
 
+PUBLIC_RPC = "https://api.mainnet-beta.solana.com"
+
+
 class Rpc:
-    def __init__(self, settings: Settings):
-        self.url = settings.rpc_url
+    def __init__(self, settings: Settings, url: str | None = None):
+        self.url = url or settings.rpc_url
         self.lim = http.limiter("rpc:" + self.url, settings.rpc_max_rps)
         self.shared = http.throttle is not None and (urlparse(self.url).hostname or "") in http.SHARED_HOSTS
         self._id = 0
+        self.poller: Rpc | None = None
+        if url is None:
+            pu = settings.poll_rpc_url or (PUBLIC_RPC if "helius" in self.url else "")
+            if pu and pu != "off" and pu != self.url:
+                self.poller = Rpc(settings, url=pu)
+        self.poll_fallbacks = 0
+
+    def poll_signatures(self, address: str, limit: int = 15, until: str | None = None) -> list[dict]:
+        """Cheap "anything new?" check on the free poll RPC; falls back to the main RPC on errors."""
+        if self.poller:
+            try:
+                return self.poller.signatures(address, limit=limit, until=until)
+            except Exception as e:
+                self.poll_fallbacks += 1
+                log.debug("poll rpc failed, using main rpc: %s", e)
+        return self.signatures(address, limit=limit, until=until)
 
     def call(self, method: str, params: list[Any]) -> Any:
         self._id += 1

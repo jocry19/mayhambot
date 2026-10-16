@@ -156,7 +156,7 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row) -> list[chain.Swap]:
     """New swaps since the last poll (oldest first)."""
     wallet = wallet_row["address"]
     last = wallet_row["last_sig"]
-    sigs = rpc.signatures(wallet, limit=15, until=last) if last else rpc.signatures(wallet, limit=1)
+    sigs = rpc.poll_signatures(wallet, limit=15, until=last) if last else rpc.poll_signatures(wallet, limit=1)
     now = int(time.time())
     if not sigs:
         conn.execute("UPDATE ct_wallets SET last_polled=? WHERE address=?", (now, wallet))

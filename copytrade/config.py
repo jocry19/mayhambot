@@ -66,6 +66,10 @@ class Settings:
     wallet_poll_seconds: float = field(default_factory=lambda: _f("CT_WALLET_POLL_SECONDS", 8))
     # quiet wallets are polled less often (each poll = 1 RPC credit): last swap < 6 h -> every
     # wallet_poll_seconds, < 48 h -> every CT_POLL_WARM_SECONDS, older/never -> every CT_POLL_COLD_SECONDS
+    # "is there anything new?" polls (getSignaturesForAddress) go to a free RPC so a paid/credit RPC (Helius)
+    # is only used for real transactions. Default: public mainnet when SOLANA_RPC_URL is Helius; "off" = same RPC.
+    poll_rpc_url: str = field(default_factory=lambda: os.getenv("CT_POLL_RPC_URL", ""))
+    discover_every_s: float = field(default_factory=lambda: _f("CT_DISCOVER_EVERY_SECONDS", 1800))
     poll_warm_seconds: float = field(default_factory=lambda: _f("CT_POLL_WARM_SECONDS", 60))
     poll_cold_seconds: float = field(default_factory=lambda: _f("CT_POLL_COLD_SECONDS", 300))
     min_whale_buy_sol: float = field(default_factory=lambda: _f("CT_MIN_WHALE_BUY_SOL", 2.0))

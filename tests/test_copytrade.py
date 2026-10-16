@@ -411,3 +411,22 @@ def test_live_buy_requires_fresh_safety_check(env, monkeypatch):
     monkeypatch.setattr(safety, "assess", lambda mint, conn=None, deep=True, **k: ok)
     pid = st.on_signal(_signal(conn, mint=MINT))
     assert pid and conn.execute("SELECT mode, safety_level FROM ct_positions").fetchone()[:] == ("live", "low")
+
+
+def test_wallet_polls_use_free_rpc_and_fall_back(monkeypatch):
+    from copytrade import http as cthttp
+    urls = []
+
+    def fake_post(url, payload, **k):
+        urls.append(url.split("?")[0])
+        if "mainnet-beta" in url and payload["method"] == "getSignaturesForAddress" and len(urls) > 1:
+            raise RuntimeError("429")
+        return {"result": [{"signature": "x"}]}
+
+    monkeypatch.setattr(cthttp, "post_json", fake_post)
+    rpc = chain.Rpc(Settings(rpc_url="https://mainnet.helius-rpc.com/?api-key=k", poll_rpc_url=""))
+    assert rpc.poll_signatures(W) == [{"signature": "x"}]
+    assert urls == ["https://api.mainnet-beta.solana.com"]  # no Helius credit for "anything new?"
+    rpc.poll_signatures(W)  # public RPC fails -> main RPC
+    assert urls[-1] == "https://mainnet.helius-rpc.com/" and rpc.poll_fallbacks == 1
+    assert chain.Rpc(Settings(rpc_url="https://mainnet.helius-rpc.com/?api-key=k", poll_rpc_url="off")).poller is None

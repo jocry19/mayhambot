@@ -138,7 +138,11 @@ slippage_bps` (Anteile: 0.2 = 20 %; `min_score`, `min_smart_buyers`, `max_signal
 - Wallets mit derselben `cluster_id` sind ein Wal: ein Coin wird pro Cluster nur einmal kopiert (6 h Fenster), und
   das Lernen tunt Ausstiege pro Cluster. `exit_capture` (wie viel vom Pump der Wal mitnimmt) ist ein Lern-Merkmal.
 - Abfrage-Takt pro Wallet: letzter Swap < 6 h alle `CT_WALLET_POLL_SECONDS`, < 48 h alle `CT_POLL_WARM_SECONDS` (60),
-  sonst alle `CT_POLL_COLD_SECONDS` (300); manuelle Wallets immer schnell. Jede Abfrage = 1 RPC-Credit.
+  sonst alle `CT_POLL_COLD_SECONDS` (300); manuelle Wallets immer schnell.
+- Die Frage „gibt es Neues?“ (`getSignaturesForAddress`) geht an `CT_POLL_RPC_URL` (Standard: öffentliches Mainnet-RPC,
+  wenn `SOLANA_RPC_URL` Helius ist; `off` = alles über Helius). Helius-Credits kosten nur echte Transaktionen
+  (`getTransaction`). Fällt das öffentliche RPC aus, wird automatisch Helius genommen.
+- Wal-Suche auf Trend-Coins höchstens alle `CT_DISCOVER_EVERY_SECONDS` (1800).
 
 ## So entscheidet der Bot (Modus 1)
 
@@ -225,6 +229,8 @@ CT_MAX_TRACKED_WALLETS=40
 CT_WALLET_POLL_SECONDS=8
 CT_POLL_WARM_SECONDS=60
 CT_POLL_COLD_SECONDS=300
+CT_POLL_RPC_URL=                      # leer = öffentliches RPC für Polls, wenn Helius das Haupt-RPC ist; off = Helius
+CT_DISCOVER_EVERY_SECONDS=1800
 CT_MIN_WHALE_BUY_SOL=2
 
 # Bewertung
