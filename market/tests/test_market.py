@@ -404,3 +404,12 @@ def test_coin_context_never_uses_a_coin_row_from_the_future():
     assert not early["fresh"] and early.get("rs_sector_h1") is None
     assert early["net_flow_usd"] is None and early["liq_mcap"] is None
     assert context.features(conn, "M000", NOW + 30)["mkt_rs_sector_h1"] is None
+
+
+def test_market_tokens_index_on_existing_db():
+    conn = make_db("off")
+    conn.execute("DROP INDEX IF EXISTS idx_market_tokens_updated")
+    store.ensure_schema(conn)
+    plan = " ".join(str(tuple(r)) for r in conn.execute(
+        "EXPLAIN QUERY PLAN SELECT mint FROM market_tokens WHERE updated_at<?", (NOW,)))
+    assert "idx_market_tokens_updated" in plan

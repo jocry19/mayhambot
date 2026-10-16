@@ -48,6 +48,12 @@ MIGRATIONS = [
 ]
 
 
+# created on existing databases too (SCHEMA only runs once); prune and the universe filter on updated_at
+INDEXES = [
+    ("idx_market_tokens_updated", "CREATE INDEX IF NOT EXISTS idx_market_tokens_updated ON market_tokens(updated_at)"),
+]
+
+
 def ensure_schema(conn):
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='market_state'").fetchone() is None:
         db.retry_locked(conn, lambda: conn.executescript(SCHEMA))
@@ -58,6 +64,12 @@ def ensure_schema(conn):
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
                 conn.commit()
             db.retry_locked(conn, add)
+    for name, sql in INDEXES:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", (name,)).fetchone() is None:
+            def mk(sql=sql):
+                conn.execute(sql)
+                conn.commit()
+            db.retry_locked(conn, mk)
     return conn
 
 
