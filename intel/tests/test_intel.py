@@ -282,3 +282,40 @@ def test_liquidity_flash(conn):
     conn.commit()
     f = coin.coin_features(conn, MINT, NOW)["features"]
     assert f["liq_flash_60m"] == pytest.approx(2.0)
+
+
+def test_deep_playbook_walk_forward_and_bh():
+    from intel import deep
+    import random
+    rnd = random.Random(7)
+    data = []
+    for i in range(900):
+        smart = rnd.random() < 0.3
+        wash = rnd.random() < 0.3
+        f = {"flow_smart_entities_60m": 3 if smart else 0, "vol_roundtrip_60m": 0.6 if wash else 0.05,
+             "px_mcap": rnd.uniform(1e4, 1e6), "px_age_h": rnd.uniform(0, 48), "liq_usd": rnd.uniform(1e3, 1e5),
+             "noise": rnd.random()}
+        p = 0.05 + (0.35 if smart and not wash else 0) - (0.04 if wash else 0)
+        mx = 0.8 if rnd.random() < p else 0.1
+        mn = -0.7 if wash and rnd.random() < 0.5 else -0.1
+        data.append((f, mx, mn))
+    pb = deep.playbook(data)
+    good = {tuple(s["setup"]) for s in pb["good"] if s["confirmed"]}
+    bad = {tuple(s["setup"]) for s in pb["bad"] if s["confirmed"]}
+    assert ("smart2", "clean_vol") in good or ("smart2",) in good
+    assert ("wash",) in bad
+    assert deep.matching({"flow_smart_entities_60m": 3, "vol_roundtrip_60m": 0.05}, pb)
+    rob = {r["feature"]: r for r in deep.robustness(data)}
+    assert rob["flow_smart_entities_60m"]["verdict"] == "robust"
+    assert deep.bh([0.01, 0.04, 0.5]) == pytest.approx([0.03, 0.06, 0.5])
+
+
+def test_event_study(conn):
+    store.add_events(conn, [dict(ts=NOW - 7200 + i * 60, kind="smart_entry", mint=MINT, title="x", dedup=f"d{i}") for i in range(3)])
+    prices(conn, MINT, [(NOW - 7300, 1.0, 1e4), (NOW - 6900, 1.2, 1e4), (NOW - 6300, 1.6, 1e4), (NOW - 3700, 1.1, 1e4)])
+    conn.commit()
+    from intel import deep
+    ev = deep.event_study(conn, NOW, base_rate=0.1)
+    r = ev[0]
+    assert r["kind"] == "smart_entry" and r["n"] == 1  # three events within 30 min on one coin count once
+    assert r["med_max"] == pytest.approx(0.6) and r["hit_rate"] == 1

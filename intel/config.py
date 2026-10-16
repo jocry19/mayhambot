@@ -25,6 +25,7 @@ class IntelSettings:
     persist_every_sec: int = field(default_factory=lambda: _i("INTEL_PERSIST_EVERY_SEC", 900))  # history rows
     wallets_every_sec: int = field(default_factory=lambda: _i("INTEL_WALLETS_EVERY_SEC", 3600))
     label_every_sec: int = field(default_factory=lambda: _i("INTEL_LABEL_EVERY_SEC", 600))
+    deep_every_sec: int = field(default_factory=lambda: _i("INTEL_DEEP_EVERY_SEC", 1800))  # event study, robustness, playbook
     keep_days: int = field(default_factory=lambda: _i("INTEL_KEEP_DAYS", 21))
     universe_max: int = field(default_factory=lambda: _i("INTEL_UNIVERSE_MAX", 150))
     wallets_max: int = field(default_factory=lambda: _i("INTEL_WALLETS_MAX", 400))

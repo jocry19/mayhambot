@@ -9,7 +9,7 @@ import os
 import time
 
 from core import http
-from intel import base, coin, evaluate, events, marketctx, sources, store, wallet
+from intel import base, coin, deep, evaluate, events, marketctx, sources, store, wallet
 from intel.config import settings as default_cfg
 
 log = logging.getLogger("intel")
@@ -68,7 +68,7 @@ class Service:
         http.set_budget("api.coingecko.com", cfg.coingecko_per_min)
         http.set_budget("api.alternative.me", 2)
         self.net = ("PYTEST_CURRENT_TEST" not in os.environ) if net is None else net  # tests never call out
-        self.last = {"coins": 0, "persist": 0, "wallets": 0, "label": 0, "prune": 0, "quotes": 0, "macro": 0}
+        self.last = {"coins": 0, "persist": 0, "wallets": 0, "label": 0, "prune": 0, "quotes": 0, "macro": 0, "deep": 0}
         st = store.get_state(self.conn, "service_status") or {}
         self.holders_since = int(st.get("holders_since") or 0)
         self.rounds = 0
@@ -137,6 +137,9 @@ class Service:
             c["labeled"] = self.step("label", lambda: evaluate.label(self.conn, now))
             self.step("evaluate", lambda: store.set_state(self.conn, "evaluation", evaluate.evaluate(self.conn, now=now)))
             self.last["label"] = now
+        if now - self.last["deep"] >= self.cfg.deep_every_sec:
+            self.step("deep", lambda: store.set_state(self.conn, "deep", deep.run(self.conn, now, cfg=self.cfg)))
+            self.last["deep"] = now
         if now - self.last["prune"] >= 86400:
             self.step("prune", lambda: store.prune(self.conn, self.cfg.keep_days, now))
             self.last["prune"] = now

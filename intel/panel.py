@@ -104,6 +104,8 @@ def view(conn, now=None):
     sv = store.get_state(conn, "service_status") or {}
     sv["up"] = bool(sv.get("ts") and now - sv["ts"] <= 3 * max(60, sv.get("every_sec") or 60))
     coins = []
+    dp = store.get_state(conn, "deep") or {}
+    from intel import deep as _deep
     rows = _latest(conn, "coin", 1800, now)
     sym = _symbols(conn, [r[0] for r in rows])
     for k, ts, cov, fj, mj in rows:
@@ -111,7 +113,7 @@ def view(conn, now=None):
         meta = _j(mj, {})
         s, name = sym.get(k, (None, None))
         coins.append({"mint": k, "symbol": s, "name": name, "ts": ts, "coverage": cov, "coverage_by": meta.get("coverage"),
-                      "flags": flags(f), **{x: f.get(x) for x in (
+                      "flags": flags(f), "setups": _deep.matching(f, dp.get("playbook")), **{x: f.get(x) for x in (
                           "px_mcap", "liq_usd", "liq_off_peak", "liq_chg_15m", "flow_net_usd_15m", "flow_net_usd_60m",
                           "flow_buy_ratio_15m", "flow_buyers_15m", "flow_buyers_accel", "flow_smart_entities_60m",
                           "flow_smart_net_usd_60m", "flow_smart_exit_share", "flow_whale_share_60m", "flow_insider_sell_usd_60m",
@@ -135,7 +137,7 @@ def view(conn, now=None):
             "coins": coins[:150], "events": ev, "event_counts_24h": dict(counts),
             "event_kinds": {k: {"label": v[0], "tone": v[1]} for k, v in events.KINDS.items()},
             "rotation": rotation(conn, now), "flows": flows(conn, now, sym_cache=sym), "wallets": wallets(conn, now),
-            "evaluation": store.get_state(conn, "evaluation"), "sources": sources(conn, now), "stages": [
+            "evaluation": store.get_state(conn, "evaluation"), "deep": dp or None, "sources": sources(conn, now), "stages": [
                 {"n": n, "title": t, "text": x, "status": s} for n, t, x, s in STAGES],
             "groups": coin.GROUPS, "feature_labels": {k: {"group": v[0], "label": v[1], "unit": v[2]} for k, v in coin.FEATURES.items()}}
 

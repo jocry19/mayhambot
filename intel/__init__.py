@@ -60,3 +60,21 @@ def latest(conn, kind, key):
         return None
     return {"kind": kind, "key": key, "ts": r[0], "coverage_all": r[1], "features": json.loads(r[2]),
             "meta": json.loads(r[3] or "{}")}
+
+
+def deep_analysis(conn):
+    """Latest deep analysis (event study, robustness per feature, redundancy, walk-forward playbook), refreshed every
+    30 min by the service; None before the first run. See intel/deep.py."""
+    from intel import store
+    return store.get_state(conn, "deep") if store.has(conn, "intel_state") else None
+
+
+def setups(conn, mint, ts=None):
+    """Confirmed playbook setups the coin matches right now (or at ts): [{"kind": "good"|"bad", "text", "lift"}].
+    Uses the playbook found on older data and confirmed on newer data; the brain decides what to do with it."""
+    from intel import deep
+    book = (deep_analysis(conn) or {}).get("playbook")
+    f = features_at("coin", mint, ts, conn)["features"] if ts else (latest(conn, "coin", mint) or {}).get("features")
+    if not f:
+        f = features_at("coin", mint, __import__("time").time(), conn)["features"]
+    return [{"kind": k, "text": t, "lift": lift} for k, t, lift in deep.matching(f, book)]

@@ -67,6 +67,18 @@ Je Coin und Stunde zählt eine Stichprobe. Je Merkmal: Spearman-Korrelation mit 
 **Klar** bei |z| ≥ 2 und ≥ 40 Stichproben je Fünftel. Das Gehirn nimmt nur Merkmale auf, die zusätzlich im
 eigenen Walk-forward-Test nach Kosten wirken.
 
+## Tiefe Analyse (`intel.deep_analysis`, alle 30 min, `intel/deep.py`)
+
+- **Ereignis-Studie**: Kurs nach jedem Ticker-Ereignis (5/15/60 min, Hoch, Absturz), gleiche Art am gleichen Coin
+  binnen 30 min zählt einmal, z-Test der Pumprate gegen die Basis.
+- **Robustheit je Merkmal**: Rang-Korrelation gesamt, in älterer und neuerer Hälfte, je Marktphase, partielle
+  Korrelation ohne Market Cap, Alter und Liquidität; q-Werte nach Benjamini-Hochberg. Urteil `robust` /
+  `nur Größe/Alter` / `instabil` / `kein Effekt`.
+- **Redundanz**: Merkmalspaare mit |Spearman| ≥ 0,8.
+- **Playbook**: 33 Trader-Situationen (`deep.CONDITIONS`) und ihre Paare, gefunden auf den älteren 2/3 der
+  Stichproben (BH q ≤ 10 %), `confirmed` nur wenn das neueste Drittel die Richtung bestätigt (≥ 15 Treffer).
+  `intel.setups(conn, mint)` gibt die bestätigten Setups zurück, die ein Coin gerade erfüllt.
+
 ## Kosten
 
 Eine Runde pro Minute, Coins alle 5 min (≤ 150), Wallets stündlich (≤ 400), jeweils ein paar Sekunden CPU.

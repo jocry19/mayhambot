@@ -107,6 +107,77 @@ function Evaluation({ ev }) {
   );
 }
 
+function Setups({ s }) {
+  if (!s?.length) return null;
+  return <span className="row" style={{ gap: 4, flexWrap: "wrap", marginTop: 3 }}>{s.map(([k, t, lift], i) => (
+    <span key={i} className={`badge ${k === "good" ? "accent" : "bad"}`} title={`Bestätigtes Setup aus dem Playbook · ${n(lift, 1)}x Basis-Pumprate`}>▶ {t}</span>))}</span>;
+}
+
+function EventStudy({ rows }) {
+  return (
+    <Table rows={rows || []} rowKey={(r) => r.kind} empty="Ergebnisse kommen, sobald Ereignisse eine Stunde alt sind" cols={[
+      { k: "label", l: "Ereignis", fmt: (r) => <span className={`badge ${TONE[r.tone] || ""}`}>{r.label}</span> },
+      { k: "n", l: "Anzahl", r: true, fmt: (r) => n(r.n) },
+      { k: "med_r5", l: "Median 5 min", r: true, fmt: (r) => <span className={sign(r.med_r5)}>{pctSigned(r.med_r5)}</span> },
+      { k: "med_r15", l: "15 min", r: true, fmt: (r) => <span className={sign(r.med_r15)}>{pctSigned(r.med_r15)}</span> },
+      { k: "med_r60", l: "60 min", r: true, fmt: (r) => <span className={sign(r.med_r60)}>{pctSigned(r.med_r60)}</span> },
+      { k: "med_max", l: "Median Hoch", r: true, fmt: (r) => pctSigned(r.med_max) },
+      { k: "hit_rate", l: "Pumps +50 %", r: true, fmt: (r) => pct(r.hit_rate, 1) },
+      { k: "crash_rate", l: "Abstürze −50 %", r: true, fmt: (r) => pct(r.crash_rate, 1) },
+      { k: "clear", l: "", sort: false, fmt: (r) => (r.clear ? <span className={`badge ${r.z > 0 ? "good" : "bad"}`}>{r.z > 0 ? "besser" : "schlechter"} als Basis</span> : <span className="dim">noch offen</span>) },
+    ]} />
+  );
+}
+
+function Playbook({ pb }) {
+  if (!pb) return <Empty>–</Empty>;
+  if (!pb.good?.length && !pb.bad?.length) return <Empty>{pb.note || `${n(pb.tested)} Setups geprüft, noch keins sicher genug`}</Empty>;
+  const cols = [
+    { k: "text", l: "Setup", fmt: (r) => <span className="b">{r.text}</span> },
+    { k: "confirmed", l: "", sort: (r) => (r.confirmed ? 1 : 0), fmt: (r) => (r.confirmed ? <span className="badge good">bestätigt</span> : <span className="badge">nur gefunden</span>) },
+    { k: "found", l: "Gefunden (älter)", r: true, sort: (r) => r.found.hit, fmt: (r) => `${pct(r.found.hit, 1)} · ${n(r.found.n)}×` },
+    { k: "lift", l: "ggü. Basis", r: true, fmt: (r) => `${n(r.lift, 1)}x` },
+    { k: "check", l: "Prüfung (neuer)", r: true, sort: (r) => r.check?.hit, fmt: (r) => (r.check ? `${pct(r.check.hit, 1)} · ${n(r.check.n)}×` : "–") },
+    { k: "crash", l: "Abstürze", r: true, sort: (r) => r.found.crash, fmt: (r) => pct(r.found.crash, 0) },
+  ];
+  return (
+    <div className="col" style={{ gap: 8 }}>
+      <div className="t2" style={{ padding: "0 14px" }}>
+        {n(pb.tested)} Setups aus {n(Object.keys(pb.conditions || {}).length || 33)} Trader-Situationen und ihren Paaren, gefunden auf den älteren {n(pb.n_found)} Stichproben
+        (Basis {pct(pb.base_found, 1)} Pumps), geprüft auf den neuesten {n(pb.n_check)} (Basis {pct(pb.base_check, 1)}). Mehrfach-Tests korrigiert (Benjamini-Hochberg).
+      </div>
+      <div className="b" style={{ padding: "0 14px" }}>Kaufen-Setups</div>
+      <Table rows={pb.good} rowKey={(r) => r.text} empty="noch keins" cols={cols} />
+      <div className="b" style={{ padding: "0 14px" }}>Finger weg</div>
+      <Table rows={pb.bad} rowKey={(r) => r.text} empty="noch keins" cols={cols} />
+    </div>
+  );
+}
+
+function Robustness({ dp }) {
+  const rows = (dp?.robustness || []).filter((r) => r.verdict !== "kein Effekt");
+  const V = { robust: "good", "nur Größe/Alter": "warn", instabil: "" };
+  return (
+    <div className="col" style={{ gap: 8 }}>
+      <div className="t2" style={{ padding: "0 14px" }}>Robust heißt: nach Korrektur für viele Tests signifikant (q ≤ 5 %), gleiche Richtung in älterer und neuerer Hälfte, und auch dann wirksam, wenn man Market Cap, Alter und Liquidität herausrechnet.</div>
+      <Table rows={rows} rowKey={(r) => r.feature} empty="Noch kein Merkmal mit Effekt" cols={[
+        { k: "label", l: "Merkmal", fmt: (r) => <span><span className="b">{r.label}</span> <span className="dim">{r.group_label}</span></span> },
+        { k: "verdict", l: "Urteil", fmt: (r) => <span className={`badge ${V[r.verdict] || ""}`}>{r.verdict}</span> },
+        { k: "ic", l: "Korrelation", r: true, fmt: (r) => <span className={sign(r.ic)}>{n(r.ic, 3)}</span> },
+        { k: "ic_old", l: "älter / neuer", r: true, sort: false, fmt: (r) => `${n(r.ic_old, 3)} / ${n(r.ic_new, 3)}` },
+        { k: "partial_ic", l: "ohne Größe/Alter", r: true, fmt: (r) => n(r.partial_ic, 3) },
+        { k: "by_phase", l: "je Marktphase", sort: false, fmt: (r) => Object.values(r.by_phase || {}).map((p) => `${p.label} ${n(p.ic, 2)}`).join(" · ") || "–" },
+        { k: "q", l: "q", r: true, fmt: (r) => pct(r.q, 1) },
+      ]} />
+      {dp?.redundancy?.length ? (
+        <div style={{ padding: "0 14px 10px" }} className="t2">
+          <b>Messen dasselbe:</b> {dp.redundancy.slice(0, 12).map((x) => `${x.a_label} ≈ ${x.b_label} (${n(x.rho, 2)})`).join(" · ")}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export default function Zentrale() {
   const { data: d, error } = usePoll("/api/intel", 15000);
   const [view, setView] = useState("all");
@@ -147,7 +218,7 @@ export default function Zentrale() {
           actions={<Seg value={view} onChange={setView} options={[["all", "Alle"], ["smart", "Smart Money"], ["bad", "Warnungen"]]} />} flush>
           <Table rows={coins} rowKey={(r) => r.mint} expand={(r) => <Dossier mint={r.mint} />} tall cols={[
             { k: "symbol", l: "Coin", fmt: (r) => <span className="b" title={r.mint}>{r.symbol || short(r.mint)}</span> },
-            { k: "flags", l: "Lage", sort: (r) => r.flags.length, fmt: (r) => <Flags f={r.flags} /> },
+            { k: "flags", l: "Lage", sort: (r) => r.flags.length + 3 * (r.setups?.length || 0), fmt: (r) => <span><Flags f={r.flags} /><Setups s={r.setups} /></span> },
             { k: "px_mcap", l: "MC", r: true, fmt: (r) => mc(r.px_mcap) },
             { k: "flow_smart_entities_60m", l: "Smart-Personen", r: true, title: "netto kaufend, 60 min", fmt: (r) => n(r.flow_smart_entities_60m) },
             { k: "flow_smart_net_usd_60m", l: "Smart netto", r: true, fmt: (r) => <span className={sign(r.flow_smart_net_usd_60m)}>{usdSigned(r.flow_smart_net_usd_60m)}</span> },
@@ -206,6 +277,19 @@ export default function Zentrale() {
           { k: "w_latency_median_s", l: "Verspätung", r: true, fmt: (r) => fmtU("s", r.w_latency_median_s) },
         ]} />
       </Card>
+
+      <Card title="Playbook: Setups wie ein Trader" sub="Welche Situationen nachweislich öfter pumpen oder abstürzen: gefunden auf älteren Daten, bestätigt auf neueren (walk-forward). Bestätigte Setups stehen im Lagebild am Coin." flush>
+        <Playbook pb={d.deep?.playbook && { ...d.deep.playbook, conditions: d.deep.conditions }} />
+      </Card>
+
+      <div className="grid g2">
+        <Card title="Was nach Ereignissen passiert" sub="Ereignis-Studie: Kurs nach 5, 15 und 60 min, Hoch und Absturz in der Stunde danach, verglichen mit der Basis-Pumprate" flush>
+          <EventStudy rows={d.deep?.events} />
+        </Card>
+        <Card title="Robustheit und Redundanz" sub="Welche Merkmale wirklich und dauerhaft etwas sagen, und welche dasselbe messen" flush>
+          <Robustness dp={d.deep} />
+        </Card>
+      </div>
 
       <Card title="Taugt das? Messung je Merkmal" sub="Jeder Stand bekommt eine Stunde später sein echtes Ergebnis (Höchststand, Absturz); je Coin und Stunde zählt eine Stichprobe" flush>
         <Evaluation ev={evs} />
