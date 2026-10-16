@@ -300,6 +300,7 @@ def test_warm_start_from_copytrade_replays(conn, s):
     model = Brain(len(PLANS))
     assert learner.warm_start(conn, model, s, now=started + 10) == 40
     assert learner.warm_start(conn, model, s, now=started + 20) == 0  # never twice
+    assert learner.warm_start(conn, Brain(len(PLANS)), s, now=started + 30) == 40  # model file lost: relearn
     good = model.predict(tokens("whale", {"tier": "ultra"}))[NAMES.index(BASE)][0]
     bad_ = model.predict(tokens("whale", {"tier": "none"}))[NAMES.index(BASE)][0]
     assert good > 0 > bad_

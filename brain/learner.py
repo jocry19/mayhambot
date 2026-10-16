@@ -82,6 +82,10 @@ def warm_start(conn, model, s, now: float | None = None, limit: int = 5000) -> i
         started = int(now)
         store.put(conn, "started_at", started)
     cur = store.get(conn, "prior_cursor", -1)
+    if model.n == 0 and model.d <= 1 and cur != -1:  # model file lost or reset: the prior knowledge is relearned
+        cur = -1
+        store.put(conn, "prior_check", {})
+        store.put(conn, "prior_rows", 0)
     rows = conn.execute(
         """SELECT e.kind, e.ref, e.ts, e.gains, e.features, e.created_at FROM ct_evals e
            WHERE e.kind IN ('whale_buy','signal') AND e.grid_version=? AND e.gains!='[]' AND e.created_at>?
