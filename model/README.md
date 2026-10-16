@@ -70,7 +70,11 @@ python -m model retrain --loop     # every MODEL_RETRAIN_HOURS (default 6)
 python -m model service            # research discovery + retrain loop together (one long-running process)
 python -m model tiers [--tier ultra] | python -m model score <MINT> | python -m model versions
 python -m research discover [--loop]   # wallet discovery at scale (see research/README.md)
+python -m research discover --shard 1/3 --db /tmp/shard1.db   # parallel runner (cloud), own DB
+python -m research merge /tmp/shard1.db                        # merge a runner DB into the app DB
 python -m research report              # latest research report as Markdown
+# seeding: research/seed_wallets.txt or data/seed_wallets.txt ("<address> [label] # source"),
+# Birdeye top traders of fresh pumps when BIRDEYE_API_KEY is set
 ```
 Each retrain stores a new row in `model_versions` (weights, metrics, tier counts) and marks it active,
 so the dashboard can show how the model evolves. Walk-forward: events are split by time, every fold

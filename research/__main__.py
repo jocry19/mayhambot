@@ -10,6 +10,10 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("discover", parents=[common], help="find and backfill good wallets (early buyers of pumped coins, top traders)")
     d.add_argument("--loop", action="store_true")
+    d.add_argument("--shard", default="0/1", help="i/n: this runner's share of coins and wallets (parallel runners)")
+    d.add_argument("--db", help="write to this DB instead of the app DB (for cloud runners; merge later)")
+    mg = sub.add_parser("merge", parents=[common], help="merge a runner DB (trades, candles, research tables) into the app DB")
+    mg.add_argument("path")
     sub.add_parser("report", parents=[common], help="print the latest research report")
     sub.add_parser("selftest", parents=[common], help="run the whole pipeline on a synthetic market (no network)")
     a = ap.parse_args()
@@ -17,10 +21,16 @@ def main():
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     if a.cmd == "discover":
         from research import discovery
+        from research.store import connect
+        discovery.set_shard(*a.shard.split("/"))
+        conn = connect(a.db) if a.db else None
         if a.loop:
-            discovery.loop()
+            discovery.loop(conn)
         else:
-            print(discovery.run_once())
+            print(discovery.run_once(conn))
+    elif a.cmd == "merge":
+        from research.store import connect, merge
+        print(merge(connect(), a.path))
     elif a.cmd == "report":
         from research.store import connect
         r = connect().execute("SELECT markdown FROM research_reports ORDER BY id DESC LIMIT 1").fetchone()

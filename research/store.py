@@ -99,3 +99,30 @@ def save_report(conn, title, markdown, data, version=None):
                        (int(time.time()), version, title, markdown, json.dumps(data, default=float)))
     conn.commit()
     return cur.lastrowid
+
+
+MERGE_TABLES = ("trades", "token_prices", "research_candles", "research_tokens", "research_wallets")
+
+
+def merge(conn, path):
+    """Copy rows from a runner DB (e.g. a cloud shard) into this DB; existing rows win. Short transactions."""
+    src = sqlite3.connect(path)
+    out = {}
+    for t in MERGE_TABLES + ("tokens", "wallets"):
+        try:
+            cols = [r[1] for r in src.execute(f"PRAGMA table_info({t})")]
+        except sqlite3.DatabaseError:
+            continue
+        if not cols:
+            continue
+        mine = {r[1] for r in conn.execute(f"PRAGMA table_info({t})")}
+        cols = [c for c in cols if c in mine]
+        rows = src.execute(f"SELECT {','.join(cols)} FROM {t}").fetchall()
+        for i in range(0, len(rows), 5000):
+            chunk = rows[i:i + 5000]
+            retry(lambda: (conn.executemany(
+                f"INSERT OR IGNORE INTO {t}({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", chunk),
+                conn.commit()), conn=conn)
+        out[t] = len(rows)
+    src.close()
+    return out

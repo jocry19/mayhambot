@@ -11,16 +11,30 @@
 """
 import logging
 import time
+import zlib
 from collections import Counter
 
 from core import db
 from core.models import Token
 from core.sources import market, wallet_source
-from research import sources
+from research import seeds, sources
 from research.config import rsettings
 from research.store import add_research_wallets, connect, retry, store_candles, upsert_research_token
 
 log = logging.getLogger("research.discovery")
+
+
+SHARD = (0, 1)  # (index, count): several runners split coins and wallets by address hash
+
+
+def set_shard(i, n):
+    global SHARD
+    SHARD = (int(i), max(1, int(n)))
+
+
+def _mine(key):
+    i, n = SHARD
+    return n == 1 or zlib.crc32(key.encode()) % n == i
 
 
 class Budget:
@@ -98,8 +112,13 @@ def run_once(conn=None):
     max_age = rsettings.max_token_age_days * 86400
     young = [p for p in pools if p["created_at"] and now - p["created_at"] <= max_age and p["mint"] not in done]
     thr = (rsettings.pumped_multiple - 1) * 100
-    pumped = sorted((p for p in young if max(p["ch_h24"], p["ch_h6"]) >= thr), key=lambda p: -max(p["ch_h24"], p["ch_h6"]))
+    pumped = sorted((p for p in young if max(p["ch_h24"], p["ch_h6"]) >= thr),
+                    key=lambda p: -max(p["ch_h24"], p["ch_h6"]) / (1 + (now - p["created_at"]) / 86400))
+    pumped = [p for p in pumped if _mine(p["mint"])]
     calm = [p for p in young if max(p["ch_h24"], p["ch_h6"]) < 30 and p["liquidity"] >= 5000][:3]
+    calm = [p for p in calm if _mine(p["mint"])]
+    summary["seeded_file"] = seeds.from_files(conn)
+    summary["seeded_birdeye"] = seeds.birdeye_top_traders(conn, [p["mint"] for p in pumped[:rsettings.early_tokens_per_run]])
     for p, is_pump in [(p, True) for p in pumped[:rsettings.early_tokens_per_run]] + [(p, False) for p in calm]:
         age = now - p["created_at"]
         cs = _candles(conn, p["mint"], p["pool"], age, budget)
@@ -146,7 +165,7 @@ def run_once(conn=None):
     due = [r[0] for r in conn.execute(
         """SELECT address FROM research_wallets WHERE backfilled_at < ? ORDER BY (backfilled_at = 0) DESC, priority DESC
            LIMIT ?""", (now - int(rsettings.rebackfill_hours * 3600), rsettings.wallets_per_run * 2))
-        if r[0] not in bots][:rsettings.wallets_per_run]
+        if r[0] not in bots and _mine(r[0])][:rsettings.wallets_per_run]
     new_mints = Counter()
     for w in due:
         time.sleep(rsettings.pause_s)
@@ -160,12 +179,12 @@ def run_once(conn=None):
     # candles for coins those wallets traded (so entries/outcomes can be measured)
     have = {r[0] for r in conn.execute("SELECT DISTINCT mint FROM research_candles")}
     recent_tried = {r[0] for r in conn.execute("SELECT mint FROM research_tokens WHERE researched_at > ?", (now - 86400,))}
-    need = [m for m, _ in new_mints.most_common() if m not in have and m not in recent_tried]
+    need = [m for m, _ in new_mints.most_common() if m not in have and m not in recent_tried and _mine(m)]
     pending = [r[0] for r in conn.execute(
         """SELECT t.mint FROM trades t LEFT JOIN research_candles c ON c.mint = t.mint
            JOIN research_wallets w ON w.address = t.wallet
            WHERE c.mint IS NULL GROUP BY t.mint ORDER BY COUNT(*) DESC LIMIT 200""")]
-    need += [m for m in pending if m not in need and m not in recent_tried]
+    need += [m for m in pending if m not in need and m not in recent_tried and _mine(m)]
     infos = {t.mint: t for t in market.token_info(need[:150])} if need else {}
     retry(lambda: db.upsert_tokens(conn, list(infos.values()), tracked=False))
     for m in need:
@@ -183,10 +202,10 @@ def run_once(conn=None):
     return dict(summary)
 
 
-def loop():
+def loop(conn=None):
     while True:
         try:
-            run_once()
+            run_once(conn)
         except Exception:  # noqa: BLE001
             log.exception("discovery run failed")
         time.sleep(rsettings.discover_every_min * 60)

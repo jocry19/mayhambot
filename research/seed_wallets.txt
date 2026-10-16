@@ -1,0 +1,3 @@
+# Known good wallets to research first: one per line, "<address> [label] # source"
+# e.g. copied from the GMGN / Birdeye / Cielo top-trader pages of coins that pumped.
+# They are only candidates: the model still tiers them purely on their own measured history.
