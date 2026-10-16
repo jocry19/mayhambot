@@ -3,6 +3,7 @@ automated requests (403/Cloudflare) it is skipped and reported, never worked aro
 
   github_lists   open-source wallet lists on GitHub (kol-quest: GMGN smart money + KOL wallets, KolScan
                  leaderboard; more via RESEARCH_SEED_URLS)
+  gmgn_openapi   GMGN official OpenAPI (smart money, KOL, top traders of fresh pumps), only with GMGN_API_KEY
   gmgn_rank      GMGN public wallet leaderboard (7d / 30d PnL)
   pumpfun_coins  pump.fun coins with the highest market cap -> their earliest buyers via RPC (core early_buyers)
 Wallets go to data/seed_wallets.txt with provenance; coins found go through early-buyer discovery right away.
@@ -94,6 +95,52 @@ def github_lists(urls=None):
     return rows, status
 
 
+GMGN_API = "https://openapi.gmgn.ai"
+
+
+def _gmgn_api(path, **query):
+    """Read-only GMGN OpenAPI call (official, same routes as GMGN's gmgn-cli). Needs only GMGN_API_KEY from .env;
+    the private key is never used (it is only needed for trading routes, which we do not call)."""
+    import uuid
+    key = os.getenv("GMGN_API_KEY", "")
+    if not key:
+        raise RuntimeError("no GMGN_API_KEY")
+    time.sleep(1.4)  # free plan: leaky bucket 5/5, back-to-back calls get banned for 5 min
+    q = dict(query, timestamp=int(time.time()), client_id=str(uuid.uuid4()))
+    j = get_json(GMGN_API + path, params=q, headers={"X-APIKEY": key, "User-Agent": "mayhambot/1.0"}, retries=1)
+    if isinstance(j, dict) and j.get("code") not in (0, None):
+        raise RuntimeError(f"gmgn {path}: code {j.get('code')} {str(j.get('msg') or j.get('message'))[:60]}")
+    return (j or {}).get("data", j)
+
+
+def gmgn_openapi(pumped_mints=()):
+    """Smart money + KOL wallets and the top traders of fresh pumps from GMGN's OpenAPI (needs GMGN_API_KEY)."""
+    rows, status = [], {}
+    if not os.getenv("GMGN_API_KEY"):
+        return rows, {"gmgn_openapi": "skipped (no GMGN_API_KEY)"}
+    day = time.strftime("%Y-%m-%d")
+    for name, path in (("smartmoney", "/v1/user/smartmoney"), ("kol", "/v1/user/kol")):
+        try:
+            d = _gmgn_api(path, chain="sol", limit=200)
+            ws = {a: lab for a, lab, _ in extract_wallets(d)}
+            rows += [(a, lab or name, f"gmgn openapi {name} {day}") for a, lab in ws.items()]
+            status[name] = f"{len(ws)} wallets"
+        except Exception as e:  # noqa: BLE001
+            status[name] = f"failed ({str(e)[:80]})"
+    n = 0
+    for mint in list(pumped_mints)[:10]:
+        try:
+            d = _gmgn_api("/v1/market/token_top_traders", chain="sol", address=mint, order_by="profit", limit=50)
+        except Exception as e:  # noqa: BLE001
+            status["top_traders"] = f"failed ({str(e)[:80]})"
+            break
+        ws = {a for a, _, _ in extract_wallets(d)} - {mint}
+        rows += [(a, "top_trader", f"gmgn openapi top_traders {mint[:8]} {day}") for a in ws]
+        n += len(ws)
+    status.setdefault("top_traders", f"{n} wallets")
+    return rows, status
+
+
 def gmgn_rank(periods=("7d", "30d"), limit=100):
     rows, status = [], {}
     for per in periods:
@@ -136,6 +183,12 @@ def run(conn, early_coins=10):
     summary["github_lists"] = st
     add_research_wallets(conn, [a for a, _, _ in rows], "open_source_list", 60.0)
     summary["github_new_in_seed_file"] = _append_seeds(rows)
+    fresh_pumps = [r[0] for r in conn.execute(
+        "SELECT mint FROM research_tokens WHERE pumped=1 ORDER BY early_fetched_at DESC LIMIT 10")]
+    rows, st = gmgn_openapi(fresh_pumps)
+    summary["gmgn_openapi"] = st
+    add_research_wallets(conn, [a for a, _, _ in rows], "gmgn_openapi", 85.0)
+    summary["gmgn_openapi_new_in_seed_file"] = _append_seeds(rows)
     rows, st = gmgn_rank()
     summary["gmgn"] = st
     for a, lab, src in rows:
