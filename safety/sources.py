@@ -48,6 +48,7 @@ class Fetcher:
         self.rpc_calls = defaultdict(int)
         self.rpc_url = rpc_url or core_settings.rpc_url
         self.priority = priority
+        self.lane = "live" if priority else "bulk"   # core.http lane on the shared public-RPC window
 
     def _spend(self, n=1):
         if self.calls + n > self.max_calls:
@@ -83,7 +84,7 @@ class Fetcher:
                 continue
             self.rpc_calls[host] += 1
             try:
-                j = http.post_json(url, payload, retries=2)
+                j = http.post_json(url, payload, retries=2, priority=self.lane)  # RPC method is read from payload
             except getattr(http, "CreditsExhausted", ()):  # Helius monthly/daily credits used: next endpoint
                 exhausted = True
                 continue
@@ -104,7 +105,7 @@ class Fetcher:
         _space(self.cfg.jupiter_url.split("/")[2])
         headers = {"x-api-key": self.cfg.jupiter_api_key} if self.cfg.jupiter_api_key else None
         try:
-            return http.get_json(f"{self.cfg.jupiter_url}/swap/v1/quote", retries=1, headers=headers, params={
+            return http.get_json(f"{self.cfg.jupiter_url}/swap/v1/quote", priority=self.lane, retries=1, headers=headers, params={
                 "inputMint": input_mint, "outputMint": output_mint, "amount": int(amount_raw),
                 "slippageBps": slippage_bps})
         except Exception as e:  # noqa: BLE001 - 400 "no route" is an answer, not an outage
@@ -116,11 +117,11 @@ class Fetcher:
     # ---- DexScreener pairs of a token (keyless) ----
     def dexscreener_pairs(self, mint):
         self._spend()
-        d = http.get_json(f"{DEXSCREENER}/tokens/v1/solana/{mint}", retries=2)
+        d = http.get_json(f"{DEXSCREENER}/tokens/v1/solana/{mint}", priority=self.lane, retries=2)
         return d if isinstance(d, list) else (d or {}).get("pairs") or []
 
     # ---- RugCheck full report (keyless cross-check) ----
     def rugcheck(self, mint):
         self._spend()
         _space("api.rugcheck.xyz")
-        return http.get_json(f"{RUGCHECK}/tokens/{mint}/report", retries=1, timeout=25)
+        return http.get_json(f"{RUGCHECK}/tokens/{mint}/report", priority=self.lane, retries=1, timeout=25)
