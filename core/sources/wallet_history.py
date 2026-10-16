@@ -116,9 +116,16 @@ def early_buyers(mint, max_pages=8, n_tx=120):
     return out
 
 
+def too_many_failed(failed, n):
+    """A history with this many failed getTransaction calls is incomplete: scoring it would judge the wallet
+    on a random part of its trades, and marking it backfilled would keep it that way for hours."""
+    return failed > max(2, 0.2 * n)
+
+
 def _rpc_wallet_trades(wallet, limit, url=None):
     sigs = _rpc("getSignaturesForAddress", [wallet, {"limit": limit}], url) or []
     out = []
+    failed = 0
     for s in sigs:
         if s.get("err"):
             continue
@@ -126,8 +133,11 @@ def _rpc_wallet_trades(wallet, limit, url=None):
             tx = _get_tx(s["signature"], url)
         except Exception as e:  # noqa: BLE001
             log.debug("getTransaction %s failed: %s", s["signature"], e)
+            failed += 1
             continue
         out.extend(parse_rpc_tx(tx, wallet, s["signature"]))
+    if too_many_failed(failed, len(sigs)):
+        raise SkipForNow(f"{failed}/{len(sigs)} getTransaction failed")
     return out
 
 
@@ -199,6 +209,9 @@ def wallet_trades(wallet, limit=60, enhanced_fallback=True, helius_rpc=False) ->
             log.info("wallet history %s via Helius RPC failed (%s), public RPC instead", wallet[:6], e)
     try:
         return _rpc_wallet_trades(wallet, limit, PUBLIC_RPC)
+    except SkipForNow as e:
+        log.info("wallet history %s: incomplete (%s), skipped this cycle", wallet[:6], e)
+        raise
     except Exception as e:  # noqa: BLE001
         if str(e).startswith("429"):
             log.info("wallet history %s: public RPC rate limited, skipped this cycle", wallet[:6])
@@ -218,7 +231,9 @@ def wallet_trades(wallet, limit=60, enhanced_fallback=True, helius_rpc=False) ->
         raise
     except Exception as e:  # noqa: BLE001 - incl. core.http.CreditsExhausted
         log.warning("wallet history %s failed: %s", wallet[:6], e)
-    return []
+        raise SkipForNow(str(e)) from None
+    # every source failed: an empty list would mark the wallet backfilled with no history
+    raise SkipForNow("no history source left")
 
 
 class SkipForNow(Exception):
