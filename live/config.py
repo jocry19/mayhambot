@@ -76,6 +76,8 @@ class LiveConfig:
     max_price_impact: float = field(default_factory=lambda: _f("LIVE_MAX_PRICE_IMPACT", 0.03))
     # Jupiter quote vs DexScreener price: more apart than this = one of the two is stale or wrong, no buy
     max_quote_deviation: float = field(default_factory=lambda: _f("LIVE_MAX_QUOTE_DEVIATION", 0.25))
+    max_hidden_tax_pct: float = field(default_factory=lambda: _f("LIVE_MAX_HIDDEN_TAX_PCT", 3))
+    max_wash_share: float = field(default_factory=lambda: _f("LIVE_MAX_WASH_SHARE", 0.2))
     max_snapshot_age_s: float = field(default_factory=lambda: _f("LIVE_MAX_SNAPSHOT_AGE_S", 90))
     buy_slippage_bps: int = field(default_factory=lambda: int(_f("LIVE_BUY_SLIPPAGE_BPS", 300)))
     # sells must get out (stop loss): retries double the slippage up to the max

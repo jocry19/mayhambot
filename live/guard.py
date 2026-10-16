@@ -101,3 +101,33 @@ def check_buy(conn, cfg: LiveConfig, mode: str, size_sol: float, balance_sol: fl
         if size < 0.01:
             return 0, f"Guthaben {balance_sol:.3f} SOL, Reserve {cfg.reserve_sol:g} SOL für Gebühren"
     return round(size, 9), None
+
+
+def check_coin(conn, cfg: LiveConfig, mint: str, assess=None) -> str | None:
+    """Rug check for every live/dry buy, whoever asked for it (strategy, dashboard, terminal): blocked, high/critical
+    or unchecked, sell simulation without a clean result, hidden sell tax or wash volume over the live limits.
+    Stricter than the paper rules on purpose: 10/2026 a manual buy with 11 % hidden tax and 37 % wash lost 38 %."""
+    try:
+        if assess is None:
+            import safety  # type: ignore
+
+            assess = safety.assess
+        a = assess(mint, conn, deep=False)
+    except Exception as e:  # noqa: BLE001
+        return f"Rug-Prüfung nicht möglich ({type(e).__name__})"
+    reasons = "; ".join(r.get("text", "") for r in (a.reasons or [])[:2])
+    if a.blocked:
+        return f"Rug-Schutz blockiert ({reasons or a.level})"
+    if a.level in ("high", "critical", "unchecked"):
+        return f"Rug-Risiko {a.level} ({reasons or 'keine Prüfung'})"
+    checks = a.checks or {}
+    sim = checks.get("sell_sim") or {}
+    data = sim.get("data") or {}
+    if sim.get("status") != "ok" or sim.get("hard"):
+        return "Verkauf nicht simuliert oder nicht möglich (kein Echtgeld-Kauf ohne Verkaufsweg)"
+    if float(data.get("hidden_tax_pct") or 0) >= cfg.max_hidden_tax_pct:
+        return f"versteckte Verkaufssteuer {float(data['hidden_tax_pct']):.0f} %"
+    wash = (checks.get("wash") or {}).get("data") or {}
+    if float(wash.get("roundtrip_share") or 0) >= cfg.max_wash_share:
+        return f"Wash-Volumen {100 * float(wash['roundtrip_share']):.0f} %"
+    return None

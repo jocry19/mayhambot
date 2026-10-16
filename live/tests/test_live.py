@@ -131,6 +131,16 @@ class FakeRpc:
                          "transaction": {"message": {"accountKeys": [{"pubkey": self.owner}]}}}
 
 
+class _A:
+    def __init__(self, level="low", blocked=False, tax=0.5, wash=0.05, sim="ok"):
+        self.level, self.blocked, self.reasons = level, blocked, []
+        self.checks = {"sell_sim": {"status": sim, "hard": False, "data": {"hidden_tax_pct": tax}},
+                       "wash": {"status": "ok", "data": {"roundtrip_share": wash}}}
+
+
+SAFE = _A()
+
+
 def snap(price_sol=1e-4, age=0):
     return market.PairSnapshot(MINT, "MEME", "pool", "pumpswap", 1e-5, price_sol, 80_000, 1e6, 5000, 30000,
                                10, 2, 120, 1.0, 5.0, int(time.time() * 1000) - 3600_000, time.time() - age)
@@ -151,6 +161,7 @@ def env(tmp_path, monkeypatch):
         ex = GuardedLiveExecutor(s, rpc, c or cfg(), kp if key else None, str(kp.pubkey()), dry, conn=conn, jup=jup,
                                  sleep=lambda x: None)
         store.put(conn, "heartbeat", int(time.time()))
+        ex.assess = lambda m, c, deep=False: SAFE
         return ex
     return s, conn, rpc, jup, make
 
@@ -410,3 +421,13 @@ def test_exit_value_from_quote(env):
     assert v and v[0] == pytest.approx(0.001)
     jup.fail_quote = True
     assert ex.exit_value(MINT, 1000.0, 6) is None
+
+
+def test_coin_check_blocks_red_flags_for_every_live_buy(env):
+    s, conn, rpc, jup, make = env
+    ex = make()
+    for a, word in ((_A(tax=11), "steuer"), (_A(wash=0.37), "Wash"), (_A(sim="unknown"), "Verkauf"),
+                    (_A(level="unchecked"), "unchecked"), (_A(blocked=True), "blockiert")):
+        ex.assess = lambda m, c, deep=False, a=a: a
+        f = ex.buy(MINT, 0.1, snap())
+        assert not f.ok and word in f.error and not rpc.sent

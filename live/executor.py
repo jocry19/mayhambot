@@ -36,7 +36,8 @@ class GuardedLiveExecutor(PaperExecutor):
     def __init__(self, settings: Settings, rpc, cfg: LiveConfig, keypair, pubkey: str, dry: bool, conn=None,
                  jup=jupiter, sleep=time.sleep, exit_only: str = ""):
         PaperExecutor.__init__(self, settings, rpc)
-        self.exit_only = exit_only  # reason: only sells of open real positions, no buys
+        self.exit_only = exit_only
+        self.assess = None  # safety.assess; tests inject their own  # reason: only sells of open real positions, no buys
         self.cfg = cfg
         self.keypair = keypair
         self.pubkey = pubkey
@@ -236,6 +237,7 @@ class GuardedLiveExecutor(PaperExecutor):
             except Exception as e:
                 return Fill(False, error=f"Guthaben nicht lesbar: {e}")
             size, why = guard.check_buy(self.conn, self.cfg, self.mode, size_sol, bal)
+            why = why or guard.check_coin(self.conn, self.cfg, mint, self.assess)
             if why:
                 store.event_safe(self.conn, f"[{self.mode}] Kauf {snap.symbol if snap else mint[:6]} blockiert: {why}")
                 return Fill(False, error=why)

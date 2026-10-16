@@ -9,6 +9,9 @@ Ausführung, harte Grenzen, Not-Aus, Go-Live-Prüfung. Ohne `LIVE_TRADING=true` 
    (3 in Folge setzt Not-Aus), Datenausfall, Live-Wächter läuft (nur Echtgeld), Go-Live-Prüfung bestanden
    (nur Echtgeld), max. offene Positionen, Einsatz-Obergrenze, Verlust 24 h (realisiert plus offene Verluste),
    Trading-Wallet nicht zu groß (Trennung vom Hauptvermögen), Reserve für Gebühren. Größe wird auf die Stufe gekappt.
+   Dazu für **jeden** Echtgeld-/Dry-Kauf (auch manuell aus Dashboard oder Terminal) die Rug-Prüfung: gesperrt,
+   Risiko hoch/kritisch/ungeprüft, Verkaufs-Simulation ohne sauberes Ergebnis, versteckte Steuer ≥ 3 %
+   (`LIVE_MAX_HIDDEN_TAX_PCT`) oder Wash-Volumen ≥ 20 % (`LIVE_MAX_WASH_SHARE`) = kein Kauf.
 2. Jupiter-Quote mit **unserer** Slippage (kein dynamicSlippage), Preiseinfluss ≤ 3 %, Quote-Preis höchstens 25 %
    neben dem DexScreener-Preis, Marktdaten nicht älter als 90 s.
 3. Swap-Transaktion mit Priority-Fee-Deckel (0,0003 SOL), lokal signiert.
