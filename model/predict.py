@@ -9,6 +9,10 @@ from research import data, events as ev
 from research.store import connect, ensure_schema
 
 
+class ModelNotTrained(RuntimeError):
+    """Raised by score_token before the first retrain; callers keep their own heuristic."""
+
+
 def active_version(conn):
     return conn.execute("SELECT * FROM model_versions WHERE active=1 ORDER BY id DESC LIMIT 1").fetchone()
 
@@ -34,6 +38,8 @@ def score_token(mint, now=None, conn=None, store=False, tiers=None):
     now = int(now or time.time())
     W = msettings.window_min * 60
     version, models = _models(conn)
+    if not version:
+        raise ModelNotTrained("no model version yet: run python -m model retrain")
     tiers = tiers if tiers is not None else tier_map(conn)
     ds = data.load(conn, since_ts=now - max(W, 3 * 3600), mints=[mint])
     tok = conn.execute("SELECT symbol, pair_created_at, price_usd, mcap_usd FROM tokens WHERE mint=?", (mint,)).fetchone()
@@ -128,7 +134,10 @@ def score_many(mints, conn=None, store=True, now=None):
     tiers = tier_map(conn)
     out = []
     for m in mints:
-        r = score_token(m, now=now, conn=conn, store=store, tiers=tiers)
+        try:
+            r = score_token(m, now=now, conn=conn, store=store, tiers=tiers)
+        except ModelNotTrained:
+            return []
         if r:
             out.append(r)
     return sorted(out, key=lambda r: -r["score"])

@@ -53,47 +53,43 @@ def _z(X, mean, std):
     return [[(r[j] - mean[j]) / std[j] for j in range(len(mean))] for r in X]
 
 
-def logistic_fit(X, y, l2=5.0, iters=400, lr=0.5, weights=None):
-    """L2-regularised logistic regression on standardized inputs (Newton-free, full-batch GD with
-    backtracking). Returns dict(bias, coef, mean, std) with coef per standard deviation."""
+def logistic_fit(X, y, l2=5.0, iters=25, weights=None):
+    """L2-regularised logistic regression on standardized inputs, fitted with Newton/IRLS.
+    Returns dict(bias, coef, mean, std) with coef per standard deviation."""
     mean, std = standardize_fit(X)
-    Z = _z(X, mean, std)
-    n, k = len(Z), len(mean)
+    Z = [[1.0] + r for r in _z(X, mean, std)]
+    n, k = len(Z), len(mean) + 1
     w = weights or [1.0] * n
     W = sum(w)
     pbar = min(0.99, max(0.01, sum(wi * yi for wi, yi in zip(w, y)) / W))
-    b = math.log(pbar / (1 - pbar))
-    c = [0.0] * k
-
-    def loss(b, c):
-        s = 0.0
-        for zi, yi, wi in zip(Z, y, w):
-            t = b + sum(cj * zj for cj, zj in zip(c, zi))
-            s += wi * (math.log1p(math.exp(-abs(t))) + max(t, 0) - yi * t)
-        return s / W + l2 * sum(cj * cj for cj in c) / (2 * max(W, 1))
-
-    cur = loss(b, c)
-    step = lr
+    beta = [math.log(pbar / (1 - pbar))] + [0.0] * (k - 1)
     for _ in range(iters):
-        gb, gc = 0.0, [0.0] * k
+        g = [0.0] * k
+        H = [[0.0] * k for _ in range(k)]
         for zi, yi, wi in zip(Z, y, w):
-            e = wi * (sigmoid(b + sum(cj * zj for cj, zj in zip(c, zi))) - yi)
-            gb += e
-            for j in range(k):
-                gc[j] += e * zi[j]
-        gb /= W
-        gc = [g / W + l2 * cj / max(W, 1) for g, cj in zip(gc, c)]
-        while step > 1e-6:
-            nb, nc = b - step * gb, [cj - step * g for cj, g in zip(c, gc)]
-            new = loss(nb, nc)
-            if new <= cur:
-                b, c, cur = nb, nc, new
-                step *= 1.3
-                break
-            step /= 2
-        if abs(gb) + sum(abs(g) for g in gc) < 1e-5 or step <= 1e-6:
+            p = sigmoid(sum(b * z for b, z in zip(beta, zi)))
+            e = wi * (p - yi)
+            v = wi * max(p * (1 - p), 1e-6)
+            for a in range(k):
+                za = zi[a]
+                if za == 0.0:
+                    continue
+                g[a] += e * za
+                vza = v * za
+                Ha = H[a]
+                for c in range(a, k):
+                    Ha[c] += vza * zi[c]
+        for a in range(k):
+            for c in range(a):
+                H[a][c] = H[c][a]
+        for a in range(1, k):  # no penalty on the bias
+            g[a] += l2 * beta[a]
+            H[a][a] += l2
+        step = _solve(H, g)
+        beta = [b - s for b, s in zip(beta, step)]
+        if max(abs(s) for s in step) < 1e-6:
             break
-    return dict(bias=b, coef=c, mean=mean, std=std)
+    return dict(bias=beta[0], coef=beta[1:], mean=mean, std=std)
 
 
 def logistic_predict(m, x):

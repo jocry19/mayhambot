@@ -12,10 +12,11 @@ from core.config import settings
 from research.config import rsettings
 from research.stats import median
 
-COMPONENTS = ("win", "early", "roi", "consistency", "timing", "influence", "rug_avoid")
+COMPONENTS = ("win", "early", "roi", "consistency", "timing", "lead", "influence", "rug_avoid")
 COMPONENT_LABELS = {
     "win": "Trefferquote", "early": "Frühe Einstiege (danach ≥2x)", "roi": "Rendite (ROI)",
-    "consistency": "Konstanz", "timing": "Einstieg bei niedriger Market Cap", "influence": "Einfluss (Follower)",
+    "consistency": "Konstanz", "timing": "Einstieg bei niedriger Market Cap",
+    "lead": "Kauft vor der Masse", "influence": "Einfluss (Follower)",
     "rug_avoid": "Rug-Vermeidung",
 }
 
@@ -42,8 +43,9 @@ def _positions(trades, cutoff):
 
 
 def _influence(ds, cutoff, win_s):
-    """(wallet, mint) -> (followers, follow_usd, lift_usd) for first buys whose window closed before cutoff
-    and where pool-wide data covers the window."""
+    """(wallet, mint) -> (followers, follow_usd, lift_usd, entry_rank) for first buys whose window closed
+    before cutoff and where pool-wide data covers the window. entry_rank: 0 = first buyer of the coin seen,
+    1 = last one (share of known buyers that came before this wallet)."""
     out = {}
     for mint, lst in ds.by_mint.items():
         if not ds.pool_ts.get(mint):
@@ -57,6 +59,7 @@ def _influence(ds, cutoff, win_s):
             first.setdefault(t.wallet, t.ts)
         firsts = sorted((ts, w) for w, ts in first.items() if w not in ds.bots)
         fts = [x[0] for x in firsts]
+        nfirst = max(1, len(firsts) - 1)
         for w, t0 in first.items():
             if t0 + win_s >= cutoff or w in ds.bots:
                 continue
@@ -68,7 +71,8 @@ def _influence(ds, cutoff, win_s):
             follow_usd = sum(pool[k].usd for k in range(a, b) if pool[k].wallet != w)
             c = bisect.bisect_left(pts, t0 - win_s)
             before_usd = sum(pool[k].usd for k in range(c, bisect.bisect_left(pts, t0)) if pool[k].wallet != w)
-            out[(w, mint)] = (followers, follow_usd, follow_usd - before_usd)
+            rank = bisect.bisect_left(fts, t0) / nfirst
+            out[(w, mint)] = (followers, follow_usd, follow_usd - before_usd, min(1.0, rank))
     return out
 
 
@@ -135,16 +139,18 @@ def summarize(P):
     med_lift = median([x[2] for x in inf]) if inf else None
     infl_raw = 1 - math.exp(-(med_f or 0) / 5)
     infl_c = (k * infl_raw + 3 * 0.3) / (k + 3)
+    med_rank = median([x[3] for x in inf]) if inf else None
+    lead = (k * (1 - med_rank) + 3 * 0.5) / (k + 3) if inf else 0.5
     mc = median([p["entry_mcap"] for p in P if p["entry_mcap"]])
     timing = min(1.0, max(0.0, 1 - (math.log10(mc) - 4) / 3)) if mc else 0.5
     comps = dict(
         win=(wins + 1) / (n + 2), early=(early + 0.5) / (n + 2), roi=0.5 + 0.5 * math.tanh(roi),
-        consistency=consistency, timing=timing, influence=infl_c, rug_avoid=1 - (rugs + 0.5) / (n + 2))
+        consistency=consistency, timing=timing, lead=lead, influence=infl_c, rug_avoid=1 - (rugs + 0.5) / (n + 2))
     return dict(
         n_tokens=n, win_rate=wins / n, early_rate=early / n, roi=roi,
         realized_pnl_usd=sum(p["realized"] for p in P), total_pnl_usd=total_pnl,
         median_entry_mcap=mc, median_min_to_2x=median([p["min_to_2x"] for p in P]),
-        influence_followers=med_f, influence_usd=med_usd, inflow_lift_usd=med_lift, influence_samples=k,
+        influence_followers=med_f, influence_usd=med_usd, inflow_lift_usd=med_lift, influence_samples=k, median_entry_rank=med_rank,
         consistency=consistency, rug_rate=rugs / n, components=comps,
         last_ts=max(p["ts"] for p in P))
 

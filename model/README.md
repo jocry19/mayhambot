@@ -29,6 +29,11 @@ Tier = first rule that matches (all configurable in `.env`, see `model/config.py
 | smart | `MODEL_SMART_MIN_SCORE` 60 | `MODEL_SMART_MIN_TOKENS` 4 | `MODEL_SMART_MIN_WINRATE` 0.35 | PnL > 0, rug rate ok |
 | good  | `MODEL_GOOD_MIN_SCORE` 48 | `MODEL_GOOD_MIN_TOKENS` 3 | `MODEL_GOOD_MIN_WINRATE` 0.25 | PnL > 0 |
 
+Rank caps: at most `MODEL_ULTRA_MAX` (40) Ultra and `MODEL_SMART_MAX` (150) Smart wallets, the best by score;
+the rest fall through to the next tier. Components: win rate, early entries (≥2x after entry), ROI, consistency
+(profit not from one hit, profitable in both halves of its history), timing (low entry market cap), lead
+(buys before most other buyers of a coin), influence (wallets following within 10 min), rug avoidance.
+
 Bots (core `is_bot`, or > `BOT_MAX_TRADES_PER_TOKEN` trades in a coin) never get a tier.
 
 ## Coin prediction — `model.predict`
@@ -46,6 +51,7 @@ score_token(mint, now=None, conn=None, store=False) -> dict
 #   "tiers": {"ultra": {"wallets", "net_sol"}, "smart": {...}, "good": {...}},
 #   "wallets": [{"address", "tier", "score", "net_sol", "first_ts"}]}
 # store=True appends the result to model_predictions (the coin page's signal history).
+# Returns None when the coin has no price yet; raises model.predict.ModelNotTrained before the first retrain.
 token_signal_history(mint, conn=None) -> list[dict]   # stored predictions for one coin, oldest first,
                                                       # with outcomes ret_15m/ret_1h/ret_6h/max_ret_1h/max_ret_6h
 update_outcomes(conn=None) -> int                     # fills outcomes of stored predictions

@@ -7,7 +7,7 @@ from core.config import settings
 from research.prices import PriceIndex
 from research.stats import median
 
-POOL_SOURCES = {"geckoterminal", "research_rpc", "test_pool"}  # pool-wide trade feeds (all wallets of a coin)
+POOL_SOURCES = {"geckoterminal", "rpc_early", "test_pool"}  # pool-wide trade feeds (all wallets of a coin)
 
 
 @dataclass

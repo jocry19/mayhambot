@@ -24,8 +24,8 @@ def _horizons():
 TIERS = ("ultra", "smart", "good")
 TIER_LABELS = {"ultra": "Ultra Smart", "smart": "Smart", "good": "Good"}
 
-PRIOR_WALLET_WEIGHTS = dict(win=0.20, early=0.20, roi=0.15, consistency=0.10, timing=0.10,
-                            influence=0.15, rug_avoid=0.10)
+PRIOR_WALLET_WEIGHTS = dict(win=0.17, early=0.17, roi=0.13, consistency=0.10, timing=0.08, lead=0.12,
+                            influence=0.13, rug_avoid=0.10)
 
 
 @dataclass
@@ -48,6 +48,10 @@ class ModelSettings:
                          _f("MODEL_GOOD_MIN_WINRATE", 0.25), _f("MODEL_GOOD_MAX_RUG_RATE", 0.5)),
     })
     horizons: list = field(default_factory=_horizons)          # [(name, seconds, pump threshold)]
+    # rank caps: only the best N per tier, the rest drops to the next tier (0 = no cap)
+    caps: dict = field(default_factory=lambda: {"ultra": int(_f("MODEL_ULTRA_MAX", 40)),
+                                                "smart": int(_f("MODEL_SMART_MAX", 150)),
+                                                "good": int(_f("MODEL_GOOD_MAX", 0))})
     window_min: int = int(_f("MODEL_WINDOW_MIN", 30))
     event_dedupe_min: int = int(_f("MODEL_EVENT_DEDUPE_MIN", 10))
     retrain_hours: float = _f("MODEL_RETRAIN_HOURS", 6)
@@ -57,7 +61,7 @@ class ModelSettings:
     l2: float = _f("MODEL_L2", 5.0)
 
     def rules_dict(self):
-        return {k: asdict(v) for k, v in self.rules.items()}
+        return {k: dict(asdict(v), max_wallets=self.caps.get(k, 0)) for k, v in self.rules.items()}
 
 
 msettings = ModelSettings()

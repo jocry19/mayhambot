@@ -13,9 +13,11 @@ def wallet_score(stats, weights=None):
     return round(100 * raw * math.sqrt(1 - math.exp(-stats["n_tokens"] / 4)), 1)
 
 
-def assign_tier(stats, score, rules=None):
+def assign_tier(stats, score, rules=None, skip=()):
     rules = rules or msettings.rules
     for tier in TIERS:
+        if tier in skip:
+            continue
         r = rules[tier]
         if isinstance(r, dict):
             r = type("R", (), r)
@@ -25,12 +27,19 @@ def assign_tier(stats, score, rules=None):
     return None
 
 
-def tier_all(stats_by_wallet, weights=None, rules=None):
-    """wallet -> (tier, score, stats). Includes untiered wallets with tier None."""
+def tier_all(stats_by_wallet, weights=None, rules=None, caps=None):
+    """wallet -> (tier, score, stats). Includes untiered wallets with tier None.
+    Caps keep only the best N wallets in a tier; the others fall through to the next tier's rule."""
+    caps = msettings.caps if caps is None else caps
+    scored = sorted(((w, s, wallet_score(s, weights)) for w, s in stats_by_wallet.items()), key=lambda x: -x[2])
+    used = {t: 0 for t in TIERS}
     out = {}
-    for w, s in stats_by_wallet.items():
-        sc = wallet_score(s, weights)
-        out[w] = (assign_tier(s, sc, rules), sc, s)
+    for w, s, sc in scored:
+        full = tuple(t for t in TIERS if caps.get(t) and used[t] >= caps[t])
+        tier = assign_tier(s, sc, rules, skip=full)
+        if tier:
+            used[tier] += 1
+        out[w] = (tier, sc, s)
     return out
 
 
