@@ -191,7 +191,9 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
         log(f"update pending: live trading on ({live}), {subject}")
         return _once(st, alert, f"live:{target}", f"⏸ Update {subject} wartet: {live}. "
                      "Einspielen von Hand mit `.venv/bin/python mayham.py update`.")
-    gap = ops.cfg("AUTO_UPDATE_MIN", 10) * 60
+    # launchd fires every 600 s counted from the previous start; without slack a deploy every 10 min would
+    # often see 599 s and wait a whole extra round
+    gap = ops.cfg("AUTO_UPDATE_MIN", 10) * 60 - 90
     if now - st.get("last_deploy", 0) < gap:
         return "warte (höchstens ein Deploy pro 10 min)"
 
