@@ -243,7 +243,7 @@ def wallet(address: str):
 
 @app.get("/api/copytrade")
 def copytrade(mode: str = "paper", strategy: str | None = None):
-    if mode not in ("paper", "dry", "live"):
+    if mode not in ("paper", "explore", "dry", "live"):
         raise HTTPException(400, "mode paper|live")
     return ok(cache.get(("ct", mode, strategy), 4, lambda: q.copytrade(read_conn(), mode, strategy or None)))
 

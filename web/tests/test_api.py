@@ -623,3 +623,13 @@ def test_live_card_and_kill_switch(demo, monkeypatch):
     assert c.post("/api/live/unkill", json={"confirm": "FREIGEBEN"}).status_code in (404, 405)  # release stays off the dashboard
     assert c.get("/api/control").json()["live_dry_run"] is True
     assert c.get("/api/copytrade?mode=dry").status_code == 200
+
+
+def test_explore_account_separate(demo):
+    c = _client(demo)
+    d = c.get("/api/copytrade?mode=explore").json()
+    assert d["closed"] and all(p["mode"] == "explore" for p in d["closed"]) and d["balance_sol"] is not None
+    strict = c.get("/api/copytrade?mode=paper").json()
+    assert all(p["mode"] == "paper" for p in strict["closed"]) and strict["balance_sol"] != d["balance_sol"]
+    ov = c.get("/api/overview").json()["copytrade"]
+    assert ov["explore"]["trades"] == len(d["closed"]) and ov["paper"]["pnl_sol"] != ov["explore"]["pnl_sol"]

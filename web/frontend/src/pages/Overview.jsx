@@ -7,6 +7,7 @@ export default function Overview() {
   const { data: d, loading, error } = usePoll("/api/overview", 10000);
   if (!d) return error ? <Callout kind="bad" icon="alert">API nicht erreichbar: {error}</Callout> : <div className="empty">Lade …</div>;
   const paper = d.copytrade?.paper;
+  const explore = d.copytrade?.explore;
   const ctl = d.control || {};
   return (
     <div className={`col ${loading ? "" : ""}`} style={{ gap: 16 }}>
@@ -19,7 +20,8 @@ export default function Overview() {
         <Tile label="Signal-Trefferquote" value={d.signal_perf?.hit_rate != null ? pct(d.signal_perf.hit_rate) : "–"}
           sub={d.signal_perf?.n ? `${d.signal_perf.hits} von ${d.signal_perf.n} mit +${pct(d.signal_perf.pump_threshold)} in 1 h` : "noch keine ausgewerteten Signale"} />
         <Tile label="Copy-Trading Papier" value={paper?.pnl_sol != null ? solSigned(paper.pnl_sol, 2) : "–"} cls={(paper?.pnl_sol || 0) >= 0 ? "up" : "down"}
-          sub={paper?.trades ? `${paper.trades} Trades · ${pct(paper.win_rate)} Gewinner · ${paper.open} offen` : "noch keine Trades"} />
+          sub={<>{paper?.trades ? `streng: ${paper.trades} Trades · ${pct(paper.win_rate)} Gewinner · ${paper.open} offen` : "streng: noch keine Trades"}
+            {explore && <><br />Erkundung: <span className={(explore.pnl_sol || 0) >= 0 ? "up" : "down"}>{solSigned(explore.pnl_sol, 2)}</span> · {explore.trades || 0} Trades · {explore.open || 0} offen</>}</>} />
         {d.sniper && <SniperTile s={d.sniper} />}
         <Tile label="Betriebsart" value={<span style={{ fontSize: 17 }}>{MODE_SHORT[ctl.modes?.whale] || "–"} / {MODE_SHORT[ctl.modes?.signal] || "–"}</span>}
           sub={`Wale / Signale · ${ctl.paused ? "Käufe pausiert" : ctl.live_ready ? "Echtgeld an" : "Papier"}`} />

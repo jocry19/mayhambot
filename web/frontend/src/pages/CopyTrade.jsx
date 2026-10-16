@@ -77,12 +77,14 @@ export default function CopyTrade() {
   return (
     <div className="col" style={{ gap: 16 }}>
       <div className="row" style={{ gap: 12 }}>
-        <Seg value={mode} onChange={setMode} options={[["paper", "Papierkonto"], ["dry", "Dry-Run"], ["live", "Echtgeld-Konto"]]} />
+        <Seg value={mode} onChange={setMode} options={[["paper", "Papier streng"], ["explore", "Erkundung"], ["dry", "Dry-Run"], ["live", "Echtgeld-Konto"]]} />
         <Seg value={strategy} onChange={setStrategy} options={[["", "Alle Modi"], ["whale", "Modus 1 · Wal-Pumps"], ["signal", "Modus 2 · Signale"], ["manual", "Manuell"]]} />
         <span className="sp" />
         <span className="dim">Modus 1: {MODE_LABEL[ctl.modes?.whale] || "–"} · Modus 2: {MODE_LABEL[ctl.modes?.signal] || "–"}{ctl.paused ? " · Käufe pausiert" : ""}</span>
         <a href="#/control" className="btn sm">Steuerung</a>
       </div>
+      {mode === "paper" && <Callout icon="info">Strenges Papierkonto: genau die Regeln, die mit Echtgeld gelten würden. Dieses Ergebnis entscheidet über den Schritt zu Echtgeld.</Callout>}
+      {mode === "explore" && <Callout icon="info">Erkundungskonto (Start 5 SOL): kauft bewusst breiter, auch Ultra- und Smart-Wale, die die strengen Regeln auslassen, mit kleinen Beträgen. Es dient zum Lernen, nicht als Maßstab für Echtgeld.</Callout>}
       {mode === "dry" && <Callout icon="info">Dry-Run-Konto: Orders, die der Echtgeld-Pfad gebaut, signiert und simuliert, aber nie gesendet hat. Gebucht mit Quote-Preisen wie auf Papier.</Callout>}
       {mode === "live" && !ctl.live_ready && <Callout icon="info">Echtgeld ist aus. Der Hauptschalter steht in der .env (LIVE_TRADING=true und ein Schlüssel), danach je Modus unter Steuerung.</Callout>}
 
@@ -191,6 +193,7 @@ export default function CopyTrade() {
         {tab === "alerts" && (
           <Table rows={d.alerts} rowKey={(r) => r.id} tall empty="Noch keine Einstiege" cols={[
             { k: "ts", l: "Zeit", fmt: (r) => dt(r.ts) },
+            { k: "account", l: "Konto", fmt: (r) => (r.account === "explore" ? <span className="badge warn">Erkundung</span> : r.account === "live" ? <span className="badge live">Echtgeld</span> : <span className="dim">streng</span>) },
             { k: "action", l: "", fmt: (r) => (r.action === "bought" ? <span className="badge good">gekauft</span> : r.action === "signal" ? <span className="badge accent">Kaufsignal</span> : <span className="badge">{r.action}</span>) },
             { k: "symbol", l: "Coin", fmt: (r) => <CoinLink mint={r.mint} symbol={r.symbol} /> },
             { k: "strategy", l: "Modus", fmt: (r) => STRAT_LABEL[r.strategy] || r.strategy },

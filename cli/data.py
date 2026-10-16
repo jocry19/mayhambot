@@ -21,7 +21,7 @@ def snapshot(n_signals: int = 60, n_wallets: int = 150) -> dict:
     if has(conn, "ct_positions"):
         open_pos = [Q._pos(p) for p in rows(conn, "SELECT * FROM ct_positions WHERE status='open' ORDER BY opened_at DESC")]
         closed = [Q._pos(p) for p in rows(conn, "SELECT * FROM ct_positions WHERE status='closed' ORDER BY closed_at DESC LIMIT 80")]
-        for mode in ("paper", "live"):
+        for mode in Q.CT_ACCOUNTS:
             ps = [Q._pos(p) for p in rows(conn, "SELECT * FROM ct_positions WHERE mode=?", (mode,))]
             if ps or mode == "paper":
                 summary[mode] = Q._summary(ps)

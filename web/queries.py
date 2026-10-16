@@ -1227,6 +1227,8 @@ def control_state(conn):
 
 # ct_positions.status besides open/closed: opening = intent row before the swap, failed = live buy that bought nothing;
 # pending_buy/pending_sell/stuck come with live trading. In-flight rows are listed with the open ones.
+# copytrade books: strict paper (the live rules), explore (deliberately wider, to learn; copytrade/strategy.py), live
+CT_ACCOUNTS = ("paper", "explore", "live")
 POS_IN_FLIGHT = ("open", "opening", "closing", "pending_buy", "pending_sell", "stuck")
 
 
@@ -1311,12 +1313,13 @@ def copytrade(conn, mode="paper", strategy=None):
     for a_ in alerts:
         sf = (_j(a_.get("data"), {}) or {}).get("safety") if isinstance(a_.get("data"), str) else None
         a_["safety"] = {k: sf.get(k) for k in ("level", "score", "blocked", "reasons")} if isinstance(sf, dict) else None
+        a_["account"] = (_j(a_.get("data"), {}) or {}).get("account") if isinstance(a_.get("data"), str) else None
         a_["data"] = None  # can be large; the alert row itself carries the essentials
     events = rows(conn, "SELECT ts, level, kind, message FROM ct_events ORDER BY ts DESC LIMIT 200") if has(conn, "ct_events") else []
     cmds = rows(conn, "SELECT * FROM ct_commands ORDER BY id DESC LIMIT 30") if has(conn, "ct_commands") else []
     balance = None
-    if mode == "paper" and has(conn, "ct_state"):
-        v = scalar(conn, "SELECT value FROM ct_state WHERE key='paper_balance_sol'")
+    if mode in ("paper", "explore") and has(conn, "ct_state"):
+        v = scalar(conn, "SELECT value FROM ct_state WHERE key=?", (f"{mode}_balance_sol",))
         balance = _f(v, 4) if v is not None else None
     return {"available": True, "mode": mode, "strategy": strategy, "summary": summ, "by_strategy": by_strategy,
             "balance_sol": balance, "equity": eq, "pnl_curve": curve,
@@ -1784,7 +1787,7 @@ def overview(conn):
     net_24 = sum(f["ultra"] + f["smart"] + f["good"] for f in flows)
     perf = signal_performance(conn)
     ct = {}
-    for mode in ("paper", "live"):
+    for mode in CT_ACCOUNTS:
         if has(conn, "ct_positions"):
             ps = [_pos(p) for p in rows(conn, "SELECT * FROM ct_positions WHERE mode=?", (mode,))]
             if ps or mode == "paper":
@@ -1827,8 +1830,9 @@ def situation(conn, now=None, sniper=None, ct=None, model=None, signals_24h=None
     add("signals", "/signals", f"{signals_24h or 0} Signale in 24 h",
         f"Trefferquote {round(100 * perf['hit_rate'])} %" if perf and perf.get("hit_rate") is not None else "")
     paper = (ct or {}).get("paper") or {}
-    add("copytrade", "/copytrade", f"Papier {paper['pnl_sol']:+.2f} SOL".replace(".", ",") if paper.get("pnl_sol") is not None else "noch keine Trades",
-        f"{paper.get('open') or 0} offen · {paper.get('trades') or 0} Trades" if paper else "")
+    add("copytrade", "/copytrade", f"Papier streng {paper['pnl_sol']:+.2f} SOL".replace(".", ",") if paper.get("pnl_sol") is not None else "noch keine Trades",
+        (f"{paper.get('open') or 0} offen · {paper.get('trades') or 0} Trades" if paper else "") +
+        (f" · Erkundung {ex['pnl_sol']:+.2f} SOL".replace(".", ",") if (ex := (ct or {}).get("explore") or {}).get("pnl_sol") is not None else ""))
     sq = cache.get(("safety_quality",), 60, lambda: safety_quality(conn))
     blocked = scalar(conn, "SELECT COUNT(*) FROM safety_tokens WHERE blocked=1", default=0) if has(conn, "safety_tokens", "blocked") else None
     best = None

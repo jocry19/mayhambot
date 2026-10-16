@@ -37,7 +37,7 @@ def status() -> None:
               f"letzter Trade {ago(s['last_trade_ts'])} · "
               + (f"Modell v{m['id']}" + (f" (AUC 1 h {n(m['auc_1h'], 2)})" if m.get("auc_1h") is not None else "") if m else "Modell noch nicht trainiert"))
     for mode, sm in (s["summary"] or {}).items():
-        con.print(f"Copy-Trading {'Papier' if mode == 'paper' else 'Echtgeld'}: {_c(sol(sm.get('pnl_sol'), 2, True), tone(sm.get('pnl_sol')))} · "
+        con.print(f"Copy-Trading { {'paper': 'Papier streng', 'explore': 'Erkundung'}.get(mode, 'Echtgeld')}: {_c(sol(sm.get('pnl_sol'), 2, True), tone(sm.get('pnl_sol')))} · "
                   f"{sm.get('trades', 0)} Trades · {pct(sm.get('win_rate'))} Gewinner · {sm.get('open', 0)} offen")
     line = api_line()
     if line:

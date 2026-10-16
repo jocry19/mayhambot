@@ -67,6 +67,24 @@ def _inflight_demo(conn, r, tokens, now):
                "intent": json.dumps({"size_sol": .5, "source": "whale"})}
         row = {k: v for k, v in row.items() if k in pcols}
         conn.execute(f"INSERT INTO ct_positions({','.join(row)}) VALUES ({','.join('?' * len(row))})", list(row.values()))
+    # second paper account 'explore': smaller, wider buys (copytrade/strategy.py ExploreExecutor)
+    pcols_l = [c for c in pcols if c != "id"]
+    src = conn.execute(f"SELECT {','.join(pcols_l)} FROM ct_positions WHERE mode='paper' AND status='closed' ORDER BY opened_at DESC LIMIT 40").fetchall()
+    for row in src:
+        d = dict(zip(pcols_l, row))
+        k = 0.1 / (d.get("size_sol") or 0.5)
+        d.update(mode="explore", size_sol=0.1, entry_cost_sol=(d.get("entry_cost_sol") or 0) * k, tokens=(d.get("tokens") or 0) * k,
+                 pnl_sol=round((d.get("pnl_sol") or 0) * k * r.uniform(0.3, 1.1) - r.uniform(0, 0.01), 5))
+        conn.execute(f"INSERT INTO ct_positions({','.join(d)}) VALUES ({','.join('?' * len(d))})", list(d.values()))
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='ct_state'").fetchone():
+        tot = conn.execute("SELECT COALESCE(SUM(pnl_sol),0) FROM ct_positions WHERE mode='explore'").fetchone()[0]
+        conn.execute("INSERT OR REPLACE INTO ct_state(key, value) VALUES ('explore_balance_sol', ?)", (str(round(5 + tot, 4)),))
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='ct_equity'").fetchone():
+        acc = 5.0
+        for i in range(48):
+            acc += r.uniform(-0.03, 0.05)
+            conn.execute("INSERT INTO ct_equity(ts, mode, balance_sol, open_value_sol, equity_sol) VALUES (?,?,?,?,?)",
+                         (now - (48 - i) * 1800, "explore", round(acc, 4), 0, round(acc, 4)))
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='ct_commands'").fetchone():
         ccols = {c[1] for c in conn.execute("PRAGMA table_info(ct_commands)")}
         for ts, st, res in ((now - 400, "expired", "abgelaufen"), (now - 1500, "done", "gekauft")):
