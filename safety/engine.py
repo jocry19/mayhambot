@@ -391,7 +391,11 @@ def refresh(conn=None, extra=(), budget_sec=None, max_tokens=None, cfg=None, fet
         if fetcher_factory is None and offline():
             return done
         hot = set(hot_mints(conn, extra, cfg))
-        for m in candidates(conn, extra, cfg)[:limit]:
+        todo = candidates(conn, extra, cfg)[:limit]
+        if fetcher_factory is None and todo:
+            from safety import sources
+            sources.prefetch_pairs(todo, priority="bulk")
+        for m in todo:
             if time.time() - t0 > budget_s:
                 break
             prev = get(conn, m, cfg)

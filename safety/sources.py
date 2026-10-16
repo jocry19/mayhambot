@@ -39,6 +39,35 @@ def _host(url):
     return urlparse(url).netloc
 
 
+PAIRS_TTL = 60
+PAIRS_BATCH = 30            # DexScreener tokens/v1 takes up to 30 addresses per request
+_PAIRS = {}                 # mint -> (ts, [pairs where the mint is the base token])
+
+
+def prefetch_pairs(mints, priority="bulk"):
+    """One DexScreener request per 30 mints for a whole refresh pass instead of one per coin. Mints without a
+    pair are stored as [] (answered). Failures leave the cache alone; the per-coin call is the fallback."""
+    mints = [m for m in dict.fromkeys(mints) if m]
+    for i in range(0, len(mints), PAIRS_BATCH):
+        chunk = mints[i:i + PAIRS_BATCH]
+        try:
+            d = http.get_json(f"{DEXSCREENER}/tokens/v1/solana/{','.join(chunk)}", priority=priority, retries=2)
+        except Exception as e:  # noqa: BLE001
+            log.warning("safety: DexScreener batch failed (%s), per-coin requests instead", e)
+            continue
+        pairs = d if isinstance(d, list) else (d or {}).get("pairs") or []
+        now = time.time()
+        by = {m: [] for m in chunk}
+        for p in pairs:
+            base = (p.get("baseToken") or {}).get("address")
+            if base in by:
+                by[base].append(p)
+        for m, ps in by.items():
+            _PAIRS[m] = (now, ps)
+    for m in [m for m, (ts, _) in _PAIRS.items() if time.time() - ts > PAIRS_TTL]:
+        _PAIRS.pop(m, None)
+
+
 class Fetcher:
     """priority=True: a live path (signal about to fire, real-money buy) may wait for the shared RPC budget
     and use its reserve; the background refresher (priority=False) never waits and never touches the reserve."""
@@ -124,6 +153,9 @@ class Fetcher:
 
     # ---- DexScreener pairs of a token (keyless) ----
     def dexscreener_pairs(self, mint):
+        hit = _PAIRS.get(mint)
+        if hit and time.time() - hit[0] < PAIRS_TTL:
+            return hit[1]           # from the pass's batch request, costs nothing
         self._spend()
         d = http.get_json(f"{DEXSCREENER}/tokens/v1/solana/{mint}", priority=self.lane, retries=2)
         return d if isinstance(d, list) else (d or {}).get("pairs") or []

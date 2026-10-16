@@ -651,3 +651,21 @@ def test_sell_sim_survives_jupiter_rate_limit_only_for_structurally_safe_tokens(
     s["dex"] = "someclmm"
     a = safety.assess(MINT, conn(), deep=False, fetcher=_JupiterDown(s), cfg=CFG, force=True)
     assert a.checks["sell_sim"]["status"] == "error" and a.blocked
+
+
+def test_dexscreener_batch_serves_the_whole_pass(monkeypatch):
+    from safety import sources
+    calls = []
+
+    def fake_get(url, **k):
+        calls.append(url)
+        return [{"baseToken": {"address": "A1"}, "dexId": "raydium", "liquidity": {"usd": 5}},
+                {"baseToken": {"address": "B2"}, "dexId": "pumpswap", "liquidity": {"usd": 7}}]
+    monkeypatch.setattr(sources.http, "get_json", fake_get)
+    sources._PAIRS.clear()
+    sources.prefetch_pairs([f"M{i}" for i in range(31)] + ["A1", "B2"])
+    assert len(calls) == 2 and calls[0].count(",") == 29                  # 33 mints -> 2 requests
+    f = sources.Fetcher(CFG, priority=False)
+    assert f.dexscreener_pairs("B2")[0]["dexId"] == "pumpswap" and f.dexscreener_pairs("M3") == []
+    assert f.calls == 0 and len(calls) == 2                                # answered from the batch
+    sources._PAIRS.clear()

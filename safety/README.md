@@ -138,6 +138,7 @@ Enhanced API. Jupiter, DexScreener and RugCheck are keyless and not Helius.
   `safety_cache` and shared by every process, 10 min (`SAFETY_HOLDERS_TTL_SEC`), 2 min for hot coins
   (`SAFETY_HOLDERS_TTL_HOT_SEC`); on top an own bucket per endpoint for this method, 30/min and ≥1.7 s apart
   (`SAFETY_LARGEST_PER_MIN`, `SAFETY_LARGEST_SPACING_SEC`), i.e. at most 6 per 10 s per endpoint over all processes.
+- **DexScreener**: one request per 30 mints for the whole refresh pass (`sources.prefetch_pairs`, kept 60 s); single requests only for live paths.
 - **Cache**: results per mint with TTL 15 min (pair < 6 h), 2 h (older), 6 h (blocked); launch forever, wallet
   profiles a day. `refresh` runs every `SAFETY_REFRESH_EVERY_SEC`=60 s, at most `SAFETY_REFRESH_MAX_TOKENS`=8 coins and
   stops early when the minute's budget cannot cover the next coin.
