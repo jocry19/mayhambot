@@ -133,8 +133,10 @@ class Watcher:
             if not a.connected or now - a.connected_at < 120:
                 continue
             mine = a.covered()
+            # only transactions after a's own subscription of that wallet was confirmed: while a fresh connection
+            # still subscribes (2 per second), the other stream's notifications are no miss
             cand = {sig for b in self.streams if b is not a for sig, (t, w) in list(b.recent.items())
-                    if w in mine and a.connected_at + 10 < t < now - 20 and t > now - 600}
+                    if w in mine and max(a.connected_at, a.sub_at.get(w, 0)) + 5 < t < now - 20 and t > now - 600}
             missed = [sig for sig in cand if not a.saw(sig)]
             if len(cand) >= 4 and len(missed) * 2 >= len(cand):
                 a.reconnect(f"missed {len(missed)} of {len(cand)}")

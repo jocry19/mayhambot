@@ -85,13 +85,14 @@ class Engine:
 
     def usage_line(self, force: bool = False) -> str | None:
         """Once an hour: swaps found by websocket vs. polling, and RPC calls public vs. Helius."""
-        if not force and time.time() - self._last_usage < 3600:
+        # every 15 min: the app restarts on each auto-update, an hourly line would rarely be written
+        if not force and time.time() - self._last_usage < 900:
             return None
         u = self.rpc.usage()
         pub = sum(v for k, v in u.items() if k.startswith("public:"))
         hel = sum(v for k, v in u.items() if k.startswith("helius:"))
         lat = tracker.WS_LATENCY
-        line = (f"detection last hour: {tracker.DETECTED['wslog']} pump.fun swaps read from websocket logs,"
+        line = (f"detection last {int((time.time() - self._last_usage) / 60)} min: {tracker.DETECTED['wslog']} pump.fun swaps read from websocket logs,"
                 f" {tracker.DETECTED['ws']} via websocket + transaction"
                 + (f" (mean {sum(lat) / len(lat):.2f}s notification->swap)" if lat else "")
                 + f", {tracker.DETECTED['poll']} via polling, {tracker.DETECTED['gap']} gaps (polling found what"

@@ -628,3 +628,13 @@ def test_whale_sells_do_not_take_the_entry_lock():
     watch.handle_swap(Strat(), sw)
     watch.handle_swap(Strat(), chain.Swap("s", W, 0, "buy", MINT, 1, 1, 1))
     assert got == [False, True]
+
+
+def test_watchdog_does_not_count_misses_before_the_own_subscription():
+    w = _fake_streams()
+    a, b = w.streams
+    now = time.time()
+    b.sub_at[W] = now - 30  # b's subscription of W only came up 30 s ago (fresh connection still subscribing)
+    for i in range(6):
+        a.recent[f"s{i}"] = (now - 60 - i, W)
+    assert w.watchdog(now) == []

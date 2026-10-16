@@ -60,6 +60,7 @@ class WalletStream:
         # signature -> (received_at, wallet) of recent notifications, so the watcher can compare streams
         self.recent: "collections.OrderedDict[str, tuple[float, str]]" = collections.OrderedDict()
         self._kick: str | None = None
+        self.sub_at: dict[str, float] = {}  # wallet -> when its subscription was confirmed (watchdog fairness)
         self._tokens, self._tok_at = 1.0, 0.0
         self.stats["limited"] = 0
         self._wanted: list[str] = []  # best first (manual, Ultra, Smart, rank)
@@ -202,6 +203,7 @@ class WalletStream:
             with self._lock:
                 if op == "sub":
                     self._subs[w] = msg["result"]
+                    self.sub_at[w] = time.time()
                     sub_wallet[msg["result"]] = w
                 else:
                     sid = self._subs.pop(w, None)
