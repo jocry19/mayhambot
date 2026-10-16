@@ -85,7 +85,7 @@ def _usd(r, sol_usd):
 
 TIER_RANK = {"ultra": 3, "smart": 2, "good": 1}
 last_cluster_stats = {"wallets": 0, "entities": 0}
-FUNNEL_KEYS = ("coins", "no_smart", "few_entities", "low_net", "low_score", "low_ev", "safety_drop", "cooldown",
+FUNNEL_KEYS = ("coins", "no_smart", "few_entities", "low_net", "low_score", "low_ev", "thin_liq", "safety_drop", "cooldown",
                "fired")
 last_funnel = {}  # per evaluate(): where coins dropped out (first failing condition), see signals.funnel
 
@@ -145,6 +145,7 @@ def explain(m, cfg=settings):
 
 
 MODEL_MIN_EXP_NET = float(os.getenv("SIGNAL_MODEL_MIN_EXP_NET", 0.0))
+MIN_LIQ_USD = float(os.getenv("SIGNAL_MIN_LIQ_USD", 3000))  # ~2 % price impact for a 0.5 SOL buy
 
 
 def _reason(m, cfg, strict=False):
@@ -156,7 +157,7 @@ def _reason(m, cfg, strict=False):
         sp = m.get("safety") or {}
         if sp.get("factor", 1.0) < EV_MIN_SAFETY_FACTOR and (strict or sp.get("checked") is not False):
             return "safety_drop"  # rug protection still vetoes: high risk, blocked, or still unchecked
-        return None if m["ev"] > ev_mod.MIN_EV else "low_ev"
+        return "low_ev" if m["ev"] <= ev_mod.MIN_EV else "thin_liq" if _thin(m) else None
     if m.get("entities", m["smart_buyers"]) < cfg.signal_min_wallets:  # distinct owners, not wallets of one cluster
         return "few_entities"
     if m["net_usd"] < m.get("min_net", cfg.signal_min_net_usd):
@@ -165,7 +166,15 @@ def _reason(m, cfg, strict=False):
         return "low_score"
     if m.get("model_exp_net") is not None and m["model_exp_net"] < MODEL_MIN_EXP_NET:
         return "low_ev"  # the model's own net return (TP exit, after costs) says this setup loses money
+    if _thin(m):
+        return "thin_liq"
     return None
+
+
+def _thin(m):
+    """Pool too thin to get in and out by hand without eating the move (unknown liquidity is not blocked)."""
+    liq = m.get("liquidity_usd")
+    return liq is not None and liq < MIN_LIQ_USD
 
 
 def token_metrics(conn, mint, qc, now=None, cfg=settings):
@@ -188,6 +197,8 @@ def token_metrics(conn, mint, qc, now=None, cfg=settings):
             d["sell_usd"] += usd
             d["sell_sol"] = d.get("sell_sol", 0.0) + (r["sol_amount"] or 0)
         d["first_ts"] = min(d["first_ts"], r["ts"])
+        if r["side"] == "buy":
+            d["last_buy_ts"] = max(d.get("last_buy_ts", 0), r["ts"])
     smart = [d for d in per.values() if d["tier"] in ("ultra", "smart")]
     buy = sum(d["buy_usd"] for d in smart)
     sell = sum(d["sell_usd"] for d in smart)
@@ -223,6 +234,8 @@ def token_metrics(conn, mint, qc, now=None, cfg=settings):
                 buy_sol=buy_sol, net_sol=net_sol, smart_buyers=n_smart_entities, avg_quality=avg_q, score=score,
                 n_ultra=tiers["ultra"], n_smart=tiers["smart"], n_good=tiers["good"],
                 entities=n_smart_entities, sellers=n_sellers,
+                smart_first_ts=min((d["first_ts"] for d in sbuyers), default=None),
+                smart_last_ts=max((d.get("last_buy_ts", 0) for d in sbuyers), default=None) or None,
                 contributions=contributions, model_version="core-heuristic-v1",
                 wallets=sorted(buyers, key=lambda d: d["buy_usd"], reverse=True))
 
@@ -595,15 +608,16 @@ def evaluate(conn, mints, cfg=settings, now=None):
                                    mcap_usd, wallets_json, buy_sol, net_sol, liquidity_usd, n_ultra, n_smart, n_good,
                                    prediction, prediction_label, contributions_json, model_version,
                                    score_raw, safety_factor, safety_risk, safety_level, safety_reasons_json,
-                                   ev, ev_n, reason, call_no, target_ret, stop_ret)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                   ev, ev_n, reason, call_no, target_ret, stop_ret, lag_first_s, lag_last_s)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (now, mint, tok["symbol"] if tok else "", m["score"], m["net_usd"], m["buy_usd"], m["smart_buyers"],
              m["avg_quality"], tok["price_usd"] if tok else None, tok["mcap_usd"] if tok else None,
              json.dumps(m["wallets"]), m["buy_sol"], m["net_sol"], tok["liquidity_usd"] if tok else None,
              m["n_ultra"], m["n_smart"], m["n_good"], pred, pred_label, contrib, m["model_version"],
              m.get("score_raw", m["score"]), sp.get("factor"), sp.get("risk"), sp.get("level"),
              json.dumps(sp.get("reasons") or [], ensure_ascii=False), m.get("ev"), m.get("ev_n"), reason, call_no,
-             lv["target"], lv["stop"]))
+             lv["target"], lv["stop"], now - m["smart_first_ts"] if m.get("smart_first_ts") else None,
+             now - m["smart_last_ts"] if m.get("smart_last_ts") else None))
         new.append(conn.execute("SELECT * FROM signals WHERE id=?", (cur.lastrowid,)).fetchone())
     conn.commit()
     f["model"] = model_guard.stats()

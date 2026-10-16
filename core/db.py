@@ -103,6 +103,8 @@ MIGRATIONS = [
     ("signals", "stop_ret", "REAL"),                # stop mark sent with the alert (from past dips)
     ("signals", "target_hit_ts", "INTEGER"),        # first time the price reached the target (follow-up alert sent)
     ("signals", "stop_hit_ts", "INTEGER"),          # first time the price fell to the stop before the target
+    ("signals", "lag_first_s", "INTEGER"),          # seconds from the first smart buy in the window to the call
+    ("signals", "lag_last_s", "INTEGER"),           # seconds from the newest smart buy to the call (data + cycle lag)
     ("signal_metrics", "ev", "REAL"),
     ("signal_metrics", "model_exp_net", "REAL"),   # model's expected 1h return after costs (for later replays)
 ]

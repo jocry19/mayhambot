@@ -58,6 +58,10 @@ def format_signal(s) -> str:
     if "liquidity_usd" in keys:
         lines.append(f"Liquidität {_usd(s['liquidity_usd'])}"
                      + (f" · Call Nr. {s['call_no']} auf diesen Coin" if "call_no" in keys and (s["call_no"] or 1) > 1 else ""))
+    if "lag_last_s" in keys and s["lag_last_s"] is not None:
+        lag = s["lag_last_s"]
+        lines.append(f"⏱ letzter Smart-Kauf vor {lag // 60} min {lag % 60} s"
+                     + (" · Preis vor dem Kauf prüfen" if lag > 600 else ""))
     if "target_ret" in keys and s["target_ret"] is not None and s["price_usd"]:
         p0 = s["price_usd"]
         stop = s["stop_ret"] if s["stop_ret"] is not None else None

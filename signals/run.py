@@ -43,7 +43,7 @@ def refresh_watchlist(conn, cycle):
     # ~25 coins in the list for hours (each cycle re-scores them), so fresh smart buys never got trade fetches.
     now = int(time.time())
     return conn.execute(
-        """SELECT t.* FROM tokens t
+        """SELECT t.*, COALESCE(sb.n, 0) AS smart_n FROM tokens t
            LEFT JOIN (SELECT mint, MAX(score) s FROM signal_metrics WHERE ts > ? GROUP BY mint) m ON m.mint=t.mint
            LEFT JOIN (SELECT tr.mint, COUNT(DISTINCT tr.wallet) n FROM trades tr JOIN wallets w ON w.address=tr.wallet
                       WHERE w.tier IN ('ultra','smart') AND tr.side='buy' AND tr.ts > ? GROUP BY tr.mint) sb
@@ -76,8 +76,11 @@ REFETCH_MAX_SECONDS = 900
 
 
 def refetch_interval(r, cycle_seconds):
-    """Seconds until a token's pool trades are worth fetching again."""
+    """Seconds until a token's pool trades are worth fetching again. A coin smart wallets are buying right now is
+    due every cycle: its pool trades feed the call, and every skipped cycle is latency for whoever trades by hand."""
     keys = r.keys() if hasattr(r, "keys") else r
+    if "smart_n" in keys and (r["smart_n"] or 0) > 0:
+        return cycle_seconds
     m5 = (r["txns_m5"] if "txns_m5" in keys else 0) or 0
     h1 = (r["txns_h1"] if "txns_h1" in keys else 0) or 0
     per_s = max(m5 / 300, h1 / 3600)
@@ -93,8 +96,9 @@ def due_for_trades(watch, now, cycle_seconds):
         last = r["last_trades_fetch"] or 0
         over = now - last - refetch_interval(r, cycle_seconds)
         if not last or over >= 0:
-            due.append((-(1e12 if not last else over), r))
-    return [r for _, r in sorted(due, key=lambda x: x[0])]
+            hot = "smart_n" in r.keys() and (r["smart_n"] or 0) > 0 if hasattr(r, "keys") else False
+            due.append((not hot, -(1e12 if not last else over), r))
+    return [r for *_, r in sorted(due, key=lambda x: x[:2])]  # smart-bought coins first, then most overdue
 
 
 def fetch_trades(conn, watch):
@@ -199,7 +203,9 @@ _backfiller = None
 def cycle(conn, i):
     t0 = time.time()
     watch = refresh_watchlist(conn, i)
+    t_fetch = time.time()
     new_trades = fetch_trades(conn, watch)
+    t_fetch = time.time() - t_fetch
     if _backfiller is not None:  # history arrives in the background; picked up by this rescore
         bf = _backfiller.take()
     else:  # --once / tests: inline, but with a hard time cap
@@ -214,6 +220,7 @@ def cycle(conn, i):
     mints = list(dict.fromkeys([r["mint"] for r in watch] + smart_active_mints(conn)))
     sigs = engine.evaluate(conn, mints)
     notifier.notify(conn, sigs)
+    engine.last_funnel.update(cycle_s=round(time.time() - t0, 1), fetch_s=round(t_fetch, 1))
     engine.update_outcomes(conn)
     try:
         notifier.notify_followups(plan.check_levels(conn))  # target / stop reached: follow-up alert for manual trading
@@ -287,6 +294,7 @@ def main():
         _backfiller = Backfiller().start()
     i = 0
     while True:
+        t_cycle = time.time()
         try:
             cycle(conn, i)
         except engine.ModelCodeStale as e:  # the supervisor (mayham.py run) restarts us with fresh code
@@ -299,7 +307,7 @@ def main():
         if a.once:
             break
         i += 1
-        time.sleep(max(5, settings.cycle_seconds))
+        time.sleep(max(5, settings.cycle_seconds - (time.time() - t_cycle)))  # a cycle every CYCLE_SECONDS, not a pause after it
 
 
 if __name__ == "__main__":

@@ -32,8 +32,8 @@ def _pct(vals, q):
 def funnel(conn, hours=10, cfg=settings, now=None):
     now = now or int(time.time())
     since = now - int(hours * 3600)
-    rows = conn.execute("SELECT ts, mint, net_usd, smart_buyers, score, n_ultra, n_smart, n_good, contributions_json "
-                        "FROM signal_metrics WHERE ts>=?", (since,)).fetchall()
+    rows = conn.execute("SELECT ts, mint, net_usd, smart_buyers, score, n_ultra, n_smart, n_good, contributions_json, "
+                        "model_exp_net FROM signal_metrics WHERE ts>=?", (since,)).fetchall()
     out = dict(hours=hours, rows=len(rows), cycles=len({r["ts"] for r in rows}), coins=len({r["mint"] for r in rows}),
                model_rows=0, smart_ge1=0, smart_ge_min=0, net_ge_min=0, score_ge_min=0,
                smart_and_net=0, all_pass=0, max_score=0.0, max_score_model=0.0, max_score_heuristic=0.0,
@@ -43,7 +43,7 @@ def funnel(conn, hours=10, cfg=settings, now=None):
     thr_model = engine.cfg_min_model(conn, cfg)
     net_min = engine.min_net_usd(conn, cfg, now)
     out.update(min_net_calibrated=net_min, min_score_model_calibrated=thr_model, model_base_rate_1h=engine._model_thr.get("base"),
-               all_pass_calibrated=0)
+               all_pass_calibrated=0, blocked_loss_veto=0)
     model_scores, coins_pass = [], set()
     for r in rows:
         is_model = _is_model(r["contributions_json"])
@@ -62,6 +62,8 @@ def funnel(conn, hours=10, cfg=settings, now=None):
         if (s >= (thr_model if is_model else thr) and sb >= cfg.signal_min_wallets
                 and net >= net_min):
             out["all_pass_calibrated"] += 1
+            if r["model_exp_net"] is not None and r["model_exp_net"] < engine.MODEL_MIN_EXP_NET:
+                out["blocked_loss_veto"] += 1  # passed every minimum, stopped only by the model's expected loss
         out["max_score"] = max(out["max_score"], s)
         key = "max_score_model" if is_model else "max_score_heuristic"
         out[key] = max(out[key], s)
@@ -98,6 +100,9 @@ def peak_after_call(rows):
     n = len(rows)
     mx = [r["max_ret_1h"] or 0 for r in rows]
     out = dict(hit_25=round(sum(x >= 0.25 for x in mx) / n, 3), hit_100=round(sum(x >= 1.0 for x in mx) / n, 3),
+               hit_150=round(sum(x >= 1.5 for x in mx) / n, 3),
+               median_lag_first_s=_med(r["lag_first_s"] for r in rows),
+               median_lag_last_s=_med(r["lag_last_s"] for r in rows),
                median_max_ret_15m=_med(r["max_ret_15m"] for r in rows),
                median_max_ret_4h=_med(r["max_ret_4h"] for r in rows),
                median_peak_min_1h=_med(r["peak_min_1h"] for r in rows),
@@ -114,7 +119,7 @@ def outcomes(conn, hours=168, cost=COST, now=None, bands=(0, 20, 30, 40, 50, 60,
     minus costs. This is what the score bands get calibrated on."""
     now = now or int(time.time())
     rows = conn.execute("SELECT score, ret_1h, max_ret_1h, max_ret_15m, max_ret_4h, peak_min_1h, dd_before_peak_1h, "
-                        "target_hit_ts, stop_hit_ts FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NOT NULL",
+                        "target_hit_ts, stop_hit_ts, lag_first_s, lag_last_s FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NOT NULL",
                         (now - int(hours * 3600), now - 3900)).fetchall()
     missing = conn.execute("SELECT COUNT(*) FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NULL",
                            (now - int(hours * 3600), now - 3900)).fetchone()[0]
@@ -175,7 +180,7 @@ def write_report(conn, path=None, now=None):
                recent_signals=[dict(r, tradable_strict=(r["liquidity_usd"] or 0) >= TRADABLE_LIQ_USD)
                                for r in conn.execute(
                    "SELECT ts, symbol, score, ev, ev_n, smart_buyers, net_usd, liquidity_usd, mcap_usd, ret_1h, "
-                   "max_ret_15m, max_ret_1h, max_ret_4h, peak_min_1h, dd_before_peak_1h, call_no, target_ret, stop_ret, "
+                   "max_ret_15m, max_ret_1h, max_ret_4h, peak_min_1h, dd_before_peak_1h, call_no, target_ret, stop_ret, lag_last_s, "
                    "target_hit_ts, stop_hit_ts, outcome_flag, reason FROM signals ORDER BY ts DESC LIMIT 20")])
     from signals import plan
     rep["plan_next"] = plan.levels(conn, now)

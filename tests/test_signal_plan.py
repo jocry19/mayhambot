@@ -92,3 +92,39 @@ def test_outcomes_show_peak_stats(tmp_path):
     a = out["all"]
     assert a["n"] == 2 and a["hit_25"] == 1.0 and a["hit_100"] == 0.5 and a["median_peak_min_1h"] == 12
     assert a["target_hits"] == 1 and out["30-40"]["n"] == 2
+
+
+def test_thin_pool_is_not_called():
+    import dataclasses
+    from core.config import settings
+    cfg = dataclasses.replace(settings, signal_min_wallets=2, signal_min_net_usd=100, signal_min_score=10)
+    m = dict(smart_buyers=2, entities=2, net_usd=500, score=50, liquidity_usd=1500)
+    assert engine._reason(m, cfg) == "thin_liq"
+    assert engine._reason(dict(m, liquidity_usd=None), cfg) is None      # unknown liquidity: not blocked
+    assert engine._reason(dict(m, liquidity_usd=8000), cfg) is None
+    assert engine._reason(dict(m, ev=0.1), cfg) == "thin_liq"            # also when the EV table decides
+
+
+def test_smart_bought_coins_fetched_first():
+    from signals.run import due_for_trades, refetch_interval
+    now = 10_000
+    quiet = dict(mint="q", last_trades_fetch=now - 2000, txns_m5=0, txns_h1=0, smart_n=0)
+    hot = dict(mint="h", last_trades_fetch=now - 100, txns_m5=0, txns_h1=0, smart_n=2)
+    assert refetch_interval(hot, 90) == 90
+    assert [r["mint"] for r in due_for_trades([quiet, hot], now, 90)] == ["h", "q"]
+
+
+def test_lag_and_hit_150_reported(tmp_path):
+    c = conn(tmp_path)
+    now = 300_000
+    c.execute("INSERT INTO signals(ts, mint, score, price_usd, ret_1h, max_ret_1h, lag_first_s, lag_last_s) "
+              "VALUES (?,?,?,?,?,?,?,?)", (now - 7200, "Z", 35, 1.0, 0.2, 1.8, 400, 95))
+    c.execute("INSERT INTO signal_metrics(ts, mint, net_usd, smart_buyers, score, model_exp_net, contributions_json) "
+              "VALUES (?,?,?,?,?,?,?)", (now - 60, "Z", 900, 3, 90, -0.2, '{"x": {"points": 1}}'))
+    c.commit()
+    a = {b["band"]: b for b in funnel.outcomes(c, 24, now=now)}["all"]
+    assert a["hit_150"] == 1.0 and a["median_lag_last_s"] == 95 and a["median_lag_first_s"] == 400
+    assert funnel.funnel(c, 4, now=now)["blocked_loss_veto"] == 1
+    s = c.execute("SELECT * FROM signals").fetchone()
+    assert "letzter Smart-Kauf vor 1 min 35 s" in notifier.format_signal(dict(s, wallets_json="[]", avg_quality=50,
+                                                                                smart_buyers=2, net_usd=300))
