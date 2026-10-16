@@ -225,3 +225,31 @@ def test_api_usage(demo, tmp_path, monkeypatch, capsys):
     from cli.report import api_line
     line = api_line()
     assert "Helius 54/60" in line and "knapp: safety" in line and "research" not in line
+
+
+def test_wallet_tiers_from_wallets_table(demo, tmp_path, monkeypatch):
+    c = _client(demo)
+    w = c.get("/api/wallets?limit=2000").json()
+    assert w["tier_info"]["source"] == "model" and w["tier_info"]["synced"] and w["tier_info"]["version"]
+    con = sqlite3.connect(demo)
+    want = dict(con.execute("SELECT tier, COUNT(*) FROM wallets WHERE tier IS NOT NULL GROUP BY tier").fetchall())
+    assert w["counts"] == {k: want.get(k, 0) for k in ("ultra", "smart", "good")}
+    assert c.get("/api/overview").json()["tiers"] == w["counts"]
+    it = w["items"][0]
+    assert it["tier_source"] == "model" and it["tier_version"] and "score_heuristic" in it and "model_score" in it
+    # one entity per cluster
+    cl = next(x for x in w["items"] if (x.get("cluster_n") or 0) > 1)
+    members = c.get(f"/api/wallets?limit=2000&cluster={cl['cluster_id']}").json()["items"]
+    assert len(members) == cl["cluster_n"] and all(m["cluster_id"] == cl["cluster_id"] for m in members)
+    g = c.get("/api/wallets?limit=2000&group=1").json()
+    assert g["total"] == w["total"] - sum(n - 1 for n in {x["cluster_id"]: x["cluster_n"] for x in w["items"] if x.get("cluster_id")}.values())
+    assert c.get("/api/wallets?sort=exit_capture").status_code == 200
+    # next retrain: from the research log line, else computed
+    m = c.get("/api/model").json()
+    assert m["retrain"]["source"] in ("berechnet", "log") and m["tier_info"]["counts"] == w["counts"]
+    (tmp_path / "research.log").write_text("x model: next retrain at 2099-01-02 03:04 UTC\n")
+    monkeypatch.setenv("MAYHAM_LOG_DIR", str(tmp_path))
+    from web.db import cache
+    cache.clear()
+    r = c.get("/api/model").json()["retrain"]
+    assert r["source"] == "log" and r["next_ts"] == __import__("calendar").timegm((2099, 1, 2, 3, 4, 0)) and not r["due"] and not r["failed"]

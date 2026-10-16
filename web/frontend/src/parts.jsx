@@ -177,3 +177,12 @@ export function HistBars({ data, x = "bucket", y = "n", height = 200, fmtX = (v)
 }
 
 export { Addr };
+
+/** Where a wallet's tier comes from: the active model version or the heuristic fallback. */
+export function TierSrc({ src, version, synced }) {
+  if (!src) return null;
+  if (src === "model") {
+    return <span className="badge accent" title={synced === false ? "Stufen direkt aus dem Modell (noch nicht in die Wallet-Liste übernommen)" : "Stufe aus der aktiven Modellversion; Signale und Copy-Trading nutzen dieselbe"}>Modell{version ? ` v${version}` : ""}</span>;
+  }
+  return <span className="badge warn" title="Stufe aus der Wallet-Formel, bis das Modell eine Version aktiviert hat">Heuristik</span>;
+}

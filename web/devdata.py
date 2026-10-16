@@ -552,6 +552,12 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
                       p_now * 1e9, "open", hint, now - 60 if hint else None, json.dumps({"fill_source": "jupiter"})))
     conn.execute(_named(conn, "INSERT INTO ct_events VALUES (?,?,?,?,?)"), (now - 60, "info", "hint", "VERKAUFS-HINWEIS: Ziel erreicht", None))
     control.set_mode(conn, "signal", "semi")
+    try:  # signals/ syncs the active model's tiers into wallets every rescore (core.scoring)
+        from core.scoring import sync_model_tiers
+        sync_model_tiers(conn)
+        conn.commit()
+    except Exception:
+        pass
     _learn_demo(conn, r, now)
     _safety_demo(conn, r, tokens, now)
     try:

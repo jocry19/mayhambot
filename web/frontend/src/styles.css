@@ -374,3 +374,6 @@ label.fld small { color: var(--muted); }
 .load.warn .load-fill { background: var(--warn); } .load.warn .load-num { color: var(--warn); }
 .load.bad .load-fill { background: var(--bad); } .load.bad .load-num { color: var(--bad-ink); }
 .load-num { min-width: 38px; text-align: right; }
+
+button.badge.linkish { border: 0; cursor: pointer; font: inherit; font-size: 11.5px; }
+button.badge.linkish:hover { background: var(--accent-wash); color: var(--accent-ink); }

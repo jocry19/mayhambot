@@ -1,18 +1,22 @@
 import { useState } from "react";
 import { EChart, baseOption, tierColor, tipRow, valueAxis } from "../chart.jsx";
 import { TIER_LABEL, TIER_SOURCE, ago, go, mc, n, pct, usd, usdSigned, usePoll } from "../lib.js";
-import { HistBars, WalletLink } from "../parts.jsx";
+import { HistBars, TierSrc, WalletLink } from "../parts.jsx";
 import { Callout, Card, Empty, Legend, Score, Seg, Table, Tier, Tile } from "../ui.jsx";
 
 const SORTS = [["score", "Score"], ["win_rate", "Trefferquote"], ["roi", "ROI"], ["total_pnl_usd", "Gewinn"],
   ["influence_followers", "Einfluss"], ["influence_usd", "Erzeugter Inflow"], ["early_rate", "Früh-Quote"], ["exit_capture", "Ausstieg"], ["copy_score", "Copy-Score"]];
+const srcOf = (r) => (r.tier_source === "heuristic" ? "heuristic" : r.tier_source ? "model" : null);
 
 export default function Wallets() {
   const [tier, setTier] = useState("");
   const [sort, setSort] = useState("score");
   const [search, setSearch] = useState("");
-  const { data } = usePoll(`/api/wallets?tier=${tier}&sort=${sort}&limit=500${search ? `&search=${encodeURIComponent(search)}` : ""}`, 30000);
+  const [cluster, setCluster] = useState("");
+  const [group, setGroup] = useState(false);
+  const { data } = usePoll(`/api/wallets?tier=${tier}&sort=${sort}&limit=500${search ? `&search=${encodeURIComponent(search)}` : ""}${cluster ? `&cluster=${encodeURIComponent(cluster)}` : ""}${group ? "&group=1" : ""}`, 30000);
   const { data: st } = usePoll("/api/wallets/stats", 60000);
+  const ti = st?.tier_info;
   return (
     <div className="col" style={{ gap: 16 }}>
       {st && st.tier_source !== "model" && <Callout>{TIER_SOURCE[st.tier_source]}.</Callout>}
@@ -23,7 +27,8 @@ export default function Wallets() {
               sub={st.by_tier[k].n ? `Treffer ${pct(st.by_tier[k].win_rate)} · ROI ${pct(st.by_tier[k].roi)}` : "noch keine"} />
           ))}
           <Tile label="Bewertete Wallets" value={n(st.scored_wallets)} sub={`${n(st.total_wallets)} Wallets beobachtet`} />
-          <Tile label="Anteil mit Tier" value={st.scored_wallets ? pct(st.tiered / st.scored_wallets, 1) : "–"} sub="Smart Money ist selten" />
+          <Tile label="Herkunft der Stufen" value={ti ? <TierSrc src={ti.source === "model" ? "model" : "heuristic"} version={ti.version} synced={ti.synced} /> : "–"}
+            sub={ti?.source === "model" ? (ti.synced ? "gilt gleich für Signale und Copy-Trading" : "wird beim nächsten Signal-Zyklus übernommen") : `${st.scored_wallets ? pct(st.tiered / st.scored_wallets, 1) : "–"} mit Tier · Modell noch nicht aktiv`} />
         </div>
       )}
 
@@ -68,16 +73,23 @@ export default function Wallets() {
       <div className="row" style={{ gap: 12 }}>
         <Seg value={tier} onChange={setTier} options={[["", "Alle Tiers"], ["ultra", "Ultra Smart"], ["smart", "Smart"], ["good", "Good"]]} />
         <Seg value={sort} onChange={setSort} options={SORTS} />
+        <label className="row nowrap dim" style={{ fontSize: 12.5, gap: 6 }} title="Wallets mit derselben Gruppe (gleicher Geldgeber oder gemeinsames Kaufen) sind ein Akteur: nur die beste Wallet je Gruppe zeigen">
+          <input type="checkbox" checked={group} onChange={(e) => setGroup(e.target.checked)} />Gruppen zusammenfassen
+        </label>
+        {cluster && <button className="btn sm" onClick={() => setCluster("")}>Gruppe {cluster.slice(0, 8)} ✕</button>}
         <span className="sp" />
         <input className="in" placeholder="Adresse oder Label …" value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 220 }} aria-label="Wallets filtern" />
       </div>
-      <Card title="Rangliste Smart Wallets" sub={data ? `${n(data.total)} Wallets · Einfluss = Ø Wallets, die in den Minuten nach ihrem Kauf nachkaufen` : ""} flush>
+      <Card title="Rangliste Smart Wallets" sub={data ? `${n(data.total)} ${group ? "Akteure" : "Wallets"}${cluster ? ` in Gruppe ${cluster.slice(0, 8)}` : ""} · Einfluss = Ø Wallets, die in den Minuten nach ihrem Kauf nachkaufen` : ""} flush>
         <Table rows={data?.items} rowKey={(r) => r.address} onRow={(r) => go(`/wallet/${r.address}`)} tall max={500}
           empty="Noch keine Wallet mit Tier. Das Modell vergibt Tiers, sobald genug Historie da ist." cols={[
             { k: "rank", l: "#", sort: false, fmt: (r) => <span className="dim">{data.items.indexOf(r) + 1 + 0}</span> },
             { k: "address", l: "Wallet", fmt: (r) => <span><WalletLink a={r.address} label={r.label || undefined} />{r.manual && <span className="badge" style={{ marginLeft: 6 }}>eigene</span>}</span> },
             { k: "tier", l: "Tier", fmt: (r) => <Tier t={r.tier} />, sort: (r) => ({ ultra: 3, smart: 2, good: 1 }[r.tier] || 0) },
-            { k: "score", l: "Score", fmt: (r) => <Score v={r.score} /> },
+            { k: "tier_source", l: "Quelle", title: "Woher die Stufe kommt: aktive Modellversion oder Heuristik", sort: (r) => r.tier_version || 0,
+              fmt: (r) => <TierSrc src={srcOf(r)} version={r.tier_version} /> },
+            { k: "score", l: "Score", title: "Score, nach dem die Stufe vergeben wurde (Modell, sonst Heuristik)", fmt: (r) => <Score v={r.score} /> },
+            { k: "score_heuristic", l: "Heuristik", r: true, title: "Score der Wallet-Formel (Treffer, ROI, Konstanz) zum Vergleich", fmt: (r) => (r.score_heuristic != null ? n(r.score_heuristic) : "–") },
             { k: "n_tokens", l: "Coins", r: true },
             { k: "win_rate", l: "Treffer", r: true, fmt: (r) => pct(r.win_rate) },
             { k: "early_rate", l: "Früh", r: true, title: "Anteil Käufe vor einem 2x", fmt: (r) => pct(r.early_rate) },
@@ -88,7 +100,12 @@ export default function Wallets() {
             { k: "median_entry_mcap", l: "Einstieg MC", r: true, fmt: (r) => mc(r.median_entry_mcap) },
             { k: "exit_capture", l: "Ausstieg", r: true, title: "Verkaufspreis als Anteil vom Hoch nach dem Einstieg (Median); 100 % = am Gipfel verkauft", fmt: (r) => (r.exit_capture != null ? pct(r.exit_capture) : "–") },
             { k: "median_hold_min", l: "Haltedauer", r: true, title: "Median, Minuten", fmt: (r) => (r.median_hold_min != null ? `${n(r.median_hold_min, 0)} min` : "–") },
-            { k: "cluster_id", l: "Gruppe", title: "Wallets, die wiederholt innerhalb von 60 s denselben Coin kaufen (vermutlich ein Akteur)", fmt: (r) => (r.cluster_id ? <span className="badge">{String(r.cluster_id).slice(0, 8)}</span> : <span className="dim">–</span>) },
+            { k: "cluster_n", l: "Gruppe", title: "Wallets mit gleichem Geldgeber oder die wiederholt gemeinsam kaufen: ein Akteur. Klick zeigt die ganze Gruppe.",
+              sort: (r) => r.cluster_n || 0,
+              fmt: (r) => (r.cluster_id ? (
+                <button className="badge linkish" onClick={(e) => { e.stopPropagation(); setCluster(String(r.cluster_id)); setGroup(false); }}
+                  title={`Gruppe ${r.cluster_id}: alle Wallets zeigen`}>{String(r.cluster_id).slice(0, 8)}{r.cluster_n > 1 ? ` · ${r.cluster_n}` : ""}</button>
+              ) : <span className="dim">–</span>) },
             { k: "copy_score", l: "Copy-Score", r: true, title: "Erwarteter Gewinn pro Kopie (Copy-Trading-Ranking)", fmt: (r) => (r.copy_score != null ? pct(r.copy_score, 1) : "–") },
             { k: "last_trade_ts", l: "Zuletzt", r: true, fmt: (r) => ago(r.last_trade_ts) },
           ]} />

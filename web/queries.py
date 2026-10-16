@@ -79,9 +79,18 @@ def sol_usd(conn) -> float:
     return cache.get(("sol_usd",), 60, calc)
 
 
+def _wallets_synced(conn) -> bool:
+    """True once signals/ synced the active model's tiers into wallets (core.scoring.sync_model_tiers)."""
+    return has(conn, "wallets", "tier_source") and bool(
+        scalar(conn, "SELECT 1 FROM wallets WHERE tier_source='model' AND tier IS NOT NULL LIMIT 1", default=0))
+
+
 def tier_source(conn) -> str:
-    """model = model/ tiers, core = wallets.tier set by core/signals, fallback = README rules on core score."""
+    """model = tiers of the active model (wallets.tier synced from it, else model_wallet_stats directly),
+    core = wallets.tier from the core heuristic, fallback = README rules on core score."""
     def calc():
+        if _wallets_synced(conn):
+            return "model"
         if has(conn, "model_wallet_stats") and scalar(conn, "SELECT COUNT(*) FROM model_wallet_stats WHERE tier IS NOT NULL", default=0):
             return "model"
         if has(conn, "wallets", "tier") and scalar(conn, "SELECT COUNT(*) FROM wallets WHERE tier IS NOT NULL", default=0):
@@ -91,9 +100,19 @@ def tier_source(conn) -> str:
 
 
 def tier_map(conn) -> dict[str, dict]:
-    """{address: {tier, score, influence_followers, influence_usd}} for every tiered wallet."""
+    """{address: {tier, score, influence_followers, influence_usd, ...}} for every tiered wallet.
+    wallets.tier is the one truth once synced, so dashboard, signals and copy trader count the same wallets."""
     def calc():
         out = {}
+        if _wallets_synced(conn):
+            infl = {}
+            if has(conn, "model_wallet_stats"):
+                infl = {r["address"]: r for r in rows(conn, """SELECT address, influence_followers, influence_usd, inflow_lift_usd
+                                                               FROM model_wallet_stats WHERE tier IS NOT NULL""")}
+            for r in rows(conn, """SELECT address, tier, COALESCE(model_score, score) score, tier_source, tier_version
+                                   FROM wallets WHERE tier IS NOT NULL"""):
+                out[r["address"]] = {**(infl.get(r["address"]) or {}), **r}
+            return out
         if tier_source(conn) == "model":
             for r in rows(conn, """SELECT address, tier, score, influence_followers, influence_usd, inflow_lift_usd
                                    FROM model_wallet_stats WHERE tier IS NOT NULL"""):
@@ -114,6 +133,20 @@ def tier_map(conn) -> dict[str, dict]:
                     break
         return out
     return cache.get(("tier_map",), 30, calc)
+
+
+def tier_info(conn) -> dict:
+    """Where the tiers come from right now, for badges: source, version, synced into wallets, counts."""
+    src = tier_source(conn)
+    synced = _wallets_synced(conn)
+    ver = None
+    if synced:
+        ver = scalar(conn, "SELECT MAX(tier_version) FROM wallets WHERE tier_source='model'")
+    elif src == "model" and has(conn, "model_wallet_stats", "version"):
+        ver = scalar(conn, "SELECT MAX(version) FROM model_wallet_stats")
+    tm = tier_map(conn)
+    return {"source": src, "version": ver, "synced": synced,
+            "counts": {k: sum(1 for v in tm.values() if v.get("tier") == k) for k in TIERS}}
 
 
 def model_active(conn) -> dict | None:
@@ -704,7 +737,7 @@ def _live_prediction(mint):
 # ====================================================================== wallets
 WALLET_SORTS = {"score", "win_rate", "roi", "total_pnl_usd", "influence_followers", "influence_usd",
                 "inflow_lift_usd", "n_tokens", "early_rate", "last_trade_ts", "copy_score", "exit_capture",
-                "median_hold_min"}
+                "median_hold_min", "model_score", "score_heuristic", "cluster_n"}
 
 
 def _fallback_influence(conn, addresses, window_s=600):
@@ -737,7 +770,8 @@ def _fallback_influence(conn, addresses, window_s=600):
     return cache.get(("influence", len(addresses)), 120, calc)
 
 
-def wallets(conn, tier=None, sort="score", q=None, limit=200, offset=0, include_untiered=False):
+def wallets(conn, tier=None, sort="score", q=None, limit=200, offset=0, include_untiered=False, cluster=None,
+            group_clusters=False):
     src = tier_source(conn)
     tm = tier_map(conn)
     ct = {r["address"]: r for r in rows(conn, "SELECT * FROM ct_wallet_rank")} if has(conn, "ct_wallet_rank") else {}
@@ -757,6 +791,7 @@ def wallets(conn, tier=None, sort="score", q=None, limit=200, offset=0, include_
         out = []
         for b in base:
             comp = _j(b.get("components_json"), {})
+            b["model_score"] = b.get("score")
             out.append({**{k: b.get(k) for k in ("address", "tier", "score", "n_tokens", "win_rate", "early_rate", "roi",
                                                   "realized_pnl_usd", "total_pnl_usd", "median_entry_mcap",
                                                   "median_min_to_2x", "influence_followers", "influence_usd",
@@ -776,6 +811,61 @@ def wallets(conn, tier=None, sort="score", q=None, limit=200, offset=0, include_
         out = []
         for b in base:
             out.append({**b, "tier": (tm.get(b["address"]) or {}).get("tier"), **infl.get(b["address"], {})})
+    # wallets.tier is the one truth once synced: tier, its source/version, model and heuristic score per wallet
+    wcols = tables(conn).get("wallets", set()) if has(conn, "wallets") else set()
+    if "tier_source" in wcols:
+        addrs = [w["address"] for w in out]
+        wrow = {}
+        for i in range(0, len(addrs), 500):
+            ch = addrs[i:i + 500]
+            for r in rows(conn, f"""SELECT address, tier, tier_source, tier_version, model_score, score, cluster_id, exit_capture
+                                    FROM wallets WHERE address IN ({','.join('?' * len(ch))})""", ch):
+                wrow[r["address"]] = r
+        synced = _wallets_synced(conn)
+        known = set(addrs)
+        if synced:  # tiered in wallets but not in the model table (manual wallets stay smart)
+            for r in rows(conn, """SELECT address, tier, tier_source, tier_version, model_score, score, cluster_id, exit_capture,
+                                          tokens_traded n_tokens, win_rate, early_rate, roi, realized_pnl_usd, total_pnl_usd,
+                                          last_trade_ts FROM wallets WHERE tier IS NOT NULL"""):
+                if r["address"] not in known:
+                    wrow[r["address"]] = r
+                    out.append({k: r[k] for k in ("address", "n_tokens", "win_rate", "early_rate", "roi", "realized_pnl_usd",
+                                                  "total_pnl_usd", "last_trade_ts")})
+        for w in out:
+            r = wrow.get(w["address"])
+            if not r:
+                continue
+            if synced:
+                w["tier"] = r["tier"]
+            w["tier_source"] = r.get("tier_source")
+            w["tier_version"] = r.get("tier_version")
+            w["score_heuristic"] = _f(r.get("score"), 1)
+            if r.get("model_score") is not None:
+                w["model_score"] = r["model_score"]
+            for k in ("cluster_id", "exit_capture"):
+                if w.get(k) is None and r.get(k) is not None:
+                    w[k] = r[k]
+            if w.get("score") is None:
+                w["score"] = w.get("model_score") if w.get("model_score") is not None else r.get("score")
+        if not include_untiered:
+            out = [w for w in out if w.get("tier")]
+    elif has(conn, "wallets"):
+        hs = {r["address"]: r["score"] for r in rows(conn, "SELECT address, score FROM wallets WHERE score>0")} if src == "model" else {}
+        for w in out:
+            if src == "model":
+                w["score_heuristic"] = _f(hs.get(w["address"]), 1)
+                w["model_score"] = w.get("score")
+                w["tier_source"] = "model"
+            else:
+                w["score_heuristic"] = w.get("score")
+                w["tier_source"] = "heuristic"
+    # wallets with the same cluster_id are one entity (same funder): size per cluster
+    csize = defaultdict(int)
+    for w in out:
+        if w.get("cluster_id"):
+            csize[w["cluster_id"]] += 1
+    for w in out:
+        w["cluster_n"] = csize.get(w.get("cluster_id"), 0) or None
     for w in out:
         m = meta.get(w["address"]) or {}
         w["label"] = m.get("label") or ""
@@ -790,11 +880,25 @@ def wallets(conn, tier=None, sort="score", q=None, limit=200, offset=0, include_
         out = [w for w in out if w.get("tier") == tier]
     if q:
         ql = q.lower()
-        out = [w for w in out if ql in w["address"].lower() or ql in (w["label"] or "").lower()]
+        out = [w for w in out if ql in w["address"].lower() or ql in (w["label"] or "").lower()
+               or (w.get("cluster_id") and ql == str(w["cluster_id"]).lower())]
+    if cluster:
+        out = [w for w in out if str(w.get("cluster_id") or "") == cluster]
     sort = sort if sort in WALLET_SORTS else "score"
     out.sort(key=lambda w: (w.get(sort) is not None, w.get(sort) or 0), reverse=True)
+    if group_clusters:  # one row per entity: the best wallet of each cluster carries the group size
+        seen, grouped = set(), []
+        for w in out:
+            c = w.get("cluster_id")
+            if c and (w.get("cluster_n") or 0) > 1:
+                if c in seen:
+                    continue
+                seen.add(c)
+            grouped.append(w)
+        out = grouped
     total = len(out)
-    return {"tier_source": src, "total": total, "counts": counts, "items": out[offset:offset + limit]}
+    return {"tier_source": src, "tier_info": tier_info(conn), "total": total, "counts": counts,
+            "items": out[offset:offset + limit]}
 
 
 def wallet_stats_overview(conn):
@@ -819,7 +923,8 @@ def wallet_stats_overview(conn):
         by_tier[k] = {"n": len(xs), "win_rate": med("win_rate"), "roi": med("roi"), "early_rate": med("early_rate"),
                       "influence_followers": med("influence_followers"), "influence_usd": med("influence_usd"),
                       "median_entry_mcap": med("median_entry_mcap"), "total_pnl_usd": med("total_pnl_usd")}
-    return {"tier_source": tier_source(conn), "total_wallets": scalar(conn, "SELECT COUNT(*) FROM wallets", default=0),
+    return {"tier_source": tier_source(conn), "tier_info": tier_info(conn),
+            "total_wallets": scalar(conn, "SELECT COUNT(*) FROM wallets", default=0),
             "scored_wallets": len(allw), "tiered": len(tiered),
             "counts": {k: by_tier[k]["n"] for k in TIERS}, "by_tier": by_tier,
             "score_hist": [{"bucket": f"{i * 10}–{i * 10 + 10}", "n": n} for i, n in enumerate(hist)],
@@ -1120,11 +1225,52 @@ def model_view(conn):
             if not k.get("algo"):
                 k["algo"] = mm.get("algo")
     return {"versions": versions, "active": active, "report": report, "calibration": calib, "research": research,
-            "tier_source": tier_source(conn),
+            "tier_source": tier_source(conn), "tier_info": tier_info(conn), "retrain": retrain_schedule(conn),
             "signal_formula": [{"feature": f, "label": lab, "weight": w} for f, lab, w in
                                (("inflow", "Netto-Inflow Smart Money", 0.4), ("breadth", "Anzahl Smart Wallets", 0.3),
                                 ("quality", "Ø Wallet-Qualität", 0.3))],
             "performance": signal_performance(conn)}
+
+
+_RETRAIN_RE = None
+
+
+def retrain_schedule(conn, now=None):
+    """When the research service retrains next: the last "next retrain at" line of logs/research.log, else
+    the active version's time + MODEL_RETRAIN_HOURS. due = the time has passed (retrain runs in the next cycle)."""
+    import calendar
+    import re
+    global _RETRAIN_RE
+    _RETRAIN_RE = _RETRAIN_RE or re.compile(r"next retrain at (\d{4}-\d\d-\d\d \d\d:\d\d) UTC")
+    now = now or time.time()
+    try:
+        from model.config import msettings  # type: ignore
+        every_h = float(msettings.retrain_hours)
+    except Exception:
+        try:
+            every_h = float(os.getenv("MODEL_RETRAIN_HOURS", "6"))
+        except ValueError:
+            every_h = 6.0
+    last_ok = scalar(conn, "SELECT MAX(ts) FROM model_versions WHERE active=1") if has(conn, "model_versions") else None
+    out = {"every_h": every_h, "last_ok": last_ok, "next_ts": None, "source": None, "failed_ts": None}
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(os.getenv("MAYHAM_LOG_DIR") or os.path.join(root, "logs"), "research.log")
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 256 * 1024))
+            tail = f.read().decode("utf-8", "replace")
+        hits = _RETRAIN_RE.findall(tail)
+        if hits:
+            out["next_ts"] = calendar.timegm(time.strptime(hits[-1], "%Y-%m-%d %H:%M"))
+            out["source"] = "log"
+        out["failed"] = tail.rfind("retrain failed") > tail.rfind("next retrain at")
+    except OSError:
+        pass
+    if out["next_ts"] is None and last_ok:
+        out["next_ts"], out["source"] = int(last_ok + every_h * 3600), "berechnet"
+    out["due"] = bool(out["next_ts"] and out["next_ts"] <= now)
+    return out
 
 
 # ====================================================================== overview + system

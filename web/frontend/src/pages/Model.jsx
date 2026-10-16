@@ -67,7 +67,12 @@ export default function Model() {
           <Tile label="Trennschärfe 1 h (AUC)" value={v.auc_1h != null ? n(v.auc_1h, 2) : "–"} sub={v.auc_baseline_1h != null ? `einfache Formel: ${n(v.auc_baseline_1h, 2)} · 0,5 = Zufall` : "noch zu wenige Testfälle"} />
           <Tile label="Top 10 % der Prognosen" value={v.top10_1h != null ? pct(v.top10_1h) : "–"} sub={v.base_rate_1h != null ? `pumpen, sonst nur ${pct(v.base_rate_1h)}` : "–"} />
           <Tile label="Lern-Events" value={n(v.n_events)} sub={`${n(v.n_test_1h)} davon im Test`} />
-          <Tile label="Wallets bewertet" value={n(v.n_wallets)} sub={`${v.tier_counts.ultra || 0} Ultra · ${v.tier_counts.smart || 0} Smart · ${v.tier_counts.good || 0} Good`} />
+          <Tile label="Stufen im Einsatz" value={d.tier_info ? n((d.tier_info.counts.ultra || 0) + (d.tier_info.counts.smart || 0) + (d.tier_info.counts.good || 0)) : n(v.n_wallets)}
+            title="Ultra · Smart · Good, wie Signale und Copy-Trading sie gerade nutzen (Tabelle wallets)"
+            sub={d.tier_info ? `${n(d.tier_info.counts.ultra)} Ultra · ${n(d.tier_info.counts.smart)} Smart · ${n(d.tier_info.counts.good)} Good${d.tier_info.source === "model" ? ` · aus v${d.tier_info.version ?? v.id}${d.tier_info.synced ? "" : " (noch nicht übernommen)"}` : " · Heuristik"}`
+              : `${v.tier_counts.ultra || 0} Ultra · ${v.tier_counts.smart || 0} Smart · ${v.tier_counts.good || 0} Good`} />
+          <Tile label="Nächstes Retrain" value={d.retrain?.next_ts ? (d.retrain.due ? "fällig" : dt(d.retrain.next_ts)) : "–"} cls={d.retrain?.failed ? "down" : ""}
+            sub={d.retrain ? `${d.retrain.failed ? "letzter Versuch fehlgeschlagen, neuer Versuch im nächsten Zyklus · " : d.retrain.due ? "läuft im nächsten Zyklus · " : ""}alle ${n(d.retrain.every_h)} h${d.retrain.source === "berechnet" ? " (berechnet)" : ""}` : ""} />
           <Tile label="Algorithmus 1 h" value={<span style={{ fontSize: 17 }}>{ALGO_LABEL[v.algo_1h] || v.algo_1h || "–"}</span>}
             sub={v.selection?.["1h"]?.why || "gewählt nach Test auf ungesehenen Daten"} />
           {Object.values(d.research).filter((r) => r.n > 0).slice(0, 1).map((r) => <Tile key={r.label} label={r.label} value={n(r.n)} />)}

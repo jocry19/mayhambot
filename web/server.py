@@ -172,8 +172,10 @@ def coin(mint: str):
 
 
 @app.get("/api/wallets")
-def wallets(tier: str | None = None, sort: str = "score", search: str | None = None, limit: int = 200, offset: int = 0):
-    return ok(q.wallets(read_conn(), tier=tier, sort=sort, q=search, limit=min(limit, 2000), offset=offset))
+def wallets(tier: str | None = None, sort: str = "score", search: str | None = None, limit: int = 200, offset: int = 0,
+            cluster: str | None = None, group: int = 0):
+    return ok(q.wallets(read_conn(), tier=tier, sort=sort, q=search, limit=min(limit, 2000), offset=offset,
+                        cluster=cluster or None, group_clusters=bool(group)))
 
 
 @app.get("/api/wallets/stats")
