@@ -1,3 +1,4 @@
+import time
 import dataclasses
 import json
 import sqlite3
@@ -119,3 +120,13 @@ def test_metrics_trimmed_and_pruned(tmp_path):
     engine._last_prune["at"] = 0
     assert engine.prune_metrics(c, now=now) == 1
     assert [r[0] for r in c.execute("SELECT mint FROM signal_metrics")] == ["NEW"]
+
+
+def test_report_due_by_file_age(tmp_path):
+    import os
+    p = tmp_path / "r.json"
+    assert funnel.report_due(p)
+    p.write_text("{}")
+    assert not funnel.report_due(p)
+    os.utime(p, (time.time() - 4000, time.time() - 4000))
+    assert funnel.report_due(p)

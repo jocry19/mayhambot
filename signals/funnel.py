@@ -112,12 +112,26 @@ def outcomes(conn, hours=168, cost=COST, now=None, bands=(0, 20, 30, 40, 50, 60,
 REPORT_EVERY = 3600
 
 
+def report_path():
+    from pathlib import Path
+    return Path(settings.db_path).parent / "reports" / "signals_report.json"
+
+
+def report_due(path=None, every=REPORT_EVERY):
+    """By the report file's age, so frequent restarts (auto-updates) never starve the hourly report."""
+    p = path or report_path()
+    try:
+        return time.time() - p.stat().st_mtime >= every
+    except OSError:
+        return True
+
+
 def write_report(conn, path=None, now=None):
     """Hourly self-report for threads that may read logs but not the DB: reports/signals_report.json next to
     the DB (data/ on the Mac; funnel 4 h / 24 h, outcomes by band 24 h / 7 d, newest EV calibration). Small, no secrets, overwritten."""
     from pathlib import Path
     now = now or int(time.time())
-    path = Path(path) if path else Path(settings.db_path).parent / "reports" / "signals_report.json"
+    path = Path(path) if path else report_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     cal = None
     try:
