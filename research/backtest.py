@@ -10,12 +10,13 @@ Timeline is cut into checkpoints C_0 < C_1 < ... For the window [C_k, C_k+1):
 import bisect
 import logging
 import random
+import time
 
 from model import learn
 from model.config import msettings
 from model.tiers import tier_all
 from research import events as ev
-from research import stats, wallet_stats
+from research import exits, stats, wallet_stats
 
 log = logging.getLogger("research.backtest")
 
@@ -124,12 +125,16 @@ def run(ds, ms=msettings, max_points=24):
                     continue
                 p = stats.logistic_predict(m, e["x"])
                 p_net = stats.logistic_predict(mn, e["x"]) if mn["kind"] != "prior" else None
-                res["preds"][name].append(dict(ts=e["ts"], p=p, y=lab["pumped"], max_ret=lab["max_ret"],
+                res["preds"][name].append(dict(ts=e["ts"], mint=e["mint"], p=p, y=lab["pumped"], max_ret=lab["max_ret"],
                                                net=lab.get("net"), win=lab.get("win"), p_net=p_net,
                                                baseline=e["baseline"], model=m["kind"]))
         res["events"].extend(cev)
         log.info("checkpoint %d/%d: %d wallets, tiers %s, %d coin events", k + 1, len(cps), len(st), counts, len(cev))
     res["metrics"] = metrics(res, ms)
+    main = "1h" if res["preds"].get("1h") else ms.horizons[0][0]
+    t0 = time.time()
+    res["metrics"]["exits"] = exits.study(res["preds"][main][-1500:], ds.pidx)
+    log.info("exit study: %d rules x %d signals in %.0f s", len(exits.GRID), len(res["preds"][main][-1500:]), time.time() - t0)
     return res
 
 

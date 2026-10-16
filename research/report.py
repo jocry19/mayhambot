@@ -143,7 +143,8 @@ def build(conn, version_id, bt, tiers_now, weights, weight_info, models, prev=No
                 tier_counts=counts, weights=weights, weight_info=weight_info,
                 tier_profiles={}, tier_forward=m.get("tier_forward", {}),
                 combos=combos(evs, main), univariate=univariate(evs, main),
-                backtest={k: v for k, v in m.items() if k not in ("tier_forward", "selection")},
+                backtest={k: v for k, v in m.items() if k not in ("tier_forward", "selection", "exits")},
+                exits=m.get("exits") or {},
                 models={h: {"kind": mm.get("kind"), "algo": (mm.get("cfg") or {}).get("algo", mm.get("kind")),
                             "drop": (mm.get("cfg") or {}).get("drop"), "n": mm.get("n"), "pos": mm.get("pos"),
                             "weights": sorted(({"feature": f, "label": FEATURE_LABELS[f], "weight": c}
@@ -314,6 +315,21 @@ def render(d):
             if qs and qs[0].get("mean_net") is not None:
                 L.append(f"Score-Fünftel {h} (1 = höchster Score), Ø netto: " +
                          " · ".join(f"{q['quintile']}: {_pct(q['mean_net'])} (n {q['n']})" for q in qs) + "\n")
+        ex = d.get("exits") or {}
+        if ex.get("top"):
+            def rule(r):
+                return (f"Ziel +{100 * r['tp']:.0f} %, " + (f"Stopp {100 * r['sl']:.0f} %" if r["sl"] is not None else "kein Stopp")
+                        + f", max. {r['hold']}")
+            L.append(f"### Ausstiege nach Kosten (oberstes Fünftel nach Modell, {ex['n_top']} von {ex['n']} Signalen)\n")
+            L.append("| Regel | Fälle | Ø netto | Gewinnquote |")
+            L.append("|---|---|---|---|")
+            for r in ex["top"]:
+                L.append(f"| {rule(r['rule'])} | {r['n']} | {_pct(r['mean_net'])} | {_pct(r['win_rate'])} |")
+            o = ex.get("out_of_sample")
+            if o:
+                L.append(f"\nEhrlicher Test: Die beste Regel der älteren 60 % ({rule(o['rule'])}, dort {_pct(o['in_sample_mean'])}) "
+                         f"bringt auf den neueren 40 % **{_pct(o['mean_net'])}** im Schnitt nach Kosten "
+                         f"(Gewinnquote {_pct(o['win_rate'])}, n {o['n']}).\n")
     else:
         L.append(f"_Backtest: noch zu wenig Historie ({d['checkpoints']} Prüfpunkte). Er läuft automatisch, sobald mehr Daten da sind._\n")
     if d["top_wallets"]:

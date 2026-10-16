@@ -143,6 +143,15 @@ class PriceIndex:
                 return tss[i]
         return None
 
+    def first_time_below(self, mint, a, b, level):
+        tss = self.lo_ts.get(mint)
+        if not tss:
+            return None
+        for i in range(bisect.bisect_right(tss, a), bisect.bisect_right(tss, b)):
+            if self.lo[mint][i] <= level:
+                return tss[i]
+        return None
+
     def mcap(self, mint, price):
         if not price:
             return None

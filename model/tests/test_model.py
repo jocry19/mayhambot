@@ -252,3 +252,15 @@ def test_selection_refuses_models_worse_than_base_rate_and_survives_purge():
                 labels={"6h": {"pumped": i % 2, "max_ret": 1.0, "net": 0.5, "win": i % 2}}) for i in range(420)]
     _, rep6 = learn.select_models(ev6, horizons=[("6h", 21600, 1.0)])
     assert rep6["6h"]["n_train"] >= 40
+
+
+def test_exit_replay_stop_before_target_and_costs():
+    from research import exits
+    from research.prices import PriceIndex
+    idx = PriceIndex()
+    idx._add("M", [(0, 1.0), (60, 0.7), (120, 1.6), (4000, 1.0)])
+    r = dict(tp=0.5, sl=-0.2, hold="1h", hold_s=3600)
+    assert abs(exits.replay(idx, "M", 0, r) - (-0.2 - 0.06)) < 1e-9  # stop hit first
+    r2 = dict(tp=0.5, sl=None, hold="1h", hold_s=3600)
+    assert abs(exits.replay(idx, "M", 0, r2) - (0.5 - 0.06)) < 1e-9
+    assert exits.replay(idx, "M", 0, dict(r2, hold_s=21600)) is None  # 6 h not covered yet
