@@ -68,7 +68,7 @@ normal TTL.
 | `insiders` (deep) | first tx of each top holder (cached a day) | – | fresh wallets (< `FRESH_WALLET_DAYS`, ≤ `FRESH_WALLET_MAX_TXS` txs), holders with the same funder or funded by the creator, RugCheck insider flags |
 | `bundles` (deep) | oldest signatures of the mint + launch txs (cached forever) | – | supply bought in the first `BUNDLE_SLOTS` slots, buys in the creation block, how much they still hold, shared funders |
 | `dev` (deep) | creator from launch/RugCheck, balance, last `DEV_TXS_SCANNED` txs | – | dev holding, share of dev buy already gone, SOL sent to exchanges (`exchanges.txt`), tokens spread to other wallets without a sale |
-| `liquidity` | DexScreener | – | liquidity below `MIN_LIQUIDITY_USD`, liquidity/mcap below `MIN_LIQ_MCAP_RATIO` |
+| `liquidity` | DexScreener, our `token_prices` | liquidity fell ≥ `LIQ_DROP_PCT` (90 %) below its 7-day peak | liquidity below `MIN_LIQUIDITY_USD`, liquidity/mcap below `MIN_LIQ_MCAP_RATIO` |
 | `lp` | RugCheck markets, DEX type | – | LP locked/burned below `LP_LOCKED_OK_PCT`; CLMM/DLMM pools; pump.fun curve = safe |
 | `wash` | our own `trades` table (no network) | – | round-trip volume of the same wallets, top-3 volume share |
 | `socials` | DexScreener info, RugCheck metadata | – | no website/socials, mutable metadata |
@@ -79,7 +79,7 @@ Funding from an exchange hot wallet never links wallets (one exchange funds thou
 ## Cost
 
 Every assessment has its own call budget (`SAFETY_MAX_CALLS_PER_TOKEN`, default 70) on top of core.http's
-shared per-host limits. A first deep check of a young coin costs about 30–65 calls; launch data is stored
+shared per-host limits. A first deep check of a young coin costs about 30–65 calls (up to `SAFETY_LAUNCH_MAX_PAGES`=15 more to page back to the launch of a busy pump coin, once); launch data is stored
 forever and wallet profiles for a day, so a re-check costs about 15–25. `refresh` checks at most
 `SAFETY_REFRESH_MAX_TOKENS` coins and stops after `SAFETY_REFRESH_BUDGET_SEC`. TTL: 15 min for coins younger than
 6 h, 2 h for older ones, 6 h for blocked ones.
@@ -103,5 +103,8 @@ forever and wallet profiles for a day, so a re-check costs about 15–25. `refre
 .venv/bin/python -m safety list
 .venv/bin/python -m safety block <MINT> "grund"    # allow <MINT> / clear <MINT>
 ```
+
+Offline: with `SAFETY_OFFLINE=1` or inside any pytest run, `assess` and `refresh` make no network calls
+(stored result, or `level='unchecked'`, not blocked) unless a test passes its own `fetcher`.
 
 All thresholds: `safety/config.py` (`SAFETY_*` in `.env`). Tests: `tests/test_safety.py` (fixtures, no network).

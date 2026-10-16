@@ -55,7 +55,7 @@ class SafetySettings:
     bundle_slots: int = field(default_factory=lambda: _i("SAFETY_BUNDLE_SLOTS", 3))
     bundle_warn_pct: float = field(default_factory=lambda: _f("SAFETY_BUNDLE_WARN_PCT", 15))
     bundle_crit_pct: float = field(default_factory=lambda: _f("SAFETY_BUNDLE_CRIT_PCT", 35))
-    launch_max_pages: int = field(default_factory=lambda: _i("SAFETY_LAUNCH_MAX_PAGES", 3))
+    launch_max_pages: int = field(default_factory=lambda: _i("SAFETY_LAUNCH_MAX_PAGES", 15))
     launch_max_txs: int = field(default_factory=lambda: _i("SAFETY_LAUNCH_MAX_TXS", 25))
 
     # sell simulation (Jupiter round trip SOL -> token -> SOL)
@@ -69,6 +69,7 @@ class SafetySettings:
     # liquidity and LP
     min_liquidity_usd: float = field(default_factory=lambda: _f("SAFETY_MIN_LIQUIDITY_USD", 5000))
     min_liq_mcap_ratio: float = field(default_factory=lambda: _f("SAFETY_MIN_LIQ_MCAP_RATIO", 0.03))
+    liq_drop_pct: float = field(default_factory=lambda: _f("SAFETY_LIQ_DROP_PCT", 90))   # vs 7-day peak -> hard flag
     lp_locked_ok_pct: float = field(default_factory=lambda: _f("SAFETY_LP_LOCKED_OK_PCT", 90))
 
     # wash trading (from the pool trades signals/ already stores)

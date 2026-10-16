@@ -6,6 +6,8 @@ the chance that at least one danger is real: 100 * (1 - prod(1 - risk_i/100)), "
 SAFETY_HARD_FLAG_FLOOR and always blocks. Unknown checks add nothing but lower `coverage`.
 """
 import logging
+import os
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 
@@ -77,6 +79,13 @@ def combine(mint, results, cfg, calls=0, override=None):
         creator=creator, calls=calls, override=override)
 
 
+def offline():
+    """No network for the safety layer: SAFETY_OFFLINE=1, or inside any pytest run (other packages' tests
+    must never reach the real APIs through safety). Tests that want checks pass a fake `fetcher`."""
+    return os.getenv("SAFETY_OFFLINE", "").strip().lower() in ("1", "true", "yes", "on") \
+        or "PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules
+
+
 def assess(mint, conn=None, deep=True, force=False, fetcher=None, cfg=None):
     """Full safety assessment of one token. Uses the stored result while it is fresh (see ttl), unless
     force=True. Network calls are capped per token (SAFETY_MAX_CALLS_PER_TOKEN); checks that do not fit
@@ -89,6 +98,10 @@ def assess(mint, conn=None, deep=True, force=False, fetcher=None, cfg=None):
             cached = get(conn, mint, cfg=cfg)
             if cached and not is_due(cached, cfg):
                 return cached
+        if fetcher is None and offline():
+            cached = get(conn, mint, cfg=cfg)
+            return cached or Assessment(mint=mint, ts=int(time.time()), score=0.0, level="unchecked", blocked=False,
+                                        coverage=0.0, error="offline")
         f = fetcher or Fetcher(cfg)
         ctx = checks.Context(conn, mint, f, cfg, deep=deep)
         results = []
@@ -251,6 +264,8 @@ def refresh(conn=None, extra=(), budget_sec=None, max_tokens=None, cfg=None, fet
     try:
         for m in candidates(conn, extra, cfg)[:limit]:
             if time.time() - t0 > budget:
+                break
+            if fetcher_factory is None and offline():
                 break
             try:
                 f = fetcher_factory(cfg) if fetcher_factory else None

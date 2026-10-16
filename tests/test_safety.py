@@ -240,3 +240,18 @@ def test_open_copytrade_positions_are_watched():
     c.execute("UPDATE safety_tokens SET pair_created_at=0")  # old coin: normal TTL would be 2 h
     c.commit()
     assert safety.candidates(c, cfg=CFG) == [MINT]
+
+
+def test_offline_never_touches_network():
+    c = conn()
+    a = safety.assess(MINT, c, cfg=CFG, force=True)  # pytest run -> offline, no fetcher given
+    assert a.level == "unchecked" and not a.blocked and a.error == "offline"
+    assert safety.get(c, MINT) is None and safety.refresh(c, extra=[MINT], cfg=CFG) == []
+
+
+def test_liquidity_collapse_blocks():
+    c = conn()
+    c.execute("INSERT INTO token_prices VALUES (?,?,?,?,?)", (MINT, NOW - 3600, 1.0, 2_000_000, 700_000))
+    c.commit()
+    a = safety.assess(MINT, c, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)  # live liquidity 60k = -91 %
+    assert a.blocked and any("eingebrochen" in r["text"] for r in a.reasons)

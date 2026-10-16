@@ -136,7 +136,7 @@ class Context:
 
     def tx(self, sig):
         return self._once(("tx", sig), lambda: self.f.rpc(
-            "getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}]))
+            "getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 1}]))
 
     def mint_info(self):
         def load():
@@ -552,6 +552,14 @@ def check_liquidity(ctx):
         r.positives.append("Läuft noch auf der pump.fun-Bonding-Curve.")
         return r.finish()
     c = ctx.cfg
+    peak = ctx.conn.execute("SELECT MAX(liquidity_usd) FROM token_prices WHERE mint=? AND ts>=?",
+                            (ctx.mint, ctx.now - 7 * 86400)).fetchone()[0] or 0.0
+    r.data["peak_liquidity_usd_7d"] = peak
+    if peak >= c.min_liquidity_usd and liq < peak * (1 - c.liq_drop_pct / 100):
+        drop = 100 * (1 - liq / peak)
+        r.hard = True
+        r.add(90, f"Liquidität ist um {drop:.0f} % eingebrochen ({peak:,.0f} $ → {liq:,.0f} $): "
+                  f"Rug Pull oder Pool geleert.".replace(",", "."))
     if liq < c.min_liquidity_usd:
         r.add(ramp(c.min_liquidity_usd - liq, 0, c.min_liquidity_usd, 20, 50),
               f"Nur {liq:,.0f} $ Liquidität: schon kleine Verkäufe bewegen den Kurs stark.".replace(",", "."))
