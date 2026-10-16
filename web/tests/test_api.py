@@ -505,3 +505,18 @@ def test_safety_quality(demo, empty):
     assert lr["recall"] == round(208 / 351, 3) and lr["auc"] == 0.81 and lr["doublers_flagged"] == 4
     assert {x["level"] for x in s["levels"]} == {"low", "caution", "high", "critical"}
     assert _client(empty).get("/api/system").json()["safety_quality"] is None
+
+
+def test_cross_site_writes_refused(demo):
+    c = _client(demo)
+    body = b'{"on": true}'
+    evil = c._call("POST", "/api/control/pause", body, [(b"origin", b"https://evil.example"),
+                                                        (b"content-type", b"text/plain")])
+    assert evil.status_code == 403
+    form = c._call("POST", "/api/control/pause", body, [(b"referer", b"https://evil.example/x")])
+    assert form.status_code == 403
+    rebound = c._call("POST", "/api/control/pause", body, [(b"host", b"evil.example:8600")])
+    assert rebound.status_code == 403
+    same = c._call("POST", "/api/control/pause", b'{"on": false}', [(b"origin", b"http://127.0.0.1:8600"),
+                                                                     (b"content-type", b"application/json")])
+    assert same.status_code == 200

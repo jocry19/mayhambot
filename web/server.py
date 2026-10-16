@@ -22,6 +22,7 @@ import sqlite3
 import time
 from dataclasses import asdict
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -79,8 +80,26 @@ def ok(data):
     return Json(_clean(data))
 
 
+LOCAL_HOSTS = ("127.0.0.1", "::1", "localhost")
+
+
+def _cross_site(request: Request) -> bool:
+    """A write whose Origin/Referer is another site than the one it is sent to (CSRF from a web page
+    the user has open), or a localhost-only server reached under a foreign Host name (DNS rebinding)."""
+    host = request.headers.get("host", "")
+    src = request.headers.get("origin") or request.headers.get("referer")
+    if src and src != "null" and urlparse(src).netloc != host:
+        return True
+    if src == "null":
+        return True
+    name = urlparse(f"//{host}").hostname or ""
+    return not PASSWORD and bool(host) and name not in LOCAL_HOSTS
+
+
 @app.middleware("http")
 async def auth(request: Request, call_next):
+    if request.method not in ("GET", "HEAD", "OPTIONS") and _cross_site(request):
+        return Json({"detail": "Schreiben nur von der Dashboard-Seite selbst"}, status_code=403)
     if PASSWORD:
         h = request.headers.get("authorization", "")
         good = False
@@ -92,7 +111,7 @@ async def auth(request: Request, call_next):
                 good = False
         if not good:
             return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="mayhambot"'})
-    elif request.method not in ("GET", "HEAD") and request.client and request.client.host not in ("127.0.0.1", "::1", "localhost"):
+    elif request.method not in ("GET", "HEAD") and request.client and request.client.host not in LOCAL_HOSTS:
         return Json({"detail": "Schreiben nur von localhost oder mit WEB_PASSWORD"}, status_code=403)
     return await call_next(request)
 
