@@ -284,3 +284,28 @@ def test_signal_mode_uses_model_when_trained(env, monkeypatch):
     follow_signals(conn, st)  # model 62 % (A): buy at 1.5x size
     pos = conn.execute("SELECT * FROM ct_positions").fetchone()
     assert pos and pos["size_sol"] == pytest.approx(control.preset(conn, "signal").size_sol * 1.5)
+
+
+def test_geckoterminal_uses_shared_limiter(monkeypatch):
+    from copytrade import http as cthttp
+
+    calls = []
+    monkeypatch.setattr(cthttp, "throttle", lambda host: calls.append(("throttle", host)))
+    monkeypatch.setattr(cthttp, "penalize", lambda host, s: calls.append(("penalize", host, s)))
+    monkeypatch.setattr(cthttp.time, "sleep", lambda s: calls.append(("sleep", s)))
+
+    class R:
+        def __init__(self, code):
+            self.status_code, self.text, self.headers = code, "", {"Retry-After": "40"}
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"ok": 1}
+
+    answers = [R(429), R(200)]
+    monkeypatch.setattr(cthttp._session, "request", lambda *a, **k: answers.pop(0))
+    assert cthttp.get_json("https://api.geckoterminal.com/api/v2/x", limiter_name="geckoterminal") == {"ok": 1}
+    assert calls == [("throttle", "api.geckoterminal.com"), ("penalize", "api.geckoterminal.com", 40.0),
+                     ("throttle", "api.geckoterminal.com")]  # no own limiter, no own sleep

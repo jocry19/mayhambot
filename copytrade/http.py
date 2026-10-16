@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -31,6 +32,11 @@ except Exception:  # copytrade without core: same rule locally
         return rec
 
     logging.setLogRecordFactory(_redacting_factory)
+
+try:  # cross-process limiter shared with signals/ and research/ (GeckoTerminal's free budget is per IP)
+    from core.http import SHARED_HOSTS, penalize, throttle  # type: ignore
+except Exception:
+    SHARED_HOSTS, penalize, throttle = set(), None, None
 
 _session = requests.Session()
 _session.headers["User-Agent"] = "mayhambot-copytrade/1.0"
@@ -74,11 +80,21 @@ def request_json(
     **kw: Any,
 ) -> Any:
     last: Exception | None = None
+    host = urlparse(url).hostname or ""
+    shared = throttle is not None and host in SHARED_HOSTS
     for attempt in range(retries):
-        if limiter_name:
+        if shared:
+            throttle(host)  # one budget for all mayhambot processes
+        elif limiter_name:
             limiter(limiter_name).wait()
         try:
             r = _session.request(method, url, timeout=timeout, **kw)
+            if r.status_code == 429 and shared:
+                try:
+                    wait = float(r.headers.get("Retry-After") or 0)
+                except ValueError:
+                    wait = 0
+                penalize(host, max(wait, 15 * (attempt + 1)))
             if r.status_code == 429 or r.status_code >= 500:
                 raise requests.HTTPError(f"{r.status_code} {r.text[:200]}", response=r)
             r.raise_for_status()
@@ -88,7 +104,8 @@ def request_json(
             resp = getattr(e, "response", None)
             if resp is not None and 400 <= resp.status_code < 500 and resp.status_code != 429:
                 break
-            time.sleep(min(2 ** attempt, 16))
+            if not shared:  # shared hosts wait in throttle() (incl. the 429 penalty)
+                time.sleep(min(2 ** attempt, 16))
     # requests puts the full URL (with any api-key) into its exception text: never pass it on raw
     raise RuntimeError(redact(f"{method} {url.split('?')[0]} failed: {last}"))
 
