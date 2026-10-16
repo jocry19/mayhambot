@@ -14,6 +14,7 @@ import Model from "./pages/Model.jsx";
 import Control from "./pages/Control.jsx";
 import System from "./pages/System.jsx";
 import Sniper from "./pages/Sniper.jsx";
+import Market from "./pages/Market.jsx";
 
 setTheme(getTheme());
 
@@ -24,6 +25,7 @@ const NAV = [
   ["/wallets", "wallet", "Wallets"],
   ["/copytrade", "copy", "Copy-Trading"],
   ["/sniper", "target", "Launch-Sniper"],
+  ["/market", "globe", "Markt"],
   ["/model", "brain", "Modell & Forschung"],
   ["sep"],
   ["/control", "sliders", "Steuerung"],
@@ -94,6 +96,7 @@ function Page({ route }) {
     case "wallet": return <Wallet address={b} />;
     case "copytrade": return <CopyTrade />;
     case "sniper": return <Sniper />;
+    case "market": return <Market />;
     case "model": return <Model />;
     case "control": return <Control />;
     case "system": return <System />;
@@ -102,7 +105,7 @@ function Page({ route }) {
 }
 
 const TITLES = { "": "Übersicht", signals: "Signale", coins: "Coins", coin: "Coin", wallets: "Wallets", wallet: "Wallet",
-  copytrade: "Copy-Trading", sniper: "Launch-Sniper", model: "Modell & Forschung", control: "Steuerung", system: "System" };
+  copytrade: "Copy-Trading", sniper: "Launch-Sniper", market: "Markt", model: "Modell & Forschung", control: "Steuerung", system: "System" };
 
 function Heartbeat() {
   const { data, error } = usePoll("/api/system", 20000);

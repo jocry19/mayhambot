@@ -28,6 +28,7 @@ const P = {
   terminal: "M4 17l6-6-6-6M12 19h8",
   check: "M20 6 9 17l-5-5",
   shield: "M12 3 4 6v6c0 4.5 3.4 8.3 8 9 4.6-.7 8-4.5 8-9V6z",
+  globe: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3c2.5 2.5 3.8 5.5 3.8 9s-1.3 6.5-3.8 9M12 3C9.5 5.5 8.2 8.5 8.2 12s1.3 6.5 3.8 9",
 };
 export function Icon({ name, size }) {
   return (

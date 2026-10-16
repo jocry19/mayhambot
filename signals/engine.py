@@ -186,6 +186,37 @@ def apply_safety(conn, mint, m):
     return m
 
 
+def _load_market():
+    try:
+        import market
+        return market
+    except Exception as e:  # noqa: BLE001 - signals keep working without market/
+        log.info("market/ not available, no market weight: %s", e)
+        return None
+
+
+_market = _load_market()
+
+
+def apply_market(conn, mint, m, now=None):
+    """score x market.signal_factor (market phase + sector heat, 1 +- 0.15). Does nothing unless
+    MARKET_SIGNAL_WEIGHT=true; adds a 'market' contribution so the points still add up to the score."""
+    if not _market:
+        return m
+    try:
+        f = _market.signal_factor(conn, mint, now)
+    except Exception as e:  # noqa: BLE001
+        log.warning("market.signal_factor %s failed: %s", mint[:6], e)
+        return m
+    if not f or f["factor"] == 1.0:
+        return m
+    before = m["score"]
+    m = dict(m, market=f, score=round(before * f["factor"], 1))
+    m["contributions"] = dict(m["contributions"], market=dict(
+        weight=None, value=f["factor"], points=round(m["score"] - before, 1), why=f["why"]))
+    return m
+
+
 def check_before_signal(conn, mint, m):
     """An unchecked coin about to fire gets a quick safety check (no deep checks, about 8 calls) first."""
     if not _safety or (m.get("safety") or {}).get("checked", True):
@@ -196,7 +227,7 @@ def check_before_signal(conn, mint, m):
         log.warning("safety.assess %s failed: %s", mint[:6], e)
         return m
     m = dict(m, score=m.get("score_raw", m["score"]))
-    return apply_safety(conn, mint, m)
+    return apply_market(conn, mint, apply_safety(conn, mint, m))
 
 
 def cfg_min_model():
@@ -223,7 +254,7 @@ def evaluate(conn, mints, cfg=settings, now=None):
     for mint in mints:
         tok = conn.execute("SELECT symbol, price_usd, mcap_usd, liquidity_usd FROM tokens WHERE mint=?",
                            (mint,)).fetchone()
-        m = apply_safety(conn, mint, apply_model(conn, mint, now, token_metrics(conn, mint, qc, now, cfg)))
+        m = apply_market(conn, mint, apply_safety(conn, mint, apply_model(conn, mint, now, token_metrics(conn, mint, qc, now, cfg))), now)
         if "prediction" in m:
             pred, pred_label = m["prediction"], m["prediction_label"]
         else:

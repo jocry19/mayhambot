@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { EChart, baseOption, tierColor, timeAxis, tipRow, valueAxis } from "../chart.jsx";
+import { PhaseBadge } from "./Market.jsx";
 import { ALGO_LABEL, EXIT_LABEL, STRAT_LABEL, TIER_LABEL, TIER_SOURCE, act, ago, dt, go, mc, n, pct, pctSigned, price, sol, solSigned, usd, usdSigned, usePoll } from "../lib.js";
 import { Breakdown, FlowChart, Outcome, SignalDetail, WalletLink } from "../parts.jsx";
 import { Addr, Callout, Card, Delta, Empty, Icon, Legend, Modal, Score, Seg, Switch, Table, Tier, TierCounts, Tile } from "../ui.jsx";
@@ -127,6 +128,26 @@ function SignalCards({ signals, hl }) {
   );
 }
 
+/** Market context from market/: sector heat, matching narratives, phase (read-only, hidden until market runs). */
+function MarketContext({ mint }) {
+  const { data: m } = usePoll(`/api/market/coin/${mint}`, 60000);
+  if (!m || !m.available || !m.phase) return null;
+  return (
+    <Card title="Marktkontext" sub={`Stand ${ago(m.phase.ts)} · Sektor aus Name, Symbol und Beschreibung`} actions={<a href="#/market" className="dim" style={{ fontSize: 12 }}>Marktseite</a>}>
+      <div className="tiles dense">
+        <Tile label="Marktphase" value={<PhaseBadge p={m.phase} />} />
+        <Tile label="Sektor" value={<span style={{ fontSize: 17 }}>{m.sector_label}</span>}
+          sub={m.sector_rank ? `Platz ${m.sector_rank} von ${m.sectors_ranked} nach Hitze` : "–"} />
+        <Tile label="Sektor-Hitze" value={m.sector_heat == null ? "–" : n(m.sector_heat)} sub={m.sector_median_ret_h1 == null ? "" : `Median 1 h ${m.sector_median_ret_h1 > 0 ? "+" : ""}${n(m.sector_median_ret_h1, 1)} %`} />
+        <Tile label="Stärke ggü. Sektor" value={m.rs_sector_h1 == null ? "–" : `${m.rs_sector_h1 > 0 ? "+" : ""}${n(m.rs_sector_h1, 1)} Pkt`}
+          cls={m.rs_sector_h1 > 0 ? "up" : m.rs_sector_h1 < 0 ? "down" : ""} sub="1-h-Änderung minus Sektor-Median" />
+        <Tile label="Narrativ" value={<span style={{ fontSize: 17 }}>{m.terms?.[0]?.term || "–"}</span>}
+          sub={m.terms?.[0] ? `Hitze ${n(m.terms[0].heat)} · ${n(m.terms[0].lift, 1)}x häufiger als sonst` : "kein aktuelles Narrativ im Namen"} />
+      </div>
+    </Card>
+  );
+}
+
 export default function Coin({ mint, hl }) {
   const { data: d, error } = usePoll(`/api/coins/${mint}`, 15000);
   const [showTrades, setShowTrades] = useState(true);
@@ -194,6 +215,7 @@ export default function Coin({ mint, hl }) {
         <Card title="Inflow nach Wallet-Tier" sub={`Netto-Käufe je ${d.flow_bucket_s / 60} min · grau = Crowd`}><FlowChart flows={d.flows} group="coin" height={200} /></Card>
         <Card title="Score-Verlauf" sub="Wie nah der Coin am Signal war (Schwelle 60)"><ScoreChart d={d} /></Card>
       </div>
+      <MarketContext mint={mint} />
 
       {d.prediction_live && !d.prediction_live.error && (
         <Card title="Live-Prognose des Modells" sub={`Modell v${d.prediction_live.version ?? "?"}${d.prediction_live.algo ? ` · ${ALGO_LABEL[d.prediction_live.algo] || d.prediction_live.algo}` : ""} · jetzt berechnet`}>

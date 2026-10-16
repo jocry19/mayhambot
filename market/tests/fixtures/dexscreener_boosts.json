@@ -1,0 +1,8 @@
+[
+ {"url":"https://dexscreener.com/solana/x","chainId":"solana","tokenAddress":"MintTesla1111111111111111111111111111111pump",
+  "amount":10,"totalAmount":30,"icon":"x","header":"x","description":"Elon's roadster is flying to Mars. Community takeover.",
+  "links":[{"type":"twitter","url":"https://x.com/ftr"},{"label":"Website","url":"https://ftr.example"}]},
+ {"url":"https://dexscreener.com/base/y","chainId":"base","tokenAddress":"0xbeef","amount":5,"totalAmount":5},
+ {"url":"https://dexscreener.com/solana/z","chainId":"solana","tokenAddress":"MintGrok333333333333333333333333333333333","amount":50,"totalAmount":50,
+  "description":"The first sentient AI agent on Solana","links":[{"type":"twitter","url":"https://x.com/g"}]}
+]

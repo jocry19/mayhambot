@@ -296,6 +296,35 @@ def sniper_launch(mint: str):
     return ok(d)
 
 
+@app.get("/api/market")
+def market_page(hours: float = 24):
+    """Market phase, sector and narrative heat, rotation, evaluation (market/README.md). Read-only."""
+    hours = max(1.0, min(hours, 24 * 14))
+
+    def build():
+        try:
+            import market  # type: ignore
+        except Exception as e:
+            return {"available": False, "note": f"market/ fehlt: {e}"[:200]}
+        return market.view(read_conn(), hours=hours)
+    return ok(cache.get(("market", hours), 15, build))
+
+
+@app.get("/api/market/coin/{mint}")
+def market_coin(mint: str):
+    """Market context of one coin (sector, heat, narratives, phase) for the coin page."""
+    def build():
+        try:
+            import market  # type: ignore
+        except Exception as e:
+            return {"available": False, "note": f"market/ fehlt: {e}"[:200]}
+        conn = read_conn()
+        if not q.has(conn, "market_snapshots"):
+            return {"available": False, "note": "Noch keine Marktanalyse."}
+        return dict(market.coin_context(conn, mint.strip()), available=True)
+    return ok(cache.get(("market_coin", mint), 30, build))
+
+
 @app.get("/api/system")
 def system():
     return ok(q.system(read_conn()))

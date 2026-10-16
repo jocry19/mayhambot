@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 GET = ["/api/overview", "/api/signals", "/api/signals/performance", "/api/coins", "/api/wallets", "/api/wallets/stats",
        "/api/copytrade", "/api/copytrade?mode=live", "/api/model", "/api/system", "/api/control", "/api/search?search=a",
        "/api/copytrade/backtest?strategy=whale", "/api/copytrade/learn?strategy=whale", "/api/copytrade/learn?strategy=signal", "/api/safety",
-       "/api/sniper", "/api/sniper?hours=6"]
+       "/api/sniper", "/api/sniper?hours=6", "/api/market", "/api/market?hours=168", "/api/market/coin/So11111111111111111111111111111111111111112"]
 
 
 def _client(db: str):

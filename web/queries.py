@@ -1580,7 +1580,7 @@ def system(conn):
     last = {}
     for t, col in (("trades", "ts"), ("token_prices", "ts"), ("signal_metrics", "ts"), ("signals", "ts"),
                    ("model_predictions", "ts"), ("model_versions", "ts"), ("ct_events", "ts"), ("ct_equity", "ts"),
-                   ("ct_swaps", "seen_at")):
+                   ("ct_swaps", "seen_at"), ("market_snapshots", "ts")):
         if has(conn, t, col):
             last[t] = scalar(conn, f"SELECT MAX({col}) FROM {t}")
     services = []
@@ -1717,3 +1717,15 @@ def search(conn, q, limit=12):
                       (f"{q}%", f"%{q}%", limit)):
             out.append({"type": "wallet", "id": w["address"], "label": w["label"] or w["address"][:8], "sub": f"Score {w['score'] or 0:.0f}"})
     return out[:limit]
+
+
+# ====================================================================== market analysis (market/, read-only)
+def market_summary(conn, now=None):
+    """Overview tile and terminal line: phase, top sector and narrative (market.summary), or None."""
+    if not has(conn, "market_snapshots"):
+        return None
+    try:
+        import market  # type: ignore
+        return market.summary(conn, now)
+    except Exception:
+        return None

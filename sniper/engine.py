@@ -33,7 +33,42 @@ SKIP_LABELS = {
     "no_stream": "kein Trade-Datenstrom für diese Plattform (bonk)",
     "no_price": "kein Preis für den Einstieg",
     "unverified": "Launch-Daten nicht prüfbar (pump.fun und RPC ohne Antwort)",
+    "market": "Marktphase (Risk-off, höherer Mindest-Score)",
 }
+
+
+def _load_market():
+    try:
+        import market
+        return market
+    except Exception as e:  # noqa: BLE001 - the sniper works without market/
+        log.info("market/ not available, no market gate: %s", e)
+        return None
+
+
+_market = _load_market()
+
+
+def market_gate(conn, st, a, reason, cfg, now=None):
+    """Optional market gate (MARKET_SNIPER_GATE, off by default): risk-off raises the minimum score, a hot
+    narrative with better-than-average launches lowers it. Only touches 'score too low' or a clean pass."""
+    if _market is None or reason not in (None, "score"):
+        return reason
+    try:
+        adj = _market.sniper_adjust(conn, st.name, st.symbol, now)
+    except Exception as e:  # noqa: BLE001
+        log.warning("market.sniper_adjust %s failed: %s", st.mint[:6], e)
+        return reason
+    if not adj.get("delta"):
+        return reason
+    need = cfg.min_score + adj["delta"]
+    if a.score < need:
+        if reason is None:
+            a.reasons.append({"check": "market", "risk": 0.0, "text": f"Score {a.score:.0f} unter {need:.0f}: {adj['why']}"})
+        return "market" if reason is None else reason
+    if reason == "score":
+        a.positives.append(f"Mindest-Score {need:.0f} statt {cfg.min_score:.0f}: {adj['why']}")
+    return None
 
 
 class Engine:
@@ -328,6 +363,7 @@ class Engine:
             if reason is None and self.cfg.require_launch_data and st.source == "pumpportal" \
                     and not enr.get("early") and not enr.get("replay"):
                 reason = "unverified"
+        reason = market_gate(conn, st, a, reason, self.cfg, now)
         self.counters["stage2"] += 1
         safety_res = None
         if reason is None and self.cfg.safety_gate and self.enricher:
@@ -335,7 +371,7 @@ class Engine:
             enr["safety"] = safety_res
             with self.lock:
                 a = analyze(st, self.cfg, enr, self.tiers, now)
-                reason = a.skip_reason(self.cfg)
+                reason = market_gate(conn, st, a, a.skip_reason(self.cfg), self.cfg, now)
                 if reason is None and safety_res.get("blocked"):
                     reason = "safety"
         qf = None

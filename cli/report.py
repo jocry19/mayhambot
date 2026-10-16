@@ -51,6 +51,9 @@ def status() -> None:
     sl = sniper_line(s.get("sniper"))
     if sl:
         con.print(sl)
+    ml = market_line(s.get("market"))
+    if ml:
+        con.print(ml)
     con.print()
     _signals(s["signals"][:8])
     con.print()
@@ -211,6 +214,25 @@ def sniper_line(sn: dict | None) -> str:
         " · [yellow]Websocket getrennt[/]" if sn.get("service_up") and not sn.get("connected") else ""
     return (f"Launch-Sniper (Papier): {n(sn.get('launches_today'))} Launches heute, {n(sn.get('entered_today'))} gekauft, "
             f"Ergebnis [{tone_}]{sol(pnl, 3, signed=True)}[/] aus {n(sn.get('closed'))} Trades, {last}{down}")
+
+
+def market_line(m: dict | None) -> str:
+    """'Markt: Risk-on 62/100 · SOL 24 h +3,1 % · Top-Sektor KI & Agenten · Narrativ "tesla roadster" · vor 3 min'."""
+    if not m or m.get("score") is None:
+        return ""
+    lab = m.get("label")
+    tone_ = "green" if lab in ("risk_on", "hot") else "red" if lab == "risk_off" else "yellow"
+    sol24 = m.get("sol_ret_24h")
+    parts = [f"Markt: [{tone_}]{escape(m.get('label_de') or '–')} {m['score']:.0f}/100[/]"]
+    if sol24 is not None:
+        parts.append(f"SOL 24 h {sol24 * 100:+.1f} %".replace(".", ","))
+    if m.get("top_sector"):
+        parts.append(f"Top-Sektor {escape(m.get('top_sector_label') or m['top_sector'])}")
+    if m.get("top_term"):
+        parts.append(f'Narrativ "{escape(m["top_term"])}"')
+    parts.append(ago(m.get("ts")))
+    stale = (m.get("age_s") or 0) > 1800
+    return " · ".join(parts) + (" · [red]Daten veraltet[/]" if stale else "")
 
 
 def rpc_pool_line() -> str:

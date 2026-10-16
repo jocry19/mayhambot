@@ -42,6 +42,7 @@ def snapshot(n_signals: int = 60, n_wallets: int = 150) -> dict:
         "control": Q.control_state(conn),
         "model": Q.model_active(conn),
         "sniper": Q.sniper_summary(conn, now),
+        "market": Q.market_summary(conn, now),
     }
 
 
