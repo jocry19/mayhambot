@@ -167,6 +167,7 @@ def evaluate(conn, mints, cfg=settings, now=None):
             (now, mint, m["window_min"], m["buy_usd"], m["sell_usd"], m["net_usd"], m["smart_buyers"],
              m["avg_quality"], m["score"], tok["price_usd"] if tok else None, m["buy_sol"], m["net_sol"],
              tok["mcap_usd"] if tok else None, m["n_ultra"], m["n_smart"], m["n_good"], pred, contrib))
+        conn.commit()
         if not (m["score"] >= m.get("min_score", cfg.signal_min_score) and m["smart_buyers"] >= cfg.signal_min_wallets
                 and m["net_usd"] >= cfg.signal_min_net_usd):
             continue

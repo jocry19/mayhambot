@@ -37,8 +37,9 @@ HOST_INTERVAL = {
     "api.geckoterminal.com": 3.0,      # documented 30 req/min, in practice 429s below ~20/min
     "api.dexscreener.com": 0.25,       # 300 req/min on pair endpoints, 60 on profiles
     "api.mainnet-beta.solana.com": 0.25,
-    "api.helius.xyz": 0.12,
-    "mainnet.helius-rpc.com": 0.1,
+    "api.helius.xyz": 0.15,             # shared by all processes, see SHARED_HOSTS
+    "mainnet.helius-rpc.com": 0.12,
+    "beta.helius-rpc.com": 0.12,
     "api.telegram.org": 0.05,
 }
 DEFAULT_INTERVAL = 0.2
@@ -51,7 +52,8 @@ _lock = threading.Lock()
 
 # Hosts whose limit is shared by every mayhambot process (signals, copytrade, research run separately).
 # Their spacing is coordinated through a lock file, so together they stay under the free-tier limit.
-SHARED_HOSTS = {"api.geckoterminal.com"}
+SHARED_HOSTS = {"api.geckoterminal.com", "api.helius.xyz", "mainnet.helius-rpc.com", "beta.helius-rpc.com",
+                "api.mainnet-beta.solana.com"}
 _LOCK_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "ratelimit")
 
 

@@ -59,7 +59,26 @@ def _spawn(name, detach):
     return p
 
 
+def _agent():
+    return f"gui/{os.getuid()}/{LABEL}"
+
+
+def _agent_loaded():
+    if not PLIST.exists():
+        return False
+    return subprocess.call(["launchctl", "print", _agent()], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL) == 0
+
+
 def start():
+    if PLIST.exists():
+        # autostart owns the services: load/kick the agent instead of spawning a second copy
+        _stop_detached(quiet=True)
+        if not _agent_loaded():
+            subprocess.call(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST)])
+        subprocess.call(["launchctl", "kickstart", _agent()])
+        print(f"mayhambot läuft über Autostart ({LABEL}). Dashboard: http://localhost:{PORT}")
+        return
     for name in SERVICES:
         if _pid(name):
             print(f"{name}: läuft schon")
@@ -70,10 +89,29 @@ def start():
 
 
 def stop():
+    if _agent_loaded():
+        # unload only; the plist stays, so autostart is back at next login or with `start`
+        subprocess.call(["launchctl", "bootout", _agent()])
+        print("Autostart-Agent angehalten (bleibt eingerichtet; `start` oder nächster Login startet ihn wieder)")
+    _stop_detached()
+
+
+def restart():
+    if _agent_loaded():
+        subprocess.call(["launchctl", "kickstart", "-k", _agent()])
+        print("mayhambot über Autostart neu gestartet")
+        return
+    stop()
+    time.sleep(2)
+    start()
+
+
+def _stop_detached(quiet=False):
     for name in SERVICES:
         pid = _pid(name)
         if not pid:
-            print(f"{name}: läuft nicht")
+            if not quiet:
+                print(f"{name}: läuft nicht")
             continue
         try:
             os.killpg(pid, signal.SIGTERM)
@@ -94,6 +132,7 @@ def status():
 
 def run():
     """Foreground supervisor: restarts a crashed service after 10 s, stops all on Ctrl+C / SIGTERM."""
+    _stop_detached(quiet=True)  # never run next to copies started with `start`
     procs = {n: _spawn(n, detach=False) for n in SERVICES}
     print(f"mayhambot läuft. Dashboard: http://localhost:{PORT}  (Ctrl+C beendet alles)")
     stopping = []
@@ -151,9 +190,10 @@ def update():
     if (ROOT / "deploy" / "ops.py").exists():
         subprocess.call([PY, "deploy/ops.py", "backup"], cwd=ROOT)
     if PLIST.exists():
-        subprocess.call(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LABEL}"])
+        # never bootout/unlink here: kickstart a loaded agent, load it if it got unloaded
+        restart() if _agent_loaded() else start()
     elif any(_pid(n) for n in SERVICES):
-        stop()
+        _stop_detached()
         start()
     print("Update ok:", subprocess.check_output(["git", "log", "-1", "--format=%h %s"], cwd=ROOT, text=True).strip()
           if old else "")
@@ -206,7 +246,7 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
     arg = sys.argv[2] if len(sys.argv) > 2 else None
     actions = {"run": run, "start": start, "stop": stop, "status": status, "update": update,
-               "restart": lambda: (stop(), time.sleep(2), start()), "logs": lambda: logs(arg),
+               "restart": restart, "logs": lambda: logs(arg),
                "install-autostart": install_autostart, "update-loop": lambda: update_loop(int(arg or 300)), "remove-autostart": remove_autostart}
     if cmd not in actions:
         print(__doc__)

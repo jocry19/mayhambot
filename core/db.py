@@ -85,13 +85,21 @@ def _migrate(conn):
     conn.commit()
 
 
+BUSY_TIMEOUT_MS = 30000
+
+
 def connect(path=None) -> sqlite3.Connection:
+    """The one way every mayhambot process (signals, copytrade, model, dashboard) should open the DB:
+    WAL (readers never block the writer), 30 s busy timeout, Row factory, schema + migrations applied.
+    Keep write transactions short: commit right after writing, never hold one across a network call."""
     path = path or settings.db_path
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+    conn = sqlite3.connect(path, timeout=BUSY_TIMEOUT_MS / 1000, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
     try:
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
     except sqlite3.OperationalError:
         pass  # e.g. network filesystems
     conn.executescript(SCHEMA)
