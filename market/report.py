@@ -7,7 +7,7 @@ from pathlib import Path
 
 from market import evaluate, store
 
-LENSES = ("by_phase", "by_sector_heat", "by_term", "by_term_stage")
+LENSES = ("by_phase", "by_sector_heat", "by_term", "by_term_stage", "new_term")
 
 
 def report_path(db_path=None):
@@ -15,15 +15,23 @@ def report_path(db_path=None):
     return Path(db_path or settings.db_path).parent / "reports" / "market_report.json"
 
 
+def _holds(wf, lens, best=None, worst=None):
+    """A lens carries a switch only when the older half itself was clear (z >= 2), the newer half confirmed it
+    (z >= 2 on unseen data) and the direction is the one the switch acts on."""
+    v = wf.get(lens) or {}
+    return bool(v.get("ok") and ((v.get("train") or {}).get("z") or 0) >= 2
+                and (best is None or v.get("best") == best) and (worst is None or v.get("worst") == worst))
+
+
 def verdict(ev, dyn):
-    """Plain verdict per switch: on only where the walk-forward confirmed it on data the choice never saw."""
+    """Plain verdict per switch: on only where the walk-forward confirmed exactly the rule that switch applies."""
     wf = ev.get("walk_forward") or {}
-    comp = ((dyn or {}).get("components") or {})
-    learned = comp.get("learned") or {}
+    learned = (((dyn or {}).get("components") or {}).get("learned") or {})
     return {
-        "signal_weight": bool((wf.get("by_phase") or {}).get("ok") and (wf.get("by_sector_heat") or {}).get("ok")),
-        "sniper_gate": bool((wf.get("by_phase") or {}).get("ok")),
-        "sniper_hot_term": bool((wf.get("by_term") or {}).get("ok") or (wf.get("by_term_stage") or {}).get("ok")),
+        "signal_weight": _holds(wf, "by_phase", best="Risk-on") and _holds(wf, "by_sector_heat", best="heiß ≥60"),
+        "sniper_gate": _holds(wf, "by_phase", worst="Risk-off"),
+        "sniper_hot_term": _holds(wf, "by_term", best="mit heißem Narrativ"),
+        "sniper_new_term": _holds(wf, "new_term", worst="neues Narrativ"),
         "learned_weights": bool(learned.get("adopt")),
     }
 
@@ -51,6 +59,7 @@ def build(conn, now=None, cfg=None, days=14):
                        "learned": comp.get("learned")},
         "sector_lead": dyn.get("sector_lead"),
         "switches": {"signal_weight": cfg.signal_weight, "sniper_gate": cfg.sniper_gate,
+                     "sniper_new_term": getattr(cfg, "sniper_new_term", False),
                      "learned_weights": getattr(cfg, "learned_weights", False)},
         "walk_forward_says": verdict(ev, dyn),
         "note": ev.get("note"),

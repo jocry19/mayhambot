@@ -4,7 +4,7 @@ import { ago, dt, go, n, pct, pctSigned, sign, usd, usdSigned, usePoll } from ".
 import { Bars, Callout, Card, Delta, Empty, Seg, Table, Tile } from "../ui.jsx";
 
 const LABEL_CLS = { risk_off: "bad", neutral: "", risk_on: "good", hot: "warn" };
-const LENS = [["by_phase", "Nach Marktphase"], ["by_sector_heat", "Nach Sektor-Hitze"], ["by_term", "Nach Narrativ"], ["by_term_stage", "Nach Narrativ-Stufe"]];
+const LENS = [["by_phase", "Nach Marktphase"], ["by_sector_heat", "Nach Sektor-Hitze"], ["by_term", "Nach Narrativ"], ["by_term_stage", "Nach Narrativ-Stufe"], ["new_term", "Brandneues Narrativ"]];
 const ORDER = ["risk_off", "neutral", "risk_on", "hot"];
 const RLABEL = { risk_off: "Risk-off", neutral: "Neutral", risk_on: "Risk-on", hot: "Heiß" };
 const COMP_LABEL = {
@@ -226,8 +226,8 @@ export default function Market() {
     <div className="col" style={{ gap: 16 }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
         <Callout icon="info">
-          Marktlage aus freien Quellen (DexScreener, CoinGecko) und den eigenen Daten (Launches, Smart Money). Wirkt auf Signale: <b>{sw.signal_weight ? "an" : "aus"}</b> · Sniper-Tor: <b>{sw.sniper_gate ? "an" : "aus"}</b>.
-          Beides bleibt aus, bis die Auswertung unten einen klaren Unterschied zeigt.
+          Marktlage aus freien Quellen (DexScreener, CoinGecko) und den eigenen Daten (Launches, Smart Money). Wirkt auf Signale: <b>{sw.signal_weight ? "an" : "aus"}</b> · Sniper-Tor: <b>{sw.sniper_gate ? "an" : "aus"}</b> · Aufschlag bei brandneuem Narrativ: <b>{sw.sniper_new_term ? "an" : "aus"}</b>.
+          Alles bleibt aus, bis die Auswertung unten einen klaren Unterschied auch auf ungesehenen Daten zeigt.
         </Callout>
         <Seg value={hours} onChange={setHours} options={[[6, "6 h"], [24, "24 h"], [168, "7 Tage"]]} />
       </div>

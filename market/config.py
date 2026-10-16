@@ -52,6 +52,9 @@ class MarketSettings:
     sniper_gate: bool = field(default_factory=lambda: _b("MARKET_SNIPER_GATE", False))
     sniper_riskoff_bump: float = field(default_factory=lambda: _f("MARKET_SNIPER_RISKOFF_BUMP", 10))  # + min score
     sniper_hot_term_bonus: float = field(default_factory=lambda: _f("MARKET_SNIPER_HOT_TERM_BONUS", 5))  # - min score
+    # a launch riding a brand-new narrative (stage 'new'): + min score; own switch, walk-forward decides
+    sniper_new_term: bool = field(default_factory=lambda: _b("MARKET_SNIPER_NEW_TERM", False))
+    sniper_new_term_bump: float = field(default_factory=lambda: _f("MARKET_SNIPER_NEW_TERM_BUMP", 5))
     learned_weights: bool = field(default_factory=lambda: _b("MARKET_LEARNED_WEIGHTS", False))  # adopt OOS-better weights
     dynamics_every_sec: int = field(default_factory=lambda: _i("MARKET_DYNAMICS_EVERY_SEC", 3600))
     max_age_sec: int = field(default_factory=lambda: _i("MARKET_MAX_AGE_SEC", 1800))  # older snapshot = no effect

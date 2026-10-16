@@ -144,11 +144,13 @@ def signal_factor(conn, mint, ts=None, cfg=default_cfg):
 
 
 def sniper_adjust(conn, name, symbol, ts=None, cfg=default_cfg):
-    """Change of the sniper's minimum score for one launch: + MARKET_SNIPER_RISKOFF_BUMP in a risk-off market,
-    - MARKET_SNIPER_HOT_TERM_BONUS when the name carries a hot narrative whose launches did better than average.
-    {"delta": 0} when MARKET_SNIPER_GATE is off or the snapshot is too old."""
+    """Change of the sniper's minimum score for one launch. With MARKET_SNIPER_GATE: + MARKET_SNIPER_RISKOFF_BUMP
+    in a risk-off market, - MARKET_SNIPER_HOT_TERM_BONUS when the name carries a hot narrative whose launches did
+    better than average. With MARKET_SNIPER_NEW_TERM: + MARKET_SNIPER_NEW_TERM_BUMP when the name's strongest
+    narrative is brand new (stage 'new'; such launches doubled about half as often in the walk-forward).
+    {"delta": 0} when both switches are off or the snapshot is too old."""
     out = {"delta": 0.0, "why": "", "label": None}
-    if not cfg.sniper_gate:
+    if not (cfg.sniper_gate or getattr(cfg, "sniper_new_term", False)):
         return out
     ts = int(ts or time.time())
     p = store.snapshot_at(conn, ts, cfg.max_age_sec)
@@ -156,17 +158,21 @@ def sniper_adjust(conn, name, symbol, ts=None, cfg=default_cfg):
         return out
     out["label"] = p["label"]
     why = []
-    if p["label"] == "risk_off":
-        out["delta"] += cfg.sniper_riskoff_bump
-        why.append(f"Markt Risk-off ({p['score']:.0f}): Mindest-Score +{cfg.sniper_riskoff_bump:.0f}")
     terms = _term_rows(conn, p["ts"])
-    base = p.get("launch_hit2x")
-    for t in narratives.terms_of(name, symbol):
-        r = terms.get(t)
-        if r and (r["heat"] or 0) >= 60 and r["hit2x"] is not None and base and r["hit2x"] > base:
-            out["delta"] -= cfg.sniper_hot_term_bonus
-            why.append(f"heißes Narrativ '{t}' (Hitze {r['heat']:.0f}): Mindest-Score -{cfg.sniper_hot_term_bonus:.0f}")
-            break
+    mine = sorted((terms[t] for t in narratives.terms_of(name, symbol) if t in terms), key=lambda r: -(r["heat"] or 0))
+    if cfg.sniper_gate:
+        if p["label"] == "risk_off":
+            out["delta"] += cfg.sniper_riskoff_bump
+            why.append(f"Markt Risk-off ({p['score']:.0f}): Mindest-Score +{cfg.sniper_riskoff_bump:.0f}")
+        base = p.get("launch_hit2x")
+        for r in mine:
+            if (r["heat"] or 0) >= 60 and r["hit2x"] is not None and base and r["hit2x"] > base:
+                out["delta"] -= cfg.sniper_hot_term_bonus
+                why.append(f"heißes Narrativ '{r['term']}' (Hitze {r['heat']:.0f}): Mindest-Score -{cfg.sniper_hot_term_bonus:.0f}")
+                break
+    if getattr(cfg, "sniper_new_term", False) and mine and mine[0].get("stage") == "new":
+        out["delta"] += cfg.sniper_new_term_bump
+        why.append(f"brandneues Narrativ '{mine[0]['term']}': Mindest-Score +{cfg.sniper_new_term_bump:.0f}")
     out["why"] = "; ".join(why)
     return out
 

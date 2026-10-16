@@ -95,6 +95,10 @@ vom 16.10.2026: "flying", "tesla", "roadster" in 7 % aller Launches.
 - `sniper/engine.market_gate`: in Risk-off Mindest-Score +10, bei heißem Narrativ mit besserer 2x-Rate −5; ändert nur
   "Score zu niedrig" oder einen sauberen Kauf, nie Bundle/Insider/Risiko. Schalter `MARKET_SNIPER_GATE` (Standard aus),
   Skip-Grund `market`.
+- `MARKET_SNIPER_NEW_TERM` (Standard aus): Mindest-Score +`MARKET_SNIPER_NEW_TERM_BUMP` (5), wenn das stärkste Narrativ
+  eines Launches brandneu ist (Stufe "neu"). Messung am 16.10.2026, 15 873 Launches: neu 6 % 2x gegen 10 % im Rest.
+- Ein Schalter gilt in `walk_forward_says` erst als getragen, wenn die ältere Hälfte selbst klar war (z ≥ 2), die
+  neuere sie bestätigt (z ≥ 2) und die Richtung genau die Regel des Schalters ist.
 - Ein Snapshot älter als `MARKET_MAX_AGE_SEC` (30 min) wirkt nie.
 
 **Einschalten erst**, wenn `python -m market eval` (oder die Karte "Taugt die Marktanalyse?") einen klaren Unterschied

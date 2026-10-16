@@ -115,7 +115,8 @@ def evaluate(conn, days=14, now=None, cfg=default_cfg):
                                     ("mit Narrativ" if r["term_heat"] is not None else "ohne Narrativ"), hit, _launch_extra),
                   "by_term_stage": _group(rows, lambda r: STAGE_LABEL.get(r["term_stage"], "ohne Narrativ")
                                           if r["term_heat"] is not None or r["term_stage"] else "ohne Narrativ",
-                                          hit, _launch_extra)}
+                                          hit, _launch_extra),
+                  "new_term": _group(rows, LENSES["new_term"], hit, _launch_extra)}
             # what the sniper gate would have changed among launches the sniper bought or would have bought
             cand = [r for r in rows if r["decision"] == "enter"]
             blocked = [r for r in cand if r["label"] == "risk_off"]
@@ -147,7 +148,7 @@ def significance(ev, min_n=40):
     Two-proportion z-test, |z| >= 2 counts as clear (about 95 %)."""
     la = ev.get("launches") or {}
     verdicts = {}
-    for lens in ("by_phase", "by_sector_heat", "by_term", "by_term_stage"):
+    for lens in ("by_phase", "by_sector_heat", "by_term", "by_term_stage", "new_term"):
         g = [(k, v) for k, v in (la.get(lens) or {}).items() if v["n"] >= min_n]
         if len(g) < 2:
             verdicts[lens] = {"clear": False, "text": f"zu wenig Daten (je Gruppe mindestens {min_n} nötig)"}
@@ -169,6 +170,8 @@ LENSES = {
     "by_term": lambda r: "mit heißem Narrativ" if (r["term_heat"] or 0) >= 60 else
     ("mit Narrativ" if r["term_heat"] is not None else "ohne Narrativ"),
     "by_term_stage": lambda r: STAGE_LABEL.get(r.get("term_stage"), "ohne Narrativ"),
+    # the one rule MARKET_SNIPER_NEW_TERM acts on: a brand-new narrative against everything else
+    "new_term": lambda r: "neues Narrativ" if r.get("term_stage") == "new" else "sonst",
 }
 
 
@@ -193,6 +196,7 @@ def walk_forward(rows, hit, min_n=40):
             continue
         best = max(tr, key=lambda k: tr[k]["hit_rate"])
         worst = min(tr, key=lambda k: tr[k]["hit_rate"])
+        z_train = _z(tr[best]["hit_rate"], tr[best]["n"], tr[worst]["hit_rate"], tr[worst]["n"])
         te = _group(test, key, hit)
         b, w = te.get(best), te.get(worst)
         if not b or not w or b["n"] < min_n or w["n"] < min_n:
@@ -202,7 +206,8 @@ def walk_forward(rows, hit, min_n=40):
         z = _z(b["hit_rate"], b["n"], w["hit_rate"], w["n"])
         ok = z >= 2
         out[lens] = {"ok": ok, "best": best, "worst": worst,
-                     "train": {"best_rate": tr[best]["hit_rate"], "worst_rate": tr[worst]["hit_rate"]},
+                     "train": {"best_rate": tr[best]["hit_rate"], "worst_rate": tr[worst]["hit_rate"],
+                               "z": round(z_train, 2)},
                      "test": {"best_rate": b["hit_rate"], "worst_rate": w["hit_rate"], "n_best": b["n"],
                               "n_worst": w["n"], "z": round(z, 2)},
                      "text": f"{best} {b['hit_rate']:.0%} gegen {worst} {w['hit_rate']:.0%} im neueren Teil (z = {z:.1f}), "

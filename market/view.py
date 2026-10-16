@@ -70,7 +70,8 @@ def view(conn, hours=24, now=None, cfg=default_cfg):
         "dynamics": dyn, "learned_weights": lw, "learned_active": bool(cfg.learned_weights and isinstance(lw, dict) and lw.get("adopt")),
         "switches": {"signal_weight": cfg.signal_weight, "sniper_gate": cfg.sniper_gate,
                      "signal_max_adj": cfg.signal_max_adj, "sniper_riskoff_bump": cfg.sniper_riskoff_bump,
-                     "sniper_hot_term_bonus": cfg.sniper_hot_term_bonus, "learned_weights": cfg.learned_weights},
+                     "sniper_hot_term_bonus": cfg.sniper_hot_term_bonus, "learned_weights": cfg.learned_weights,
+                     "sniper_new_term": cfg.sniper_new_term, "sniper_new_term_bump": cfg.sniper_new_term_bump},
     }
 
 

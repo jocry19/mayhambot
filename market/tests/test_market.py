@@ -203,7 +203,7 @@ def test_backfill_evaluate_and_view(monkeypatch):
     la = ev["launches"]
     assert la["n"] > 500 and la["by_phase"] and la["by_term"]
     assert "gate" in la and la["gate"]["candidates"] > 0
-    assert set(ev["significant"]) == {"by_phase", "by_sector_heat", "by_term", "by_term_stage"}
+    assert set(ev["significant"]) == {"by_phase", "by_sector_heat", "by_term", "by_term_stage", "new_term"}
     # one live round with the network replaced by fixtures
     monkeypatch.setattr(sources, "promoted", lambda: (sources.parse_promoted(fx("dexscreener_boosts.json"), "boost"), 3))
     monkeypatch.setattr(sources, "pairs_for", lambda mints: (sources.best_pairs(fx("dexscreener_tokens.json")), 1))
@@ -219,7 +219,8 @@ def test_backfill_evaluate_and_view(monkeypatch):
     v = view(conn, now=NOW + 400)
     assert v["available"] and v["phase"]["components"] and v["sectors"] and v["history"]
     assert v["switches"] == {"signal_weight": False, "sniper_gate": False, "signal_max_adj": 0.15,
-                             "sniper_riskoff_bump": 10.0, "sniper_hot_term_bonus": 5.0, "learned_weights": False}
+                             "sniper_riskoff_bump": 10.0, "sniper_hot_term_bonus": 5.0, "learned_weights": False,
+                             "sniper_new_term": False, "sniper_new_term_bump": 5.0}
     json.dumps(v, default=str)
     assert context.summary(conn, NOW + 400)["label"] == snap["label"]
 
@@ -426,8 +427,35 @@ def test_service_writes_market_report(monkeypatch):
     p = os.path.join(d, "reports", "market_report.json")
     rep = json.load(open(p))
     assert rep["ts"] == NOW and set(rep["walk_forward_says"]) == {"signal_weight", "sniper_gate", "sniper_hot_term",
-                                                                  "learned_weights"}
-    assert rep["switches"] == {"signal_weight": False, "sniper_gate": False, "learned_weights": False}
+                                                                  "sniper_new_term", "learned_weights"}
+    assert rep["switches"] == {"signal_weight": False, "sniper_gate": False, "sniper_new_term": False,
+                               "learned_weights": False}
     assert "by_phase" in rep["launches"] and "rows" in rep["components"]
     from market import report
     assert report.line(rep).startswith("Taugt die Marktanalyse?")
+
+
+def test_verdict_needs_the_exact_rule_and_both_halves():
+    from market import report
+    ok = {"ok": True, "best": "sonst", "worst": "neues Narrativ", "train": {"z": 3.1}}
+    assert report.verdict({"walk_forward": {"new_term": ok}}, {})["sniper_new_term"]
+    assert not report.verdict({"walk_forward": {"new_term": dict(ok, train={"z": 1.5})}}, {})["sniper_new_term"]
+    # a confirmed narrative-stage lens is not a reason for the hot-narrative bonus
+    stage = {"ok": True, "best": "wachsend", "worst": "neu", "train": {"z": 2.5}}
+    v = report.verdict({"walk_forward": {"by_term_stage": stage,
+                                         "by_term": {"ok": True, "best": "ohne Narrativ", "worst": "mit Narrativ",
+                                                     "train": {"z": 3}}}}, {})
+    assert not v["sniper_hot_term"] and not v["sniper_gate"] and not v["signal_weight"]
+
+
+def test_sniper_new_term_penalty_switch():
+    conn = make_db("on")
+    snap, secs, terms, bks = analysis.compute(conn, NOW, {})
+    for t in terms:
+        t["stage"] = "new"
+    store.save_snapshot(conn, snap, secs, terms, bks)
+    t = terms[0]["term"]
+    assert context.sniper_adjust(conn, t, t, NOW + 30)["delta"] == 0                       # switches off
+    a = context.sniper_adjust(conn, t, t, NOW + 30, cfg=cfg(sniper_new_term=True))
+    assert a["delta"] == 5 and "brandneues Narrativ" in a["why"]
+    assert context.sniper_adjust(conn, "zzqx", "QQZ", NOW + 30, cfg=cfg(sniper_new_term=True))["delta"] == 0
