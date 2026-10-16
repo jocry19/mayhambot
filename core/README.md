@@ -196,4 +196,5 @@ ROI, consistency (profit not from one lucky hit), scaled by confidence (number o
 - Heuristic score: fires at `SIGNAL_MIN_SCORE` (60).
 - Model score = P(+50 % in 1h) x 100, a calibrated probability. The threshold is `min(MODEL_SIGNAL_MIN_SCORE, MODEL_SIGNAL_MIN_LIFT x base rate)`, where the base rate is the 1h `base_rate` of the active version's backtest (`model_versions.metrics_json`). It never drops below `MODEL_SIGNAL_FLOOR` (defaults 40 / 2.0 / 10). A fixed 40 needs four times a 10 % base rate and almost never fired.
 - Every signal cycle logs `signal funnel: N coins -> no smart buyer / <2 entities / net <$500 / score < thr / safety / cooldown / fired`.
+- Each cycle evaluates the watchlist plus every coin that had an Ultra or Smart buy inside the signal window (up to 100 coins), whether or not it is watched. The watchlist is ranked by fresh smart buyers first, then recent score. Ranking by score alone kept the same 25 coins for hours: the Mac funnel showed 49 coins evaluated in 10 h, while smart wallets traded 273.
 - `python -m signals.funnel --hours 10` runs the same funnel over the stored `signal_metrics`. It is read only.

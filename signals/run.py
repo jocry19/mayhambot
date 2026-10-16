@@ -36,13 +36,29 @@ def refresh_watchlist(conn, cycle):
     conn.execute("UPDATE tokens SET tracked=0 WHERE tracked=1 AND (liquidity_usd < ? OR last_updated < ?)",
                  (settings.min_liquidity_usd / 4, int(time.time()) - 6 * 3600))
     conn.commit()
-    # priority: recent smart activity, then hour volume
+    # priority: smart buyers right now, then recent score, then hour volume. Ranking by score alone kept the same
+    # ~25 coins in the list for hours (each cycle re-scores them), so fresh smart buys never got trade fetches.
+    now = int(time.time())
     return conn.execute(
         """SELECT t.* FROM tokens t
            LEFT JOIN (SELECT mint, MAX(score) s FROM signal_metrics WHERE ts > ? GROUP BY mint) m ON m.mint=t.mint
+           LEFT JOIN (SELECT tr.mint, COUNT(DISTINCT tr.wallet) n FROM trades tr JOIN wallets w ON w.address=tr.wallet
+                      WHERE w.tier IN ('ultra','smart') AND tr.side='buy' AND tr.ts > ? GROUP BY tr.mint) sb
+                  ON sb.mint=t.mint
            WHERE t.tracked=1 AND t.pool_address != ''
-           ORDER BY COALESCE(m.s,0) DESC, t.volume_h1 DESC LIMIT ?""",
-        (int(time.time()) - 3600, settings.max_tracked_tokens)).fetchall()
+           ORDER BY COALESCE(sb.n,0) DESC, COALESCE(m.s,0) DESC, t.volume_h1 DESC LIMIT ?""",
+        (now - 3600, now - settings.signal_window_min * 60, settings.max_tracked_tokens)).fetchall()
+
+
+def smart_active_mints(conn, now=None, limit=100):
+    """Coins with an Ultra/Smart buy inside the signal window, watched or not: the signal only needs the tiered
+    wallets' own trades, which wallet tracking and backfill already store."""
+    now = now or int(time.time())
+    return [r[0] for r in conn.execute(
+        """SELECT tr.mint FROM trades tr JOIN wallets w ON w.address=tr.wallet
+           WHERE w.tier IN ('ultra','smart') AND tr.side='buy' AND tr.ts > ? AND tr.ts <= ?
+           GROUP BY tr.mint ORDER BY COUNT(DISTINCT tr.wallet) DESC, MAX(tr.ts) DESC LIMIT ?""",
+        (now - settings.signal_window_min * 60, now, limit))]
 
 
 def _row_token(r):
@@ -167,7 +183,8 @@ def cycle(conn, i):
         bf = backfill(conn, deadline=time.time() + 20)
     db.retry_locked(conn, lambda: scoring.rescore_all(conn))
     engine.last_cluster_stats.update(wallets=0, entities=0)
-    sigs = engine.evaluate(conn, [r["mint"] for r in watch])
+    mints = list(dict.fromkeys([r["mint"] for r in watch] + smart_active_mints(conn)))
+    sigs = engine.evaluate(conn, mints)
     notifier.notify(conn, sigs)
     engine.update_outcomes(conn)
     smart = conn.execute("SELECT COUNT(*) FROM wallets WHERE is_smart=1").fetchone()[0]
@@ -186,8 +203,8 @@ def cycle(conn, i):
                  "safety %d, cooldown %d, fired %d (max score %.1f)", fu["coins"], fu["no_smart"],
                  settings.signal_min_wallets, fu["few_entities"], settings.signal_min_net_usd, fu["low_net"],
                  fu["min_score"], fu["low_score"], fu["safety_drop"], fu["cooldown"], fu["fired"], fu["max_score"])
-    log.info("cycle %d: %d tokens, +%d trades, +%d backfill trades, %d smart wallets, %d signals (%.0fs)",
-             i, len(watch), new_trades, bf, smart, len(sigs), time.time() - t0)
+    log.info("cycle %d: %d tokens (+%d smart-active evaluated), +%d trades, +%d backfill trades, %d smart wallets, %d signals (%.0fs)",
+             i, len(watch), len(mints) - len(watch), new_trades, bf, smart, len(sigs), time.time() - t0)
     return sigs
 
 
