@@ -52,6 +52,11 @@ CREATE INDEX IF NOT EXISTS idx_signals_mint ON signals(mint, ts);
 
 # columns added after the first release: (table, column, type). Applied on connect, idempotent.
 MIGRATIONS = [
+    ("signals", "score_raw", "REAL"),               # score before the safety penalty
+    ("signals", "safety_factor", "REAL"),           # safety.signal_penalty factor (NULL = safety/ absent)
+    ("signals", "safety_risk", "REAL"),             # risk 0-100, NULL = unchecked
+    ("signals", "safety_level", "TEXT"),            # low | caution | high | critical | unchecked
+    ("signals", "safety_reasons_json", "TEXT"),     # up to 3 German reasons, worst first
     ("tokens", "txns_m5", "INTEGER"),               # DexScreener buys+sells, last 5 min
     ("tokens", "txns_h1", "INTEGER"),
     ("wallets", "tier", "TEXT"),                    # 'ultra' | 'smart' | 'good' | NULL

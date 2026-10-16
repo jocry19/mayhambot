@@ -4,7 +4,7 @@
   python mayham.py run               # everything in the foreground, Ctrl+C stops all (used by launchd)
   python mayham.py start             # everything in the background
   python mayham.py stop | status | restart
-  python mayham.py logs [signals|copytrade|research|web]
+  python mayham.py logs [signals|copytrade|research|web|safety]
   python mayham.py update            # git pull (GitHub transport), install requirements, restart if running
   python mayham.py install-autostart # macOS: start at login and restart on crash (launchd)
   python mayham.py remove-autostart
@@ -28,7 +28,8 @@ PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 SERVICES = {
     "signals": [PY, "-m", "signals.run"],
     "copytrade": [PY, "-m", "copytrade", "run"],
-    "web": [PY, "-m", "web"],  # the dashboard (FastAPI + built frontend); the old Streamlit dashboard/ is no longer started
+    "web": [PY, "-m", "web"],
+    "safety": [PY, "-m", "safety", "run"],  # rug/honeypot/insider refresher, every SAFETY_REFRESH_EVERY_SEC  # the dashboard (FastAPI + built frontend); the old Streamlit dashboard/ is no longer started
 }
 # research + retraining loop from model/ (other thread), started only once it exists
 if (ROOT / "model" / "__main__.py").exists():

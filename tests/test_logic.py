@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core import db, scoring  # noqa: E402
 from core.models import Token, Trade  # noqa: E402
 from signals import engine  # noqa: E402
+engine._safety = None  # offline test: the safety penalty has its own tests (tests/test_signal_safety.py)
 
 
 def T(sig, w, mint, side, ts, usd, price):

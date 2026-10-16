@@ -130,6 +130,50 @@ def apply_model(conn, mint, now, m):
     return m
 
 
+def _load_safety():
+    try:
+        import safety
+        return safety
+    except Exception as e:  # noqa: BLE001 - signals keep working without safety/
+        log.info("safety/ not available, no risk penalty: %s", e)
+        return None
+
+
+_safety = _load_safety()
+
+
+def apply_safety(conn, mint, m):
+    """score x safety.signal_penalty factor (1.0 up to risk 25, 0.2 at 75, 0 when blocked, 1.0 unchecked).
+    Adds a negative 'safety' contribution so the points still add up to the score."""
+    if not _safety:
+        return m
+    try:
+        p = _safety.signal_penalty(conn, mint)
+    except Exception as e:  # noqa: BLE001
+        log.warning("safety.signal_penalty %s failed: %s", mint[:6], e)
+        return m
+    m = dict(m, safety=p, score_raw=m["score"])
+    if p.get("factor", 1.0) < 1.0:
+        m["score"] = round(m["score"] * p["factor"], 1)
+        m["contributions"] = dict(m["contributions"], safety=dict(
+            weight=None, value=p["factor"], points=round(m["score"] - m["score_raw"], 1),
+            why=f"Risiko {p.get('risk', 0):.0f} ({p.get('level')}): " + "; ".join(p.get("reasons") or [])))
+    return m
+
+
+def check_before_signal(conn, mint, m):
+    """An unchecked coin about to fire gets a quick safety check (no deep checks, about 8 calls) first."""
+    if not _safety or (m.get("safety") or {}).get("checked", True):
+        return m
+    try:
+        _safety.assess(mint, conn, deep=False)
+    except Exception as e:  # noqa: BLE001
+        log.warning("safety.assess %s failed: %s", mint[:6], e)
+        return m
+    m = dict(m, score=m.get("score_raw", m["score"]))
+    return apply_safety(conn, mint, m)
+
+
 def cfg_min_model():
     return settings.model_signal_min_score  # model score = P(pump within 1h) x 100
 
@@ -154,35 +198,47 @@ def evaluate(conn, mints, cfg=settings, now=None):
     for mint in mints:
         tok = conn.execute("SELECT symbol, price_usd, mcap_usd, liquidity_usd FROM tokens WHERE mint=?",
                            (mint,)).fetchone()
-        m = apply_model(conn, mint, now, token_metrics(conn, mint, qc, now, cfg))
+        m = apply_safety(conn, mint, apply_model(conn, mint, now, token_metrics(conn, mint, qc, now, cfg)))
         if "prediction" in m:
             pred, pred_label = m["prediction"], m["prediction_label"]
         else:
             pred, pred_label = calibrated_prediction(conn, m["score"]) if m["score"] > 0 else (None, "")
-        contrib = json.dumps(m["contributions"])
         conn.execute(
             """INSERT OR REPLACE INTO signal_metrics(ts, mint, window_min, buy_usd, sell_usd, net_usd, smart_buyers,
                    avg_quality, score, price_usd, buy_sol, net_sol, mcap_usd, n_ultra, n_smart, n_good, prediction,
                    contributions_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (now, mint, m["window_min"], m["buy_usd"], m["sell_usd"], m["net_usd"], m["smart_buyers"],
              m["avg_quality"], m["score"], tok["price_usd"] if tok else None, m["buy_sol"], m["net_sol"],
-             tok["mcap_usd"] if tok else None, m["n_ultra"], m["n_smart"], m["n_good"], pred, contrib))
+             tok["mcap_usd"] if tok else None, m["n_ultra"], m["n_smart"], m["n_good"], pred,
+             json.dumps(m["contributions"])))
         conn.commit()
-        if not (m["score"] >= m.get("min_score", cfg.signal_min_score) and m["smart_buyers"] >= cfg.signal_min_wallets
-                and m["net_usd"] >= cfg.signal_min_net_usd):
+
+        def passes(m):
+            return (m["score"] >= m.get("min_score", cfg.signal_min_score) and m["smart_buyers"] >= cfg.signal_min_wallets
+                    and m["net_usd"] >= cfg.signal_min_net_usd)
+        if not passes(m):
             continue
+        m = check_before_signal(conn, mint, m)
+        if not passes(m):
+            log.info("signal %s dropped by safety check: %s", mint[:6], (m.get("safety") or {}).get("reasons"))
+            continue
+        contrib = json.dumps(m["contributions"])
+        sp = m.get("safety") or {}
         last = conn.execute("SELECT ts, score FROM signals WHERE mint=? ORDER BY ts DESC LIMIT 1", (mint,)).fetchone()
         if last and now - last["ts"] < cfg.signal_cooldown_min * 60 and m["score"] < last["score"] + 15:
             continue
         cur = conn.execute(
             """INSERT INTO signals(ts, mint, symbol, score, net_usd, buy_usd, smart_buyers, avg_quality, price_usd,
                                    mcap_usd, wallets_json, buy_sol, net_sol, liquidity_usd, n_ultra, n_smart, n_good,
-                                   prediction, prediction_label, contributions_json, model_version)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                   prediction, prediction_label, contributions_json, model_version,
+                                   score_raw, safety_factor, safety_risk, safety_level, safety_reasons_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (now, mint, tok["symbol"] if tok else "", m["score"], m["net_usd"], m["buy_usd"], m["smart_buyers"],
              m["avg_quality"], tok["price_usd"] if tok else None, tok["mcap_usd"] if tok else None,
              json.dumps(m["wallets"]), m["buy_sol"], m["net_sol"], tok["liquidity_usd"] if tok else None,
-             m["n_ultra"], m["n_smart"], m["n_good"], pred, pred_label, contrib, m["model_version"]))
+             m["n_ultra"], m["n_smart"], m["n_good"], pred, pred_label, contrib, m["model_version"],
+             m.get("score_raw", m["score"]), sp.get("factor"), sp.get("risk"), sp.get("level"),
+             json.dumps(sp.get("reasons") or [], ensure_ascii=False)))
         new.append(conn.execute("SELECT * FROM signals WHERE id=?", (cur.lastrowid,)).fetchone())
     conn.commit()
     return new
