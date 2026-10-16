@@ -348,3 +348,9 @@ label.fld small { color: var(--muted); }
   .search { width: 100%; order: 3; }
   .sig-body { grid-template-columns: 1fr; }
 }
+
+/* self-learning surface: take profit x stop loss grid */
+.heat { display: grid; gap: 3px; font-variant-numeric: tabular-nums; overflow-x: auto; }
+.heat-h { color: var(--muted); font-size: 11.5px; padding: 4px 6px; text-align: center; white-space: nowrap; align-self: center; }
+.heat-c { font-size: 12px; text-align: center; padding: 7px 4px; border-radius: 4px; color: var(--text); min-width: 44px; }
+.heat-c.best { outline: 2px solid var(--accent); outline-offset: -2px; font-weight: 600; }

@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 GET = ["/api/overview", "/api/signals", "/api/signals/performance", "/api/coins", "/api/wallets", "/api/wallets/stats",
        "/api/copytrade", "/api/copytrade?mode=live", "/api/model", "/api/system", "/api/control", "/api/search?search=a",
-       "/api/copytrade/backtest?strategy=whale"]
+       "/api/copytrade/backtest?strategy=whale", "/api/copytrade/learn?strategy=whale", "/api/copytrade/learn?strategy=signal"]
 
 
 def _client(db: str):
@@ -132,3 +132,16 @@ def test_buy_button_flow(demo):
     other = next(x for x in c.get("/api/coins").json() if x["mint"] != free["mint"])
     assert c.post("/api/buy", json={"mint": other["mint"]}).status_code == 409
     c.post("/api/control/pause", json={"on": False})
+
+
+def test_learn_view(demo, empty):
+    d = _client(empty).get("/api/copytrade/learn?strategy=whale").json()
+    assert d["available"] is False and d["note"]
+    c = _client(demo)
+    for st in ("whale", "signal"):
+        d = c.get(f"/api/copytrade/learn?strategy={st}").json()
+        assert d["available"] and d["strategy"] == st, d
+        assert d["versions"] and all(isinstance(v["params"], dict) for v in d["versions"])
+        assert d["surface"] and d["exit_rules"] and d["attribution"]
+    pos = c.get("/api/copytrade").json()
+    assert any(p.get("param_version") for p in pos["open"] + pos["closed"])

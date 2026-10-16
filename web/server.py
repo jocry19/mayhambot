@@ -188,6 +188,47 @@ def copytrade(mode: str = "paper", strategy: str | None = None):
     return ok(cache.get(("ct", mode, strategy), 4, lambda: q.copytrade(read_conn(), mode, strategy or None)))
 
 
+def _records(df, limit=2000):
+    if df is None or len(df) == 0:
+        return []
+    df = df[[c for c in df.columns if not str(df[c].dtype).startswith("datetime")]]
+    return json.loads(df.to_json(orient="records"))[-limit:]
+
+
+@app.get("/api/copytrade/learn")
+def copytrade_learn(strategy: str = "whale"):
+    """Self-learning of copytrade (copytrade/learn.py): status, parameter versions with their P&L,
+    variant heatmap, exit-rule comparison and attribution per feature bucket."""
+    try:
+        from copytrade import control, learn
+    except Exception as e:
+        return ok({"available": False, "note": f"copytrade-Lernen nicht installiert: {e}"})
+    if strategy not in control.STRATEGIES:
+        raise HTTPException(400, "Modus unbekannt")
+    conn = read_conn()
+    if not q.has(conn, "ct_evals") or not q.has(conn, "ct_param_versions"):
+        return ok({"available": False, "note": "Das Lernen hat noch nichts ausgewertet. Es läuft alle 10 min im Copy-Trading-Dienst."})
+
+    def run():
+        out = {"available": True, "strategy": strategy}
+        for key, fn in (("status", lambda: learn.status(conn)),
+                        ("versions", lambda: _records(learn.versions(conn, strategy))),
+                        ("surface", lambda: _records(learn.variant_surface(conn, strategy, "take_profit", "stop_loss"))),
+                        ("exit_rules", lambda: _records(learn.exit_rule_comparison(conn, strategy))),
+                        ("attribution", lambda: _records(learn.attribution(conn, strategy))),
+                        ("params", lambda: learn.params_for(conn, strategy, apply_caps=True))):
+            try:  # one failing view must not hide the others
+                out[key] = fn()
+            except Exception as e:
+                out[key] = None
+                out.setdefault("errors", {})[key] = str(e)[:200]
+        for v in out.get("versions") or []:
+            v["params"] = q._j(v.get("params"), v.get("params"))
+            v["notes"] = q._j(v.get("notes"), v.get("notes"))
+        return out
+    return ok(cache.get(("learn", strategy), 60, run))
+
+
 @app.get("/api/copytrade/backtest")
 def backtest(strategy: str = "whale", preset: str | None = None):
     """Walk-forward backtests of copytrade (mode 1: whale, mode 2: signal with a preset)."""

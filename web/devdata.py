@@ -36,6 +36,60 @@ def _named(conn, sql: str) -> str:
     cols = [c[1] for c in conn.execute(f"PRAGMA table_info({m.group(2)})")][: m.group(4).count("?")]
     return f"{m.group(1)}{m.group(2)}({','.join(cols)}){m.group(3)}"
 
+
+def _learn_demo(conn, r, now):
+    """Self-learning tables of copytrade (ct_evals, ct_param_versions) in their real format, if copytrade has them."""
+    try:
+        from copytrade import learn, sim
+    except Exception:
+        return
+    learn.init(conn)
+
+    def gains(variants, edge):
+        out = []
+        for v in variants:
+            g = edge + 0.25 * min(v.take_profit, 0.6) - 0.15 * max(0, v.take_profit - 0.6) - 0.3 * abs(v.stop_loss - 0.2)
+            g += (0.04 if v.trail_activate else 0) + (0.05 if getattr(v, "inflow_exit", False) else 0)
+            g -= 0.0004 * abs(v.max_hold_min - 45) + 0.0002 * getattr(v, "delay_s", 15)
+            out.append(round(max(-0.6, min(2.0, g + r.gauss(0, 0.25))), 4))
+        return out
+    for strategy, variants, n in (("whale", sim.GRID, 70), ("signal", sim.EXIT_GRID, 50)):
+        for i in range(n):
+            kind = "trade" if i % 3 == 0 else ("whale_buy" if strategy == "whale" else "signal")
+            edge = r.gauss(-0.02, 0.12)
+            feats = ({"tier": r.choice(["ultra", "smart", "good", "none"]), "mcap": r.choice(["<50k", "50-200k", "200k-1M", ">1M"]),
+                      "liq": r.choice(["<10k", "10-50k", ">50k"]), "size": r.choice(["<2", "2-10", ">10"])}
+                     if strategy == "whale" else
+                     {"mcap": r.choice(["<50k", "50-200k", "200k-1M"]), "score": r.choice(["50+", "60+", "70+"]),
+                      "buyers": r.choice(["2", "3", "4", "6+"]), "ultra": r.choice(["ja", "nein"])})
+            if feats.get("tier") == "ultra" or feats.get("ultra") == "ja":
+                edge += 0.08
+            g = gains(variants, edge)
+            conn.execute(_named(conn, "INSERT OR REPLACE INTO ct_evals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"),
+                         (kind, f"{strategy}-{i}", strategy, "", "", now - 86400 * 2 + i * 1800, sim.GRID_VERSION,
+                          json.dumps(g), g[0] - 0.03 if kind == "trade" else None, g[0] if kind == "trade" else None,
+                          json.dumps(feats), now))
+        base = {"take_profit": 0.4, "stop_loss": 0.2, "trail_activate": 0.3, "trail_drawdown": 0.15, "max_hold_min": 60,
+                "inflow_exit": 0}
+        for k in range(4):
+            accepted = k in (1, 3)
+            params = {**base, "take_profit": [0.4, 0.6, 0.6, 0.6][k], "stop_loss": [0.2, 0.2, 0.2, 0.3][k],
+                      "inflow_exit": 1 if k >= 1 and strategy == "whale" else 0, "block": {"tier": ["none"]} if k == 3 else {}}
+            conn.execute("""INSERT INTO ct_param_versions(ts, strategy, scope, params, n_train, n_test, train_gain, test_gain,
+                            baseline_test_gain, accepted, active, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         (now - 86400 * 2 + k * 36000, strategy, "mode", json.dumps(params), 28 + 8 * k, 12 + 3 * k,
+                          0.06 + 0.02 * k, 0.04 + 0.015 * k if accepted else 0.01, 0.02 + 0.01 * k, int(accepted),
+                          int(k == 3), json.dumps({"calibration_gap": round(0.02 + 0.01 * k, 3)})))
+    have = {c[1] for c in conn.execute("PRAGMA table_info(ct_positions)")}
+    if "param_version" in have:
+        vers = {st: [v[0] for v in conn.execute("SELECT id FROM ct_param_versions WHERE strategy=? AND accepted=1 ORDER BY id", (st,))]
+                for st in ("whale", "signal")}
+        for pid, st, opened in conn.execute("SELECT id, strategy, opened_at FROM ct_positions").fetchall():
+            vs = vers.get(st) or []
+            if vs and r.random() < 0.7:
+                conn.execute("UPDATE ct_positions SET param_version=? WHERE id=?", (vs[0] if opened < now - 86400 else vs[-1], pid))
+    conn.commit()
+
 def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wallets: int = 700) -> str:
     try:
         from .db import db_path
@@ -409,6 +463,7 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
                       p_now * 1e9, "open", hint, now - 60 if hint else None, json.dumps({"fill_source": "jupiter"})))
     conn.execute(_named(conn, "INSERT INTO ct_events VALUES (?,?,?,?,?)"), (now - 60, "info", "hint", "VERKAUFS-HINWEIS: Ziel erreicht", None))
     control.set_mode(conn, "signal", "semi")
+    _learn_demo(conn, r, now)
     try:
         from research.events import FEATURE_LABELS, FEATURE_NAMES
     except Exception:
