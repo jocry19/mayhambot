@@ -149,6 +149,25 @@ def health_check(window=None, interval=15) -> tuple[bool, str]:
     return True, f"{len(names)} von {len(names)} Dienste laufen stabil"
 
 
+def _failing_tests(rev: str) -> list[str]:
+    """Run the gate's pytest on `rev` in a throwaway worktree (the live checkout stays untouched) and return
+    the FAILED/ERROR lines, so a red gate names its tests (mayham.py update hides pytest's output)."""
+    import tempfile  # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as td:
+        wt = Path(td) / "wt"
+        try:
+            git("worktree", "add", "-q", "--detach", str(wt), rev)
+            dirs = ["tests"] + sorted(str(p.relative_to(wt)) for p in wt.glob("*/tests") if p.is_dir())
+            r = subprocess.run([_python(), "-m", "pytest", *dirs, "-q", "-p", "no:cacheprovider"], cwd=wt,
+                               capture_output=True, text=True, timeout=900)
+            return [ln for ln in r.stdout.splitlines() if ln.startswith(("FAILED", "ERROR"))][:10]
+        except Exception as e:  # noqa: BLE001
+            return [f"Diagnose fehlgeschlagen: {e}"]
+        finally:
+            subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=ROOT, capture_output=True)
+            subprocess.run(["git", "worktree", "prune"], cwd=ROOT, capture_output=True)
+
+
 def _lock_count(since_sizes: dict) -> int:
     n = 0
     for f, size in since_sizes.items():
@@ -213,10 +232,18 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
         if git("rev-parse", "HEAD") != head:
             git("reset", "-q", "--hard", head)
         st["bad"] = target
+        st["red_streak"] = st.get("red_streak", 0) + 1
         _save(st)
-        log(f"rolled back: {subject} (exit {r.returncode})")
+        log(f"rolled back: {subject} (exit {r.returncode}), red rounds in a row: {st['red_streak']}")
         alert(f"↩️ Update zurückgerollt: {subject}. Grund: Tests rot oder Update-Fehler, alte Version "
               f"{head[:7]} läuft weiter. Details: logs/update.log")
+        if st["red_streak"] == 3:   # stuck: name the failing tests once
+            failed = _failing_tests(target)
+            st["red_tests"] = failed
+            _save(st)
+            log("gate red 3 rounds in a row, failing: " + "; ".join(failed))
+            alert(f"🔴 Auto-Update hängt: Tests seit {st['red_streak']} Runden rot, der Mac bleibt auf {head[:7]}. "
+                  "Rote Tests: " + ("; ".join(failed) or "nicht ermittelbar") + ".")
         return f"zurückgerollt {target[:7]}"
     # mayham.py update pulls the newest main, which may be past `target` when someone pushed during the backup
     now_head = git("rev-parse", "HEAD")
@@ -250,6 +277,8 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
               f"{'' if ok2 else ' NICHT sauber: ' + detail2}. Details: logs/update.log")
         return f"zurückgerollt {target[:7]} ({detail})"
     st.pop("bad", None)
+    st["red_streak"] = 0
+    st.pop("red_tests", None)
     st["deployed"] = target
     _save(st)
     lock_note = f", {locks}× 'database is locked'" if locks else ""

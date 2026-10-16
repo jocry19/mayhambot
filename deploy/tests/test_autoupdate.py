@@ -256,3 +256,14 @@ def test_update_crash_after_pull_resets_checkout(repo):
     (work / "PIP_FAILS").write_text("")
     assert autoupdate.run_once(alerts.append, health=lambda: (True, "ok")).startswith("zurückgerollt")
     assert head() == before and not (work / "needs_pip").exists()
+
+
+def test_red_streak_names_failing_tests_once(repo, monkeypatch):
+    work, push, head, alerts = repo
+    monkeypatch.setattr(autoupdate, "_failing_tests", lambda rev: ["FAILED web/tests/test_api.py::test_x"])
+    for i in range(4):
+        push(f"red{i}", red=True)
+        autoupdate.run_once(alerts.append, now=1e9 + i * 1000, health=lambda: (True, "ok"))
+    hangs = [a for a in alerts if "hängt" in a]
+    assert len(hangs) == 1 and "test_x" in hangs[0]
+    assert autoupdate._load()["red_streak"] == 4
