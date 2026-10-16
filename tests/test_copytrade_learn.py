@@ -368,3 +368,23 @@ def test_landing_drift_sets_paper_slippage_from_the_tape():
         assert abs(execution.paper_adverse() - 0.01) < 1e-6
     finally:
         execution.set_paper_adverse(old)
+
+
+def test_wallet_features_point_in_time():
+    import sqlite3
+    from copytrade import learn, store
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(store.SCHEMA)
+    conn.executescript("""CREATE TABLE model_versions (id INTEGER PRIMARY KEY, ts INTEGER, active INTEGER);
+        CREATE TABLE model_tier_history (version INTEGER, address TEXT, tier TEXT, score REAL);
+        CREATE TABLE wallets (address TEXT, tier TEXT, tier_source TEXT, model_score REAL, cluster_id TEXT,
+                              exit_capture REAL);
+        INSERT INTO model_versions VALUES (1, 1000, 0), (2, 5000, 1);
+        INSERT INTO model_tier_history VALUES (1, 'W', 'smart', 1), (2, 'W', 'ultra', 2);
+        INSERT INTO wallets VALUES ('W', 'ultra', 'model', 2, NULL, 0.8);""")
+    store._winfo_cache.clear()
+    assert learn.wallet_features(conn, "W", 6000) == learn.wallet_features(conn, "W")  # newer than the model: today
+    assert learn.wallet_features(conn, "W", 2000) == {"tier": "smart", "capture": "?"}  # version 1 was active
+    assert learn.wallet_features(conn, "W", 500) == {"tier": "?", "capture": "?"}  # before any model

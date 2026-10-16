@@ -174,8 +174,9 @@ def backtest(conn, s: Settings, size_sol: float | None = None) -> pd.DataFrame:
         return df
     hist: dict[str, list] = {}
     rows = []
+    known_after = s.pump_window_min * 60  # an outcome is only known once its pump window is over
     for r in df.itertuples():
-        prev = hist.setdefault(r.wallet, [])
+        prev = [p for p in hist.setdefault(r.wallet, []) if p.ts + known_after <= r.ts]
         take = False
         tp = s.take_profit
         if len(prev) >= s.min_wallet_samples:
@@ -188,10 +189,12 @@ def backtest(conn, s: Settings, size_sol: float | None = None) -> pd.DataFrame:
                 tp = min(s.tp_max, max(s.tp_min, s.tp_fraction_of_median_pump * statistics.median(pumps)))
         if take and r.our_entry_price_usd and r.entry_price_usd:
             our_first = (1 + r.first_pump_gain) * r.entry_price_usd / r.our_entry_price_usd - 1
-            gain = tp - ROUNDTRIP_COST if our_first >= tp else r.achievable_gain
+            # a buy that stopped out may have hit the stop before the pump: book the stop (pessimistic)
+            stopped = r.achievable_gain <= -s.stop_loss - ROUNDTRIP_COST + 1e-9
+            gain = tp - ROUNDTRIP_COST if our_first >= tp and not stopped else r.achievable_gain
             rows.append({"ts": r.ts, "dt": r.dt, "wallet": r.wallet, "mint": r.mint, "tp": tp,
                          "gain": gain, "pnl_sol": size * gain})
-        prev.append(r)
+        hist[r.wallet].append(r)
     bt = pd.DataFrame(rows)
     if not bt.empty:
         bt["equity_sol"] = bt["pnl_sol"].cumsum()

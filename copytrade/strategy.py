@@ -346,7 +346,8 @@ class Strategy:
         if m == "off":
             return None
         mint = row["mint"]
-        age = time.time() - (row["decided_ts"] or 0)
+        entered = row["entered_ts"] if "entered_ts" in row.keys() and row["entered_ts"] else row["decided_ts"]
+        age = time.time() - (entered or 0)
         if age > LAUNCH_MAX_AGE_S:
             return self._skip("launch", mint, f"Launch-Entscheidung zu alt ({age:.0f}s)")
         p = control.preset(self.conn, "launch")

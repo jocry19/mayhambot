@@ -150,11 +150,27 @@ def wallet_tier(conn, wallet: str) -> str:
     return store.wallet_info(conn, wallet).get("tier") or "none" if wallet else "-"
 
 
-def wallet_features(conn, wallet: str) -> dict:
+def wallet_features(conn, wallet: str, ts: float | None = None) -> dict:
+    """Tier and exit-capture bucket as known at ts (None = now). Replays of old buys must not see today's tier or
+    a capture computed from later trades: they get the tier of the model version active then (model_tier_history)
+    and '?' for capture, unless the buy is newer than the active model."""
     from . import store
 
     info = store.wallet_info(conn, wallet)
-    return {"tier": info.get("tier") or "none", "capture": bucket_capture(info.get("exit_capture"))}
+    now = {"tier": info.get("tier") or "none", "capture": bucket_capture(info.get("exit_capture"))}
+    if ts is None:
+        return now
+    try:
+        act = conn.execute("SELECT MAX(ts) FROM model_versions WHERE active=1").fetchone()[0]
+        if act is not None and ts >= act:
+            return now
+        r = conn.execute("""SELECT h.tier FROM model_tier_history h JOIN model_versions v ON v.id=h.version
+                            WHERE h.address=? AND v.id=(SELECT MAX(id) FROM model_versions WHERE ts<=?)""",
+                         (wallet, int(ts))).fetchone()
+        had = conn.execute("SELECT 1 FROM model_versions WHERE ts<=? LIMIT 1", (int(ts),)).fetchone()
+    except Exception:
+        return {"tier": "?", "capture": "?"}
+    return {"tier": (r[0] or "none") if r else ("none" if had else "?"), "capture": "?"}
 
 
 # intel/ (Zentrale): point-in-time features; the buckets below become learnable filters, the raw values go to
@@ -284,12 +300,29 @@ def evaluate_trades(conn, s: Settings, limit: int = 20) -> int:
     return n
 
 
+def _pit_migrate(conn) -> None:
+    """Once: replays stored before 10/2026 carried today's tier and capture; rewrite them as known at the time."""
+    from . import store
+
+    if store.get_state(conn, "evals_pit_v1"):
+        return
+    for ref, w, ts, f in conn.execute("SELECT ref, wallet, ts, features FROM ct_evals WHERE kind='whale_buy'").fetchall():
+        try:
+            feats = {**json.loads(f or "{}"), **wallet_features(conn, w, ts)}
+        except ValueError:
+            continue
+        conn.execute("UPDATE ct_evals SET features=? WHERE kind='whale_buy' AND ref=?", (json.dumps(feats), ref))
+    store.set_state(conn, "evals_pit_v1", "1")
+    conn.commit()
+
+
 def evaluate_whale_buys(conn, s: Settings, limit: int = 40) -> int:
     """Every whale buy already measured by the ranking (ct_buy_outcomes) -> full grid."""
     rows = conn.execute(
         """SELECT o.* FROM ct_buy_outcomes o WHERE o.pumped IS NOT NULL AND o.ts < ?
            AND NOT EXISTS (SELECT 1 FROM ct_evals e WHERE e.kind='whale_buy' AND e.ref=o.sig)
            ORDER BY o.ts DESC LIMIT ?""", (int(time.time()) - HORIZON_S, limit)).fetchall()
+    _pit_migrate(conn)
     now = int(time.time())
     gaps = tracker_gaps(conn, now - 3 * 86400, now)
     for a, b in gaps:  # replays stored before the outage was known
@@ -309,7 +342,7 @@ def evaluate_whale_buys(conn, s: Settings, limit: int = 40) -> int:
         cs = candles(conn, s, b["mint"], b["ts"] - 20 * 60, b["ts"] + HORIZON_S, b["pool"])
         if not cs and b["ts"] > time.time() - RETRY_S:
             continue  # candles not available right now: try again next round
-        feats = {"strategy": "whale", **wallet_features(conn, w), "size": bucket_size(b["sol_amount"]),
+        feats = {"strategy": "whale", **wallet_features(conn, w, b["ts"]), "size": bucket_size(b["sol_amount"]),
                  **intel_context(conn, b["mint"], w, b["ts"])[0]}
         gains = sim.grid_gains(cs, b["ts"], sim.GRID, sells) if cs else []
         _store_eval(conn, "whale_buy", b["sig"], "whale", w, b["mint"], b["ts"], gains, feats)

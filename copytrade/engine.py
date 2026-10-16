@@ -174,6 +174,10 @@ class Engine:
         store.event(self.conn, "stop", "Copy-Trader gestoppt")
 
 
+SIGNAL_TRIES = 3
+_signal_tries: dict[int, int] = {}
+
+
 def follow_signals(conn, strat: Strategy) -> int:
     """Mode 2: hand new rows of the signal engine's `signals` table to the strategy."""
     try:
@@ -188,8 +192,12 @@ def follow_signals(conn, strat: Strategy) -> int:
     for sig in rows:
         try:
             strat.on_signal(sig)
-        except Exception as e:
-            log.warning("signal %s failed: %s", sig["id"], e)
+        except Exception as e:  # e.g. database locked: retry next round, give up after SIGNAL_TRIES
+            n = _signal_tries[sig["id"]] = _signal_tries.get(sig["id"], 0) + 1
+            log.warning("signal %s failed (%d/%d): %s", sig["id"], n, SIGNAL_TRIES, e)
+            if n < SIGNAL_TRIES:
+                break
+        _signal_tries.pop(sig["id"], None)
         store.set_state(conn, "last_signal_id", sig["id"])
     return len(rows)
 
@@ -200,19 +208,26 @@ def follow_launches(conn, strat: Strategy) -> int:
 
     if control.mode(conn, "launch") == "off":
         return 0
+    # decided_ts is the stage-1 time; 'enter' is written at stage 2 together with the sniper's paper position,
+    # so the cursor runs on the position's opened_ts (a decided_ts cursor skipped launches entered later)
     try:
-        last = store.get_state(conn, "last_launch_ts")
+        last = store.get_state(conn, "last_launch_entry_ts")
         if last is None:  # first start: do not buy old launches
-            r = conn.execute("SELECT COALESCE(MAX(decided_ts), 0) FROM sniper_launches").fetchone()
-            store.set_state(conn, "last_launch_ts", str(r[0]))
+            r = conn.execute("SELECT COALESCE(MAX(opened_ts), 0) FROM sniper_positions").fetchone()
+            store.set_state(conn, "last_launch_entry_ts", str(r[0]))
             return 0
-        rows = conn.execute("SELECT * FROM sniper_launches WHERE decision='enter' AND decided_ts > ? "
-                            "ORDER BY decided_ts", (int(last),)).fetchall()
+        rows = conn.execute("""SELECT l.*, p.opened_ts AS entered_ts FROM sniper_launches l
+                               JOIN sniper_positions p ON p.mint = l.mint
+                               WHERE l.decision='enter' AND p.opened_ts > ? ORDER BY p.opened_ts""",
+                            (int(last),)).fetchall()
     except Exception:  # sniper/ not installed or its table missing
         return 0
     for row in rows:
-        store.set_state(conn, "last_launch_ts", str(row["decided_ts"]))
-        strat.on_launch(row)
+        try:
+            strat.on_launch(row)
+        except Exception as e:
+            log.warning("launch %s failed: %s", row["mint"][:6], e)
+        store.set_state(conn, "last_launch_entry_ts", str(row["entered_ts"]))
     return len(rows)
 
 

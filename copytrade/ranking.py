@@ -25,6 +25,7 @@ from .config import Settings
 log = logging.getLogger("copytrade.ranking")
 
 Candle = tuple  # (ts, o, h, l, c, v)
+RETRY_EVERY_S, RETRY_FOR_S = 2 * 3600, 2 * 86400
 ROUNDTRIP_COST = 0.045  # measured on paper fills 10/2026: Jupiter quote both ways + 0.75 % landing drift each way + fees
 
 
@@ -129,9 +130,10 @@ def evaluate_pending(conn, s: Settings, max_mints: int = 25, min_sol: float | No
     rows = conn.execute(
         """SELECT s.sig, s.wallet, s.mint, s.ts, s.sol_amount FROM ct_swaps s
            LEFT JOIN ct_buy_outcomes o ON o.sig = s.sig
-           WHERE s.side='buy' AND s.ts < ? AND s.ts > ? AND s.sol_amount >= ? AND o.sig IS NULL
-           ORDER BY s.ts DESC""",
-        (horizon, horizon - 30 * 86400, min_sol),
+           WHERE s.side='buy' AND s.ts < ? AND s.ts > ? AND s.sol_amount >= ?
+             AND (o.sig IS NULL OR (o.pumped IS NULL AND o.candles = 0 AND o.evaluated_at < ? AND s.ts > ?))
+           ORDER BY o.sig IS NOT NULL, s.ts DESC""",  # failed candle fetches retried every 2 h for 2 days, new first
+        (horizon, horizon - 30 * 86400, min_sol, int(time.time()) - RETRY_EVERY_S, int(time.time()) - RETRY_FOR_S),
     ).fetchall()
     by_mint: dict[str, list] = {}
     for r in rows:

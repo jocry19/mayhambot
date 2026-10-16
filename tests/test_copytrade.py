@@ -128,11 +128,12 @@ def test_skips(env):
 
 def test_rank_and_backtest(env):
     s, conn, ex, state = env
-    t = int(time.time()) - 86400
+    gap = s.pump_window_min * 60 + 60  # the backtest only uses outcomes already known at the time
+    t = int(time.time()) - 8 * gap - 3600
     for i in range(8):
         good = i % 4 != 0
         conn.execute("INSERT INTO ct_buy_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                     (f"s{i}", W, MINT, t + i * 600, 5, "pool", 1.0, 1.02, 0.8 if good else 0.05, 9, 0.9, 10, 9, 3,
+                     (f"s{i}", W, MINT, t + i * gap, 5, "pool", 1.0, 1.02, 0.8 if good else 0.05, 9, 0.9, 10, 9, 3,
                       0.45 if good else -0.2, int(good), 60, t))
     conn.commit()
     assert ranking.rank_wallets(conn, s) == 1
@@ -548,11 +549,14 @@ def test_learned_version_that_lost_in_training_is_ignored(env):
     assert learn.params_for(conn, "whale") is None
 
 
-def _launch(conn, decided_ts=None, mcap_usd=1e6):
+def _launch(conn, decided_ts=None, mcap_usd=1e6, entered_ts=None):
     conn.execute("CREATE TABLE IF NOT EXISTS sniper_launches (mint TEXT PRIMARY KEY, source TEXT, decided_ts INTEGER, "
                  "decision TEXT, score REAL, risk REAL, mcap_decide_usd REAL)")
+    conn.execute("CREATE TABLE IF NOT EXISTS sniper_positions (mint TEXT, opened_ts INTEGER)")
     conn.execute("INSERT OR REPLACE INTO sniper_launches(mint, source, decided_ts, decision, score, risk, mcap_decide_usd) "
                  "VALUES (?,?,?,?,?,?,?)", (MINT, "pumpportal", decided_ts or int(time.time()), "enter", 55, 20, mcap_usd))
+    conn.execute("DELETE FROM sniper_positions WHERE mint=?", (MINT,))
+    conn.execute("INSERT INTO sniper_positions VALUES (?,?)", (MINT, entered_ts or decided_ts or int(time.time())))
     return conn.execute("SELECT * FROM sniper_launches WHERE mint=?", (MINT,)).fetchone()
 
 
@@ -566,7 +570,8 @@ def test_launch_mode_off_by_default_then_buys_sniper_entries(env):
     assert follow_launches(conn, st) == 0 and conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0] == 0
     control.set_mode(conn, "launch", "auto")
     assert follow_launches(conn, st) == 0  # first start only remembers where it is
-    _launch(conn, decided_ts=int(time.time()) + 1)
+    # stage 1 decided 90 s ago, the sniper entered at stage 2 just now: still handed over and bought
+    _launch(conn, decided_ts=int(time.time()) - 90, entered_ts=int(time.time()) + 1)
     assert follow_launches(conn, st) == 1
     p = conn.execute("SELECT * FROM ct_positions WHERE strategy='launch'").fetchone()
     pre = control.preset(conn, "launch")
