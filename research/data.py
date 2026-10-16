@@ -89,7 +89,23 @@ def _flags(conn, ttl=120):
     return _flag_cache["val"]
 
 
-def load(conn, since_ts=0, mints=None):
+class Shared:
+    """What every per-coin load needs and does not change within a scoring cycle: bot/manual flags and the intel
+    feature source (with its per-minute cache). Build once per cycle with shared(conn), pass to load()."""
+
+    def __init__(self, conn):
+        from research.intel_features import Source
+        self.bots, self.manual = _flags(conn, ttl=0)
+        self.intel = Source(conn)
+
+
+def shared(conn):
+    return Shared(conn)
+
+
+def load(conn, since_ts=0, mints=None, shared=None):
+    """mints=None: everything (training). mints=[...]: those coins only (live scoring); funding links are then
+    skipped (only training builds clusters) and `shared` (see Shared) saves the per-call flag/intel setup."""
     cond, args = "WHERE ts >= ?", [since_ts]
     if mints is not None:
         mints = list(mints)
@@ -110,10 +126,15 @@ def load(conn, since_ts=0, mints=None):
         created[r[0]] = r[1]
     for r in conn.execute("SELECT mint, created_at FROM research_tokens WHERE created_at > 0" + mcond, margs):
         created[r[0]] = min(created.get(r[0], r[1]), r[1])
-    bots, manual = _flags(conn)
+    bots, manual = (shared.bots, shared.manual) if shared is not None else _flags(conn)
     ds = Dataset(trades, pidx, created, bots, manual, median(ratios) or 150.0)
-    from research.intel_features import Source
-    ds.intel = Source(conn)  # point-in-time coin features from intel/ (neutral when unavailable)
+    if shared is not None:
+        ds.intel = shared.intel
+    else:
+        from research.intel_features import Source
+        ds.intel = Source(conn)  # point-in-time coin features from intel/ (neutral when unavailable)
+    if mints is not None:
+        return ds
     try:
         ds.funding = {r[0]: (r[1], int(r[2] or 0)) for r in conn.execute(
             "SELECT wallet, funder, ts FROM research_funding WHERE funder IS NOT NULL")}

@@ -57,6 +57,10 @@ def test_score_token_explains_itself(market):
     assert abs(sum(x["share"] for x in c) - 1) < 0.01
     assert set(r["horizons"]) == {"15m", "1h", "6h"}
     assert token_signal_history(mint, conn)[-1]["score"] == r["score"]
+    from model.predict import prepare
+    ctx = prepare(conn)
+    r2 = score_token(mint, now=ts, conn=conn, tiers=ctx["tiers"], shared=ctx["shared"])
+    assert r2["score"] == r["score"]  # per-cycle context gives the same answer
     assert update_outcomes(conn, now=now) >= 1
 
 

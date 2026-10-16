@@ -44,7 +44,14 @@ def _grade(p):
     return "A" if p >= 0.6 else "B" if p >= 0.45 else "C" if p >= 0.3 else "D" if p >= 0.15 else "E"
 
 
-def score_token(mint, now=None, conn=None, store=False, tiers=None):
+def prepare(conn=None):
+    """Everything score_token needs that is the same for all coins in one cycle. Build once per cycle:
+    ctx = prepare(conn); score_token(mint, conn=conn, tiers=ctx["tiers"], shared=ctx["shared"])."""
+    conn = ensure_schema(conn) if conn is not None else connect()
+    return {"tiers": tier_map(conn), "shared": data.shared(conn)}
+
+
+def score_token(mint, now=None, conn=None, store=False, tiers=None, shared=None):
     conn = ensure_schema(conn) if conn is not None else connect()
     now = int(now or time.time())
     W = msettings.window_min * 60
@@ -52,7 +59,7 @@ def score_token(mint, now=None, conn=None, store=False, tiers=None):
     if not version:
         raise ModelNotTrained("no model version yet: run python -m model retrain")
     tiers = tiers if tiers is not None else tier_map(conn)
-    ds = data.load(conn, mints=[mint])
+    ds = data.load(conn, mints=[mint], shared=shared)
     tok = conn.execute("SELECT symbol, pair_created_at, price_usd, mcap_usd FROM tokens WHERE mint=?", (mint,)).fetchone()
     created = ds.created.get(mint) or (tok["pair_created_at"] if tok else None)
     f, wallets = ev.features_at(mint, now, ds.window(mint, now - W, now), tiers, ds.pidx, created, ds.to_sol,
@@ -199,11 +206,11 @@ def update_outcomes(conn=None, now=None):
 
 def score_many(mints, conn=None, store=True, now=None):
     conn = ensure_schema(conn) if conn is not None else connect()
-    tiers = tier_map(conn)
+    ctx = prepare(conn)
     out = []
     for m in mints:
         try:
-            r = score_token(m, now=now, conn=conn, store=store, tiers=tiers)
+            r = score_token(m, now=now, conn=conn, store=store, tiers=ctx["tiers"], shared=ctx["shared"])
         except ModelNotTrained:
             return []
         if r:

@@ -158,3 +158,8 @@ Wallets in the `wallets` table that the model has not scored yet are backfilled 
 basis). `tier_of(addr, with_edge=True)["copy_edge"]` / `wallet_tiers(..., with_edge=True)` = what copying it earned
 us (`copytrade.learn.wallet_edge`: our delay, exits, measured costs; `lower` > 0 = proven). Off by default because
 copytrade calls `tier_of` itself.
+
+**Fast live scoring:** build the per-cycle context once, `ctx = model.predict.prepare(conn)`, then
+`score_token(mint, conn=conn, tiers=ctx["tiers"], shared=ctx["shared"])` for every coin (no full-table scans per
+coin). `score_many` does this itself. Models carry `feature_set` / `n_features`; a model from a different release
+raises `model.predict.ModelIncompatible` (a `ModelNotTrained`), so callers fall back instead of crashing.
