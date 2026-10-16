@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import threading
 import time
 
@@ -38,6 +39,7 @@ LAUNCH_MAX_AGE_S = 60  # mode 3: a sniper decision older than this is not bought
 EXIT_NAMES = {"target": "Ziel erreicht", "inflow_peak": "Copy-Ansturm vorbei", "trail": "Trailing-Stop",
               "stop": "Stop-Loss", "time": "Zeit abgelaufen", "whale": "Wal verkauft", "no_market": "kein Markt",
               "smart_exit": "Smart Money steigt aus", "manual": "von dir verkauft", "rug": "Liquidität abgezogen"}
+UNCONFIRMED = "unbestätigt:"  # live.executor.UNCONFIRMED: a buy that may still land keeps its 'opening' row
 RUG_LIQ_DROP = 0.8  # liquidity this far under its value at entry: the pool was pulled, exit at once
 PAPER_MODES = ("paper", "explore")  # simulated accounts: strict paper (the live rules) and exploration
 
@@ -553,11 +555,14 @@ class Strategy:
             if ex.mode in PAPER_MODES and ex.balance(self.conn) - reserved < size + 0.01:
                 self._skip(strategy, mint, "Guthaben zu klein (andere Käufe laufen)", snap)
                 return None
-            pid = self.conn.execute(
-                """INSERT INTO ct_positions(mode, strategy, managed, wallet, mint, symbol, signal_id, opened_at,
-                     size_sol, tokens, entry_cost_sol, status, intent) VALUES (?,?,?,?,?,?,?,?,?,0,0,'opening',?)""",
-                (ex.mode, strategy, managed, wallet, mint, snap.symbol, signal_id, int(time.time()), size, intent),
-            ).lastrowid
+            try:
+                pid = self.conn.execute(
+                    """INSERT INTO ct_positions(mode, strategy, managed, wallet, mint, symbol, signal_id, opened_at,
+                         size_sol, tokens, entry_cost_sol, status, intent) VALUES (?,?,?,?,?,?,?,?,?,0,0,'opening',?)""",
+                    (ex.mode, strategy, managed, wallet, mint, snap.symbol, signal_id, int(time.time()), size, intent),
+                ).lastrowid
+            except sqlite3.IntegrityError:  # another process wrote this intent a moment ago: it buys, we do not
+                return None
             self.conn.commit()
         try:
             fill = ex.buy(mint, size, snap)
@@ -575,6 +580,10 @@ class Strategy:
         if not fill.ok:  # nothing was bought: paper rows go, a live row stays as 'failed' for the record
             if ex.mode in PAPER_MODES:
                 _write_hard(self.conn, "DELETE FROM ct_positions WHERE id=?", (pid,))
+            elif (fill.error or "").startswith(UNCONFIRMED):  # the swap may still land: the live watchdog books it
+                store.event(self.conn, "error", f"Kauf {snap.symbol} unbestätigt, Position {pid} wartet auf die "
+                                                f"Prüfung: {fill.error}", "error")
+                return None
             else:
                 _write_hard(self.conn, "UPDATE ct_positions SET status='failed', exit_reason=? WHERE id=?",
                             (fill.error[:200], pid))
@@ -812,6 +821,12 @@ class Strategy:
     def process_commands(self) -> int:
         n = 0
         for c in control.pending_commands(self.conn):
+            # claim it: a second process (a manual `copytrade run` beside the service) or a cancel click must not
+            # act on the same command
+            if self.conn.execute("UPDATE ct_commands SET status='running' WHERE id=? AND status='pending'",
+                                 (c["id"],)).rowcount != 1:
+                continue
+            self.conn.commit()
             n += 1
             try:
                 if c["action"] == "sell":
@@ -820,7 +835,8 @@ class Strategy:
                     if not p:
                         control.finish_command(self.conn, c["id"], "failed", "Position nicht offen")
                         continue
-                    ok = self.close(p, market.snapshot(p["mint"], self.s), "manual")
+                    # real-money sells run in a worker: a panic sell of five positions must not hold up the others
+                    ok = self.close(p, market.snapshot(p["mint"], self.s), "manual", wait=p["mode"] in PAPER_MODES)
                     control.finish_command(self.conn, c["id"], "done" if ok else "failed")
                 elif c["action"] == "buy":
                     snap = market.snapshot(c["mint"], self.s)

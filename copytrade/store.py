@@ -143,6 +143,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE ct_positions ADD COLUMN {col} {typ}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ct_positions_strategy ON ct_positions(strategy, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ct_positions_intent ON ct_positions(intent)")
+    try:  # one row per intent across processes too (INTENT_LOCK only guards one process)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ct_positions_intent_u ON ct_positions(intent) "
+                     "WHERE intent IS NOT NULL")
+    except sqlite3.IntegrityError:  # an old database with duplicates: keep the plain index
+        pass
     conn.commit()
 
 

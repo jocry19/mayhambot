@@ -948,3 +948,31 @@ def test_signal_backtest_books_the_stop_when_the_dip_came_first(env):
     bt = stats.signal_backtest(conn, p)
     gains = sorted(bt["gain"].round(3))
     assert gains == sorted([round(-0.95 - stats.ROUNDTRIP_COST, 3), round(-p.stop_loss - stats.ROUNDTRIP_COST, 3)])
+
+
+def test_commands_are_claimed_once_and_unconfirmed_live_buys_stay_opening(env):
+    from copytrade.execution import Fill
+
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    conn.execute("INSERT INTO ct_commands(ts, action, mint, strategy, status) VALUES (?,?,?,?,?)",
+                 (int(time.time()), "buy", MINT, "signal", "pending"))
+    st2 = strategy.Strategy(conn, s, ex)
+    assert st.process_commands() == 1 and st2.process_commands() == 0  # the second process finds it claimed
+    assert conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0] == 1
+
+    class Unsure:
+        mode = "live"
+
+        def buy(self, mint, size, snap):
+            return Fill(False, error=f"{strategy.UNCONFIRMED} Kauf abc… wird geprüft")
+
+        def balance(self, conn):
+            return 10.0
+
+    st3 = strategy.Strategy(conn, s, {"paper": ex, "live": Unsure()})
+    st3.exs["live"] = Unsure()
+    p = control.preset(conn, "signal")
+    assert st3.open("signal", "auto", "LIVEMINT", 0.1, state["snap"], p, tp=0.5, hold=60, reason="t",
+                    account="live") is None
+    assert conn.execute("SELECT status FROM ct_positions WHERE mint='LIVEMINT'").fetchone()[0] == "opening"
