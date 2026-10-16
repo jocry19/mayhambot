@@ -405,8 +405,12 @@ def _norm_signal(conn, s, tm):
             "safety": {"level": s.get("safety_level"), "score": _f(s.get("safety_risk"), 1),
                        "factor": _f(s.get("safety_factor"), 3), "blocked": (s.get("safety_factor") == 0),
                        "reasons": _j(s.get("safety_reasons_json"), []) or []} if s.get("safety_level") else None,
-            "outcome": {k: _f(s.get(k), 4) for k in ("ret_5m", "ret_15m", "ret_1h", "ret_6h", "max_ret_1h",
-                                                      "max_ret_24h", "max_mcap_1h")}}
+            "outcome": {k: _f(s.get(k), 4) for k in ("ret_5m", "ret_15m", "ret_1h", "ret_6h", "max_ret_15m", "max_ret_1h",
+                                                      "max_ret_4h", "max_ret_24h", "max_mcap_1h", "dd_before_peak_1h")}
+                       | {"peak_min_1h": _f(s.get("peak_min_1h"), 1)},
+            # manual trade plan sent with the alert (signals/plan.py): call number on this coin, target/stop and their hits
+            "plan": {"call_no": s.get("call_no") or 1, "target_ret": _f(s.get("target_ret"), 4), "stop_ret": _f(s.get("stop_ret"), 4),
+                     "target_hit_ts": s.get("target_hit_ts"), "stop_hit_ts": s.get("stop_hit_ts"), "move_since_last": None}}
 
 
 def _norm_prediction(p, sol):
@@ -442,10 +446,29 @@ def signals(conn, since=None, mint=None, min_score=0.0, limit=300, tier=None, mi
         out = [s for s in out if s["tiers"][tier] > 0]
     if min_wallets:
         out = [s for s in out if s["wallets_total"] >= min_wallets]
+    _recall_moves(conn, out)
     sm = safety_map(conn, [s["mint"] for s in out])
     for s in out:  # current state too: the buy button and "gesperrt" follow it, not the state at the signal
         s["safety_now"] = sm.get(s["mint"])
     return out
+
+
+def _recall_moves(conn, out):
+    """Re-calls (call_no > 1): price move since the previous call on the same coin, from the stored call prices."""
+    re = [s for s in out if s["plan"]["call_no"] > 1 and s.get("price_usd")]
+    if not re:
+        return
+    mints = sorted({s["mint"] for s in re})
+    calls = defaultdict(list)
+    for i in range(0, len(mints), 500):
+        ch = mints[i:i + 500]
+        for r in rows(conn, f"SELECT mint, ts, price_usd FROM signals WHERE mint IN ({','.join('?' * len(ch))}) ORDER BY ts", ch):
+            calls[r["mint"]].append((r["ts"], r["price_usd"]))
+    for s in re:
+        ts = calls[s["mint"]]
+        j = bisect.bisect_left(ts, (s["ts"],)) - 1
+        if j >= 0 and ts[j][1]:
+            s["plan"]["move_since_last"] = _f(s["price_usd"] / ts[j][1] - 1, 4)
 
 
 def predictions(conn, mint, since=0, limit=2000):
@@ -459,7 +482,8 @@ def predictions(conn, mint, since=0, limit=2000):
 
 def signal_performance(conn, since=None):
     """How good were past signals: hit rate and returns per score bucket, per tier mix, per market cap."""
-    items = [x for x in signals(conn, since=since, limit=20000) if x["outcome"].get("max_ret_1h") is not None]
+    all_items = signals(conn, since=since, limit=20000)
+    items = [x for x in all_items if x["outcome"].get("max_ret_1h") is not None]
 
     def grp(xs):
         hits = sum(1 for x in xs if x["outcome"]["max_ret_1h"] >= PUMP_1H)
@@ -485,7 +509,25 @@ def signal_performance(conn, since=None):
     for x in items:
         days[x["ts"] // 86400 * 86400].append(x)
     daily = [{"ts": d, **grp(xs)} for d, xs in sorted(days.items())]
-    return {"pump_threshold": PUMP_1H, **grp(items), "by_bucket": by_bucket, "by_ultra": by_ultra,
+    # how many calls reached +50/+100/+150 % at their high within 15 min / 1 h / 4 h / 24 h (only calls with that window known)
+    reach = []
+    for lvl in (0.5, 1.0, 1.5):
+        row = {"level": lvl}
+        for key in ("max_ret_15m", "max_ret_1h", "max_ret_4h", "max_ret_24h"):
+            known = [x["outcome"][key] for x in all_items if x["outcome"].get(key) is not None]
+            hit = sum(1 for v in known if v >= lvl)
+            row[key] = {"n": len(known), "hits": hit, "rate": _f(hit / len(known), 3) if known else None}
+        reach.append(row)
+    planned = [x for x in all_items if x["plan"].get("target_ret") is not None]
+    pk = [x["outcome"]["peak_min_1h"] for x in all_items if x["outcome"].get("peak_min_1h") is not None]
+    dd = [x["outcome"]["dd_before_peak_1h"] for x in all_items if x["outcome"].get("dd_before_peak_1h") is not None]
+    manual = {"reach": reach, "planned": len(planned),
+              "target_hits": sum(1 for x in planned if x["plan"]["target_hit_ts"]),
+              "stop_hits": sum(1 for x in planned if x["plan"]["stop_hit_ts"]),
+              "recalls": sum(1 for x in all_items if x["plan"]["call_no"] > 1),
+              "median_peak_min_1h": _f(statistics.median(pk), 1) if pk else None,
+              "median_dd_before_peak": _f(statistics.median(dd), 4) if dd else None}
+    return {"pump_threshold": PUMP_1H, **grp(items), "manual": manual, "by_bucket": by_bucket, "by_ultra": by_ultra,
             "by_wallets": by_wallets, "by_mcap": by_mcap, "scatter": scatter, "daily": daily}
 
 

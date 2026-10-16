@@ -662,3 +662,28 @@ def test_credit_borrow_state():
             "research": {"credits_day_budget": 4000, "credits_today": 500}, "copytrade": {"credits_day_budget": 900, "credits_today": 100}}
     b = Q._credit_borrow(fake, cred, "signals", cred["signals"])
     assert b == {"borrowed": 500, "borrow_left": 1200, "lenders": ["research", "copytrade"]}
+
+
+def test_signal_plan_and_reach(demo, tmp_path):
+    import shutil
+
+    db = str(tmp_path / "plan.db")
+    shutil.copy(demo, db)
+    con = sqlite3.connect(db)  # a re-call on the first coin at twice the price
+    sid, mint, ts, price = con.execute("SELECT id, mint, ts, price_usd FROM signals ORDER BY ts LIMIT 1").fetchone()
+    con.execute("INSERT INTO signals(ts, mint, symbol, score, price_usd, call_no) VALUES (?,?,?,?,?,2)", (ts + 1200, mint, "X", 70, price * 2))
+    con.commit()
+    con.close()
+    c = _client(db)
+    rows = c.get("/api/signals?since_h=0&limit=1000").json()
+    done = [s for s in rows if s["outcome"].get("max_ret_4h") is not None]
+    assert done and all("peak_min_1h" in s["outcome"] and s["plan"]["target_ret"] == 0.5 for s in done)
+    re = [s for s in rows if s["plan"]["call_no"] > 1]
+    assert [s["plan"]["move_since_last"] for s in re] == [1.0]
+    m = c.get("/api/signals/performance").json()["manual"]
+    assert [x["level"] for x in m["reach"]] == [0.5, 1.0, 1.5]
+    r50 = m["reach"][0]["max_ret_4h"]
+    assert r50["n"] == len([s for s in rows if s["outcome"].get("max_ret_4h") is not None])
+    assert r50["hits"] >= m["reach"][1]["max_ret_4h"]["hits"] >= m["reach"][2]["max_ret_4h"]["hits"]
+    planned = [s for s in rows if s["plan"]["target_ret"] is not None]
+    assert m["planned"] == len(planned) and m["target_hits"] == sum(1 for s in planned if s["plan"]["target_hit_ts"])

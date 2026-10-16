@@ -90,13 +90,15 @@ export function Breakdown({ items, score }) {
 
 export function Outcome({ o }) {
   if (!o) return null;
-  const k = [["ret_5m", "5 min"], ["ret_15m", "15 min"], ["ret_1h", "1 h"], ["ret_6h", "6 h"], ["max_ret_1h", "Max 1 h"], ["max_ret_24h", "Max 24 h"]]
+  const k = [["ret_5m", "5 min"], ["ret_15m", "15 min"], ["ret_1h", "1 h"], ["ret_6h", "6 h"], ["max_ret_15m", "Hoch 15 min"], ["max_ret_1h", "Hoch 1 h"],
+    ["max_ret_4h", "Hoch 4 h"], ["max_ret_24h", "Hoch 24 h"], ["dd_before_peak_1h", "Rücksetzer vor dem Hoch"]]
     .filter(([key]) => key in o);
   return (
-    <div className="row" style={{ gap: 16 }}>
+    <div className="row" style={{ gap: 16, flexWrap: "wrap" }}>
       {k.map(([key, l]) => (
         <div className="kv" key={key}><span className="k">{l}</span><span className={`v ${sign(o[key])}`}>{o[key] == null ? <span className="dim">offen</span> : pctSigned(o[key], 0)}</span></div>
       ))}
+      {o.peak_min_1h != null && <div className="kv"><span className="k">Zeit bis zum Hoch</span><span className="v">{n(o.peak_min_1h, 0)} min</span></div>}
     </div>
   );
 }
@@ -129,6 +131,25 @@ export function SignalDetail({ s }) {
   );
 }
 
+/** Call number on the coin; a re-call shows the price move since the previous call. */
+function CallNo({ p }) {
+  if (!p || p.call_no <= 1) return <span className="dim">1.</span>;
+  return (
+    <span className="badge accent" title={p.move_since_last != null ? `Preis seit dem letzten Call ${pctSigned(p.move_since_last, 0)}` : "erneuter Call auf diesen Coin"}>
+      {p.call_no}.{p.move_since_last != null ? ` ${pctSigned(p.move_since_last, 0)}` : ""}
+    </span>
+  );
+}
+
+/** Target / stop from the alert and which one the price reached first. */
+function PlanLevels({ p }) {
+  if (!p || p.target_ret == null) return <span className="dim">–</span>;
+  const lv = `+${pct(p.target_ret, 0)} / −${pct(Math.abs(p.stop_ret ?? 0), 0)}`;
+  if (p.target_hit_ts) return <span className="badge good" title={`Ziel erreicht ${dt(p.target_hit_ts)}`}>{lv} · Ziel ✓</span>;
+  if (p.stop_hit_ts) return <span className="badge bad" title={`Stopp erreicht ${dt(p.stop_hit_ts)}`}>{lv} · Stopp</span>;
+  return <span title="Ziel / Stopp aus dem Alarm (aus vergangenen Hochs und Rücksetzern)">{lv}</span>;
+}
+
 export function SignalTable({ rows, showCoin = true, max = 300, initialSort, paused, buy = true }) {
   const cols = [
     { k: "ts", l: "Zeit", fmt: (r) => <span title={ago(r.ts)}>{dt(r.ts)}</span> },
@@ -139,10 +160,13 @@ export function SignalTable({ rows, showCoin = true, max = 300, initialSort, pau
     { k: "tiers", l: "Wallets U/S/G", fmt: (r) => <TierCounts tiers={r.tiers} />, sort: (r) => r.tiers.ultra * 100 + r.tiers.smart * 10 + r.tiers.good },
     { k: "inflow_usd", l: "Smart-Inflow", r: true, fmt: (r) => <span title={r.inflow_sol != null ? `${n(r.inflow_sol, 2)} SOL` : ""}>{usd(r.inflow_usd)}</span> },
     { k: "prediction", l: "Prognose", r: true, title: "Chance auf +50 % innerhalb 1 h", fmt: (r) => (r.prediction != null ? pct(r.prediction) : "–") },
-    { k: "r15", l: "15 min", r: true, sort: (r) => r.outcome.ret_15m, fmt: (r) => <Delta v={r.outcome.ret_15m} d={0} arrow={false} /> },
-    { k: "r1", l: "1 h", r: true, sort: (r) => r.outcome.ret_1h, fmt: (r) => <Delta v={r.outcome.ret_1h} d={0} arrow={false} /> },
-    { k: "m1", l: "Max 1 h", r: true, sort: (r) => r.outcome.max_ret_1h, fmt: (r) => <Delta v={r.outcome.max_ret_1h} d={0} arrow={false} /> },
-    { k: "m24", l: "Max 24 h", r: true, sort: (r) => r.outcome.max_ret_24h, fmt: (r) => <Delta v={r.outcome.max_ret_24h} d={0} arrow={false} /> },
+    { k: "call", l: "Call", title: "Wievielter Call auf diesen Coin in 24 h; bei erneutem Call die Preisbewegung seit dem letzten", sort: (r) => r.plan?.call_no ?? 1, fmt: (r) => <CallNo p={r.plan} /> },
+    { k: "m15", l: "Hoch 15 min", r: true, title: "Höchster Preis nach dem Call innerhalb 15 min", sort: (r) => r.outcome.max_ret_15m, fmt: (r) => <Delta v={r.outcome.max_ret_15m} d={0} arrow={false} /> },
+    { k: "m1", l: "Hoch 1 h", r: true, sort: (r) => r.outcome.max_ret_1h, fmt: (r) => <Delta v={r.outcome.max_ret_1h} d={0} arrow={false} /> },
+    { k: "m4", l: "Hoch 4 h", r: true, sort: (r) => r.outcome.max_ret_4h, fmt: (r) => <Delta v={r.outcome.max_ret_4h} d={0} arrow={false} /> },
+    { k: "pk", l: "bis Hoch", r: true, title: "Minuten vom Call bis zum Hoch der ersten Stunde; Tooltip: Rücksetzer davor", sort: (r) => r.outcome.peak_min_1h,
+      fmt: (r) => (r.outcome.peak_min_1h != null ? <span title={r.outcome.dd_before_peak_1h != null ? `vorher bis ${pctSigned(r.outcome.dd_before_peak_1h, 0)}` : ""}>{n(r.outcome.peak_min_1h, 0)} min</span> : "–") },
+    { k: "plan", l: "Ziel / Stopp", sort: (r) => (r.plan?.target_hit_ts ? 2 : r.plan?.stop_hit_ts ? 0 : 1), fmt: (r) => <PlanLevels p={r.plan} /> },
     ...(buy ? [{ k: "buy", l: "", sort: false, fmt: (r) => <BuyButton mint={r.mint} symbol={r.symbol} signal={r} heldId={r.open_position_id} pendingId={r.pending_buy_id} paused={paused} blocked={r.safety_now?.blocked} /> }] : []),
   ];
   return <Table rows={rows} cols={cols} max={max} rowKey={(r) => r.id} expand={(r) => <SignalDetail s={r} />} initialSort={initialSort}

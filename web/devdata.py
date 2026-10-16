@@ -114,6 +114,31 @@ def _live_demo(conn, r, tokens, now):
     conn.commit()
 
 
+def _signal_plan_demo(conn, r, now):
+    """signals/plan.py columns: highs after the call (15 min / 4 h), minutes to the 1 h high and the dip before it,
+    re-calls on the same coin, target/stop from the alert and when they were hit."""
+    cols = {c[1] for c in conn.execute("PRAGMA table_info(signals)")}
+    if "call_no" not in cols:
+        return
+    seen = {}
+    for sid, mint, ts, m1, m24 in conn.execute("SELECT id, mint, ts, max_ret_1h, max_ret_24h FROM signals ORDER BY ts").fetchall():
+        seen[mint] = seen.get(mint, 0) + 1
+        call_no = seen[mint]
+        upd = {"call_no": call_no, "target_ret": 0.5, "stop_ret": -0.3}
+        if m1 is not None:
+            m15 = m1 * r.uniform(0.3, 1.0)
+            m4 = max(m1, (m24 if m24 is not None else m1) * r.uniform(0.6, 1.0))
+            dd = -abs(r.gauss(0.08, 0.1))
+            upd.update(max_ret_15m=round(m15, 4), max_ret_4h=round(m4, 4), peak_min_1h=round(r.uniform(2, 58), 1),
+                       dd_before_peak_1h=round(dd, 4))
+            if m4 >= 0.5 and dd > -0.3:
+                upd["target_hit_ts"] = ts + int(r.uniform(300, 7200))
+            elif dd <= -0.3 or (m4 < 0.1 and r.random() < 0.5):
+                upd["stop_hit_ts"] = ts + int(r.uniform(120, 3600))
+        conn.execute(f"UPDATE signals SET {', '.join(k + '=?' for k in upd)} WHERE id=?", (*upd.values(), sid))
+    conn.commit()
+
+
 def _learn_demo(conn, r, now):
     """Self-learning tables of copytrade (ct_evals, ct_param_versions) in their real format, if copytrade has them."""
     try:
@@ -766,6 +791,7 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
                       p_now * 1e9, "open", hint, now - 60 if hint else None, json.dumps({"fill_source": "jupiter"})))
     conn.execute(_named(conn, "INSERT INTO ct_events VALUES (?,?,?,?,?)"), (now - 60, "info", "hint", "VERKAUFS-HINWEIS: Ziel erreicht", None))
     _inflight_demo(conn, r, tokens, now)
+    _signal_plan_demo(conn, r, now)
     _live_demo(conn, r, tokens, now)
     control.set_mode(conn, "signal", "semi")
     try:  # signals/ syncs the active model's tiers into wallets every rescore (core.scoring)
