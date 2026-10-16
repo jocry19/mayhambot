@@ -50,6 +50,19 @@ bash deploy/mac/uninstall.sh                   # Dauerbetrieb aus (Daten bleiben
 
 `deploy/update.sh` startet nur neu, wenn die Tests grün sind; sonst läuft die alte Version weiter.
 
+## Stündlicher Bericht und Telegram einrichten
+
+Der Watchdog schickt jede Stunde (`SUMMARY_EVERY_HOURS`, 0 = aus) einen Bericht per Telegram: laufende Dienste
+und Laufzeit, Datenfeed, beobachtete Coins, neue Trades, Smart Wallets nach Tier, Signale (1 h / 24 h, bestes
+Signal), Papier-/Echtgeld-Positionen, PnL und Kapital. Von Hand: `.venv/bin/python deploy/ops.py summary`.
+
+Telegram einrichten (einmalig, 2 Minuten):
+1. In Telegram `@BotFather` öffnen, `/newbot` schicken, Namen vergeben, den **Token** kopieren.
+2. Deinem neuen Bot irgendeine Nachricht schicken, dann `https://api.telegram.org/bot<TOKEN>/getUpdates` im
+   Browser öffnen und die Zahl bei `"chat":{"id":...` kopieren (deine **Chat-ID**).
+3. In `.env` eintragen: `TELEGRAM_BOT_TOKEN=<Token>` und `TELEGRAM_CHAT_ID=<Chat-ID>`, dann
+   `.venv/bin/python deploy/ops.py test-alert`. Signale, Alarme und Berichte kommen dann alle dort an.
+
 ## Alarme (Telegram)
 
 Ein Problem muss in zwei Runden hintereinander auftauchen (≈4 min), dann kommt 🔴, bei Neustart 🔁,

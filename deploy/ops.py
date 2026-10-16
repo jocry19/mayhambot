@@ -12,6 +12,7 @@ Run from anywhere; paths are relative to the mayhambot folder (parent of deploy/
   python deploy/ops.py restore <archive>      # stops the app, restores, starts it again
   python deploy/ops.py rotate-logs
   python deploy/ops.py test-alert             # sends a Telegram test message
+  python deploy/ops.py summary [--send]       # hourly status report (watchdog sends it every SUMMARY_EVERY_HOURS)
 
 Settings (optional, in .env):
   BACKUP_DIR            where backups go (default: ~/mayhambot-backups); use a 2nd disk or cloud folder
@@ -21,6 +22,7 @@ Settings (optional, in .env):
   ALERT_REPEAT_HOURS    repeat an unresolved alert every N hours (default 6)
   WATCHDOG_RUNTIME      local (default) | docker   (docker: the host watches the container)
   WATCHDOG_RESTART_CMD  override the restart command
+  SUMMARY_EVERY_HOURS   Telegram status report interval (default 1, 0 = off)
   LOG_MAX_MB            rotate logs/*.log above this size (default 20), keeps 5 compressed
 """
 from __future__ import annotations
@@ -314,6 +316,11 @@ def watchdog(args) -> int:
                 send_alert(f"🟢 Wieder OK (war: {seen[key].get('msg', key)})")
             del seen[key]
 
+    every = cfg("SUMMARY_EVERY_HOURS", 1.0) * 3600
+    if every > 0 and now - st.get("last_summary", 0) >= every:
+        if send_alert(build_summary()):
+            st["last_summary"] = now
+
     save_state(st)
     print(json.dumps({"problems": r["problems"], "action": action}, ensure_ascii=False))
     return 0
@@ -480,6 +487,78 @@ def rotate_logs(args=None, quiet=False) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- hourly summary
+def _q(conn, sql, args=(), default=None):
+    try:
+        r = conn.execute(sql, args).fetchone()
+        return r[0] if r and r[0] is not None else default
+    except sqlite3.Error:
+        return default
+
+
+def build_summary() -> str:
+    """Short German status report for Telegram: uptime, feed, coins, wallets, signals, paper trading."""
+    r = collect()
+    now = int(time.time())
+    lines = []
+    pids = ROOT / "data" / "pids"
+    if r["processes"]:
+        up = [f for f in (pids / f"{n}.pid" for n in r["processes"]) if f.exists()]
+        since = min((f.stat().st_mtime for f in up), default=None)
+        run = sum(r["processes"].values())
+        lines.append(f"{'🟢' if run == len(r['processes']) else '🟠'} Dienste {run}/{len(r['processes'])} laufen"
+                     + (f", seit {(now - since) / 3600:.1f} h" if since else ""))
+    md = r["feed"].get("Marktdaten")
+    lines.append(f"Datenfeed: letzte Marktdaten {ago(md)}")
+    p = db_path()
+    if p.exists():
+        try:
+            c = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=10)
+            tracked = _q(c, "SELECT COUNT(*) FROM tokens WHERE tracked=1", default=0)
+            trades_h = _q(c, "SELECT COUNT(*) FROM trades WHERE ts>?", (now - 3600,), default=0)
+            smart = _q(c, "SELECT COUNT(*) FROM wallets WHERE is_smart=1", default=0)
+            tiers = {t: _q(c, "SELECT COUNT(*) FROM wallets WHERE tier=?", (t,), default=0)
+                     for t in ("ultra", "smart", "good")}
+            lines.append(f"Coins beobachtet: {tracked} · neue Trades (1 h): {trades_h:,}".replace(",", "."))
+            lines.append(f"Wallets: {smart} smart · Tiers ultra {tiers['ultra']} / smart {tiers['smart']} / "
+                         f"good {tiers['good']}")
+            s1 = _q(c, "SELECT COUNT(*) FROM signals WHERE ts>?", (now - 3600,), default=0)
+            s24 = _q(c, "SELECT COUNT(*) FROM signals WHERE ts>?", (now - 86400,), default=0)
+            lines.append(f"Signale: {s1} in 1 h, {s24} in 24 h")
+            try:
+                best = c.execute("SELECT symbol, score, max_ret_1h FROM signals WHERE ts>? AND max_ret_1h IS NOT NULL "
+                                 "ORDER BY max_ret_1h DESC LIMIT 1", (now - 86400,)).fetchone()
+                if best:
+                    lines.append(f"Bestes Signal 24 h: {best[0]} (Score {best[1]:.0f}) max {best[2] * 100:+.0f}% in 1 h")
+            except sqlite3.Error:
+                pass
+            for mode in ("paper", "live"):
+                opn = _q(c, "SELECT COUNT(*) FROM ct_positions WHERE mode=? AND status='open'", (mode,), default=0)
+                closed = _q(c, "SELECT COUNT(*) FROM ct_positions WHERE mode=? AND closed_at>?",
+                            (mode, now - 86400), default=0)
+                pnl = _q(c, "SELECT SUM(pnl_sol) FROM ct_positions WHERE mode=? AND closed_at>?",
+                         (mode, now - 86400), default=0.0)
+                eq = _q(c, "SELECT equity_sol FROM ct_equity WHERE mode=? ORDER BY ts DESC LIMIT 1", (mode,))
+                if opn or closed or eq is not None:
+                    lines.append(f"{'Papier' if mode == 'paper' else 'ECHTGELD'}: {opn} offen, {closed} geschlossen (24 h), "
+                                 f"PnL {pnl:+.3f} SOL" + (f", Kapital {eq:.3f} SOL" if eq is not None else ""))
+            c.close()
+        except sqlite3.Error as e:
+            lines.append(f"DB nicht lesbar: {e}")
+    if r["problems"]:
+        lines.append("Probleme: " + "; ".join(r["problems"].values()))
+    lines.append(f"Dashboard: http://localhost:{cfg('DASHBOARD_PORT', '8501')}")
+    return "📊 <b>Stündlicher Bericht</b>\n" + "\n".join(lines)
+
+
+def summary(args) -> int:
+    text = build_summary()
+    if args.send:
+        return 0 if send_alert(text) else 1
+    print(text.replace("<b>", "").replace("</b>", ""))
+    return 0
+
+
 # ---------------------------------------------------------------- status / health
 def health(args) -> int:
     r = collect()
@@ -532,9 +611,11 @@ def main(argv=None) -> int:
     r.add_argument("--no-stop", action="store_true", help="App nicht stoppen/starten (z.B. auf neuem Server)")
     sub.add_parser("rotate-logs")
     sub.add_parser("test-alert")
+    sm = sub.add_parser("summary")
+    sm.add_argument("--send", action="store_true", help="per Telegram senden")
     a = ap.parse_args(argv)
     fn = {"status": status, "health": health, "watchdog": watchdog, "backup": backup,
-          "list-backups": list_backups, "restore": restore, "rotate-logs": rotate_logs,
+          "list-backups": list_backups, "summary": summary, "restore": restore, "rotate-logs": rotate_logs,
           "test-alert": lambda _: 0 if send_alert("Test: Watchdog-Alarme kommen an ✅") else 1}[a.cmd]
     return fn(a)
 
