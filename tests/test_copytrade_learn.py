@@ -302,3 +302,21 @@ def test_lucky_test_set_fails_the_monte_carlo(env):
     b = sim.GRID.index(STAR)
     rob = learn.robustness(test, b, 0, sim.GRID, mte)
     assert mte[b] > 0 and rob["p_win"] < learn.BOOTSTRAP_MIN_WIN
+
+
+def test_intel_context_buckets_and_thesis(monkeypatch):
+    import sys, types
+    from copytrade import learn
+
+    fake = types.SimpleNamespace(features_at=lambda kind, key, ts, conn: {"features": (
+        {"vol_roundtrip_60m": 0.05, "vol_entities_60m": 120.0, "liq_chg_60m": -0.3, "exec_rt_0_25": 0.04}
+        if kind == "coin" else {"w_scalp_share": 0.8, "w_hold_median_min": 12.0})})
+    monkeypatch.setitem(sys.modules, "intel", fake)
+    b, raw = learn.intel_context(None, "MINTxyz", "WAL1", 1000)
+    assert b == {"wash": "<10%", "persons": ">80", "liq60": "<-20%", "scalper": ">70%", "focus": "?"}
+    t = learn.thesis(raw)
+    assert "120 Personen/h" in t and "Wash 5%" in t and "Liquidität 1 h -30%" in t and "Scalps 80%" in t
+
+    monkeypatch.setitem(sys.modules, "intel", types.SimpleNamespace(features_at=lambda *a: 1 / 0))
+    assert learn.intel_context(None, "MINTxyz", "WAL1", 1000) == ({}, {})
+    assert learn.thesis({}) == ""

@@ -198,7 +198,8 @@ class Strategy:
         ent = store.entity(self.conn, swap.wallet)
         if ent != swap.wallet and self._cluster_copied(ent, swap.mint):
             return self._skip("whale", swap.mint, "gleicher Wallet-Cluster schon kopiert", snap, wallet=swap.wallet)
-        feats = {**learn.wallet_features(self.conn, swap.wallet), "size": learn.bucket_size(swap.sol_amount),
+        ibuckets, iraw = learn.intel_context(self.conn, swap.mint, swap.wallet, time.time())
+        feats = {**learn.wallet_features(self.conn, swap.wallet), **ibuckets, "size": learn.bucket_size(swap.sol_amount),
                  "mcap": learn.bucket_mcap(snap.fdv),
                  "liq": learn.bucket_liq(snap.liquidity_usd), "explore": explore, "safety": safe.get("level") or "-"}
         why = learn.blocked(self.conn, "whale", feats)
@@ -210,11 +211,13 @@ class Strategy:
                 "wallet_hit_rate": rank["hit_rate"] if rank else None, "model_tier": tier,
                 "model_score": winfo.get("model_score"), "cluster": ent if ent != swap.wallet else None,
                 "exit_capture": winfo.get("exit_capture"), "capture": feats["capture"],
-                "param_version": exits["version"], "safety": safe, "edge": edge}
+                "param_version": exits["version"], "safety": safe, "edge": edge, "intel": iraw,
+                "thesis": learn.thesis(iraw)}
         reason = (f"Wal {swap.wallet[:6]}… kaufte {swap.sol_amount:.1f} SOL"
                   + (f", Wal-Score {info['wallet_score']}" if rank else ", unbewertet")
                   + (f", Vorteil Ø {edge['mean']:+.1%} aus {edge['n']} Käufen, Größe ×{edge['size_factor']:.2f}"
-                     if edge else ""))
+                     if edge else "")
+                  + (f"; {info['thesis']}" if info["thesis"] else ""))
         if m == "manual":
             control.alert(self.conn, "whale", swap.mint, snap.symbol, "signal", reason, wallet=swap.wallet,
                           price_sol=snap.price_sol, price_usd=snap.price_usd, mcap_usd=snap.fdv,

@@ -241,6 +241,9 @@ Läuft in der Wartungsschleife (alle 10 min) oder von Hand mit `python -m copytr
    Eigene Trades zählen doppelt; `notes.calibration_gap` zeigt, wie weit Papier-Ergebnis und Simulation auseinanderliegen.
 3. **Filter:** Merkmal-Gruppen (Wal-Tier, Modell-Note, Market Cap, Liquidität, Signal-Score, Anzahl Smart Wallets,
    Wal-Größe), die mit der gewählten Variante in Training **und** Test verlieren (≥15/≥8 Fälle), werden übersprungen.
+   Seit 10/2026 kommen Markt-Merkmale aus `intel/` dazu (Wash-Anteil, Personen/h, Liquidität 1 h, Scalp-Anteil und
+   Fokus des Wals, `learn.intel_context`). Sie gelten wie alle Gruppen erst, wenn sie Training **und** Test bestehen;
+   jeder Kauf schreibt außerdem eine lesbare Lage (`learn.thesis`) in seine Begründung.
 
 Nie angefasst: Positionsgröße, max. offene Positionen, Tagesverlust-Limit, Live-Schalter. Gelernter Stop nie weiter
 als der Stop deines Presets, Haltezeit nie länger als dein Maximum (auch wenn du das Preset später verschärfst).

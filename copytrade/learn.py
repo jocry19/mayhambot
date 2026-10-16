@@ -155,6 +155,66 @@ def wallet_features(conn, wallet: str) -> dict:
     return {"tier": info.get("tier") or "none", "capture": bucket_capture(info.get("exit_capture"))}
 
 
+# intel/ (Zentrale): point-in-time features; the buckets below become learnable filters, the raw values go to
+# the journal. Walk-forward on the first 410 whale buys (10/2026) no single intel feature helped after costs,
+# so nothing here gates by itself: only a filter the tuner learns in train AND test does.
+INTEL_KEYS = {"coin": ("vol_roundtrip_60m", "vol_entities_60m", "flow_smart_exit_share", "liq_chg_60m",
+                       "exec_rt_0_25", "hold_top10", "px_ret_15m", "mkt_phase"),
+              "wallet": ("w_hold_median_min", "w_scalp_share", "w_concentration", "w_latency_median_s")}
+
+
+def _b(x, edges, labels):
+    if x is None:
+        return "?"
+    for e, lab in zip(edges, labels):
+        if x < e:
+            return lab
+    return labels[-1]
+
+
+def intel_context(conn, mint: str, wallet: str, ts) -> tuple[dict, dict]:
+    """(bucket features for learning, raw values for the journal) from intel.features_at at ts; ({}, {}) if
+    intel/ is missing or fails."""
+    try:
+        import intel  # type: ignore
+
+        c = intel.features_at("coin", mint, int(ts), conn)["features"]
+        w = intel.features_at("wallet", wallet, int(ts), conn)["features"] if wallet else {}
+    except Exception as e:
+        log.debug("intel features %s failed: %s", mint[:6], e)
+        return {}, {}
+    raw = {k: c.get(k) for k in INTEL_KEYS["coin"]} | {k: w.get(k) for k in INTEL_KEYS["wallet"]}
+    buckets = {
+        "wash": _b(raw["vol_roundtrip_60m"], (0.1, 0.3), ("<10%", "10-30%", ">30%")),
+        "persons": _b(raw["vol_entities_60m"], (20, 80), ("<20", "20-80", ">80")),
+        "liq60": _b(raw["liq_chg_60m"], (-0.2, 0), ("<-20%", "-20-0%", ">0%")),
+        "scalper": _b(raw["w_scalp_share"], (0.3, 0.7), ("<30%", "30-70%", ">70%")),
+        "focus": _b(raw["w_concentration"], (0.3, 0.6), ("<30%", "30-60%", ">60%")),
+    }
+    return buckets, {k: (round(v, 4) if isinstance(v, float) else v) for k, v in raw.items()}
+
+
+def thesis(raw: dict) -> str:
+    """One readable line on the coin and the wallet, as a trader would note it in the journal."""
+    parts = []
+    def pct(k):
+        v = raw.get(k)
+        return None if v is None else f"{v:.0%}"
+    if raw.get("vol_entities_60m") is not None:
+        parts.append(f"{raw['vol_entities_60m']:.0f} Personen/h")
+    if pct("vol_roundtrip_60m"):
+        parts.append(f"Wash {pct('vol_roundtrip_60m')}")
+    if pct("liq_chg_60m"):
+        parts.append(f"Liquidität 1 h {raw['liq_chg_60m']:+.0%}")
+    if pct("exec_rt_0_25"):
+        parts.append(f"Kosten {pct('exec_rt_0_25')}")
+    if raw.get("w_hold_median_min") is not None:
+        parts.append(f"Wal hält im Mittel {raw['w_hold_median_min']:.0f} min")
+    if pct("w_scalp_share"):
+        parts.append(f"Scalps {pct('w_scalp_share')}")
+    return ", ".join(parts)
+
+
 # ---------------------------------------------------------------------- 1. evaluate
 def _sells_after(conn, wallet: str, mint: str, ts: int) -> list[int]:
     if not wallet:
@@ -215,9 +275,10 @@ def evaluate_whale_buys(conn, s: Settings, limit: int = 40) -> int:
     for b in rows:
         cs = candles(conn, s, b["mint"], b["ts"] - 20 * 60, b["ts"] + HORIZON_S, b["pool"])
         w = b["wallet"]
-        feats = {"strategy": "whale", **wallet_features(conn, w), "size": bucket_size(b["sol_amount"])}
         if not cs and b["ts"] > time.time() - RETRY_S:
             continue  # candles not available right now: try again next round
+        feats = {"strategy": "whale", **wallet_features(conn, w), "size": bucket_size(b["sol_amount"]),
+                 **intel_context(conn, b["mint"], w, b["ts"])[0]}
         gains = sim.grid_gains(cs, b["ts"], sim.GRID, _sells_after(conn, w, b["mint"], b["ts"])) if cs else []
         _store_eval(conn, "whale_buy", b["sig"], "whale", w, b["mint"], b["ts"], gains, feats)
         n += 1
