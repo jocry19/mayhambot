@@ -1,5 +1,6 @@
 """Shared HTTP helper: per-host rate limit, retries on 429/5xx, JSON in/out."""
 import logging
+import re
 import threading
 import time
 from urllib.parse import urlparse
@@ -7,6 +8,28 @@ from urllib.parse import urlparse
 import requests
 
 log = logging.getLogger("mayhambot.http")
+
+# API keys travel in URLs (Helius, RPC providers). Redact them in every log record and exception text.
+_SECRET_RE = re.compile(r"((?:api[-_]?key|apikey|token)=)[^&\s'\"]+", re.I)
+
+
+def redact(text):
+    return _SECRET_RE.sub(r"\1***", str(text))
+
+
+_old_factory = logging.getLogRecordFactory()
+
+
+def _redacting_factory(*a, **kw):
+    rec = _old_factory(*a, **kw)
+    if rec.args:
+        rec.msg = rec.getMessage()
+        rec.args = None
+    rec.msg = redact(rec.msg)
+    return rec
+
+
+logging.setLogRecordFactory(_redacting_factory)
 
 # minimum seconds between calls per host (keyless public limits)
 HOST_INTERVAL = {
@@ -43,18 +66,19 @@ def _request(method, url, retries=4, timeout=20, **kw):
             r = _session.request(method, url, timeout=timeout, **kw)
         except requests.RequestException as e:
             if attempt == retries:
-                raise
+                raise requests.RequestException(redact(e)) from None
             log.warning("%s %s failed (%s), retry", method, host, e)
             time.sleep(2 ** attempt)
             continue
         if r.status_code == 429 or r.status_code >= 500:
             if attempt == retries:
-                r.raise_for_status()
+                raise requests.HTTPError(f"{r.status_code} for {redact(r.url)}")
             delay = float(r.headers.get("Retry-After") or 0) or (2 ** attempt) * 2
             log.warning("%s %s -> %s, sleeping %.1fs", method, host, r.status_code, delay)
             time.sleep(min(delay, 60))
             continue
-        r.raise_for_status()
+        if r.status_code >= 400:
+            raise requests.HTTPError(f"{r.status_code} for {redact(r.url)}")
         return r.json()
 
 
