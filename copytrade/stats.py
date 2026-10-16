@@ -124,18 +124,27 @@ def equity(conn, mode: str) -> pd.DataFrame:
 
 
 def wallet_table(conn) -> pd.DataFrame:
+    """Whale ranking + tier/model_score/cluster_id/exit_capture from core's `wallets` (synced from the model).
+    `entity` = cluster_id or address: wallets of one cluster are one whale (count once)."""
+    try:
+        conn.execute("SELECT tier, model_score, cluster_id, exit_capture, tier_source FROM wallets LIMIT 0")
+        extra = ("cw.tier, cw.tier_source, cw.model_score, cw.cluster_id, cw.exit_capture",
+                 "LEFT JOIN wallets cw ON cw.address=w.address")
+    except Exception:
+        extra = ("NULL AS tier, NULL AS tier_source, NULL AS model_score, NULL AS cluster_id, NULL AS exit_capture", "")
     df = pd.read_sql_query(
-        """SELECT w.address, w.label, w.source, w.active, r.samples, r.hit_rate, r.median_first_pump,
+        f"""SELECT w.address, w.label, w.source, w.active, {extra[0]}, r.samples, r.hit_rate, r.median_first_pump,
                   r.median_pump_min, r.median_lead_min, r.median_achievable, r.avg_loss, r.expected_value,
                   r.score, r.take_profit, r.max_hold_min,
                   (SELECT COUNT(*) FROM ct_positions p WHERE p.wallet=w.address AND p.status='closed') AS copied,
                   (SELECT SUM(pnl_sol) FROM ct_positions p WHERE p.wallet=w.address AND p.status='closed') AS copy_pnl_sol,
                   (SELECT MAX(ts) FROM ct_swaps s WHERE s.wallet=w.address) AS last_swap
-           FROM ct_wallets w LEFT JOIN ct_wallet_rank r ON r.address=w.address
+           FROM ct_wallets w LEFT JOIN ct_wallet_rank r ON r.address=w.address {extra[1]}
            ORDER BY COALESCE(r.score, -1) DESC""",
         conn,
     )
     df["last_swap_dt"] = pd.to_datetime(df["last_swap"], unit="s", utc=True)
+    df["entity"] = [f"cluster:{c}" if c not in (None, "") and c == c else a for a, c in zip(df.address, df.cluster_id)]
     return df
 
 

@@ -85,6 +85,9 @@ stats.exit_reasons(df)                             # trades, avg_pct, pnl_sol je
 stats.alerts(conn, since_ts=0, strategy=None)      # Einstiege: action 'bought' oder 'signal' (manuell, nicht gekauft)
 stats.coin_history(conn, mint)                     # {positions, alerts, whale_swaps} für die Coin-Seite
 stats.wallet_table(conn)                           # Wal-Ranking (Pump-Quote, erster Pump, Copy-Ansturm, EV, Score, Kopie-PnL)
+                                                   # + tier, tier_source, model_score, cluster_id, exit_capture aus `wallets`,
+                                                   #   entity (= cluster:<id> oder Adresse; ein Cluster = ein Wal)
+store.wallet_info(conn, wallet)                    # {tier, model_score, cluster_id, exit_capture, tier_source}
 stats.outcomes(conn)                               # jeder ausgewertete Wal-Kauf mit Pump/Timing-Messung
 stats.backtest(conn, settings)                     # Modus 1 walk-forward
 stats.signal_backtest(conn, preset)                # Modus 2 mit Preset auf vergangenen Signalen
@@ -127,6 +130,15 @@ slippage_bps` (Anteile: 0.2 = 20 %; `min_score`, `min_smart_buyers`, `max_signal
 `ct_positions` hat zusätzlich `safety_level` (low/caution/high/critical/unchecked), `safety_score` (0–100) und
 `safety_reasons` (JSON-Liste deutscher Gründe) vom Rug-Schutz beim Kauf; dieselben Infos stehen in
 `ct_alerts.data.safety` und `ct_positions.meta.safety`. `param_version` (welche gelernte Version die Ausstiege gesetzt hat, NULL = Preset) und `use_inflow_exit`.
+
+## Tiers, Cluster, Abfrage-Takt
+
+- Tiers kommen aus `wallets.tier` (vom Forschungsmodell synchronisiert, eine Wahrheit für Dashboard, Signale und
+  Copy-Trader); automatisch verfolgt werden `ultra` und `smart`, nach `model_score` sortiert.
+- Wallets mit derselben `cluster_id` sind ein Wal: ein Coin wird pro Cluster nur einmal kopiert (6 h Fenster), und
+  das Lernen tunt Ausstiege pro Cluster. `exit_capture` (wie viel vom Pump der Wal mitnimmt) ist ein Lern-Merkmal.
+- Abfrage-Takt pro Wallet: letzter Swap < 6 h alle `CT_WALLET_POLL_SECONDS`, < 48 h alle `CT_POLL_WARM_SECONDS` (60),
+  sonst alle `CT_POLL_COLD_SECONDS` (300); manuelle Wallets immer schnell. Jede Abfrage = 1 RPC-Credit.
 
 ## So entscheidet der Bot (Modus 1)
 
@@ -211,6 +223,8 @@ JUPITER_API_KEY=           # Jupiter Pro: höhere Limits (dann JUPITER_API_URL=h
 CT_WATCH_WALLETS=          # kommagetrennt, immer beobachten
 CT_MAX_TRACKED_WALLETS=40
 CT_WALLET_POLL_SECONDS=8
+CT_POLL_WARM_SECONDS=60
+CT_POLL_COLD_SECONDS=300
 CT_MIN_WHALE_BUY_SOL=2
 
 # Bewertung

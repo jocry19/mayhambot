@@ -129,6 +129,47 @@ def set_state(conn: sqlite3.Connection, key: str, value: Any) -> None:
     conn.commit()
 
 
+_winfo_cache: dict[str, tuple[float, dict]] = {}
+
+
+def wallet_info(conn, wallet: str) -> dict:
+    """Tier etc. of a wallet from core's `wallets` table (synced from the active research model: tier,
+    model_score, cluster_id, exit_capture), else model.tier_of. Cached 10 min. Missing -> tier 'none'."""
+    if not wallet:
+        return {"tier": "-"}
+    hit = _winfo_cache.get(wallet)
+    if hit and hit[0] > time.time() - 600:
+        return hit[1]
+    info: dict = {}
+    try:
+        r = conn.execute("SELECT tier, tier_source, model_score, cluster_id, exit_capture FROM wallets WHERE address=?",
+                         (wallet,)).fetchone()
+        if r:
+            info = {k: r[k] for k in r.keys()}
+    except Exception:
+        pass
+    if not info.get("tier"):
+        try:
+            from model import tier_of  # type: ignore
+
+            t = tier_of(wallet, conn=conn) or {}
+            info = {**info, "tier": t.get("tier"), "model_score": info.get("model_score") or t.get("score"),
+                    "cluster_id": info.get("cluster_id") or t.get("cluster_id"),
+                    "exit_capture": info.get("exit_capture") if info.get("exit_capture") is not None
+                    else t.get("exit_capture")}
+        except Exception:
+            pass
+    info["tier"] = info.get("tier") or "none"
+    _winfo_cache[wallet] = (time.time(), info)
+    return info
+
+
+def entity(conn, wallet: str) -> str:
+    """Wallets of one cluster (same funder / co-buys, model cluster_id) count as one entity."""
+    cid = wallet_info(conn, wallet).get("cluster_id") if wallet else None
+    return f"cluster:{cid}" if cid not in (None, "", "None") else wallet
+
+
 def add_wallets(conn: sqlite3.Connection, addresses: Iterable[str], source: str, label: str = "") -> int:
     now = int(time.time())
     before = conn.total_changes

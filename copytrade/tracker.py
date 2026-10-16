@@ -33,8 +33,18 @@ def load_manual(conn, s: Settings) -> int:
 
 
 def load_core_smart(conn, limit: int = 30) -> int:
-    """Ultra/smart wallets of the research model (model.wallet_tiers), else core's smart wallets."""
+    """Ultra/smart wallets: core's `wallets.tier` (the one truth, synced from the research model), else
+    model.wallet_tiers, else core's smart wallets."""
     added = 0
+    try:
+        for tier in ("ultra", "smart"):
+            rows = conn.execute("SELECT address FROM wallets WHERE tier=? ORDER BY COALESCE(model_score, 0) DESC "
+                                "LIMIT ?", (tier, limit)).fetchall()
+            added += store.add_wallets(conn, [r[0] for r in rows], f"model_{tier}")
+        if added or conn.execute("SELECT 1 FROM wallets WHERE tier IS NOT NULL LIMIT 1").fetchone():
+            return added
+    except Exception as e:
+        log.debug("wallets.tier unavailable: %s", e)
     try:
         from model import wallet_tiers  # type: ignore
 
@@ -89,6 +99,28 @@ def active_wallets(conn) -> list:
         """SELECT w.*, r.score, r.samples FROM ct_wallets w LEFT JOIN ct_wallet_rank r ON r.address = w.address
            WHERE w.active = 1 ORDER BY (w.source='manual') DESC, COALESCE(r.score, -0.001) DESC"""
     ).fetchall()
+
+
+def poll_interval(s: Settings, last_swap: int | None, now: float, manual: bool = False) -> float:
+    """Seconds between polls of one wallet: hot wallets fast, quiet ones slow (saves RPC credits)."""
+    if manual or (last_swap and now - last_swap < 6 * 3600):
+        return s.wallet_poll_seconds
+    if last_swap and now - last_swap < 48 * 3600:
+        return s.poll_warm_seconds
+    return s.poll_cold_seconds
+
+
+def due_wallets(conn, s: Settings, now: float | None = None) -> list:
+    """Active wallets (max CT_MAX_TRACKED_WALLETS, best ranked) whose poll interval has passed, longest waiting first."""
+    now = now or time.time()
+    rows = conn.execute(
+        """SELECT w.*, r.score, r.samples, (SELECT MAX(ts) FROM ct_swaps x WHERE x.wallet=w.address) AS last_swap
+           FROM ct_wallets w LEFT JOIN ct_wallet_rank r ON r.address = w.address
+           WHERE w.active = 1 ORDER BY (w.source='manual') DESC, COALESCE(r.score, -0.001) DESC LIMIT ?""",
+        (s.max_tracked_wallets,)).fetchall()
+    due = [r for r in rows if now - (r["last_polled"] or 0)
+           >= poll_interval(s, r["last_swap"], now, r["source"] == "manual") - 0.5]
+    return sorted(due, key=lambda r: r["last_polled"] or 0)
 
 
 def backfill(conn, s: Settings, rpc: chain.Rpc, wallet: str, limit: int = 80) -> int:

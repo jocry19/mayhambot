@@ -175,8 +175,13 @@ class Strategy:
         elif s.exit_mode == "inflow_peak":
             tp = s.tp_max
         hold = rank["max_hold_min"] if (p.learned_tp and rank and rank["max_hold_min"]) else p.max_hold_min
-        tier = learn.wallet_tier(self.conn, swap.wallet)
-        feats = {"tier": tier, "size": learn.bucket_size(swap.sol_amount), "mcap": learn.bucket_mcap(snap.fdv),
+        winfo = store.wallet_info(self.conn, swap.wallet)
+        tier = winfo.get("tier") or "none"
+        ent = store.entity(self.conn, swap.wallet)
+        if ent != swap.wallet and self._cluster_copied(ent, swap.mint):
+            return self._skip("whale", swap.mint, "gleicher Wallet-Cluster schon kopiert", snap, wallet=swap.wallet)
+        feats = {**learn.wallet_features(self.conn, swap.wallet), "size": learn.bucket_size(swap.sol_amount),
+                 "mcap": learn.bucket_mcap(snap.fdv),
                  "liq": learn.bucket_liq(snap.liquidity_usd), "explore": explore, "safety": safe.get("level") or "-"}
         why = learn.blocked(self.conn, "whale", feats)
         if why:
@@ -185,6 +190,8 @@ class Strategy:
         info = {"explore": explore, "whale_sol": swap.sol_amount, "delay_s": round(age, 1),
                 "wallet_score": round(rank["score"] * 100, 2) if rank else None,
                 "wallet_hit_rate": rank["hit_rate"] if rank else None, "model_tier": tier,
+                "model_score": winfo.get("model_score"), "cluster": ent if ent != swap.wallet else None,
+                "exit_capture": winfo.get("exit_capture"), "capture": feats["capture"],
                 "param_version": exits["version"], "safety": safe}
         reason = (f"Wal {swap.wallet[:6]}… kaufte {swap.sol_amount:.1f} SOL"
                   + (f", Wal-Score {info['wallet_score']}" if rank else ", unbewertet"))
@@ -198,6 +205,14 @@ class Strategy:
             return self._skip("whale", swap.mint, block, snap)
         return self.open("whale", m, swap.mint, size, snap, p, reason=reason, wallet=swap.wallet,
                          whale=swap, meta=info, score=info["wallet_score"] or 0, **exits)
+
+    def _cluster_copied(self, ent: str, mint: str, window_s: int = 6 * 3600) -> bool:
+        """Another wallet of the same cluster was already copied on this coin recently (count the entity once)."""
+        for r in self.conn.execute("SELECT wallet FROM ct_positions WHERE mint=? AND strategy='whale' AND opened_at>?",
+                                   (mint, int(time.time()) - window_s)).fetchall():
+            if r["wallet"] and store.entity(self.conn, r["wallet"]) == ent:
+                return True
+        return False
 
     def process_pending(self) -> int:
         """Enter whale buys whose learned delay has passed (unless the whale already sold)."""

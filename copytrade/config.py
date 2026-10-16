@@ -64,6 +64,10 @@ class Settings:
     )
     max_tracked_wallets: int = field(default_factory=lambda: _i("CT_MAX_TRACKED_WALLETS", 40))
     wallet_poll_seconds: float = field(default_factory=lambda: _f("CT_WALLET_POLL_SECONDS", 8))
+    # quiet wallets are polled less often (each poll = 1 RPC credit): last swap < 6 h -> every
+    # wallet_poll_seconds, < 48 h -> every CT_POLL_WARM_SECONDS, older/never -> every CT_POLL_COLD_SECONDS
+    poll_warm_seconds: float = field(default_factory=lambda: _f("CT_POLL_WARM_SECONDS", 60))
+    poll_cold_seconds: float = field(default_factory=lambda: _f("CT_POLL_COLD_SECONDS", 300))
     min_whale_buy_sol: float = field(default_factory=lambda: _f("CT_MIN_WHALE_BUY_SOL", 2.0))
 
     # --- ranking ------------------------------------------------------------

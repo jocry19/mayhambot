@@ -61,20 +61,11 @@ class Engine:
 
     # ------------------------------------------------------------------ watching
     def poll_round(self) -> int:
-        """Poll as many wallets as the RPC budget allows, best ranked first."""
-        wallets = tracker.active_wallets(self.conn)[: self.s.max_tracked_wallets]
-        if not wallets:
-            return 0
+        """Poll the wallets that are due (hot ones every few seconds, quiet ones every 1-5 min), within the RPC budget."""
         budget = max(1, int(self.s.rpc_max_rps * self.s.wallet_poll_seconds * 0.5))
-        top = wallets[: budget // 2]  # top half of the budget always goes to the best wallets
-        rest = wallets[budget // 2:]
-        batch = list(top)
-        if rest:
-            for _ in range(budget - len(top)):
-                batch.append(rest[self._rr % len(rest)])
-                self._rr += 1
+        batch = tracker.due_wallets(self.conn, self.s)[:budget]
         seen = 0
-        for w in {r["address"]: r for r in batch}.values():
+        for w in batch:
             try:
                 for sw in store.retry_locked(tracker.poll, self.conn, self.s, self.rpc, w):
                     seen += 1

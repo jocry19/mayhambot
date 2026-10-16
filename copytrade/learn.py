@@ -126,24 +126,25 @@ def signal_features(sig) -> dict:
             "ultra": "ja" if "n_ultra" in keys and (sig["n_ultra"] or 0) > 0 else "nein"}
 
 
-_tier_cache: dict[str, tuple[float, str]] = {}
+def bucket_capture(x) -> str:
+    """Model exit_capture (whale's sell price / peak since entry): does following the whale's sell pay?"""
+    if x is None:
+        return "?"
+    return "<50%" if x < 0.5 else "50-80%" if x < 0.8 else ">80%"
 
 
 def wallet_tier(conn, wallet: str) -> str:
-    if not wallet:
-        return "-"
-    hit = _tier_cache.get(wallet)
-    if hit and hit[0] > time.time() - 3600:
-        return hit[1]
-    try:
-        from model import tier_of  # type: ignore
+    """Tier from core's `wallets` table (synced from the research model), see store.wallet_info."""
+    from . import store
 
-        t = tier_of(wallet, conn=conn)
-        tier = (t or {}).get("tier") or "none"
-    except Exception:
-        tier = "?"
-    _tier_cache[wallet] = (time.time(), tier)
-    return tier
+    return store.wallet_info(conn, wallet).get("tier") or "none" if wallet else "-"
+
+
+def wallet_features(conn, wallet: str) -> dict:
+    from . import store
+
+    info = store.wallet_info(conn, wallet)
+    return {"tier": info.get("tier") or "none", "capture": bucket_capture(info.get("exit_capture"))}
 
 
 # ---------------------------------------------------------------------- 1. evaluate
@@ -176,7 +177,8 @@ def evaluate_trades(conn, s: Settings, limit: int = 20) -> int:
         feats = {"strategy": p["strategy"], "mcap": bucket_mcap(p["entry_mcap_usd"] or meta.get("fdv")),
                  "liq": bucket_liq(meta.get("liq_usd")), "tier": meta.get("model_tier") or "-",
                  "grade": (meta.get("model") or {}).get("grade") or "-", "explore": bool(meta.get("explore")),
-                 "safety": (meta.get("safety") or {}).get("level") or "-"}
+                 "safety": (meta.get("safety") or {}).get("level") or "-",
+                 "capture": meta.get("capture") or "-"}
         if not cs:
             if p["opened_at"] > time.time() - RETRY_S:
                 continue
@@ -201,14 +203,11 @@ def evaluate_whale_buys(conn, s: Settings, limit: int = 40) -> int:
         """SELECT o.* FROM ct_buy_outcomes o WHERE o.pumped IS NOT NULL AND o.ts < ?
            AND NOT EXISTS (SELECT 1 FROM ct_evals e WHERE e.kind='whale_buy' AND e.ref=o.sig)
            ORDER BY o.ts DESC LIMIT ?""", (int(time.time()) - HORIZON_S, limit)).fetchall()
-    tiers: dict[str, str] = {}
     n = 0
     for b in rows:
         cs = candles(conn, s, b["mint"], b["ts"] - 20 * 60, b["ts"] + HORIZON_S, b["pool"])
         w = b["wallet"]
-        if w not in tiers:
-            tiers[w] = wallet_tier(conn, w)
-        feats = {"strategy": "whale", "tier": tiers[w], "size": bucket_size(b["sol_amount"])}
+        feats = {"strategy": "whale", **wallet_features(conn, w), "size": bucket_size(b["sol_amount"])}
         if not cs and b["ts"] > time.time() - RETRY_S:
             continue  # candles not available right now: try again next round
         gains = sim.grid_gains(cs, b["ts"], sim.GRID, _sells_after(conn, w, b["mint"], b["ts"])) if cs else []
@@ -239,12 +238,14 @@ def evaluate_signals(conn, s: Settings, limit: int = 30) -> int:
 
 
 # ---------------------------------------------------------------------- 2. tune
-def _rows(conn, strategy: str, wallet: str | None = None, min_signal_score: float | None = None) -> list[dict]:
+def _rows(conn, strategy: str, wallet: str | list[str] | None = None,
+          min_signal_score: float | None = None) -> list[dict]:
     q = "SELECT * FROM ct_evals WHERE strategy=? AND grid_version=? AND gains!='[]'"
     args: list = [strategy, sim.GRID_VERSION]
     if wallet:
-        q += " AND wallet=?"
-        args.append(wallet)
+        ws = [wallet] if isinstance(wallet, str) else list(wallet)
+        q += f" AND wallet IN ({','.join('?' * len(ws))})"
+        args += ws
     out = []
     for r in conn.execute(q + " ORDER BY ts", args).fetchall():
         f = json.loads(r["features"] or "{}")
@@ -363,13 +364,19 @@ def tune(conn, s: Settings) -> dict:
         rows = _rows(conn, strategy, min_signal_score=min_score)
         out[strategy] = tune_scope(conn, strategy, rows, "mode", MIN_MODE_N, MIN_MODE_TEST)
     if enabled(conn, "whale"):
-        for r in conn.execute(
-                """SELECT wallet, COUNT(*) n FROM ct_evals WHERE strategy='whale' AND wallet!='' AND gains!='[]'
-                   GROUP BY wallet HAVING n >= ?""", (MIN_WALLET_N,)).fetchall():
-            res = tune_scope(conn, "whale", _rows(conn, "whale", r["wallet"]), r["wallet"], MIN_WALLET_N,
-                             MIN_WALLET_TEST, wallet=r["wallet"])
+        from . import store
+
+        groups: dict[str, list[tuple[str, int]]] = {}  # entity (cluster or wallet) -> [(wallet, n)]
+        for r in conn.execute("""SELECT wallet, COUNT(*) n FROM ct_evals WHERE strategy='whale' AND wallet!=''
+                                 AND gains!='[]' GROUP BY wallet""").fetchall():
+            groups.setdefault(store.entity(conn, r["wallet"]), []).append((r["wallet"], r["n"]))
+        for ent, ws in groups.items():
+            if sum(n for _, n in ws) < MIN_WALLET_N:
+                continue
+            res = tune_scope(conn, "whale", _rows(conn, "whale", [w for w, _ in ws]), ent, MIN_WALLET_N,
+                             MIN_WALLET_TEST, wallet=ws[0][0])
             if res:
-                out[f"whale:{r['wallet'][:8]}"] = res
+                out[f"whale:{ent[:16]}"] = res
     return out
 
 
@@ -390,8 +397,10 @@ def params_for(conn, strategy: str, wallet: str | None = None, apply_caps: bool 
     try:
         r = None
         if wallet:
+            from . import store
+
             r = conn.execute("SELECT id, params FROM ct_param_versions WHERE strategy=? AND scope=? AND active=1 "
-                             "ORDER BY id DESC LIMIT 1", (strategy, wallet)).fetchone()
+                             "ORDER BY id DESC LIMIT 1", (strategy, store.entity(conn, wallet))).fetchone()
         if r is None:
             r = conn.execute("SELECT id, params FROM ct_param_versions WHERE strategy=? AND scope='mode' AND active=1 "
                              "ORDER BY id DESC LIMIT 1", (strategy,)).fetchone()

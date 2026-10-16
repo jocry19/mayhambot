@@ -76,7 +76,7 @@ STAR = sim.Variant(60, 0.4, 0.2, 0.15, 0.08, 45, 1)
 
 def _seed(conn, n, fn_by_i, features_by_i=lambda i: {"tier": "smart"}, wallet="", kind="whale_buy"):
     for i in range(n):
-        learn._store_eval(conn, kind, f"r{wallet[:4]}{i}", "whale", wallet, MINT, T0 + i * 600,
+        learn._store_eval(conn, kind, f"r{wallet[-4:]}{i}", "whale", wallet, MINT, T0 + i * 600,
                           _gains(lambda v, i=i: fn_by_i(i, v)), {"strategy": "whale", **features_by_i(i)})
 
 
@@ -144,7 +144,7 @@ def test_wallet_scope_and_autotune_switch(env):
     _seed(conn, 30, lambda i, v: 0.3 if v.take_profit == 1.0 and v.delay_s == 15 and v.stop_loss == 0.1 else -0.02,
           wallet=W)
     res = learn.tune(conn, s)
-    assert res[f"whale:{W[:8]}"]["accepted"]
+    assert res[f"whale:{W[:16]}"]["accepted"]
     assert learn.params_for(conn, "whale", W)["take_profit"] == 1.0
     assert learn.params_for(conn, "whale", "other") is None  # no mode version yet (only 30 entries)
     control.set_value(conn, "autotune:whale", "0")
@@ -205,3 +205,74 @@ def test_grid_replay_is_fast_enough():
     t = time.time()
     sim.grid_gains(c, T0, sim.GRID)
     assert time.time() - t < 3.0
+
+
+# ---------------------------------------------------------------------- tiers, clusters, polling
+W2 = "Wha1e2222222222222222222222222222222222222"
+
+
+def _wallet_row(conn, addr, tier, cluster=None, capture=None, score=None):
+    conn.execute("INSERT OR REPLACE INTO wallets(address, tier, tier_source, model_score, cluster_id, exit_capture) "
+                 "VALUES (?,?,?,?,?,?)", (addr, tier, "model", score, cluster, capture))
+    from copytrade import store
+    store._winfo_cache.clear()
+
+
+def test_tiers_come_from_wallets_table(env):
+    from copytrade import stats, store, tracker
+    s, conn, ex, state = env
+    _wallet_row(conn, W, "ultra", cluster="c7", capture=0.85, score=91)
+    _wallet_row(conn, W2, "good")
+    assert learn.wallet_tier(conn, W) == "ultra"
+    assert learn.wallet_features(conn, W) == {"tier": "ultra", "capture": ">80%"}
+    assert store.entity(conn, W) == "cluster:c7" and store.entity(conn, W2) == W2
+    tracker.load_core_smart(conn)
+    src = dict(conn.execute("SELECT address, source FROM ct_wallets").fetchall())
+    assert src == {W: "model_ultra"}  # 'good' is not copied automatically
+    wt = stats.wallet_table(conn)
+    row = wt[wt.address == W].iloc[0]
+    assert row["tier"] == "ultra" and row["entity"] == "cluster:c7" and row["model_score"] == 91
+
+
+def test_one_cluster_is_copied_once(env):
+    from test_copytrade import whale_buy as wb
+    s, conn, ex, state = env
+    _wallet_row(conn, W, "smart", cluster="c1")
+    _wallet_row(conn, W2, "smart", cluster="c1")
+    st = strategy.Strategy(conn, s, ex)
+    pid = st.on_whale_buy(wb())
+    conn.execute("UPDATE ct_positions SET status='closed' WHERE id=?", (pid,))  # closed, so "schon im Coin" is off
+    sw2 = dataclasses.replace(wb(), wallet=W2, signature="sigW2")
+    assert st.on_whale_buy(sw2) is None
+    assert any("Cluster" in r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'"))
+    meta = json.loads(conn.execute("SELECT meta FROM ct_positions").fetchone()[0])
+    assert meta["cluster"] == "cluster:c1" and meta["model_tier"] == "smart"
+
+
+def test_cluster_wallets_are_tuned_together(env):
+    s, conn, ex, state = env
+    _wallet_row(conn, W, "smart", cluster="c9")
+    _wallet_row(conn, W2, "smart", cluster="c9")
+    good = lambda i, v: 0.3 if v.take_profit == 1.0 and v.delay_s == 15 and v.stop_loss == 0.1 else -0.02  # noqa: E731
+    _seed(conn, 15, good, wallet=W)
+    _seed(conn, 15, lambda i, v: good(i + 15, v), wallet=W2)  # 15 + 15: only together enough
+    res = learn.tune(conn, s)
+    assert res["whale:cluster:c9"]["accepted"]
+    assert learn.params_for(conn, "whale", W2)["take_profit"] == 1.0
+
+
+def test_quiet_wallets_are_polled_less_often(env):
+    from copytrade import store, tracker
+    s, conn, ex, state = env
+    now = time.time()
+    hot, warm, cold = "Hot1" + "1" * 40, "Warm" + "1" * 40, "Cold" + "1" * 40
+    store.add_wallets(conn, [hot, warm, cold], "auto")
+    for w, age in ((hot, 3600), (warm, 30 * 3600)):
+        conn.execute("INSERT INTO ct_swaps(sig, wallet, mint, side, ts) VALUES (?,?,?,?,?)",
+                     ("s" + w[:4], w, MINT, "buy", int(now - age)))
+    conn.execute("UPDATE ct_wallets SET last_polled=?", (int(now - 30),))
+    assert [r["address"] for r in tracker.due_wallets(conn, s, now)] == [hot]
+    conn.execute("UPDATE ct_wallets SET last_polled=?", (int(now - 120),))
+    assert {r["address"] for r in tracker.due_wallets(conn, s, now)} == {hot, warm}
+    conn.execute("UPDATE ct_wallets SET last_polled=?", (int(now - 400),))
+    assert len(tracker.due_wallets(conn, s, now)) == 3
