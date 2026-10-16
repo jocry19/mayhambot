@@ -99,28 +99,24 @@ class Strategy:
         return None
 
     def _safety(self, strategy: str, mint: str) -> tuple[dict, str | None]:
-        """Rug/honeypot/insider check (safety/). Paper: stored result only (no network), unchecked coins pass.
-        Live: fresh quick check right before the order; if it cannot be done, no real-money buy."""
-        live = self.executor(strategy).mode == "live" if strategy in control.STRATEGIES else False
+        """Rug/honeypot/insider check (safety/) right before every buy, paper and live alike: the stored result while
+        it is fresh, else the quick check (about 4 RPC calls). A coin no check could clear is not bought, so the
+        paper results show what the protection is worth (10/2026: 28 of 57 paper buys had no check at all)."""
         try:
             import safety  # type: ignore
 
-            if live:
-                a = safety.assess(mint, self.conn, deep=False)
-                info = {"level": a.level, "score": round(a.score, 1), "blocked": bool(a.blocked), "checked": True,
-                        "reasons": [r["text"] for r in a.reasons[:3]]}
-            else:
-                pen = safety.signal_penalty(self.conn, mint)
-                info = {"level": pen["level"], "score": pen["risk"], "checked": pen["checked"],
-                        "blocked": bool(safety.is_blocked(self.conn, mint)), "reasons": pen["reasons"]}
+            a = safety.assess(mint, self.conn, deep=False)
+            info = {"level": a.level, "score": round(a.score, 1) if a.score is not None else None,
+                    "blocked": bool(a.blocked), "checked": a.level != "unchecked",
+                    "reasons": [r["text"] for r in (a.reasons or [])[:3]]}
         except Exception as e:
             log.debug("safety check %s failed: %s", mint[:6], e)
-            if live:
-                return {"level": "unchecked", "checked": False}, "Rug-Prüfung nicht möglich (kein Echtgeld-Kauf)"
-            return {"level": "unchecked", "checked": False}, None
+            return {"level": "unchecked", "checked": False}, "Rug-Prüfung nicht möglich (kein Kauf ohne Prüfung)"
         if info["blocked"]:
             why = "; ".join(info["reasons"][:2]) or info["level"]
             return info, f"Rug-Schutz blockiert ({why})"
+        if not info["checked"]:
+            return info, "Rug-Prüfung ohne Ergebnis (kein Kauf ohne Prüfung)"
         return info, None
 
     def _skip(self, strategy: str, mint: str, why: str, snap=None, **data) -> None:
@@ -146,6 +142,10 @@ class Strategy:
             return self._skip("whale", swap.mint, f"zu spät erkannt ({age:.0f}s)", wallet=swap.wallet)
         p = control.preset(self.conn, "whale")
         ex = self.executor("whale")
+        nb, kb = launch_bot_share(self.conn, swap.wallet)
+        if nb >= LAUNCH_BOT_MIN_N and kb / nb >= LAUNCH_BOT_SHARE:
+            return self._skip("whale", swap.mint, f"Launch-/Dev-Bot ({kb} von {nb} Käufen in den ersten "
+                              f"{LAUNCH_BOT_S} s eines Coins), nicht kopierbar", wallet=swap.wallet)
         rank = ranking.wallet_rank(self.conn, swap.wallet)
         size, explore, edge = p.size_sol, False, None
         if rank is None or rank["samples"] < s.min_wallet_samples:
@@ -609,6 +609,48 @@ def sniper_exits() -> dict:
 
 
 # ---------------------------------------------------------------------- wash trading (safety/ check)
+LAUNCH_BOT_S, LAUNCH_BOT_SHARE, LAUNCH_BOT_MIN_N = 3, 0.5, 3  # same rule as model.tiers.uncopyable
+_lb_cache: dict[str, tuple[float, tuple[int, int]]] = {}
+_CREATED_Q = ("SELECT pair_created_at FROM tokens WHERE mint=?", "SELECT pair_created_at FROM safety_tokens WHERE mint=?",
+              "SELECT created_at FROM research_tokens WHERE mint=?", "SELECT created_ts FROM sniper_launches WHERE mint=?")
+
+
+def _created(conn, mint: str) -> float | None:
+    """Earliest known pool / coin creation time (unix s) from any package that recorded it."""
+    best = None
+    for q in _CREATED_Q:
+        try:
+            r = conn.execute(q, (mint,)).fetchone()
+        except Exception:
+            continue
+        t = r[0] if r else None
+        if t:
+            t = t / 1000 if t > 1e11 else t  # DexScreener gives milliseconds
+            best = t if best is None else min(best, t)
+    return best
+
+
+def launch_bot_share(conn, wallet: str) -> tuple[int, int]:
+    """(buys with a known coin creation time, of those within LAUNCH_BOT_S of it). Cached 30 min.
+    10/2026: one 'ultra' wallet bought 20 of 20 coins in the creation second (dev or launch bot); every other
+    tracked wallet was at 17 % or less."""
+    hit = _lb_cache.get(wallet)
+    if hit and hit[0] > time.time() - 1800:
+        return hit[1]
+    n = k = 0
+    try:
+        for mint, ts in conn.execute("SELECT mint, MIN(ts) FROM ct_swaps WHERE wallet=? AND side='buy' "
+                                     "GROUP BY mint ORDER BY MIN(ts) DESC LIMIT 60", (wallet,)).fetchall():
+            c = _created(conn, mint)
+            if c:
+                n += 1
+                k += ts - c <= LAUNCH_BOT_S
+    except Exception:
+        pass
+    _lb_cache[wallet] = (time.time(), (n, k))
+    return n, k
+
+
 def wash_share(conn, mint: str) -> float | None:
     """Share of recent volume that the same wallets bought AND sold (safety/ check "wash"), None = unknown."""
     try:

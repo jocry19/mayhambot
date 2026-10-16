@@ -616,3 +616,32 @@ def test_close_twice_sells_once(env):
     assert st.close(p, state["snap"], "stop") is False  # second thread holding the same stale row
     assert conn.execute("SELECT COUNT(*) FROM ct_positions WHERE status='closed'").fetchone()[0] == 1
     assert ex.balance(conn) > bal and conn.execute("SELECT exit_reason FROM ct_positions").fetchone()[0] == "whale"
+
+
+def test_launch_bot_wallet_is_not_copied(env):
+    s, conn, ex, state = env
+    strategy._lb_cache.clear()
+    conn.execute("CREATE TABLE IF NOT EXISTS tokens (mint TEXT, pair_created_at INTEGER)")
+    t = int(time.time()) - 3600
+    for i in range(4):
+        conn.execute("INSERT INTO tokens(mint, pair_created_at) VALUES (?,?)", (f"L{i}", (t + i) * 1000))  # ms
+        conn.execute("INSERT INTO ct_swaps VALUES (?,?,?,?,?,?,?,?,?)", (f"lb{i}", W, f"L{i}", "buy", t + i + 1, 1, 1, 1, t))
+    st = strategy.Strategy(conn, s, ex)
+    assert st.on_whale_buy(whale_buy()) is None
+    assert any("Launch-/Dev-Bot" in r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'"))
+
+
+def test_paper_buy_needs_a_safety_result(env, monkeypatch):
+    import safety
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    monkeypatch.setattr(safety, "assess", lambda *a, **k: safety.Assessment(MINT, 0, 0.0, "unchecked", False, 0.0))
+    assert st.on_whale_buy(whale_buy()) is None
+
+    def down(*a, **k):
+        raise RuntimeError("rpc down")
+    monkeypatch.setattr(safety, "assess", down)
+    assert st.on_whale_buy(whale_buy()) is None
+    assert conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0] == 0
+    msgs = [r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'")]
+    assert sum("kein Kauf ohne Prüfung" in m for m in msgs) == 2

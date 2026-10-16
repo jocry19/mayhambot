@@ -11,7 +11,7 @@ function SafetyList() {
   const total = Object.values(c).reduce((a, b) => a + b, 0);
   return (
     <Card title="Rug-Schutz: gesperrte Coins" flush
-      sub={d.available ? `${n(total)} Coins geprüft · ${["low", "caution", "high", "critical"].map((k) => `${n(c[k] || 0)} ${RISK[k].l}`).join(" · ")}. Gesperrte Coins kauft der Bot in keinem Modus.`
+      sub={d.available ? `${n(total)} Coins geprüft · ${["low", "caution", "high", "critical", "unchecked"].map((k) => `${n(c[k] || 0)} ${RISK[k].l}`).join(" · ")}. Gesperrte Coins kauft der Bot in keinem Modus.`
         : "Der Rug-Schutz (safety) hat noch keine Coins geprüft."}>
       <Table rows={d.items} rowKey={(r) => r.mint} empty="Kein Coin gesperrt oder manuell entschieden" cols={[
         { k: "symbol", l: "Coin", fmt: (r) => <CoinLink mint={r.mint} symbol={r.symbol || `${r.mint.slice(0, 6)}…`} /> },

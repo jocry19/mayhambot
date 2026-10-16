@@ -207,7 +207,12 @@ Kosten keine der 1296 Varianten im Plus. Daher:
   aktuellen Ausstiegen nach kalibrierten Kosten im Plus lagen (`learn.wallet_edge`, mindestens `CT_EDGE_MIN_N`=8).
 - `CT_MAX_WASH_SHARE=0.30`: kein Kauf, wenn der Rug-Schutz (Prüfung „wash“) mehr Hin-und-her-Volumen misst.
 - `CT_MAX_COPIES_PER_COIN=2`: höchstens 2 Wal-Kopien je Coin in 6 h, egal welcher Wal.
-- `CT_MAX_ENTRY_DELAY_S=30` (vorher 90): später als 30 s nach dem Wal lagen die Trades bei −12 %, davor bei −3 %.
+- `CT_MAX_ENTRY_DELAY_S=15` (vorher 90, dann 30): Prüf-Auswertung 57 Trades: unter 15 s nach dem Wal −0,6 % (n=22),
+  15–30 s −9,4 % (n=13), später rund −12 % (n=22).
+- Vor **jedem** Kauf (auch Papier) läuft die Rug-Schnellprüfung; ohne Prüfergebnis wird nicht gekauft (vorher liefen
+  28 von 57 Papier-Käufen ungeprüft).
+- Launch-/Dev-Bots werden nicht kopiert: Wallets, die bei ≥60 % ihrer Käufe (≥8) in den ersten 2 s eines Coins kaufen
+  (`launch_bot_share`). Mit 15+ s Verzögerung kommt man dort nur als Ausstiegsliquidität.
 - Lernen: `learn.extra_cost` = Median(Simulation − tatsächlich) der eigenen Trades (ab 10, höchstens 10 %-Punkte)
   wird von jeder Variante abgezogen; übernommen wird eine Variante nur, wenn sie im Training **und** im Test im
   Plus liegt. Aktive Versionen mit Trainingsverlust werden ignoriert.
@@ -304,7 +309,7 @@ CT_ASSUMED_LATENCY_S=15
 # Einstieg
 CT_MIN_LIQUIDITY_USD=15000
 CT_MAX_TOKEN_AGE_H=72
-CT_MAX_ENTRY_DELAY_S=30
+CT_MAX_ENTRY_DELAY_S=15
 CT_MAX_RUN_SINCE_WHALE=0.15
 CT_MAX_WASH_SHARE=0.30
 CT_MAX_COPIES_PER_COIN=2

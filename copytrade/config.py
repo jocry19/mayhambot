@@ -102,7 +102,7 @@ class Settings:
     min_liquidity_usd: float = field(default_factory=lambda: _f("CT_MIN_LIQUIDITY_USD", 15000))
     max_token_age_h: float = field(default_factory=lambda: _f("CT_MAX_TOKEN_AGE_H", 72))
     # 30 s: copies later than 30 s after the whale lost 12 % per trade on paper (10/2026), within 30 s 3 %
-    max_entry_delay_s: float = field(default_factory=lambda: _f("CT_MAX_ENTRY_DELAY_S", 30))
+    max_entry_delay_s: float = field(default_factory=lambda: _f("CT_MAX_ENTRY_DELAY_S", 15))
     # wash trading (safety/ check "wash": share of volume bought AND sold by the same wallets): no copy above
     max_wash_share: float = field(default_factory=lambda: _f("CT_MAX_WASH_SHARE", 0.30))
     # at most this many whale-mode copies per coin within 6 h (all wallets together; 0 = no limit)
