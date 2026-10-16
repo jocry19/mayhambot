@@ -4,7 +4,7 @@
   python mayham.py run               # everything in the foreground, Ctrl+C stops all (used by launchd)
   python mayham.py start             # everything in the background
   python mayham.py stop | status | restart
-  python mayham.py logs [signals|copytrade|dashboard]
+  python mayham.py logs [signals|copytrade|research|web]
   python mayham.py update            # git pull (GitHub transport), install requirements, restart if running
   python mayham.py install-autostart # macOS: start at login and restart on crash (launchd)
   python mayham.py remove-autostart
@@ -19,8 +19,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 LOGS = ROOT / "logs"
 PIDS = ROOT / "data" / "pids"
-PORT = os.getenv("DASHBOARD_PORT", "8501")
-HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1")  # 0.0.0.0 = also reachable from other devices in the network
+PORT = os.getenv("WEB_PORT", "8600")
+HOST = os.getenv("WEB_HOST", "127.0.0.1")  # read by web/ itself; 0.0.0.0 = also reachable in the network
 PY = sys.executable
 LABEL = "de.mayhambot.app"
 PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
@@ -28,8 +28,7 @@ PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 SERVICES = {
     "signals": [PY, "-m", "signals.run"],
     "copytrade": [PY, "-m", "copytrade", "run"],
-    "dashboard": [PY, "-m", "streamlit", "run", "dashboard/app.py", "--server.headless", "true",
-                  "--server.port", PORT, "--server.address", HOST, "--browser.gatherUsageStats", "false"],
+    "web": [PY, "-m", "web"],  # the dashboard (FastAPI + built frontend); the old Streamlit dashboard/ is no longer started
 }
 # research + retraining loop from model/ (other thread), started only once it exists
 if (ROOT / "model" / "__main__.py").exists():
@@ -167,7 +166,7 @@ def logs(name=None):
 
 def _checks_ok():
     """Tests must pass before a new version goes live."""
-    for cmd in ([PY, "tests/test_logic.py"], [PY, "-m", "pytest", "tests", *(["model/tests"] if (ROOT / "model" / "tests").exists() else []), "-q", "-x"]):
+    for cmd in ([PY, "tests/test_logic.py"], [PY, "-m", "pytest", "tests", *[d for d in ("model/tests", "web/tests") if (ROOT / d).exists()], "-q", "-x"]):
         if subprocess.call(cmd, cwd=ROOT, stdout=subprocess.DEVNULL) != 0:
             print("Tests rot:", " ".join(cmd[1:]))
             return False

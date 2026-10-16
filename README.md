@@ -15,7 +15,7 @@ Einmalig im Terminal im Ordner `mayhambot`:
 Danach per Doppelklick auf **`mayhambot starten.command`** / **`mayhambot stoppen.command`**, oder im Terminal:
 
 ```bash
-./start.sh                                  # Signale + Copy-Trader (Papiermodus) + Dashboard im Hintergrund
+./start.sh                                  # Signale + Copy-Trader (Papiermodus) + Research + Dashboard im Hintergrund
 ./stop.sh                                   # alles stoppen
 .venv/bin/python mayham.py status           # was läuft
 .venv/bin/python mayham.py logs             # Live-Logs (logs/*.log)
@@ -24,7 +24,7 @@ Danach per Doppelklick auf **`mayhambot starten.command`** / **`mayhambot stoppe
 .venv/bin/python mayham.py update           # neueste Version von GitHub holen, Pakete aktualisieren, neu starten
 ```
 
-Dashboard: http://localhost:8501 (Seiten: Übersicht, Coin-Signale, Copy-Trading, Smart Wallets).
+Dashboard: http://localhost:8600 (`web/`, siehe `web/README.md`). Terminal-Ansicht: `.venv/bin/python -m cli`.
 Einstellungen und Keys in `.env`. Echtgeld nur mit `LIVE_TRADING=true` plus Schlüssel (siehe `copytrade/README.md`).
 
 ## Einzelne Teile / Entwicklung
@@ -65,7 +65,8 @@ Jeder Zyklus:
 
 - `core/` Datenquellen, SQLite, Wallet-Scoring (Schnittstellen: `core/README.md`)
 - `signals/` Signal-Engine, Notifier, Runner
-- `dashboard/` Streamlit: Übersicht, Coin-Signale, Smart Wallets (Copy-Trading-Seite kommt aus `copytrade/`)
+- `web/` Dashboard (FastAPI + Frontend, Port 8600), `cli/` Terminal-Ansicht
+- `dashboard/` altes Streamlit-Dashboard, wird nicht mehr gestartet
 - `data/mayhambot.db` die Datenbank
 
 ## Keys (optional)

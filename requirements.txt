@@ -1,7 +1,12 @@
 # core + signals
 requests>=2.31
 python-dotenv>=1.0
-# dashboard
+# dashboard (python -m web) and terminal (python -m cli)
+fastapi>=0.110
+uvicorn>=0.29
+textual>=0.80
+rich>=13
+# old Streamlit dashboard/ (no longer started; kept until it is removed)
 streamlit>=1.50
 plotly>=5.20
 pandas>=2.0
