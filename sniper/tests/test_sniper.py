@@ -479,3 +479,89 @@ def test_rpc_create_stream_and_dedupe(tmp_path):
     assert hb["active_launch_source"] == "rpc" and hb["launches_per_min"] == 0.2
     assert set(hb["launch_sources"]) == {"pumpportal", "rpc"}
     assert svc.creates.want == {rpcws.PUMP_MINT_AUTHORITY}
+
+
+def test_trade_subs_reach_rpc_stream_while_pumpportal_is_down(tmp_path):
+    """Regression: subscriptions were only routed inside the PumpPortal connection, so with PumpPortal offline
+    (HTTP 502) the RPC trade stream never got a coin and every launch showed 0 trades."""
+    import asyncio
+    from sniper import rpcws
+    from sniper.service import Service
+    svc = Service(cfg(), db_path=str(tmp_path / "s.db"))
+    assert svc.trades_via == "rpc" and svc.pp_ws is None
+    mint_b, curve_b, user_b = bytes([7]) * 32, bytes([8]) * 32, bytes([9]) * 32
+    note = {"method": "logsNotification", "params": {"result": {"context": {"slot": 5}, "value": {
+        "signature": "CSIG", "err": None, "logs": [
+            "Program data: " + _create_event("Moon", "MOON", "u", mint_b, curve_b, user_b)]}}}}
+    c = rpcws.parse_creates(note)[0]
+    svc._on_create(c, "rpc")
+    asyncio.run(svc.route_subs())
+    assert svc.logs.want == {c["mint"]}
+    # PumpPortal as trade source but offline: changes wait for the next connection instead of being lost
+    svc.trades_via = "pumpportal"
+    svc.engine.to_sub = {"X"}
+    asyncio.run(svc.route_subs())
+    assert svc.engine.to_sub == {"X"}
+
+
+def test_log_stream_paces_and_falls_back_to_program_subscription():
+    """Regression: on reconnect all ~73 coins were resubscribed at once, the public RPC closed with 1013
+    "Too many subscriptions attempted" and the back-off reset on every connect: 899 closes, no trades."""
+    import asyncio
+    from sniper import rpcws
+    sent = []
+
+    class WS:
+        async def send(self, m):
+            sent.append(json.loads(m))
+    got = []
+    s = rpcws.LogStream("wss://x", got.append, max_subs=150, subs_per_sec=4, mode="auto", program=rpcws.PUMP_PROGRAM)
+    s.subscribe({f"m{i}" for i in range(10)})
+    asyncio.run(s._sync(WS(), now=100.0))
+    asyncio.run(s._sync(WS(), now=100.25))
+    assert len(sent) == 2 and s.attempts == 2          # 4 per second, not a burst
+    asyncio.run(s._sync(WS(), now=102.0))
+    assert len(sent) == 6
+    for t in (200, 300):
+        s.note_rate_limit(t)
+    assert s.mode == "mints"
+    s.note_rate_limit(400)
+    assert s.mode == "program" and s.rejects == 3
+    # program mode: one subscription; per-coin subscriptions get dropped, trades filtered to watched coins
+    s.subs = {f"m{i}": i for i in range(3)}
+    s.pending = {}
+    sent.clear()
+    asyncio.run(s._sync(WS(), now=500.0))
+    subs = [m for m in sent if m["method"] == "logsSubscribe"]
+    assert [m["params"][0]["mentions"] for m in subs] == [[rpcws.PUMP_PROGRAM]]
+    assert sum(1 for m in sent if m["method"] == "logsUnsubscribe") == 3
+    mint_b, user_b = bytes([7]) * 32, bytes([9]) * 32
+    note = {"method": "logsNotification", "params": {"result": {"context": {"slot": 5}, "value": {
+        "signature": "S", "err": None, "logs": ["Program data: " + _trade_event(
+            mint_b, user_b, 1_000_000_000, 34_000_000_000_000, True, 31_000_000_000, 1_039_000_000_000_000)]}}}}
+    s.deliver(note)
+    assert got == []                                      # not a watched coin
+    s.subscribe({rpcws.b58(mint_b)})
+    s.deliver(note)
+    assert len(got) == 1 and got[0]["mint"] == rpcws.b58(mint_b)
+
+
+def test_blind_stream_alarm_and_no_stream_label(tmp_path):
+    import time
+    from sniper.service import Service
+    svc = Service(cfg(), db_path=str(tmp_path / "s.db"))
+    now = time.time()
+    svc.started = now - 900
+    svc.launch_log["rpc"].extend([now - 30] * 10)
+    svc.first_log["rpc"].extend([now - 30] * 10)
+    svc.engine.launches["X"] = type("S", (), {"subscribed": True})()
+    svc.trade_samples.extend([(now - 240, 5, 5), (now - 10, 5, 5)])
+    h = svc.stream_health(now)
+    assert h == {"trades_per_min": 0.0, "blind": True} and svc.engine.trades_live is False
+    svc.trade_samples.append((now, 50, 50))
+    assert svc.stream_health(now)["blind"] is False and svc.engine.trades_live is True
+    svc.creates.connected = True
+    svc.heartbeat()
+    hb = json.loads(store.get_state(svc.conn, "service_status"))
+    assert hb["connected"] is True and hb["pumpportal_connected"] is False and hb["pump_api_ok"] is None
+    assert hb["trade_sources"]["rpc"]["active"] is True and hb["trade_sources"]["rpc"]["mode"] == "mints"

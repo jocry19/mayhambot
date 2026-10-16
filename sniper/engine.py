@@ -80,6 +80,7 @@ class Engine:
         self.lock = threading.RLock()
         self.to_sub, self.to_unsub = set(), set()
         self.tiers = {}
+        self.trades_live = True    # the service clears it while launches arrive without any trades (blind stream)
         self.stream_pools = None   # pools whose trades we receive (None = all); the RPC log stream decodes pump only
         self.book = PaperBook(cfg, conn)
         self.counters = {"creates": 0, "trades": 0, "migrations": 0, "stage1": 0, "stage2": 0, "entries": 0}
@@ -262,7 +263,8 @@ class Engine:
         st.prescore = round(a.momentum * (1 - a.risk / 100), 1)
         F = a.features
         reason = None
-        if self.stream_pools is not None and st.pool not in self.stream_pools:
+        if (self.stream_pools is not None and st.pool not in self.stream_pools) or \
+                (not self.trades_live and not F.get("n_trades")):
             reason = "no_stream"
         elif F["dev_sold_pct"] >= 50:
             reason = "dev_sold"

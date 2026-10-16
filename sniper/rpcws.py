@@ -1,4 +1,4 @@
-"""Free trade stream from the Solana RPC websocket: one logsSubscribe per watched mint, pump.fun's
+"""Free trade stream from the Solana RPC websocket: one logsSubscribe per watched mint (or one on the program), pump.fun's
 TradeEvent decoded from the "Program data:" log line (mint, SOL and token amount, side, trader, curve
 reserves). Used when PumpPortal refuses per-token trades without a funded API key. No keys needed."""
 import asyncio
@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import struct
+from collections import deque
 
 log = logging.getLogger("sniper.rpcws")
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
@@ -143,15 +144,32 @@ def parse_notification(m):
 
 
 class LogStream:
-    def __init__(self, url, on_msg, max_subs=150, parser=None, name="RPC-Log-Datenstrom", stale_sec=None):
+    """One websocket, logsSubscribe per wanted account ("mints" mode) or a single subscription on a program
+    ("program" mode, messages filtered locally to the wanted mints). The public RPC limits subscription
+    *attempts* per connection and closes with 1013 "Too many subscriptions attempted": requests are paced, the
+    back-off only resets after a connection stayed up, and mode "auto" moves to one program-wide subscription
+    after repeated rate-limit closes, so the per-coin churn stops entirely."""
+    RATE_LIMIT_SWITCH, RATE_LIMIT_WINDOW = 3, 600
+
+    def __init__(self, url, on_msg, max_subs=150, parser=None, name="RPC-Log-Datenstrom", stale_sec=None,
+                 subs_per_sec=4.0, mode="mints", program=None):
         self.url, self.on_msg, self.max_subs, self.stale_sec = url, on_msg, max_subs, stale_sec
+        self.subs_per_sec = subs_per_sec
         self.parser, self.name = parser or parse_notification, name
-        self.want, self.subs = set(), {}       # mint -> subscription id
-        self.pending = {}                      # request id -> mint
+        self.auto = mode == "auto"
+        self.mode = "mints" if self.auto else mode
+        self.program = program
+        self.want, self.subs = set(), {}       # account -> subscription id
+        self.pending = {}                      # request id -> account
         self.next_id = 1
         self.connected = False
         self.msgs = 0
+        self.attempts = 0                      # logsSubscribe requests sent (all connections)
+        self.rejects = 0                       # refused subscriptions + rate-limit closes
+        self.rate_limit_log = deque(maxlen=50)
+        self.reconnects = 0
         self.ws = None
+        self._tokens, self._last = 0.0, None
 
     def subscribe(self, mints):
         self.want |= set(mints)
@@ -159,28 +177,68 @@ class LogStream:
     def unsubscribe(self, mints):
         self.want -= set(mints)
 
-    async def _sync(self, ws):
-        for m in [m for m in self.want if m not in self.subs and m not in self.pending.values()]:
-            if len(self.subs) + len(self.pending) >= self.max_subs:
+    def active_subs(self):
+        return len(self.subs)
+
+    def _targets(self):
+        return {self.program} if self.mode == "program" else self.want
+
+    def _allow(self, now):
+        if self._last is None:
+            self._tokens, self._last = 1.0, now
+        self._tokens = min(max(1.0, self.subs_per_sec), self._tokens + (now - self._last) * self.subs_per_sec)
+        self._last = now
+        if self._tokens >= 1:
+            self._tokens -= 1
+            return True
+        return False
+
+    async def _sync(self, ws, now=None):
+        import time as _t
+        now = _t.monotonic() if now is None else now
+        targets = self._targets()
+        for m in [m for m in targets if m not in self.subs and m not in self.pending.values()]:
+            if len(self.subs) + len(self.pending) >= self.max_subs or not self._allow(now):
                 break
             rid, self.next_id = self.next_id, self.next_id + 1
             self.pending[rid] = m
+            self.attempts += 1
             await ws.send(json.dumps({"jsonrpc": "2.0", "id": rid, "method": "logsSubscribe",
                                       "params": [{"mentions": [m]}, {"commitment": "processed"}]}))
-        for m in [m for m in self.subs if m not in self.want]:
+        for m in [m for m in self.subs if m not in targets]:
             sid = self.subs.pop(m)
             rid, self.next_id = self.next_id, self.next_id + 1
             await ws.send(json.dumps({"jsonrpc": "2.0", "id": rid, "method": "logsUnsubscribe", "params": [sid]}))
 
+    def note_rate_limit(self, now):
+        self.rejects += 1
+        self.rate_limit_log.append(now)
+        recent = sum(1 for t in self.rate_limit_log if now - t <= self.RATE_LIMIT_WINDOW)
+        if self.auto and self.mode == "mints" and self.program and recent >= self.RATE_LIMIT_SWITCH:
+            self.mode = "program"
+            log.warning("%s: %d Rate-Limit-Abbrüche in %d min, wechsle auf ein einziges Abo auf Programmebene",
+                        self.name, recent, self.RATE_LIMIT_WINDOW // 60)
+
+    def deliver(self, m):
+        for msg in self.parser(m):
+            if self.mode == "program" and msg.get("mint") not in self.want:
+                continue
+            self.on_msg(msg)
+
     async def run(self, stop):
+        import time as _t
         import websockets
         backoff = 2
         while not stop.is_set():
+            up_since = None
             try:
                 async with websockets.connect(self.url, ping_interval=20, ping_timeout=20, max_size=2 ** 22,
                                               open_timeout=15) as ws:
-                    self.connected, backoff, self.subs, self.pending = True, 2, {}, {}
-                    log.info("%s verbunden (%s)", self.name, self.url.split("?")[0])
+                    self.connected, self.subs, self.pending = True, {}, {}
+                    up_since = _t.monotonic()
+                    self.reconnects += 1
+                    log.info("%s verbunden (%s, %s)", self.name, self.url.split("?")[0],
+                             "Programm-Abo" if self.mode == "program" else "Abos je Coin")
 
                     async def syncer():
                         while True:
@@ -202,15 +260,15 @@ class LogStream:
                             except ValueError:
                                 continue
                             if "id" in m and m.get("id") in self.pending:
-                                mint = self.pending.pop(m["id"])
+                                acc = self.pending.pop(m["id"])
                                 if "result" in m:
-                                    self.subs[mint] = m["result"]
+                                    self.subs[acc] = m["result"]
                                 else:
+                                    self.rejects += 1
                                     log.warning("logsSubscribe abgelehnt: %s", str(m.get("error"))[:160])
-                                    self.want.discard(mint)
+                                    self.want.discard(acc)
                                 continue
-                            for msg in self.parser(m):
-                                self.on_msg(msg)
+                            self.deliver(m)
                             if stop.is_set():
                                 break
                     finally:
@@ -218,7 +276,16 @@ class LogStream:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
-                log.warning("%s getrennt (%s), neuer Versuch in %d s", self.name, e, backoff)
+                txt = str(e)
+                if "1013" in txt or "Too many subscriptions" in txt:
+                    self.note_rate_limit(_t.monotonic())
+                    backoff = max(backoff, 15)
+                    log.warning("%s: Rate-Limit beim RPC (%d Abos aktiv), neuer Versuch in %d s",
+                                self.name, len(self.subs), backoff)
+                else:
+                    log.warning("%s getrennt (%s), neuer Versuch in %d s", self.name, e, backoff)
             self.connected = False
+            if up_since is not None and _t.monotonic() - up_since >= 60:
+                backoff = 2   # only a connection that held for a minute resets the back-off
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60)

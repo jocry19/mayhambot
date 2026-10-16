@@ -54,6 +54,8 @@ Wünsche an andere Pakete (über den Coordinator):
    pump.funs `TradeEvent` aus der Zeile `Program data:` dekodiert (Mint, SOL, Tokens, Seite, Trader, Curve-Reserven,
    Slot). Lehnt PumpPortal Trade-Abos ab, wechselt der Dienst automatisch auf diesen Weg und meldet es als WARNING.
    bonk-Launches haben dort keinen Decoder: sie werden erfasst und gemessen, aber mit `no_stream` übersprungen.
+   Ebenso `no_stream`: Launches ohne einen einzigen Trade, solange der Trade-Datenstrom blind ist (Launches kommen,
+   aber seit 5 min keine Trades). Dann steht im Log ein ALARM und in `service_status` `blind: true`.
    **Launches kommen aus zwei Quellen zugleich** (`SNIPER_LAUNCH_SOURCES=both`): PumpPortal und ein
    RPC-Launch-Datenstrom (`logsSubscribe` auf pump.funs Mint-Authority `TSLvdd1p…`, die nur in Erstellungen vorkommt;
    `CreateEvent` und der erste Dev-Kauf aus den Logs dekodiert). Wer einen Coin zuerst liefert, gewinnt, der andere
@@ -105,7 +107,10 @@ Kauf nur bei `score ≥ SNIPER_MIN_SCORE` (40), `risk ≤ SNIPER_MAX_RISK` (45) 
 ## Kosten und Last
 
 - **Erkennung und Trades: 0 Calls** (ein PumpPortal-Websocket, keine Keys).
-- **Trades**: RPC-Websocket-Abos (keine HTTP-Calls, keine Credits), höchstens `SNIPER_WS_MAX_SUBS` gleichzeitig.
+- **Trades**: RPC-Websocket-Abos (keine HTTP-Calls, keine Credits), höchstens `SNIPER_WS_MAX_SUBS` gleichzeitig,
+  höchstens `SNIPER_WS_SUBS_PER_SEC` neue pro Sekunde. Der öffentliche RPC schließt bei zu vielen Abo-Versuchen mit
+  1013 „Too many subscriptions“: dann wartet der Stream mindestens 15 s, und im Modus `auto` wechselt er nach 3
+  solchen Abbrüchen in 10 min auf **ein** Abo auf das pump.fun-Programm und filtert die Trades lokal.
 - **Stufe 2 je Launch**: 1 Metadaten-Call, dazu 1–5 Calls an `SNIPER_RPC_URL` (Standard: **öffentlicher RPC**, nicht Helius), gedeckelt auf
   `SNIPER_MAX_RPC_PER_LAUNCH` (5) und `SNIPER_RPC_PER_MIN` (10) für den ganzen Dienst. Helius-Credits verbraucht
   der Sniper selbst nur, wenn der Nutzer `SNIPER_RPC_URL` auf Helius stellt.
@@ -127,10 +132,13 @@ Kauf nur bei `score ≥ SNIPER_MIN_SCORE` (40), `risk ≤ SNIPER_MAX_RISK` (45) 
 | `sniper_state` | `paper_balance_sol`; `service_status` (Heartbeat alle 10 s, JSON, siehe unten) |
 
 `service_status` (lesen mit `json.loads(store.get_state(conn, "service_status"))`): `ts` (Unix-Sekunden; älter als
-30 s = Dienst steht), `connected` (PumpPortal-Websocket offen), `ws_msgs` (Nachrichten seit Start), `subscribed`
+30 s = Dienst steht), `connected` (irgendeine Quelle offen: PumpPortal, RPC-Launches oder RPC-Trades),
+`pumpportal_connected`, `trade_sources: {pumpportal|rpc: {active, connected, trades_per_min, …}}` (rpc zusätzlich
+`mode`, `subs`, `wanted`, `attempts`, `rejects`, `reconnects`), `trades_per_min` (5 min), `blind` (Launches ohne
+Trades seit 5 min), `launch_sources`, `active_launch_source`, `launches_per_min`, `ws_msgs` (Nachrichten seit Start), `subscribed`
 (Coins im Trade-Abo), `in_memory`, `queue` (Kandidaten in der Warteschlange für Stufe 2), `open_positions`,
 `budget: {rpc|api|deep: {used_last_min, per_min, total}}`, `counters: {creates, trades, migrations, stage1, stage2,
-entries}` (seit Start), `pump_api_ok`. Beim Beenden wird einmal `connected: false` geschrieben.
+entries}` (seit Start), `pump_api_ok` (`null`, wenn die pump.fun-API aus ist). Beim Beenden wird einmal `connected: false` geschrieben.
 
 ## Einstellungen (`.env`, alle optional)
 
@@ -141,6 +149,8 @@ entries}` (seit Start), `pump_api_ok`. Beim Beenden wird einmal `connected: fals
 | `SNIPER_PUMPPORTAL_API_KEY` | – | PumpPortal-Key mit ≥ 0,02 SOL Guthaben (nur der Nutzer legt ihn an) |
 | `SNIPER_LAUNCH_SOURCES` / `SNIPER_STALE_SEC` | both / 180 | Launch-Quellen (`both`, `pumpportal`, `rpc`), Neuverbindung bei Stille |
 | `SNIPER_WS_URL` / `SNIPER_WS_MAX_SUBS` | wss://api.mainnet-beta.solana.com / 150 | RPC-Log-Datenstrom |
+| `SNIPER_WS_SUBS_PER_SEC` | 4 | neue logsSubscribe-Anfragen pro Sekunde |
+| `SNIPER_TRADE_SUB_MODE` | auto | `mints` (ein Abo je Coin), `program` (ein Abo, lokal gefiltert), `auto` (mints, bei Rate-Limit program) |
 | `SNIPER_RPC_PER_MIN` / `SNIPER_MAX_RPC_PER_LAUNCH` | 10 / 5 | RPC-Deckel |
 | `SNIPER_PUMP_API_PER_MIN` | 40 | pump.fun-API-Deckel |
 | `SNIPER_DEEP_PER_MIN` | 4 | tief geprüfte Launches je Minute |

@@ -36,7 +36,8 @@ class Service:
         if cfg.trade_source == "pumpportal" and not key:
             log.warning("SNIPER_TRADE_SOURCE=pumpportal ohne SNIPER_PUMPPORTAL_API_KEY: PumpPortal liefert Trades "
                         "nur mit aufgeladenem Key, nehme den RPC-Log-Datenstrom")
-        self.logs = rpcws.LogStream(cfg.ws_url, self._on_rpc_trade, cfg.ws_max_subs)
+        self.logs = rpcws.LogStream(cfg.ws_url, self._on_rpc_trade, cfg.ws_max_subs, subs_per_sec=cfg.ws_subs_per_sec,
+                                    mode=cfg.trade_sub_mode, program=rpcws.PUMP_PROGRAM)
         srcs = cfg.launch_sources.lower()
         self.use_pp = srcs in ("both", "pumpportal")
         self.creates = rpcws.LogStream(cfg.ws_url, lambda m: self._on_create(m, "rpc"), 1, parser=rpcws.parse_creates,
@@ -49,6 +50,11 @@ class Service:
         self._warned_reject = False
         self.engine.stream_pools = None if self.trades_via == "pumpportal" else {"pump"}
         self.connected = False
+        self.pp_ws = None
+        self.trade_samples = deque(maxlen=120)    # (ts, trades, rpc trades) every heartbeat, for trades per minute
+        self.rpc_trades = 0
+        self.started = time.time()
+        self._blind_warned = 0.0
         self.ws_msgs = 0
         self._dex_conn = None
         self._hb_conn = store.connect(db_path)
@@ -77,6 +83,7 @@ class Service:
         now = time.time()
         if self.record:  # same format as PumpPortal lines, so replay sees the RPC trades too
             self.record.write(json.dumps({"t": round(now, 3), "m": json.dumps(m)}) + "\n")
+        self.rpc_trades += 1
         self.engine.handle(m, now)
 
     def sol_usd(self):
@@ -133,7 +140,7 @@ class Service:
                         if self.trades_via == "pumpportal":
                             self.engine.to_sub |= resub
                     log.info("PumpPortal verbunden (%d Coins im Trade-Abo)", len(resub))
-                    sender = asyncio.create_task(self._sender(ws))
+                    self.pp_ws = ws
                     try:
                         while True:
                             try:
@@ -164,7 +171,7 @@ class Service:
                             if self.stop.is_set():
                                 break
                     finally:
-                        sender.cancel()
+                        self.pp_ws = None
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 - reconnect with back-off
@@ -173,20 +180,34 @@ class Service:
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60)
 
-    async def _sender(self, ws):
-        while True:
+    async def route_subs(self):
+        """Hand new (un)subscriptions to the active trade source. Runs on its own, so the RPC log stream gets its
+        coins even while PumpPortal is down; PumpPortal-bound changes wait until its socket is back."""
+        with self.engine.lock:
+            sub, unsub = self.engine.to_sub, self.engine.to_unsub
+            self.engine.to_sub, self.engine.to_unsub = set(), set()
+            if self.trades_via != "pumpportal":
+                pump = {m for m in sub if self.engine.launches.get(m) and self.engine.launches[m].pool == "pump"}
+        if self.trades_via == "pumpportal":
+            ws = self.pp_ws
+            if ws is None:
+                with self.engine.lock:  # keep them for the next connection
+                    self.engine.to_sub |= sub - unsub
+                    self.engine.to_unsub |= unsub - sub
+                return
+            for msg in feed.sub_msgs(sub - unsub, unsub - sub):
+                await ws.send(msg)
+        else:
+            self.logs.subscribe(pump - unsub)
+            self.logs.unsubscribe(unsub)
+
+    async def sub_loop(self):
+        while not self.stop.is_set():
             await asyncio.sleep(0.25)
-            with self.engine.lock:
-                sub, unsub = self.engine.to_sub, self.engine.to_unsub
-                self.engine.to_sub, self.engine.to_unsub = set(), set()
-            if self.trades_via == "pumpportal":
-                for msg in feed.sub_msgs(sub - unsub, unsub - sub):
-                    await ws.send(msg)
-            else:
-                with self.engine.lock:
-                    pump = {m for m in sub if (self.engine.launches.get(m) and self.engine.launches[m].pool == "pump")}
-                self.logs.subscribe(pump - unsub)
-                self.logs.unsubscribe(unsub)
+            try:
+                await self.route_subs()
+            except Exception as e:  # noqa: BLE001 - PumpPortal socket closed mid-send; ws_loop reconnects
+                log.debug("Abo-Weitergabe: %s", e)
 
     # ---------------------------------------------------------------- periodic loops
     async def tick_loop(self):
@@ -228,20 +249,59 @@ class Service:
     def tiers_round(self):
         self.engine.tiers = store.tier_map(self.conn)
 
+    def trade_rate(self, now, window=300, idx=1):
+        """Trades per minute over the last `window` seconds from the heartbeat samples (idx 1 all, 2 RPC only)."""
+        old = [x for x in self.trade_samples if now - x[0] <= window]
+        if len(old) < 2 or old[-1][0] - old[0][0] <= 0:
+            return None
+        return round((old[-1][idx] - old[0][idx]) / ((old[-1][0] - old[0][0]) / 60), 1)
+
+    def stream_health(self, now):
+        """Blind = launches arrive but no trades for 5 minutes: every launch would be skipped as 'activity'.
+        The engine then labels such launches 'no_stream', and the log warns every 10 minutes."""
+        tpm = self.trade_rate(now)
+        lpm = self._launch_status(now)["launches_per_min"]
+        with self.engine.lock:
+            watched = sum(1 for s in self.engine.launches.values() if s.subscribed)
+        blind = bool(now - self.started >= 300 and lpm > 0 and watched > 0 and tpm == 0)
+        self.engine.trades_live = not blind
+        if blind and now - self._blind_warned >= 600:
+            self._blind_warned = now
+            log.warning("ALARM: %.1f Launches/min, aber seit 5 min keine Trades (Quelle %s, %d RPC-Abos, %d "
+                        "Ablehnungen): der Sniper ist blind, Launches werden als no_stream markiert",
+                        lpm, self.trades_via, self.logs.active_subs(), self.logs.rejects)
+        return {"trades_per_min": tpm, "blind": blind}
+
     def heartbeat(self):
         """Service status for web/ and cli/ (they cannot see this process's memory): sniper_state 'service_status'."""
+        now = time.time()
+        self.trade_samples.append((now, self.engine.counters["trades"], self.rpc_trades))
         with self.engine.lock:
             subs = sum(1 for s in self.engine.launches.values() if s.subscribed)
             n = len(self.engine.launches)
-        now = time.time()
         budget = {k: {"used_last_min": self.budget.per_min[k] - self.budget.left(k, now), "per_min": self.budget.per_min[k],
                       "total": self.budget.total[k]} for k in self.budget.per_min}
         store.set_state(self._hb_conn, "service_status", json.dumps({
-            "ts": int(now), "connected": self.connected, "ws_msgs": self.ws_msgs, "subscribed": subs, "in_memory": n,
+            # connected = any data source open (PumpPortal, RPC launches or RPC trades); per source below
+            "ts": int(now), "connected": self.any_connected(), "pumpportal_connected": self.connected,
+            "trade_sources": self.trade_sources(now), "ws_msgs": self.ws_msgs, "subscribed": subs, "in_memory": n,
             "queue": self.q.qsize(), "open_positions": len(self.engine.book.open), "budget": budget,
-            "counters": dict(self.engine.counters), "pump_api_ok": self.enricher.pump_ok,
+            "counters": dict(self.engine.counters), "pump_api_ok": self.enricher.pump_ok if self.cfg.use_pump_api else None,
             "trade_source": self.trades_via, "rpc_ws_connected": self.logs.connected, "rpc_ws_subs": len(self.logs.subs),
-            "rpc_ws_msgs": self.logs.msgs, **self._launch_status(now)}))
+            "rpc_ws_msgs": self.logs.msgs, "rpc_ws_mode": self.logs.mode, "rpc_ws_wanted": len(self.logs.want),
+            "rpc_ws_attempts": self.logs.attempts, "rpc_ws_rejects": self.logs.rejects,
+            "rpc_ws_reconnects": self.logs.reconnects, **self.stream_health(now), **self._launch_status(now)}))
+
+    def any_connected(self):
+        return bool(self.connected or self.logs.connected or (self.creates and self.creates.connected))
+
+    def trade_sources(self, now):
+        tot, rpc = self.trade_rate(now), self.trade_rate(now, idx=2)
+        return {"pumpportal": {"active": self.trades_via == "pumpportal", "connected": self.connected,
+                               "trades_per_min": None if tot is None or rpc is None else round(tot - rpc, 1)},
+                "rpc": {"active": self.trades_via == "rpc", "connected": self.logs.connected, "mode": self.logs.mode,
+                        "subs": self.logs.active_subs(), "wanted": len(self.logs.want), "attempts": self.logs.attempts,
+                        "rejects": self.logs.rejects, "reconnects": self.logs.reconnects, "trades_per_min": rpc}}
 
     def _launch_status(self, now):
         rates = self.launch_rates(now)
@@ -264,6 +324,10 @@ class Service:
         log.info("Launch-Quellen (5 min): PumpPortal %s %.1f/min, RPC %s %.1f/min",
                  "verbunden" if lr["pumpportal"]["connected"] else "getrennt", lr["pumpportal"]["per_min"],
                  "verbunden" if lr["rpc"]["connected"] else "getrennt", lr["rpc"]["per_min"])
+        h = self.stream_health(time.time())
+        log.info("Trade-Datenstrom: %s Trades/min, Quelle %s, RPC %s (%d Abos von %d gewünscht, %d Ablehnungen)%s",
+                 "?" if h["trades_per_min"] is None else h["trades_per_min"], self.trades_via, self.logs.mode,
+                 self.logs.active_subs(), len(self.logs.want), self.logs.rejects, " BLIND" if h["blind"] else "")
         log.info("Stand: %d Launches, %d Trades, %d Migrationen | Stufe 1: %d, tief geprüft: %d, Käufe: %d | "
                  "%d im Speicher, %d im Trade-Abo (%s, RPC-Logs %d Abos), Warteschlange %d | Calls gesamt RPC %d, API/Metadaten %d | offen %d, "
                  "Papier-Guthaben %.3f SOL", c["creates"], c["trades"], c["migrations"], c["stage1"], c["stage2"],
@@ -275,6 +339,7 @@ class Service:
         stop_ev = asyncio.Event()
         self._stop_ev = stop_ev
         tasks = [asyncio.create_task(self.ws_loop()), asyncio.create_task(self.tick_loop()),
+                 asyncio.create_task(self.sub_loop()),
                  asyncio.create_task(self.logs.run(stop_ev)),
                  *([asyncio.create_task(self.creates.run(stop_ev))] if self.creates else []),
                  asyncio.create_task(self.every(300, self.sol_round)),
@@ -295,7 +360,9 @@ class Service:
             stop_ev.set()
             for t in tasks:
                 t.cancel()
-            self.connected = False
+            self.connected = self.logs.connected = False
+            if self.creates:
+                self.creates.connected = False
             try:
                 self.heartbeat()
             except Exception:  # noqa: BLE001

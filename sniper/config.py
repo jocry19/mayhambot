@@ -40,6 +40,8 @@ class SniperSettings:
     create_mention: str = field(default_factory=lambda: _s("SNIPER_CREATE_MENTION", "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"))
     stale_sec: int = field(default_factory=lambda: _i("SNIPER_STALE_SEC", 180))   # no launch that long -> reconnect
     ws_max_subs: int = field(default_factory=lambda: _i("SNIPER_WS_MAX_SUBS", 150))
+    ws_subs_per_sec: float = field(default_factory=lambda: _f("SNIPER_WS_SUBS_PER_SEC", 4.0))   # paced subscribe requests
+    trade_sub_mode: str = field(default_factory=lambda: _s("SNIPER_TRADE_SUB_MODE", "auto"))  # auto | mints | program
     pump_api_url: str = field(default_factory=lambda: _s("SNIPER_PUMP_API_URL", "https://frontend-api-v3.pump.fun").rstrip("/"))
     use_pump_api: bool = field(default_factory=lambda: _b("SNIPER_USE_PUMP_API", False))  # v3 paths answer 400/404 (10/2026)
     use_geckoterminal: bool = field(default_factory=lambda: _b("SNIPER_USE_GECKOTERMINAL", True))
