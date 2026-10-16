@@ -240,7 +240,14 @@ class Strategy:
         if not snap or snap.price_sol <= 0:
             return self._skip("whale", swap.mint, "kein Marktpreis")
         if snap.liquidity_usd < p.min_liquidity_usd:
-            return self._skip("whale", swap.mint, f"Liquidität zu klein (${snap.liquidity_usd:,.0f})", snap)
+            # exploration buys from CT_EXPLORE_MIN_LIQ_USD: on 10/16 28 of 38 ultra/smart buys sat at $4-15k
+            if "explore" in accounts and snap.liquidity_usd >= s.explore_min_liq_usd:
+                if "paper" in accounts:
+                    accounts.remove("paper")
+                    self._skip("whale", swap.mint, f"Liquidität zu klein (${snap.liquidity_usd:,.0f}); nur Erkundung",
+                               snap, account="explore")
+            else:
+                return self._skip("whale", swap.mint, f"Liquidität zu klein (${snap.liquidity_usd:,.0f})", snap)
         if snap.fdv and snap.fdv > p.max_mcap_usd:
             return self._skip("whale", swap.mint, f"Market Cap zu groß (${snap.fdv:,.0f})", snap)
         if snap.age_hours > s.max_token_age_h:

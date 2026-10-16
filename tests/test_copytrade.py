@@ -802,3 +802,18 @@ def test_exploration_buys_signals_the_strict_gates_turn_down(env):
     _signal(conn, score=85)
     follow_signals(conn, st)  # every gate passes: strict buys, exploration buys beside it
     assert sorted(r["mode"] for r in conn.execute("SELECT mode FROM ct_positions")) == ["explore", "paper"]
+
+
+def test_exploration_whale_copy_from_lower_liquidity(env, monkeypatch):
+    import dataclasses
+
+    s, conn, ex, state = env
+    s = Settings(db_path=s.db_path)
+    monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": "smart"})
+    st = strategy.Strategy(conn, s, ex)
+    state["snap"] = dataclasses.replace(state["snap"], liquidity_usd=8000)
+    assert st.on_whale_buy(whale_buy(sol=1.0))
+    assert [r[0] for r in conn.execute("SELECT mode FROM ct_positions")] == ["explore"]
+    conn.execute("DELETE FROM ct_positions")
+    state["snap"] = dataclasses.replace(state["snap"], liquidity_usd=2000)
+    assert st.on_whale_buy(chain.Swap("sigY", W, int(time.time()) - 5, "buy", MINT, 1e6, 1.0, 3e-6)) is None
