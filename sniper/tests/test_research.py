@@ -210,3 +210,36 @@ def test_rug_model_blocks_and_is_stored(conn):
            "coin": {"twitter": "x"}, "creator_hist": {"n": 1}, "dev_coins": {"n": 1, "n24": 1, "n_complete": 0}}
     _a, reason, pos = eng.finalize(st, enr, now=T0 + 22)
     assert reason == "rug_p" and pos is None and eng.enricher.gates == 0
+
+
+def test_research_rejects_outlier_rules_and_broken_bases(conn):
+    """Regression (Mac, 20:28): rules on untraded launches with a broken base were accepted with test returns of
+    +4,500 % and lost about 10 % on every real paper trade."""
+    rnd = random.Random(3)
+    for i in range(700):
+        f = rnd.random()
+        broken = f > 0.8
+        base = 0.5 if broken and i % 2 else 30.0
+        ret = (50.0 if (broken and rnd.random() < 0.15) else -0.12) if broken else rnd.gauss(-0.2, 0.1)
+        conn.execute(
+            "INSERT INTO sniper_launches(mint, source, pool, created_ts, decided_ts, stage, decision, n_trades, "
+            "n_buyers, n_sellers, buy_sol, sell_sol, net_sol, momentum, mcap_decide_sol, ret_1m, ret_5m, ret_15m, "
+            "ret_60m, rugged, done) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
+            (f"B{i}", "pumpportal", "pump", T0 + i * 60, T0 + i * 60 + 20, 1, "skip", 3, 2, 1, 0.3, 0.1, 0.2,
+             f * 100, base, ret, ret, ret, ret, 0))
+    conn.commit()
+    rep = research.run(conn, cfg(), save=True, now=T0 + 700 * 60)
+    assert all(r["mcap_decide_sol"] >= research.MIN_BASE_MCAP for r in research.load(conn))
+    assert rep["rules"]["accepted"] is None, rep["rules"]["candidates"][:1]
+
+
+def test_broken_base_is_not_bought(conn):
+    c = cfg()
+    eng = Engine(c, conn, enricher=FakeEnricher())
+    eng.learned = {"conditions": [["n_buyers", ">", -1]], "accepted": True, "exit": {}}
+    cv = Curve("ZERO")
+    eng.handle(cv.create(), T0)
+    st = eng.launches["ZERO"]
+    st.mcap_sol, st.v_tok = 0.0, 0.0
+    assert eng.tick(T0 + c.decide_sec + 1) == []
+    assert conn.execute("SELECT skip_reason FROM sniper_launches WHERE mint='ZERO'").fetchone()[0] == "no_price"

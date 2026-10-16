@@ -233,6 +233,9 @@ class Service:
             self.logs.subscribe(pump - unsub)
             self.logs.unsubscribe(unsub)
 
+    def update_free_stream(self):
+        self.engine.free_stream = self.trades_via == "rpc" and self.logs.program_complete_since() is not None
+
     def demote_dead_subs(self, now=None):
         """Coins whose RPC trade subscription never got confirmed (refused, over the limit) would keep a frozen
         curve price and exit on it: they fall back to DexScreener prices like unsubscribed coins."""
@@ -260,6 +263,7 @@ class Service:
                 await self.route_subs()
                 if n % 20 == 0:
                     self.demote_dead_subs()
+                    self.update_free_stream()
             except Exception as e:  # noqa: BLE001 - PumpPortal socket closed mid-send; ws_loop reconnects
                 log.debug("Abo-Weitergabe: %s", e)
 

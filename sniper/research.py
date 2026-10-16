@@ -57,6 +57,12 @@ def _div(a, b, sub=0.0):
 
 
 # ------------------------------------------------------------------ data
+# a pump.fun coin on its curve is never worth less than at its creation (30 virtual SOL / 1.073e9 tokens =
+# 27.96 SOL); a lower decision price is a broken quote, and a later normal price against it looked like +4,500 %
+MIN_BASE_MCAP = 27.9
+MAX_TRADE_NET = 5.0     # one trade counts at most +500 % in means (a single 50x must not carry a rule)
+
+
 def pseudo_path(r):
     """Without a stored path: the four point samples after the decision (1/5/15/60 min) as a coarse path.
     They are clean, unlike max/min of launches recorded before the outcome fix (which counted the pre-decision
@@ -77,11 +83,11 @@ def load(conn, since=None, min_trades=1, limit=30000):
     since = since or 0
     fix_ts = float(store.get_state(conn, "outcome_fix_ts") or 9e18)
     cur = conn.execute(
-        "SELECT * FROM sniper_launches WHERE ret_60m IS NOT NULL AND mcap_decide_sol > 0 AND source = 'pumpportal' "
+        "SELECT * FROM sniper_launches WHERE ret_60m IS NOT NULL AND mcap_decide_sol >= ? AND source = 'pumpportal' "
         # decided on a finished curve (migration before the decision): the base is the curve's end value
         "AND COALESCE(curve_progress, 0) < 0.95 AND COALESCE(migrated_ts, 9e18) > COALESCE(decided_ts, 0) "
         "AND COALESCE(n_trades, 0) >= ? AND COALESCE(created_ts, 0) >= ? ORDER BY created_ts DESC LIMIT ?",
-        (min_trades, since, limit))
+        (MIN_BASE_MCAP, min_trades, since, limit))
     cols = [c[0] for c in cur.description]
     rows = []
     for t in cur.fetchall():
@@ -162,7 +168,7 @@ def trade_returns(rows, paths, rule, side_cost, tx_cost):
     for r in rows:
         p = paths.get(r["mint"]) or pseudo_path(r)
         dt = (r.get("decided_ts") or r["created_ts"]) - r["created_ts"]
-        out.append(replay(p, dt, r["mcap_decide_sol"], rule, side_cost, tx_cost)[0])
+        out.append(min(MAX_TRADE_NET, replay(p, dt, r["mcap_decide_sol"], rule, side_cost, tx_cost)[0]))
     return out
 
 
@@ -204,6 +210,13 @@ def auc(x, y):
 
 def mean(xs):
     return sum(xs) / len(xs) if xs else None
+
+
+def trimmed_mean(xs, cut=0.1):
+    s = sorted(xs)
+    k = int(len(s) * cut)
+    s = s[k:len(s) - k] or s
+    return sum(s) / len(s)
 
 
 def boot_ci(xs, n=1000, q=0.05, seed=7):
@@ -373,12 +386,19 @@ def rule_search(rows, paths, cfg, train_share=0.7, min_n=30, top_singles=10):
         sel = [r for r in test if _match(r, cs)]
         rt = trade_returns(sel, paths, rule, side_cost, tx_cost) if sel else []
         tlo, thi = boot_ci(rt) if len(rt) >= 5 else (None, None)
-        ok = len(rt) >= min_n and tlo is not None and tlo > 0 and lo > 0
+        med = sorted(rt)[len(rt) // 2] if rt else None
+        tm = trimmed_mean(rt) if rt else None
+        plausible = bool(rt) and mean(rt) <= 1.0     # > +100 % per trade on average: a label error, not an edge
+        # the median trade must win too: a mean carried by a few outliers is no rule to trade
+        ok = (len(rt) >= min_n and tlo is not None and tlo > 0 and lo > 0 and med is not None and med > 0
+              and tm is not None and tm > 0 and plausible)
         results.append({"conditions": [list(c) for c in cs],
                         "exit": dict(zip(("tp1_pct", "tp1_frac", "trail_pct", "stop_pct", "time_stop_min",
                                           "max_hold_min"), rule)),
                         "train": {"n": n, "net": round(m, 4), "ci_low": lo},
                         "test": {"n": len(rt), "net": round(mean(rt), 4) if rt else None, "ci_low": tlo, "ci_high": thi,
+                                 "median": round(med, 4) if med is not None else None,
+                                 "trimmed": round(tm, 4) if tm is not None else None, "plausible": plausible,
                                  "win": round(sum(1 for v in rt if v > 0) / len(rt), 3) if rt else None},
                         "accepted": ok})
     acc = next((r for r in results if r["accepted"]), None)

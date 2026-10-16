@@ -86,6 +86,9 @@ class Engine:
             store.set_state(self.conn, "outcome_fix_ts", str(int(time.time())))
         self._rug_model = (0.0, None, None)
         self.trades_live = True
+        # the RPC program stream carries every pump.fun trade anyway: quiet launches stay "subscribed", so their
+        # outcomes come from the curve itself instead of DexScreener quotes of untraded coins
+        self.free_stream = False
         self.learned = None        # accepted rule from sniper.research (refreshed by the service), None = fixed rules    # the service clears it while launches arrive without any trades (blind stream)
         self.stream_pools = None   # pools whose trades we receive (None = all); the RPC log stream decodes pump only
         self.book = PaperBook(cfg, conn)
@@ -227,7 +230,7 @@ class Engine:
         if not st.subscribed or st.mint in self.book.open:
             return
         quiet = now - (st.last_trade_ts or st.created_ts)
-        if st.decision == "skip" and st.stage <= 1 and quiet >= self.cfg.quiet_unsub_sec:
+        if st.decision == "skip" and st.stage <= 1 and quiet >= self.cfg.quiet_unsub_sec and not self.free_stream:
             self._unsub(st)
         elif now - st.created_ts >= self.cfg.max_watch_sec or st.migrated:
             self._unsub(st)
@@ -297,7 +300,9 @@ class Engine:
         st.prescore = round(a.momentum * (1 - a.risk / 100), 1)
         F = a.features
         reason = None
-        if (self.stream_pools is not None and st.pool not in self.stream_pools) or \
+        if st.pool == "pump" and (st.base_mcap_sol or 0) < research.MIN_BASE_MCAP:
+            reason = "no_price"   # below the curve's start price: a broken quote, neither tradable nor measurable
+        elif (self.stream_pools is not None and st.pool not in self.stream_pools) or \
                 (not self.trades_live and not F.get("n_trades")):
             reason = "no_stream"
         elif F["dev_sold_pct"] >= 50:
@@ -437,6 +442,8 @@ class Engine:
                 reason = market_gate(conn, st, a, None if (r2 == "score" and st.learned) else r2, self.cfg, now)
                 if reason is None and safety_res.get("blocked"):
                     reason = "safety"
+        if reason is None and st.pool == "pump" and st.current_mcap_sol() < research.MIN_BASE_MCAP:
+            reason = "no_price"   # a buy at "MCAP 0.0" happened on a broken curve state
         qf = None
         if reason is None and self.quote_fn:  # quote outside the lock: the stream keeps flowing meanwhile
             q = self.quote_fn(st.mint, self.cfg.size_sol - self.book._fees(), "buy")
