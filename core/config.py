@@ -54,6 +54,8 @@ class Settings:
     signal_window_min: int
     signal_min_score: float
     model_signal_min_score: float
+    model_signal_min_lift: float
+    model_signal_floor: float
     signal_min_wallets: int
     signal_min_net_usd: float
     signal_cooldown_min: int
@@ -94,6 +96,8 @@ def load_settings() -> Settings:
         signal_window_min=_i("SIGNAL_WINDOW_MIN", 30),
         signal_min_score=_f("SIGNAL_MIN_SCORE", 60),
         model_signal_min_score=_f("MODEL_SIGNAL_MIN_SCORE", 40),
+        model_signal_min_lift=_f("MODEL_SIGNAL_MIN_LIFT", 2.0),
+        model_signal_floor=_f("MODEL_SIGNAL_FLOOR", 10),
         signal_min_wallets=_i("SIGNAL_MIN_WALLETS", 2),
         signal_min_net_usd=_f("SIGNAL_MIN_NET_USD", 500),
         signal_cooldown_min=_i("SIGNAL_COOLDOWN_MIN", 60),

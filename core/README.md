@@ -190,3 +190,10 @@ scoring.tier_for(score, n_tokens, is_bot, manual) -> 'ultra'|'smart'|'good'|None
 Wallet score = track record from its own positions: win rate, early entries (bought before a ≥2x peak),
 ROI, consistency (profit not from one lucky hit), scaled by confidence (number of tokens). Bots
 (very high trade counts per token) are flagged `is_bot` and never smart.
+
+## Signal thresholds and funnel
+
+- Heuristic score: fires at `SIGNAL_MIN_SCORE` (60).
+- Model score = P(+50 % in 1h) x 100, a calibrated probability. The threshold is `min(MODEL_SIGNAL_MIN_SCORE, MODEL_SIGNAL_MIN_LIFT x base rate)`, where the base rate is the 1h `base_rate` of the active version's backtest (`model_versions.metrics_json`). It never drops below `MODEL_SIGNAL_FLOOR` (defaults 40 / 2.0 / 10). A fixed 40 needs four times a 10 % base rate and almost never fired.
+- Every signal cycle logs `signal funnel: N coins -> no smart buyer / <2 entities / net <$500 / score < thr / safety / cooldown / fired`.
+- `python -m signals.funnel --hours 10` runs the same funnel over the stored `signal_metrics`. It is read only.

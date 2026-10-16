@@ -52,6 +52,20 @@ class QualityCache:
 
 TIER_RANK = {"ultra": 3, "smart": 2, "good": 1}
 last_cluster_stats = {"wallets": 0, "entities": 0}
+FUNNEL_KEYS = ("coins", "no_smart", "few_entities", "low_net", "low_score", "safety_drop", "cooldown", "fired")
+last_funnel = {}  # per evaluate(): where coins dropped out (first failing condition), see signals.funnel
+
+
+def _reason(m, cfg):
+    if m["smart_buyers"] <= 0:
+        return "no_smart"
+    if m["smart_buyers"] < cfg.signal_min_wallets:
+        return "few_entities"
+    if m["net_usd"] < cfg.signal_min_net_usd:
+        return "low_net"
+    if m["score"] < m.get("min_score", cfg.signal_min_score):
+        return "low_score"
+    return None
 
 
 def token_metrics(conn, mint, qc, now=None, cfg=settings):
@@ -147,7 +161,7 @@ def apply_model(conn, mint, now, m):
              prediction=h1.get("p_pump"), prediction_label=f"P(+{(h1.get('threshold') or 0.5)*100:.0f}% in 1h), Note {r.get('grade', '')}",
              contributions=contrib or m["contributions"])
     m["smart_buyers"] = m["n_ultra"] + m["n_smart"]
-    m["min_score"] = cfg_min_model()
+    m["min_score"] = cfg_min_model(conn)
     if r.get("wallets"):
         m["wallets"] = [dict(wallet=w["address"], tier=w.get("tier"), score=w.get("score", 0), n_tokens=None,
                              buy_usd=0.0, buy_sol=w.get("net_sol", 0), sell_usd=0.0, first_ts=w.get("first_ts"))
@@ -230,8 +244,30 @@ def check_before_signal(conn, mint, m):
     return apply_market(conn, mint, apply_safety(conn, mint, m))
 
 
-def cfg_min_model():
-    return settings.model_signal_min_score  # model score = P(pump within 1h) x 100
+_model_thr = {"version": None, "value": None, "base": None}
+
+
+def cfg_min_model(conn=None, cfg=settings):
+    """Model score = P(pump within 1h) x 100, a calibrated probability: a fixed 40 needs 4x a 10% base rate and
+    almost never fires. Threshold = min(MODEL_SIGNAL_MIN_SCORE, MODEL_SIGNAL_MIN_LIFT x the active version's
+    backtested 1h base rate), never below MODEL_SIGNAL_FLOOR. Without a base rate: MODEL_SIGNAL_MIN_SCORE."""
+    fixed = cfg.model_signal_min_score
+    if conn is None:
+        return fixed
+    try:
+        v = conn.execute("SELECT id, metrics_json FROM model_versions WHERE active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    except Exception:  # noqa: BLE001 - no model tables yet
+        return fixed
+    if v is None:
+        return fixed
+    if _model_thr["version"] != v[0]:
+        try:
+            base = ((json.loads(v[1] or "{}") or {}).get("1h") or {}).get("base_rate")
+        except ValueError:
+            base = None
+        val = fixed if not base else max(cfg.model_signal_floor, min(fixed, round(100 * base * cfg.model_signal_min_lift, 1)))
+        _model_thr.update(version=v[0], value=val, base=base)
+    return _model_thr["value"]
 
 
 def calibrated_prediction(conn, score, min_n=8):
@@ -251,6 +287,9 @@ def evaluate(conn, mints, cfg=settings, now=None):
     now = now or int(time.time())
     qc = QualityCache(conn, cfg)
     new = []
+    f = last_funnel
+    f.clear()
+    f.update({k: 0 for k in FUNNEL_KEYS}, max_score=0.0, min_score=None)
     for mint in mints:
         tok = conn.execute("SELECT symbol, price_usd, mcap_usd, liquidity_usd FROM tokens WHERE mint=?",
                            (mint,)).fetchone()
@@ -269,20 +308,25 @@ def evaluate(conn, mints, cfg=settings, now=None):
              json.dumps(m["contributions"])))
         conn.commit()
 
-        def passes(m):
-            return (m["score"] >= m.get("min_score", cfg.signal_min_score) and m["smart_buyers"] >= cfg.signal_min_wallets
-                    and m["net_usd"] >= cfg.signal_min_net_usd)
-        if not passes(m):
+        f["coins"] += 1
+        f["max_score"] = max(f["max_score"], m["score"])
+        f["min_score"] = m.get("min_score", cfg.signal_min_score)
+        why = _reason(m, cfg)
+        if why:
+            f[why] += 1
             continue
         m = check_before_signal(conn, mint, m)
-        if not passes(m):
+        if _reason(m, cfg):
+            f["safety_drop"] += 1
             log.info("signal %s dropped by safety check: %s", mint[:6], (m.get("safety") or {}).get("reasons"))
             continue
         contrib = json.dumps(m["contributions"])
         sp = m.get("safety") or {}
         last = conn.execute("SELECT ts, score FROM signals WHERE mint=? ORDER BY ts DESC LIMIT 1", (mint,)).fetchone()
         if last and now - last["ts"] < cfg.signal_cooldown_min * 60 and m["score"] < last["score"] + 15:
+            f["cooldown"] += 1
             continue
+        f["fired"] += 1
         cur = conn.execute(
             """INSERT INTO signals(ts, mint, symbol, score, net_usd, buy_usd, smart_buyers, avg_quality, price_usd,
                                    mcap_usd, wallets_json, buy_sol, net_sol, liquidity_usd, n_ultra, n_smart, n_good,
