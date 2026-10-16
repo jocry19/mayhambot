@@ -231,3 +231,24 @@ def test_realized_winner_mining():
     assert set(w) == {"WIN"}
     assert mining.run(conn, now=now) == 1
     assert conn.execute("SELECT discovered_via FROM research_wallets WHERE address='WIN'").fetchone()[0] == "realized_winner"
+
+
+def test_selection_refuses_models_worse_than_base_rate_and_survives_purge():
+    import random
+    from model import learn
+    from research.events import FEATURE_NAMES
+    rng = random.Random(3)
+    n = len(FEATURE_NAMES)
+    # pure noise: no candidate may beat the base rate on the holdout
+    ev = [dict(ts=i * 60, x=[rng.random() for _ in range(n)],
+               labels={"1h": {"pumped": int(rng.random() < 0.3), "max_ret": 0.1, "net": -0.1, "win": 0}})
+          for i in range(300)]
+    models, rep = learn.select_models(ev, horizons=[("1h", 3600, 0.5)])
+    assert rep["1h"]["status"] == "base" and models["1h"]["cfg"]["algo"] == "base"
+    p, _ = learn.predict_one(models["1h"], ev[0]["x"])
+    assert abs(p - sum(e["labels"]["1h"]["pumped"] for e in ev) / len(ev)) < 1e-6
+    # events bunched within 9 h with a 6 h horizon: the 70 % cut leaves too little purged training data
+    ev6 = [dict(ts=i * 77, x=[float(i % 2)] + [0.0] * (n - 1),
+                labels={"6h": {"pumped": i % 2, "max_ret": 1.0, "net": 0.5, "win": i % 2}}) for i in range(420)]
+    _, rep6 = learn.select_models(ev6, horizons=[("6h", 21600, 1.0)])
+    assert rep6["6h"]["n_train"] >= 40

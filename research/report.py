@@ -244,7 +244,7 @@ def render(d):
                 L.append(f"| {u['label']} | {u['auc']:.2f} | {u['direction']} |")
         L.append("")
     L.append("## Modell pro Horizont\n")
-    algo_name = {"logistic": "logistische Regression", "gbm": "Gradient Boosting (Entscheidungsbäume)"}
+    algo_name = {"logistic": "logistische Regression", "gbm": "Gradient Boosting (Entscheidungsbäume)", "base": "nur Basisrate"}
     for h, mm in d["models"].items():
         if mm["kind"] == "prior":
             kind = "Startannahme (noch zu wenig Daten)"
@@ -254,11 +254,15 @@ def render(d):
         L.append(f"**{h}** — {kind}, {mm['n']} Beispiele, {mm['pos']} Pumps. Wichtigste Merkmale ({unit}): " +
                  ", ".join(f"{w['label']} {w['weight']:+.2f}" for w in mm["weights"][:6]) + "\n")
     sel = d.get("selection") or {}
-    if any(v.get("status") == "selected" for v in sel.values()):
+    if any(v.get("status") in ("selected", "base") for v in sel.values()):
         L.append("## Automatische Modellauswahl (ehrlicher Test auf den neuesten 30 % der Fälle)\n")
         L.append("| Horizont | gewählt | Grund | Test-Fälle | Log-Loss Modell | Log-Loss ohne Wissen | AUC |")
         L.append("|---|---|---|---|---|---|---|")
         for h, v in sel.items():
+            if v.get("status") == "base":
+                L.append(f"| {h} | nur Basisrate | {v.get('reason', '')} | {v.get('n_test', '–')} | – | "
+                         f"{v.get('base_logloss', float('nan')):.3f} | – |")
+                continue
             if v.get("status") != "selected":
                 L.append(f"| {h} | Startannahme | {v.get('reason', '')} | – | – | – | – |")
                 continue

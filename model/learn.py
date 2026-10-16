@@ -16,6 +16,14 @@ PRIOR_BIAS = {"15m": -1.6, "1h": -1.9, "6h": -2.3}
 PRIOR_CENTER = dict(log_mcap=5.3, log_age=2.5)
 
 
+def base_model(horizon, rate):
+    """'No knowledge': the base rate for every coin (used when nothing beats it out of sample)."""
+    rate = min(0.99, max(0.01, rate))
+    n = len(FEATURE_NAMES)
+    return dict(kind="logistic", bias=math.log(rate / (1 - rate)), coef=[0.0] * n, mean=[0.0] * n, std=[1.0] * n,
+                cols=list(range(n)), cfg={"algo": "base", "drop": None}, n=0, pos=0)
+
+
 def prior_model(horizon):
     return dict(kind="prior", bias=PRIOR_BIAS.get(horizon, -2.0),
         coef=[PRIOR_COEF.get(f, 0.0) for f in FEATURE_NAMES], mean=[PRIOR_CENTER.get(f, 0.0) for f in FEATURE_NAMES],
@@ -173,11 +181,17 @@ def select_models(events, champion=None, horizons=None, l2=None, now=None, min_g
             report[name] = dict(status="prior", n=len(rows), pos=pos, reason="zu wenig Fälle für einen ehrlichen Test",
                                 need_n=2 * msettings.min_train_events, need_pos=2 * msettings.min_train_pos)
             continue
-        cut = rows[int(len(rows) * 0.7)]["ts"]
-        train = [e for e in rows if e["ts"] + sec <= cut]
-        test = [e for e in rows if e["ts"] > cut]
-        yt = [e["labels"][name][target] for e in test]
-        ytr = [e["labels"][name][target] for e in train]
+        # newest 30 % as holdout; training only up to the cut minus the horizon (purged). When the events are
+        # bunched in time the purge can empty the training part; then the cut moves later (smaller holdout,
+        # at least 15 %) until both parts work.
+        for q in (0.7, 0.75, 0.8, 0.85):
+            cut = rows[int(len(rows) * q)]["ts"]
+            train = [e for e in rows if e["ts"] + sec <= cut]
+            test = [e for e in rows if e["ts"] > cut]
+            yt = [e["labels"][name][target] for e in test]
+            ytr = [e["labels"][name][target] for e in train]
+            if len(train) >= msettings.min_train_events and 0 < sum(ytr) < len(ytr) and 0 < sum(yt):
+                break
         res = []
         base_p = sum(ytr) / max(1, len(ytr))
         base_ll = _logloss([base_p] * len(yt), yt)
@@ -202,6 +216,18 @@ def select_models(events, champion=None, horizons=None, l2=None, now=None, min_g
             chosen, why = best["cfg"], "neuer Sieger" if champ and best["cfg"] != champ_cfg else "bester Kandidat"
         else:
             chosen, why = champ_cfg, "Champion bleibt (kein Kandidat klar besser)"
+        held = next((r for r in ok if r["cfg"] == chosen), None)
+        if not ok or held is None or held["logloss"] >= base_ll:
+            # a model that does not beat "no knowledge" (the base rate) on the holdout is not used
+            m = base_model(name, pos / len(rows))
+            m.update(n=len(rows), pos=pos, target=target)
+            models[name] = m
+            report[name] = dict(status="base", n=len(rows), pos=pos, n_train=len(train), n_test=len(test),
+                                base_logloss=base_ll, candidates=res, skipped=skipped, holdout=held,
+                                reason=("kein Kandidat testbar" if not ok else
+                                        f"bester Kandidat schlägt die Basisrate im Test nicht "
+                                        f"({held['logloss'] if held else float('nan'):.3f} ≥ {base_ll:.3f})"))
+            continue
         m = _fit_cfg(chosen, [e["x"] for e in rows], y_all, l2)
         if chosen["algo"] == "logistic" or target == "win":
             m["size"], m["size_kind"] = _size_fit([[e["x"][i] for i in m["cols"]] for e in rows], rows, name, target, l2)

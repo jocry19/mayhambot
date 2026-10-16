@@ -48,7 +48,7 @@ def run_once(conn=None, now=None, write_files=True):
                                                                       if h.endswith("_net")}, now=now, target="win")
     for h, m in net_models.items():
         selection[f"{h}_net"] = net_sel[h]
-        if m.get("kind") != "prior":  # a pump prior says nothing about profit after costs
+        if m.get("kind") != "prior" and (m.get("cfg") or {}).get("algo") != "base":  # only tested net models
             models[f"{h}_net"] = m
     bt.setdefault("metrics", {})["selection"] = selection
     for line in selection_log(selection):
@@ -105,6 +105,14 @@ def selection_log(selection):
     or why the horizon stayed on the prior."""
     out = []
     for h, r in selection.items():
+        if r.get("status") == "base":
+            out.append(f"selection {h}: base rate only (n {r.get('n')}, pumps {r.get('pos')}, train {r.get('n_train')}, "
+                       f"holdout {r.get('n_test')}): {r.get('reason')}")
+            for c in r.get("candidates") or []:
+                if "logloss" in c:
+                    out.append(f"selection {h}: {_cfg(c['cfg'])} logloss {c['logloss']:.4f} vs base rate "
+                               f"{r.get('base_logloss', float('nan')):.4f} (auc {c.get('auc') or 0:.3f})")
+            continue
         if r.get("status") == "prior":
             why = ("no outcomes for this horizon yet" if not r.get("n") else
                    f"need >= {r.get('need_n')} labelled events and >= {r.get('need_pos')} pumps")
