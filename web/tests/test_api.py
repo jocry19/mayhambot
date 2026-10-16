@@ -490,6 +490,8 @@ def test_cache_swr_bg_and_last_ts(tmp_path, monkeypatch):
     conn.execute("CREATE TABLE trades(sig TEXT, wallet TEXT, mint TEXT, side TEXT, ts INTEGER, PRIMARY KEY(sig, wallet, mint, side))")
     conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?)", [(str(i), "w", "m", "buy", 1000 + i) for i in range(500)])
     Q.cache.clear()
+    from web import db as wdb
+    wdb._schema_cache["ts"] = 0  # the schema cache is per DB path; this test brings its own connection
     assert not Q._has_index(conn, "trades", "ts") and Q.last_ts(conn, "trades") == 1499
     conn.execute("CREATE INDEX ix ON trades(ts)")
     Q.cache.clear()
