@@ -92,7 +92,13 @@ function ApiUsage({ u }) {
             { k: "load", l: "Auslastung", sort: (r) => r.load ?? -1, fmt: (r) => <LoadBar v={r.load} /> },
             ...(credits ? [
               { k: "load_day", l: "Credits heute", title: "Helius-Credits heute gegen das Tagesbudget des Dienstes (Rest des Monatsanteils ÷ übrige Tage)", sort: (r) => r.load_day ?? -1,
-                fmt: (r) => (r.day_full && !r.credits_day_budget
+                fmt: (r) => (r.day_full && (r.borrowed > 0 || r.borrow_left > 0)
+                  ? <span className="col" style={{ gap: 2 }}>
+                    <span className="badge warn" title={`Eigener Tagesanteil aufgebraucht. Der Dienst leiht ungenutzte Credits anderer Dienste (HELIUS_BORROW_PCT) und läuft weiter auf Helius.${r.lenders?.length ? ` Größte Verleiher: ${r.lenders.join(", ")}.` : ""}`}>
+                      voll, leiht{r.lenders?.length ? ` von ${r.lenders[0]}` : ""}</span>
+                    <span className="dim" style={{ fontSize: 11 }}>{compact(r.borrowed || 0)} geliehen · noch {compact(r.borrow_left || 0)}</span>
+                  </span>
+                  : r.day_full && !r.credits_day_budget
                   ? <span className="badge bad" title="Monatsanteil aufgebraucht: Tagesbudget 0, der Dienst nutzt bis Monatsende das öffentliche RPC">voll</span>
                   : r.credits_day_budget != null ? <CreditBar used={r.credits_today} cap={r.credits_day_budget} v={r.load_day} /> : "–") },
               { k: "load_month", l: "Credits Monat", title: "Helius-Credits diesen Monat gegen den Anteil des Dienstes", sort: (r) => r.load_month ?? -1,

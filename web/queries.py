@@ -1557,6 +1557,21 @@ def sniper_stream(conn, now=None):
     return out
 
 
+def _credit_borrow(chttp, cred, svc, c):
+    """A service past its own Helius share may borrow what others leave unused today (core.http._borrowable,
+    HELIUS_BORROW_PCT): how much it borrowed, how much it may still take, and who lends most."""
+    own = (c.get("credits_day_budget") or 0) * getattr(chttp, "CREDIT_BURST", {}).get(svc, 1.0)
+    out = {"borrowed": _f(max(0.0, (c.get("credits_today") or 0) - own), 0), "borrow_left": None, "lenders": []}
+    try:
+        out["borrow_left"] = _f(chttp._borrowable(chttp._ledger_read(), svc), 0)
+    except Exception:
+        pass
+    spare = sorted(((s, (v.get("credits_day_budget") or 0) - (v.get("credits_today") or 0)) for s, v in (cred or {}).items()
+                    if s != svc and isinstance(v, dict)), key=lambda x: -x[1])
+    out["lenders"] = [s for s, left in spare if left > 0][:2]
+    return out
+
+
 # live_orders.status (live/store.py, live/executor.py) in German with a tone for the badge
 LIVE_ORDER_STATUS = {
     "new": ("angelegt", "warn"), "sending": ("wird gesendet", "warn"), "unknown": ("unklar, blockiert Käufe", "bad"),
@@ -2109,6 +2124,8 @@ def api_usage(now=None):
         # day budget 0 = month share used up: "voll" (the service runs on the public RPC until next month)
         row["load_day"] = _f((c.get("credits_today") or 0) / day, 3) if day else (None if day is None else 1.0)
         row["day_full"] = day is not None and (not day or (c.get("credits_today") or 0) >= day)
+        if row["day_full"]:
+            row.update(_credit_borrow(chttp, cred, svc, c))
         row["load_month"] = _f((c.get("credits_month") or 0) / cap, 3) if cap else None
         if c.get("credits_month_limit"):
             total = {"used": _f(c.get("credits_month_all"), 0), "limit": c["credits_month_limit"],

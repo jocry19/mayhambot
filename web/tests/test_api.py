@@ -650,3 +650,15 @@ def test_buy_needs_rug_ack(demo, monkeypatch):
     assert "ungeprüft" in c.post("/api/buy", json={"mint": free["mint"]}).json()["detail"]
     monkeypatch.setattr(server, "_buy_preview", lambda conn, mint: {"account": "paper", "size_sol": 0.5, "preset": "x", "safety": {"level": "low"}})
     assert c.post("/api/buy", json={"mint": free["mint"]}).status_code == 200
+
+
+def test_credit_borrow_state():
+    import types
+
+    from web import queries as Q
+
+    fake = types.SimpleNamespace(CREDIT_BURST={}, _ledger_read=lambda: {}, _borrowable=lambda led, svc: 1200.0)
+    cred = {"signals": {"credits_day_budget": 1000, "credits_today": 1500},
+            "research": {"credits_day_budget": 4000, "credits_today": 500}, "copytrade": {"credits_day_budget": 900, "credits_today": 100}}
+    b = Q._credit_borrow(fake, cred, "signals", cred["signals"])
+    assert b == {"borrowed": 500, "borrow_left": 1200, "lenders": ["research", "copytrade"]}
