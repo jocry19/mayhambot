@@ -23,7 +23,7 @@ WALLETS_FILE = Path(__file__).with_name("wallets.txt")
 # signatures already handled (websocket and polling both see the same transaction: act once)
 _seen: OrderedDict[str, None] = OrderedDict()
 _seen_lock = threading.Lock()  # websocket worker and polling run in different threads
-DETECTED = {"ws": 0, "poll": 0, "gap": 0}  # swaps per source since the last hourly line; gap = poll found a
+DETECTED = {"wslog": 0, "ws": 0, "poll": 0, "gap": 0}  # swaps per source since the last hourly line; gap = poll found a
 #                                            swap of a wallet the websocket was watching (missed notification)
 WS_LATENCY: list[float] = []  # seconds from websocket notification to recognised swap (hourly mean)
 # (source, side, seconds from the swap's block time to our recognition) of recent swaps, for the hourly line
@@ -75,7 +75,7 @@ def record_detection(conn, sw: chain.Swap, source: str, notified_at: float | Non
 def lag_summary(since: float = 0.0, side: str | None = "buy") -> dict:
     """{source: {n, p50, p90, max}} of block-time -> recognition lags (seconds) since `since`."""
     out: dict = {}
-    for src in ("ws", "poll", "gap"):
+    for src in ("wslog", "ws", "poll", "gap"):
         xs = sorted(x for s_, sd, x, t in list(LAG) if s_ == src and t >= since and (side is None or sd == side)
                     and x == x)
         if xs:
@@ -352,6 +352,52 @@ def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, 
         if received_at:
             WS_LATENCY.append(time.time() - received_at)
     return sw
+
+
+VERIFY: dict = {"checked": 0, "corrected": 0, "rejected": 0}  # log-read swaps checked against the full tx
+
+
+def process_logs(conn, s: Settings, wallet: str, sig: str, logs, received_at: float | None = None) -> chain.Swap | None:
+    """Fast path: a pump.fun trade read from the notification's logs (no RPC call). None when the logs are not
+    a clear pump.fun trade of this wallet; then process_signature reads the transaction as before."""
+    sw = chain.swap_from_logs(logs, wallet, sig)
+    if not sw or not _claim(conn, sig, wallet):
+        return None
+    solusd = market.sol_usd(s)
+    store.save_swaps(conn, [sw], solusd)
+    DETECTED["wslog"] += 1
+    record_detection(conn, sw, "wslog", received_at)
+    if received_at:
+        WS_LATENCY.append(time.time() - received_at)
+    return sw
+
+
+def verify_swap(conn, s: Settings, rpc: chain.Rpc, sw: chain.Swap) -> str:
+    """Re-read a log-read swap from the full transaction (public RPC, bulk lane) and store the exact amounts
+    (fees included). 'ok' | 'corrected' | 'rejected' | 'unread' (try again later)."""
+    try:
+        tx = rpc.read("getTransaction", [sw.signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
+                                                        "commitment": "confirmed"}], priority="bulk")
+    except Exception:
+        return "unread"
+    if not tx:
+        return "unread"
+    VERIFY["checked"] += 1
+    full = chain.extract_swap(tx, sw.wallet, market.sol_usd(s))
+    if not full or full.mint != sw.mint or full.side != sw.side:
+        VERIFY["rejected"] += 1
+        log.info("log-read swap %s did not hold up against the transaction", sw.signature[:8])
+        store.event(conn, "verify", f"Swap aus Logs nicht bestätigt: {sw.signature[:8]}…", "warn",
+                    {"sig": sw.signature, "wallet": sw.wallet, "mint": sw.mint})
+        return "rejected"
+    conn.execute("UPDATE ct_swaps SET token_amount=?, sol_amount=?, price_sol=?, ts=COALESCE(NULLIF(?, 0), ts) "
+                 "WHERE sig=? AND wallet=? AND mint=?", (full.token_amount, full.sol_amount, full.price_sol,
+                                                        full.block_time, sw.signature, sw.wallet, sw.mint))
+    conn.commit()
+    if abs(full.sol_amount - sw.sol_amount) > 0.05 * max(sw.sol_amount, 1e-9):
+        VERIFY["corrected"] += 1
+        return "corrected"
+    return "ok"
 
 
 def prune(conn, s: Settings) -> int:

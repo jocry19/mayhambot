@@ -7,6 +7,7 @@ are handled by a dedicated thread with its own database connection and strategy,
 """
 from __future__ import annotations
 
+import collections
 import logging
 import queue
 import threading
@@ -41,6 +42,8 @@ class Watcher:
         self.streams = [ws.WalletStream(s, url=urls[i:] + urls[:i], events=self.events, name=f"wallet-ws-{i}")
                         for i in range(n)]
         self.handled = 0
+        self.fast = 0  # swaps read straight from the notification logs (no getTransaction)
+        self._verify: collections.deque = collections.deque(maxlen=500)  # (due_at, tries, swap)
         self._thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------ control
@@ -71,7 +74,9 @@ class Watcher:
     def status(self) -> str:
         parts = [f"{st.url.split('?')[0].replace('wss://', '')} {'up' if st.connected else 'down'} "
                  f"({len(st.covered())} wallets, {st.stats['connects']} connects)" for st in self.streams]
-        return "; ".join(parts) or "off"
+        v = tracker.VERIFY
+        return ("; ".join(parts) or "off") + (f"; {self.fast} read from logs, verified {v['checked']}"
+                                              f" (corrected {v['corrected']}, rejected {v['rejected']})")
 
     # ------------------------------------------------------------------ worker
     def _work(self) -> None:
@@ -81,18 +86,44 @@ class Watcher:
         strat = Strategy(conn, self.s, self.exs)
         while not self._stop.is_set():
             try:
-                wallet, sig, got = self.events.get(timeout=0.5)
+                wallet, sig, got, *rest = self.events.get(timeout=0.5)
             except queue.Empty:
                 self._pending(strat)
+                self._verify_one(conn)
                 continue
-            try:
-                sw = store.retry_locked(tracker.process_signature, conn, self.s, self.rpc, wallet, sig, 3, got)
-                if sw:
-                    self.handled += 1
-                    handle_swap(strat, sw)
-            except Exception as e:
-                log.debug("ws swap %s failed: %s", sig[:8], e)
+            self.handle(conn, strat, wallet, sig, got, rest[0] if rest else None)
             self._pending(strat)
+
+    def handle(self, conn, strat, wallet: str, sig: str, got: float, logs=None):
+        """One notification: pump.fun trades straight from the logs (decided within milliseconds, verified
+        against the full transaction afterwards), everything else via getTransaction."""
+        sw = None
+        try:
+            sw = store.retry_locked(tracker.process_logs, conn, self.s, wallet, sig, logs, got)
+            if sw:
+                self.fast += 1
+                self._verify.append((time.time() + 3, 0, sw))
+            else:
+                sw = store.retry_locked(tracker.process_signature, conn, self.s, self.rpc, wallet, sig, 3, got)
+            if sw:
+                self.handled += 1
+                handle_swap(strat, sw)
+        except Exception as e:
+            log.debug("ws swap %s failed: %s", sig[:8], e)
+        return sw
+
+    def _verify_one(self, conn) -> None:
+        """When idle: check the oldest due log-read swap against its transaction (public RPC, never Helius)."""
+        if not self._verify or self._verify[0][0] > time.time():
+            return
+        due, tries, sw = self._verify.popleft()
+        try:
+            res = tracker.verify_swap(conn, self.s, self.rpc, sw)
+        except Exception as e:
+            log.debug("verify %s failed: %s", sw.signature[:8], e)
+            res = "unread"
+        if res == "unread" and tries < 4:
+            self._verify.append((time.time() + 10 * (tries + 1), tries + 1, sw))
 
     @staticmethod
     def _pending(strat) -> None:

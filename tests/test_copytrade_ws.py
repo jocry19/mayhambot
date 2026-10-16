@@ -364,3 +364,87 @@ def test_failed_decimals_lookup_is_not_cached(monkeypatch):
     chain._decimals_cache.pop("MintX", None)
     assert real(R(), "MintX") == 6
     assert real(R(), "MintX") == 9 and real(R(), "MintX") == 9 and R.n == 2
+
+
+# ------------------------------------------------------------------ pump.fun trades read from the logs
+import base64 as _b64
+import hashlib as _hl
+import struct as _st
+
+_USER = bytes(range(1, 33))
+_MINTB = bytes(range(40, 72))
+WHALE = chain._b58(_USER)
+PMINT = chain._b58(_MINTB)
+
+
+def _trade_log(sol=2.0, tokens=50_000_000.0, buy=True, user=_USER, mint=_MINTB, ts=None):
+    raw = (_hl.sha256(b"event:TradeEvent").digest()[:8] + mint + _st.pack("<QQ", int(sol * 1e9), int(tokens * 1e6))
+           + bytes([1 if buy else 0]) + user + _st.pack("<qQQ", ts or int(time.time()), 40 * 10**9, 800 * 10**15)
+           + bytes(100))  # newer program versions append fee/creator fields
+    return "Program data: " + _b64.b64encode(raw).decode()
+
+
+def _logs(*events):
+    return [f"Program {chain.PUMP_PROGRAM} invoke [1]", "Program log: Instruction: Buy", *events,
+            f"Program {chain.PUMP_PROGRAM} success"]
+
+
+def test_pump_trade_is_read_from_the_notification_logs():
+    sw = chain.swap_from_logs(_logs(_trade_log(1.5, 30e6), _trade_log(0.5, 10e6)), WHALE, "sigL")
+    assert sw and (sw.side, sw.mint, sw.wallet, sw.signature) == ("buy", PMINT, WHALE, "sigL")
+    assert sw.sol_amount == pytest.approx(2.0) and sw.token_amount == pytest.approx(40e6)
+    assert sw.price_sol == pytest.approx(2.0 / 40e6) and abs(sw.block_time - time.time()) < 5
+    sell = chain.swap_from_logs(_logs(_trade_log(buy=False)), WHALE, "s")
+    assert sell and sell.side == "sell"
+    # unclear cases go the normal getTransaction way
+    assert chain.swap_from_logs(_logs(_trade_log(user=bytes(32 * [9]))), WHALE, "s") is None  # someone else
+    assert chain.swap_from_logs(_logs(_trade_log(), _trade_log(buy=False)), WHALE, "s") is None  # buy + sell
+    assert chain.swap_from_logs(_logs(_trade_log(), "Log truncated"), WHALE, "s") is None
+    assert chain.swap_from_logs(["Program log: Instruction: Route"], WHALE, "s") is None  # Jupiter/Raydium
+    assert chain.swap_from_logs(None, WHALE, "s") is None
+
+
+class _NoTxRpc:
+    def __init__(self, tx=None):
+        self.tx, self.reads = tx, []
+
+    def read(self, method, params, **kw):
+        self.reads.append((method, kw.get("priority")))
+        return self.tx
+
+
+def test_watcher_copies_a_pump_buy_without_any_rpc_call_and_verifies_later(env, monkeypatch):
+    from copytrade import watch
+
+    s, conn, ex, state = env
+    seen = []
+
+    class Strat:
+        def on_whale_buy(self, sw):
+            seen.append(sw)
+
+        def process_pending(self):
+            pass
+
+    full_tx = parsed_tx(-2_200_000_000, 0, 40e6, payer=WHALE)  # with pump.fun's fee: 2.2 SOL really spent
+    for b in full_tx["meta"]["preTokenBalances"] + full_tx["meta"]["postTokenBalances"]:
+        b.update(owner=WHALE, mint=PMINT)
+    rpc = _NoTxRpc(full_tx)
+    w = watch.Watcher(Settings(db_path=s.db_path, ws_urls=["off"]), rpc, {}, threading.Event())
+    t0 = time.time()
+    sw = w.handle(conn, Strat(), WHALE, "sigFast", t0, _logs(_trade_log(2.0, 40e6)))
+    assert sw and seen == [sw] and rpc.reads == [] and time.time() - t0 < 0.5 and w.fast == 1
+    assert conn.execute("SELECT source FROM ct_detect WHERE sig='sigFast'").fetchone()[0] == "wslog"
+    # the second socket reports the same transaction: handled once
+    assert w.handle(conn, Strat(), WHALE, "sigFast", t0, _logs(_trade_log(2.0, 40e6))) is None and len(seen) == 1
+    # later, when idle: checked against the full transaction on the public bulk lane
+    w._verify[0] = (0, 0, w._verify[0][2])
+    w._verify_one(conn)
+    assert rpc.reads == [("getTransaction", "bulk")] and tracker.VERIFY["corrected"] >= 1
+    sol = conn.execute("SELECT sol_amount FROM ct_swaps WHERE sig='sigFast'").fetchone()[0]
+    assert sol == pytest.approx(2.2, abs=0.01)  # exact amount from the transaction replaces the curve amount
+    # a log-read swap the transaction does not confirm is flagged
+    rpc.tx = parsed_tx(-2_200_000_000, 0, 40e6)  # someone else's balances
+    w._verify.append((0, 0, sw))
+    w._verify_one(conn)
+    assert tracker.VERIFY["rejected"] >= 1

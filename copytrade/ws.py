@@ -156,4 +156,5 @@ class WalletStream:
         v = ((p.get("result") or {}).get("value")) or {}
         if w and v.get("signature") and not v.get("err"):
             self.stats["notifications"] += 1
-            self.events.put((w, v["signature"], time.time()))
+            # the logs ride along: pump.fun trades can be read from them without asking for the transaction
+            self.events.put((w, v["signature"], time.time(), v.get("logs")))

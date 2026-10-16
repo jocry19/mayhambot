@@ -91,7 +91,8 @@ class Engine:
         pub = sum(v for k, v in u.items() if k.startswith("public:"))
         hel = sum(v for k, v in u.items() if k.startswith("helius:"))
         lat = tracker.WS_LATENCY
-        line = (f"detection last hour: {tracker.DETECTED['ws']} swaps via websocket"
+        line = (f"detection last hour: {tracker.DETECTED['wslog']} pump.fun swaps read from websocket logs,"
+                f" {tracker.DETECTED['ws']} via websocket + transaction"
                 + (f" (mean {sum(lat) / len(lat):.2f}s notification->swap)" if lat else "")
                 + f", {tracker.DETECTED['poll']} via polling, {tracker.DETECTED['gap']} gaps (polling found what"
                 f" the websocket missed); whale buy lag block->recognised: {watch.lag_text(self._last_usage)}"
@@ -100,7 +101,7 @@ class Engine:
                 + (f" ({', '.join(f'{h} {n}' for h, n in sorted(self.rpc.endpoints().items(), key=lambda x: -x[1]))})"
                    if self.rpc.endpoints() else "")
                 + f", helius {hel}, fallbacks {self.rpc.fallbacks}, public bulk failures {self.rpc.bulk_failures}")
-        tracker.DETECTED.update(ws=0, poll=0, gap=0)
+        tracker.DETECTED.update(wslog=0, ws=0, poll=0, gap=0)
         self.rpc.fallbacks = self.rpc.bulk_failures = 0
         tracker.WS_LATENCY.clear()
         self.rpc.counts.clear()

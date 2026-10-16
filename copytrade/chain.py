@@ -5,7 +5,10 @@ SOLANA_RPC_URL makes wallet polling faster and avoids 429s.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
+import struct
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -240,6 +243,58 @@ def extract_swap(tx: dict, wallet: str, sol_usd: float = 0.0) -> Swap | None:
         sol_amount=sol_amt,
         price_sol=sol_amt / abs(tok),
     )
+
+
+# ---------------------------------------------------------------- pump.fun trades straight from the logs
+PUMP_PROGRAM = "6EF8rrDYGrSquN2vUbW2kH7JMLtQFZyD3J4bLy1F2uY3"
+_TRADE_DISC = hashlib.sha256(b"event:TradeEvent").digest()[:8]
+_B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def _b58(b: bytes) -> str:
+    n, out = int.from_bytes(b, "big"), ""
+    while n:
+        n, r = divmod(n, 58)
+        out = _B58[r] + out
+    return "1" * (len(b) - len(b.lstrip(b"\0"))) + out
+
+
+def decode_pump_trade(data_b64: str) -> dict | None:
+    """pump.fun TradeEvent (Anchor event in a 'Program data:' log line) -> dict, else None. Layout: disc 8,
+    mint 32, sol_amount u64, token_amount u64, is_buy bool, user 32, timestamp i64, virtual reserves 2x u64."""
+    try:
+        raw = base64.b64decode(data_b64)
+    except (ValueError, TypeError):
+        return None
+    if len(raw) < 113 or raw[:8] != _TRADE_DISC:
+        return None
+    sol, tok = struct.unpack_from("<QQ", raw, 40)
+    ts, vsol, vtok = struct.unpack_from("<qQQ", raw, 89)
+    return {"mint": _b58(raw[8:40]), "sol": sol / 1e9, "tokens": tok / 1e6, "is_buy": raw[56] == 1,
+            "user": _b58(raw[57:89]), "ts": ts, "v_sol": vsol / 1e9, "v_tok": vtok / 1e6}
+
+
+def swap_from_logs(logs: list | None, wallet: str, signature: str) -> Swap | None:
+    """The wallet's pump.fun buy/sell read from the websocket notification's own logs: no getTransaction, so a
+    whale buy is known well under a second after the notification. Only the clear case (all of the wallet's
+    trade events in one coin and one direction, logs complete); anything else returns None and goes the normal
+    getTransaction way. Amounts are the curve's (without pump.fun's ~1 % fee); the full read follows later."""
+    if not logs or any("Log truncated" in (ln or "") for ln in logs):
+        return None
+    evs = []
+    for ln in logs:
+        if isinstance(ln, str) and ln.startswith("Program data: "):
+            ev = decode_pump_trade(ln[14:].strip())
+            if ev and ev["user"] == wallet:
+                evs.append(ev)
+    if not evs or len({(e["mint"], e["is_buy"]) for e in evs}) != 1:
+        return None
+    sol, tok = sum(e["sol"] for e in evs), sum(e["tokens"] for e in evs)
+    if tok <= 0 or sol < 0.001:
+        return None
+    return Swap(signature=signature, wallet=wallet, block_time=int(evs[-1]["ts"] or 0),
+                side="buy" if evs[0]["is_buy"] else "sell", mint=evs[0]["mint"], token_amount=tok,
+                sol_amount=sol, price_sol=sol / tok)
 
 
 def wallet_swaps(rpc: Rpc, wallet: str, limit: int = 50, until: str | None = None,
