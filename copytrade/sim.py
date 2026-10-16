@@ -49,6 +49,26 @@ GRID = grid()
 EXIT_GRID = [v for v in GRID if v.delay_s == DELAYS_S[0]]  # signal mode / evaluated trades: no delay choice
 
 
+def neighbors(variants: Sequence[Variant], i: int) -> list[int]:
+    """Variants one grid step away from variants[i] in exactly one parameter (parameter jitter)."""
+    v = variants[i]
+    axes = {"delay_s": DELAYS_S, "take_profit": TAKE_PROFITS, "stop_loss": STOP_LOSSES,
+            "trail": TRAILS, "max_hold_min": HOLDS_MIN, "inflow_exit": INFLOW_EXIT}
+
+    def val(x: Variant, k: str):
+        return (x.trail_activate, x.trail_drawdown) if k == "trail" else getattr(x, k)
+
+    out = []
+    for j, w in enumerate(variants):
+        diff = [k for k in axes if val(w, k) != val(v, k)]
+        if len(diff) == 1:
+            k = diff[0]
+            seq = list(axes[k])
+            if val(v, k) in seq and val(w, k) in seq and abs(seq.index(val(v, k)) - seq.index(val(w, k))) == 1:
+                out.append(j)
+    return out
+
+
 def nearest(params: dict, variants: Sequence[Variant] = GRID) -> int:
     """Index of the grid variant closest to a parameter dict (for "what the current settings do")."""
     def dist(v: Variant) -> float:

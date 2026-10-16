@@ -72,6 +72,12 @@ def _gains(fn, variants=sim.GRID):
 
 
 STAR = sim.Variant(60, 0.4, 0.2, 0.15, 0.08, 45, 1)
+NEAR = {sim.GRID[j] for j in sim.neighbors(sim.GRID, sim.GRID.index(STAR))}
+
+
+def star(v, hi, lo):
+    """STAR wins, its grid neighbours do half as well (a stable optimum, not a lone spike)."""
+    return hi if v == STAR else hi / 2 if v in NEAR else lo
 
 
 def _seed(conn, n, fn_by_i, features_by_i=lambda i: {"tier": "smart"}, wallet="", kind="whale_buy"):
@@ -82,7 +88,7 @@ def _seed(conn, n, fn_by_i, features_by_i=lambda i: {"tier": "smart"}, wallet=""
 
 def test_tune_accepts_only_out_of_sample_improvement(env):
     s, conn, ex, state = env
-    _seed(conn, 50, lambda i, v: 0.2 if v == STAR else -0.05)
+    _seed(conn, 50, lambda i, v: star(v, 0.2, -0.05))
     res = learn.tune(conn, s)["whale"]
     assert res["accepted"] and res["params"]["take_profit"] == 0.4 and res["test_gain"] > res["baseline"]
     lp = learn.params_for(conn, "whale")
@@ -105,7 +111,7 @@ def test_tune_rejects_overfit(env):
 
 def test_tune_needs_enough_entries(env):
     s, conn, ex, state = env
-    _seed(conn, learn.MIN_MODE_N - 1, lambda i, v: 0.2 if v == STAR else -0.05)
+    _seed(conn, learn.MIN_MODE_N - 1, lambda i, v: star(v, 0.2, -0.05))
     assert learn.tune(conn, s).get("whale") is None
     assert learn.status(conn)["whale"]["needed_for_tuning"] == 1
 
@@ -114,7 +120,8 @@ def test_learning_never_widens_stop_or_hold(env):
     s, conn, ex, state = env
     wide = sim.Variant(15, 0.6, 0.3, 0, 0, 240, 0)  # best, but its stop is wider than the preset's 20 %
     ok = sim.Variant(15, 0.6, 0.2, 0, 0, 120, 0)
-    _seed(conn, 50, lambda i, v: 0.4 if v == wide else 0.2 if v == ok else -0.05)
+    near_ok = {sim.GRID[j] for j in sim.neighbors(sim.GRID, sim.GRID.index(ok))}
+    _seed(conn, 50, lambda i, v: 0.4 if v == wide else 0.2 if v == ok else 0.1 if v in near_ok else -0.05)
     p = control.preset(conn, "whale")
     assert p.stop_loss == pytest.approx(0.2)
     res = learn.tune(conn, s)["whale"]
@@ -132,7 +139,7 @@ def test_learning_never_widens_stop_or_hold(env):
 
 def test_learned_filter_blocks_losing_bucket(env):
     s, conn, ex, state = env
-    _seed(conn, 60, lambda i, v: (0.4 if i % 2 else -0.1) if v == STAR else -0.05,
+    _seed(conn, 60, lambda i, v: star(v, 0.4 if i % 2 else -0.1, -0.05),
           features_by_i=lambda i: {"tier": "ultra" if i % 2 else "none"})
     assert learn.tune(conn, s)["whale"]["accepted"]
     assert learn.blocked(conn, "whale", {"tier": "none"}) == "tier=none"
@@ -154,7 +161,7 @@ def test_wallet_scope_and_autotune_switch(env):
 # ---------------------------------------------------------------------- use in trading
 def test_strategy_uses_learned_exits_and_delay(env):
     s, conn, ex, state = env
-    _seed(conn, 50, lambda i, v: 0.2 if v == STAR else -0.05)
+    _seed(conn, 50, lambda i, v: star(v, 0.2, -0.05))
     learn.tune(conn, s)
     st = strategy.Strategy(conn, s, ex)
     assert st.on_whale_buy(whale_buy(age=5)) is None  # waits for the learned 60 s delay
@@ -170,7 +177,7 @@ def test_strategy_uses_learned_exits_and_delay(env):
 
 def test_pending_entry_dropped_when_whale_sold(env):
     s, conn, ex, state = env
-    _seed(conn, 50, lambda i, v: 0.2 if v == STAR else -0.05)
+    _seed(conn, 50, lambda i, v: star(v, 0.2, -0.05))
     learn.tune(conn, s)
     st = strategy.Strategy(conn, s, ex)
     sw = whale_buy(age=5)
@@ -276,3 +283,22 @@ def test_quiet_wallets_are_polled_less_often(env):
     assert {r["address"] for r in tracker.due_wallets(conn, s, now)} == {hot, warm}
     conn.execute("UPDATE ct_wallets SET last_polled=?", (int(now - 400),))
     assert len(tracker.due_wallets(conn, s, now)) == 3
+
+
+def test_lone_spike_in_the_grid_is_not_accepted(env):
+    s, conn, ex, state = env
+    _seed(conn, 50, lambda i, v: 0.2 if v == STAR else -0.05)  # only STAR wins, every neighbour loses
+    res = learn.tune(conn, s)["whale"]
+    assert res is None or not res["accepted"]
+
+
+def test_lucky_test_set_fails_the_monte_carlo(env):
+    s, conn, ex, state = env
+    # STAR wins big on one test entry and loses on all others: positive mean, but luck
+    _seed(conn, 50, lambda i, v: star(v, (2.0 if i == 40 else -0.1) if i >= 35 else 0.2, -0.05))
+    rows = learn._rows(conn, "whale")
+    test = rows[int(len(rows) * learn.TRAIN_SHARE):]
+    mte = learn._means(test, len(sim.GRID))
+    b = sim.GRID.index(STAR)
+    rob = learn.robustness(test, b, 0, sim.GRID, mte)
+    assert mte[b] > 0 and rob["p_win"] < learn.BOOTSTRAP_MIN_WIN

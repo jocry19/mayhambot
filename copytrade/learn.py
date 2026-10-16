@@ -58,6 +58,8 @@ HALF_LIFE_H = 72.0  # older entries count less: weight halves every 3 days (mark
 ROLLBACK_MIN_TRADES = 10  # own trades under a learned version before it can be rolled back
 ROLLBACK_MARGIN = 0.05  # roll back when real trades are this far below the version's test result and negative
 EDGE_SIZE_UNIT = 0.03  # size factor = lower edge bound / this, clamped to 0.5..1.5
+BOOTSTRAP_RUNS = 500  # Monte-Carlo resamples of the test part before a variant is accepted
+BOOTSTRAP_MIN_WIN = 0.8  # share of resamples in which the variant must be in the black and beat the current one
 CALIB_MIN_TRADES = 10  # own trades needed before the paper/sim cost gap is applied
 CALIB_MAX_EXTRA = 0.10  # never add more than 10 %-points of extra cost per round trip
 
@@ -365,6 +367,31 @@ def rollback(conn) -> list[int]:
     return out
 
 
+def robustness(test: Sequence[dict], best: int, base: int, variants: Sequence[sim.Variant],
+               mte: Sequence[float], cost: float = 0.0, runs: int = BOOTSTRAP_RUNS) -> dict:
+    """Is the winner an edge or luck? Monte Carlo over the test entries (bootstrap with replacement): share of
+    runs where it is in the black AND beats the current settings; and parameter jitter: the mean test result
+    of its grid neighbours (one step away in one parameter) must be in the black too (no lone spike)."""
+    import random
+
+    rows = [r for r in test if len(r["gains"]) == len(variants)]
+    if not rows:
+        return {"p_win": 0.0, "neighbours": None, "runs": 0}
+    gb = [max(GAIN_CLIP[0], min(GAIN_CLIP[1], r["gains"][best] if r["gains"][best] is not None else 0)) for r in rows]
+    g0 = [max(GAIN_CLIP[0], min(GAIN_CLIP[1], r["gains"][base] if r["gains"][base] is not None else 0)) for r in rows]
+    w = [r["w"] for r in rows]
+    rng = random.Random(len(rows) * 7919 + best)  # deterministic: the same data gives the same verdict
+    n, wins = len(rows), 0
+    for _ in range(runs):
+        idx = [rng.randrange(n) for _ in range(n)]
+        sw = sum(w[i] for i in idx) or 1
+        mb = sum(w[i] * gb[i] for i in idx) / sw - cost
+        m0 = sum(w[i] * g0[i] for i in idx) / sw - cost
+        wins += mb > 0 and mb > m0
+    nb = [mte[j] for j in sim.neighbors(variants, best)]
+    return {"p_win": wins / runs, "neighbours": sum(nb) / len(nb) if nb else None, "runs": runs}
+
+
 def _allowed(variants: Sequence[sim.Variant], cap_sl: float, cap_hold: float) -> list[int]:
     return [i for i, v in enumerate(variants) if v.stop_loss <= cap_sl + 1e-9 and v.max_hold_min <= cap_hold + 1e-9]
 
@@ -419,13 +446,16 @@ def tune_scope(conn, strategy: str, rows: list[dict], scope: str, min_n: int, mi
     # in the black on the older AND the newer part, and better than now out of sample; a variant that loses
     # money in training is the least bad of 1296, not an edge (10/2026: version 9 had train -0.8 %)
     accepted = int(mte[best] > mte[base] + MIN_IMPROVEMENT and mte[best] > 0 and mtr[best] > 0)
+    rob = robustness(test, best, base, variants, mte, cost) if accepted else None
+    if rob and (rob["p_win"] < BOOTSTRAP_MIN_WIN or rob["neighbours"] is None or rob["neighbours"] <= 0):
+        accepted = 0  # lucky on this test set or a lone spike in the grid: not stable enough
     params = variants[best].as_dict()
     if scope == "mode":
         params["block"] = _learn_filters(rows, best, split)
     trades = [r for r in rows if r["kind"] == "trade" and r["actual"] is not None and r["sim_actual"] is not None]
     gap = (sum(r["actual"] - r["sim_actual"] for r in trades) / len(trades)) if trades else None
     notes = {"variants": len(variants), "baseline": variants[base].key(), "best": variants[best].key(),
-             "calibration_gap": gap, "extra_cost": cost, "n_trades": len(trades),
+             "calibration_gap": gap, "extra_cost": cost, "robustness": rob, "n_trades": len(trades),
              "kinds": {k: sum(1 for r in rows if r["kind"] == k) for k in ("trade", "whale_buy", "signal")}}
     last = conn.execute(
         "SELECT params, accepted FROM ct_param_versions WHERE strategy=? AND scope=? ORDER BY id DESC LIMIT 1",

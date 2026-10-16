@@ -211,6 +211,12 @@ Kosten keine der 1296 Varianten im Plus. Daher:
 - Lernen: `learn.extra_cost` = Median(Simulation − tatsächlich) der eigenen Trades (ab 10, höchstens 10 %-Punkte)
   wird von jeder Variante abgezogen; übernommen wird eine Variante nur, wenn sie im Training **und** im Test im
   Plus liegt. Aktive Versionen mit Trainingsverlust werden ignoriert.
+- Robustheit (`learn.robustness`): 500 Monte-Carlo-Ziehungen des Testteils, in ≥ 80 % muss die Variante im Plus
+  und besser als die aktuelle sein; ihre Nachbarn im Gitter (ein Schritt in einem Parameter) müssen im Mittel
+  ebenfalls im Plus liegen, sonst ist es eine einzelne Spitze. Ergebnis in `notes.robustness`.
+- Alte Daten verlieren alle 72 h die Hälfte ihres Gewichts (`learn.decay`). Ein Wal braucht eine positive
+  Untergrenze (Mittel minus Standardfehler); die Größe skaliert mit ihr (0,5× bis 1,5×). Eine gelernte Version,
+  deren eigene Trades (≥ 10) klar unter dem Testergebnis und im Minus liegen, wird automatisch zurückgerollt.
 
 ## Rug-Schutz (safety/)
 
