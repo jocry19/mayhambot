@@ -166,10 +166,18 @@ def _note_planned(name):
         f.write(json.dumps({"ts": time.time(), "service": name}) + "\n")
 
 
+RESTART_S, RESTART_MAX_S, STABLE_S = 10, 300, 600
+
+
 def run():
-    """Foreground supervisor: restarts a crashed service after 10 s, stops all on Ctrl+C / SIGTERM."""
+    """Foreground supervisor: restarts a crashed service after 10 s, doubling up to 5 min while it keeps crashing
+    (reset after 10 min up or a planned restart), without holding up the other services; stops all on
+    Ctrl+C / SIGTERM."""
     _stop_detached(quiet=True)  # never run next to copies started with `start`
     procs = {n: _spawn(n, detach=False) for n in SERVICES}
+    started = {n: time.time() for n in SERVICES}
+    crashes = {n: 0 for n in SERVICES}
+    due = {}
     print(f"mayhambot läuft. Dashboard: http://localhost:{PORT}  (Ctrl+C beendet alles)")
     stopping = []
 
@@ -179,19 +187,33 @@ def run():
     try:
         while not stopping:
             time.sleep(5)
+            now = time.time()
             for n, p in procs.items():
-                if p.poll() is not None:
-                    print(f"{n} beendet (code {p.returncode}), Neustart in 10 s")
-                    if p.returncode == PLANNED_EXIT:
-                        _note_planned(n)
-                    time.sleep(10)
-                    procs[n] = _spawn(n, detach=False)
+                if p is None:
+                    if now >= due[n] and not stopping:
+                        procs[n], started[n] = _spawn(n, detach=False), now
+                    continue
+                if p.poll() is None:
+                    continue
+                planned = p.returncode == PLANNED_EXIT
+                if planned:
+                    _note_planned(n)
+                if planned or now - started[n] >= STABLE_S:
+                    crashes[n] = 0
+                delay = min(RESTART_MAX_S, RESTART_S * 2 ** crashes[n])
+                crashes[n] += 0 if planned else 1
+                print(f"{n} beendet (code {p.returncode}), Neustart in {delay} s")
+                procs[n], due[n] = None, now + delay
     except KeyboardInterrupt:
         pass
     for n, p in procs.items():
+        if p is None:
+            continue
         p.terminate()
         (PIDS / f"{n}.pid").unlink(missing_ok=True)
     for p in procs.values():
+        if p is None:
+            continue
         try:
             p.wait(15)
         except subprocess.TimeoutExpired:

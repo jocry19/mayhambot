@@ -109,3 +109,40 @@ def test_red_gate_prints_the_failing_test(monkeypatch, capsys):
     assert mayham._checks_ok() is False
     out = capsys.readouterr().out
     assert "FAILED tests/x.py::test_y" in out and "line 5\n" not in out
+
+
+def test_crash_loop_backs_off_without_holding_up_others(monkeypatch, tmp_path):
+    clock = [0.0]
+    spawned = []
+
+    class Proc:
+        def __init__(self, name):
+            self.name, self.returncode = name, None
+            spawned.append((name, clock[0]))
+
+        def poll(self):
+            if self.name == "web" and self.returncode is None:
+                self.returncode = 1  # crashes right away, every time
+            return self.returncode
+
+        def terminate(self):
+            pass
+
+        def wait(self, t):
+            pass
+
+    def sleep(s):
+        clock[0] += s
+        if clock[0] > 400:
+            raise KeyboardInterrupt
+    monkeypatch.setattr(mayham, "PIDS", tmp_path)
+    monkeypatch.setattr(mayham, "_stop_detached", lambda quiet=False: None)
+    monkeypatch.setattr(mayham, "_spawn", lambda n, detach: Proc(n))
+    monkeypatch.setattr(mayham.time, "sleep", sleep)
+    monkeypatch.setattr(mayham.time, "time", lambda: clock[0])
+    monkeypatch.setattr(mayham.signal, "signal", lambda *a: None)
+    mayham.run()
+    web = [t for n, t in spawned if n == "web"]
+    gaps = [b - a for a, b in zip(web, web[1:])]
+    assert gaps[:4] == [15, 25, 45, 85]  # 10, 20, 40, 80 s back-off plus the 5 s poll
+    assert len([n for n, _ in spawned if n != "web"]) == len(mayham.SERVICES) - 1  # the others never restarted
