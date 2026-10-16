@@ -267,3 +267,19 @@ def test_red_streak_names_failing_tests_once(repo, monkeypatch):
     hangs = [a for a in alerts if "hängt" in a]
     assert len(hangs) == 1 and "test_x" in hangs[0]
     assert autoupdate._load()["red_streak"] == 4
+
+
+def test_local_commit_blocks_and_alerts(repo):
+    work, push, head, alerts = repo
+    sh(work, "git", "config", "user.email", "t@t")
+    sh(work, "git", "config", "user.name", "t")
+    (work / "local.txt").write_text("x")
+    sh(work, "git", "add", ".")
+    sh(work, "git", "commit", "-qm", "local filter")
+    push("feature")
+    before = head()
+    res = autoupdate.run_once(alerts.append, health=lambda: (True, "ok"))
+    assert "blockiert" in res and "local filter" in res and "1 Commit(s) von main fehlen" in res
+    autoupdate.run_once(alerts.append, health=lambda: (True, "ok"))
+    assert head() == before and len(alerts) == 1
+    assert "blockiert" in autoupdate._load()["blocked"]

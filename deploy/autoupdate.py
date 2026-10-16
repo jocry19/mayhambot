@@ -201,8 +201,15 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
     if target == st.get("bad"):
         return f"übersprungen: {target[:7]} ist schon an den Tests gescheitert"
     if subprocess.run(["git", "merge-base", "--is-ancestor", head, target], cwd=ROOT).returncode != 0:
-        return _once(st, alert, f"diverged:{head}", f"⚠️ Auto-Update: lokaler Stand {head[:7]} ist nicht Teil "
-                     "von main, bitte von Hand prüfen.")
+        local = git("log", "--format=%h %s", f"{target}..{head}").splitlines()
+        behind = len(git("rev-list", f"{head}..{target}").splitlines())
+        msg = (f"⛔ Lokaler Commit blockiert das Update: {len(local)} Commit(s) nur auf dem Mac "
+               f"({'; '.join(local[:3])}), {behind} Commit(s) von main fehlen. Bitte sichern und zurücksetzen.")
+        log(msg)
+        st["blocked"] = msg
+        _save(st)
+        return _once(st, alert, f"diverged:{head}:{target}", msg)
+    st.pop("blocked", None)
     if git("status", "--porcelain", "--untracked-files=no"):
         return _once(st, alert, f"dirty:{target}", "⚠️ Auto-Update wartet: lokale Änderungen im Checkout.")
     live = live_reason(env)
