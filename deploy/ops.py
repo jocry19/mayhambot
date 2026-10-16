@@ -18,8 +18,9 @@ Run from anywhere; paths are relative to the mayhambot folder (parent of deploy/
 
 Settings (optional, in .env):
   BACKUP_DIR            where backups go (default: ~/mayhambot-backups); use a 2nd disk or cloud folder
-  BACKUP_KEEP_HOURS     keep every backup this long (default 48), then one per day ...
-  BACKUP_KEEP_DAYS      ... for this many days (default 30)
+  BACKUP_KEEP_HOURS     keep every backup this long (default 24), then one per day ...
+  BACKUP_KEEP_DAYS      ... for this many days (default 14)
+  BACKUP_MAX_GB         and never more than this in total, oldest go first, the newest 3 always stay (default 5)
   FEED_STALL_MIN        alert/restart when no new market data for this long (default 15)
   ALERT_REPEAT_HOURS    repeat an unresolved alert every N hours (default 6)
   WATCHDOG_RUNTIME      local (default) | docker   (docker: the host watches the container)
@@ -543,18 +544,28 @@ def backup(args) -> int:
 
 
 def prune_backups(out: Path) -> int:
-    keep_h, keep_d = cfg("BACKUP_KEEP_HOURS", 48), cfg("BACKUP_KEEP_DAYS", 30)
+    keep_h, keep_d = cfg("BACKUP_KEEP_HOURS", 24), cfg("BACKUP_KEEP_DAYS", 14)
+    max_bytes = cfg("BACKUP_MAX_GB", 5.0) * 1e9
     now = time.time()
     days_kept = set()
     removed = 0
+    kept = []
     for f in sorted(out.glob("mayhambot-*.tar.gz"), reverse=True):   # newest first
         age = now - f.stat().st_mtime
         day = f.name[10:18]
-        if age < keep_h * 3600:
+        if age < keep_h * 3600 or (age < keep_d * 86400 and day not in days_kept):
+            if age >= keep_h * 3600:
+                days_kept.add(day)
+            kept.append(f)
             continue
-        if age < keep_d * 86400 and day not in days_kept:
-            days_kept.add(day)
-            continue
+        f.unlink()
+        removed += 1
+    # the database grows: cap the total, dropping the oldest first but never the newest 3
+    total = sum(f.stat().st_size for f in kept)
+    for f in reversed(kept[3:]):
+        if total <= max_bytes:
+            break
+        total -= f.stat().st_size
         f.unlink()
         removed += 1
     return removed

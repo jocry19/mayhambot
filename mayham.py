@@ -204,17 +204,29 @@ def logs(name=None):
 
 
 def _checks_ok():
-    """Tests must pass before a new version goes live."""
-    dirs = ["tests"] + sorted(str(p.relative_to(ROOT)) for p in ROOT.glob("*/tests")
-                              if p.is_dir() and not p.parent.name.startswith(".") and p.parent.name != "node_modules")
-    print("Tests: " + ", ".join(dirs))
-    for cmd in ([PY, "tests/test_logic.py"], [PY, "-m", "pytest", *dirs, "-q", "-x"]):
-        r = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        if r.returncode != 0:
-            print("Tests rot:", " ".join(cmd[1:]))
-            print("\n".join((r.stdout or "").splitlines()[-30:]))  # the failing test lands in update.log
-            return False
-    return True
+    """Tests must pass before a new version goes live. They run in a throwaway git worktree of HEAD: no data/,
+    logs/ or .env of the live bot, so the gate on the Mac sees the same world as a fresh clone (tests that read
+    data/ by relative path would otherwise trip over the bot's real state files)."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="mayham-gate-") as td:
+        wt = Path(td) / "wt"
+        subprocess.run(["git", "worktree", "add", "-q", "--detach", str(wt), "HEAD"], cwd=ROOT, check=True,
+                       capture_output=True)
+        try:
+            dirs = ["tests"] + sorted(str(p.relative_to(wt)) for p in wt.glob("*/tests")
+                                      if p.is_dir() and not p.parent.name.startswith(".")
+                                      and p.parent.name != "node_modules")
+            print("Tests: " + ", ".join(dirs))
+            for cmd in ([PY, "tests/test_logic.py"], [PY, "-m", "pytest", *dirs, "-q", "-x", "-p", "no:cacheprovider"]):
+                r = subprocess.run(cmd, cwd=wt, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                if r.returncode != 0:
+                    print("Tests rot:", " ".join(cmd[1:]))
+                    print("\n".join((r.stdout or "").splitlines()[-30:]))  # the failing test lands in update.log
+                    return False
+            return True
+        finally:
+            subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=ROOT, capture_output=True)
+            subprocess.run(["git", "worktree", "prune"], cwd=ROOT, capture_output=True)
 
 
 def update():

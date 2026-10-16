@@ -1,4 +1,5 @@
 """deploy/autoupdate.py against a throwaway git origin + checkout (no network, no launchd)."""
+import os
 import json
 import time
 import sqlite3
@@ -408,3 +409,15 @@ def test_live_trading_in_file_wins_over_stale_environment(repo, monkeypatch):
     monkeypatch.setenv("LIVE_TRADING", "false")      # left behind by an earlier dotenv import
     (work / ".env").write_text("LIVE_TRADING=true\n")
     assert autoupdate.live_reason(ops.load_env())
+
+
+def test_prune_backups_caps_total_size(tmp_path, monkeypatch):
+    monkeypatch.setattr(ops, "ENV", {"BACKUP_MAX_GB": "0.000003"})   # 3 kB
+    now = time.time()
+    for h in range(6):                                                 # 6 hourly backups of 1 kB, all young
+        f = tmp_path / f"mayhambot-20261016-{20 - h:02d}0000.tar.gz"
+        f.write_bytes(b"x" * 1000)
+        os.utime(f, (now - h * 3600, now - h * 3600))
+    assert ops.prune_backups(tmp_path) == 3
+    assert sorted(p.name for p in tmp_path.iterdir())[-1] == "mayhambot-20261016-200000.tar.gz"
+    assert len(list(tmp_path.iterdir())) == 3
