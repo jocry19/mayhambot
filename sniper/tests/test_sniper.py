@@ -540,10 +540,11 @@ def test_log_stream_paces_and_falls_back_to_program_subscription():
         "signature": "S", "err": None, "logs": ["Program data: " + _trade_event(
             mint_b, user_b, 1_000_000_000, 34_000_000_000_000, True, 31_000_000_000, 1_039_000_000_000_000)]}}}}
     s.deliver(note)
-    assert got == []                                      # not a watched coin
-    s.subscribe({rpcws.b58(mint_b)})
+    assert got == []                                      # not a watched coin (yet): kept in the buffer
+    s.subscribe({rpcws.b58(mint_b)})                      # watched now: the buffered trade is replayed
+    assert len(got) == 1 and got[0]["mint"] == rpcws.b58(mint_b) and got[0]["slot"] == 5 and s.replayed == 1
     s.deliver(note)
-    assert len(got) == 1 and got[0]["mint"] == rpcws.b58(mint_b)
+    assert len(got) == 2
 
 
 def test_blind_stream_alarm_and_no_stream_label(tmp_path):
@@ -596,3 +597,32 @@ def test_program_mode_survives_a_restart_and_pumpportal_backs_off(tmp_path):
     finally:
         websockets.connect, asyncio.sleep = orig_connect, orig_sleep
     assert sleeps[:6] == [2, 4, 8, 16, 32, 60] and max(sleeps) == 600 and svc2.pp_fails >= 10
+
+
+def test_complete_rpc_stream_finds_bundles_by_slot_and_counts_trades_once(conn):
+    """Program mode + replay buffer: buyers in the creation slot are the bundle (no unseen-curve guess), the dev
+    buy inside the create transaction and a replayed duplicate are not counted twice."""
+    from sniper.analyze import analyze
+    c = cfg()
+    eng = Engine(c, conn, enricher=FakeEnricher())
+    cv = Curve("SLOTB")
+    cr = dict(cv.create(), slot=500, src="rpc_logs")
+    st = eng.handle(cr, T0)
+    st.stream_complete = True
+
+    def rpc(msg, slot):
+        return dict(msg, slot=slot, src="rpc_logs", newTokenBalance=None)
+    dev_again = rpc(dict(cv._msg(DEV, "buy", 0.5, cv.dev_tokens, None), signature=cr["signature"]), 500)
+    eng.handle(dev_again, T0)                                   # dev buy of the create tx: already counted
+    b1 = rpc(cv.buy("bundler1", 2.0), 500)
+    b2 = rpc(cv.buy("bundler2", 2.0), 500)
+    eng.handle(b1, T0 + 0.1)
+    eng.handle(b2, T0 + 0.1)
+    eng.handle(b2, T0 + 0.2)                                    # replayed twice: ignored
+    for i in range(8):
+        eng.handle(rpc(cv.buy(f"org{i}", 0.3), 503 + i), T0 + 2 + i)
+    assert st.n_seen == 10
+    a = analyze(st, c, None, {}, T0 + 20)
+    assert a.features["bundle_src"] == "slot" and a.features["bundle_wallets"] == 2
+    assert set(w for w, r in a.insiders.items() if r == "bundle") == {"bundler1", "bundler2"}
+    assert 10 < a.features["bundle_pct"] < 13 and a.features["unseen_pct"] < 0.5   # their real share, no guess

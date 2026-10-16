@@ -79,6 +79,18 @@ def analyze(st, cfg, enr=None, tiers=None, now=None):
                 b["tokens"] += float(e.get("tokens") or 0)
                 b["sol"] += float(e.get("sol") or 0)
         bundle_tokens = sum(b["tokens"] for b in bundle.values())
+    elif st.trade_src == "rpc_logs" and st.stream_complete and create_slot is not None:
+        # RPC program stream with replay buffer: every trade since the creation, each with its slot. Buyers in
+        # the creation slot (and the next bundle_slots - 1) are the bundle, exactly as with the RPC early list
+        src = "slot"
+        for t in st.trades:
+            if t.side == "buy" and t.wallet != creator and t.slot is not None \
+                    and create_slot <= t.slot < create_slot + max(1, cfg.bundle_slots):
+                b = bundle.setdefault(t.wallet, {"wallet": t.wallet, "role": "bundle", "slot": t.slot, "ts": t.ts,
+                                                 "tokens": 0.0, "sol": 0.0})
+                b["tokens"] += t.tokens
+                b["sol"] += t.sol
+        bundle_tokens = sum(b["tokens"] for b in bundle.values())
     else:
         src = "stream"
         # PumpPortal pushes bundled buys right after the create; the RPC log stream subscribes later, so its
@@ -92,7 +104,8 @@ def analyze(st, cfg, enr=None, tiers=None, now=None):
         bundle_tokens = sum(b["tokens"] for b in bundle.values())
     unseen = st.unseen_tokens()
     unseen_pct = _pct(unseen, supply)
-    explained = bool(early)  # the early list from pump.fun / RPC contains the trades the stream missed
+    # the early list from pump.fun / RPC, or a complete RPC stream, contains the trades a late stream misses
+    explained = bool(early) or (st.trade_src == "rpc_logs" and st.stream_complete and src == "slot")
     bundle_pct = _pct(bundle_tokens, supply) + (0.0 if explained else unseen_pct)
     n_bundle = len(bundle)
     F.update(bundle_src=src, create_slot=create_slot, bundle_wallets=n_bundle, bundle_pct=round(bundle_pct, 2),

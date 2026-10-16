@@ -73,12 +73,20 @@ class Service:
         if self.record and src == "rpc":
             self.record.write(json.dumps({"t": round(now, 3), "m": json.dumps(m)}) + "\n")
         self.launch_log[src].append(now)
-        if self.engine.handle(m, now) is not None:
+        st = self.engine.handle(m, now)
+        if st is not None:
             self.first_log[src].append(now)
+            since = self.logs.program_complete_since() if self.trades_via == "rpc" else None
+            # the program-wide stream has run for a while: with the replay buffer, every trade since this
+            # creation reaches the engine, so bundles can be read from the creation slot directly
+            st.stream_complete = bool(since and now - since >= 10)
 
     def _save_mode(self, mode):
-        store.set_state(self._hb_conn if hasattr(self, "_hb_conn") else self.conn, "rpc_trade_mode",
-                        json.dumps({"mode": mode, "ts": int(time.time())}))
+        conn = self._own_conn()   # called from the event loop; the heartbeat's connection lives in a thread
+        try:
+            store.set_state(conn, "rpc_trade_mode", json.dumps({"mode": mode, "ts": int(time.time())}))
+        finally:
+            conn.close()
 
     def launch_rates(self, now=None):
         now = now or time.time()
@@ -93,7 +101,7 @@ class Service:
         return out
 
     def _on_rpc_trade(self, m):
-        now = time.time()
+        now = m.pop("_rx", None) or time.time()
         if self.record:  # same format as PumpPortal lines, so replay sees the RPC trades too
             self.record.write(json.dumps({"t": round(now, 3), "m": json.dumps(m)}) + "\n")
         self.rpc_trades += 1
@@ -292,8 +300,17 @@ class Service:
             self.engine.add_external(p["mint"], p["created_ts"], p["symbol"], p["name"], p["pool"], p["mcap_sol"],
                                      info=p["info"])
 
+    def _own_conn(self):
+        """A connection of its own for work in asyncio.to_thread: self.conn belongs to the event loop (engine
+        writes), and a commit from another thread would commit its half-done writes too."""
+        return store.connect(self.db_path)
+
     def tiers_round(self):
-        self.engine.tiers = store.tier_map(self.conn)
+        conn = self._own_conn()
+        try:
+            self.engine.tiers = store.tier_map(conn)
+        finally:
+            conn.close()
 
     def trade_rate(self, now, window=300, idx=1):
         """Trades per minute over the last `window` seconds from the heartbeat samples (idx 1 all, 2 RPC only)."""
@@ -379,7 +396,18 @@ class Service:
             log.warning("Gelernte Regel %s", "AKTIV (Papier): " + json.dumps(rule["conditions"]) if rule else "aus")
 
     def prune_round(self):
-        store.prune(self.conn, self.cfg.keep_days)
+        conn = self._own_conn()
+        try:
+            store.prune(conn, self.cfg.keep_days)
+        finally:
+            conn.close()
+
+    def _balance(self):
+        conn = self._own_conn()
+        try:
+            return self.engine.book.balance(conn)
+        finally:
+            conn.close()
 
     def report(self):
         e = self.engine
@@ -399,7 +427,7 @@ class Service:
                  "%d im Speicher, %d im Trade-Abo (%s, RPC-Logs %d Abos), Warteschlange %d | Calls gesamt RPC %d, API/Metadaten %d | offen %d, "
                  "Papier-Guthaben %.3f SOL", c["creates"], c["trades"], c["migrations"], c["stage1"], c["stage2"],
                  c["entries"], n, subs, self.trades_via, len(self.logs.subs), self.q.qsize(), self.budget.total["rpc"], self.budget.total["api"],
-                 len(e.book.open), e.book.balance(self.conn))
+                 len(e.book.open), self._balance())
 
     async def main(self, duration=None):
         threading.Thread(target=self.worker, daemon=True, name="sniper-stage2").start()

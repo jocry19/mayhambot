@@ -150,6 +150,7 @@ class LogStream:
     back-off only resets after a connection stayed up, and mode "auto" moves to one program-wide subscription
     after repeated rate-limit closes, so the per-coin churn stops entirely."""
     RATE_LIMIT_SWITCH, RATE_LIMIT_WINDOW = 3, 600
+    BUFFER_SEC = 15
 
     def __init__(self, url, on_msg, max_subs=150, parser=None, name="RPC-Log-Datenstrom", stale_sec=None,
                  subs_per_sec=4.0, mode="mints", program=None):
@@ -170,6 +171,8 @@ class LogStream:
         self.rate_limit_log = deque(maxlen=50)
         self.reconnects = 0
         self.server_drops = 0                  # closes by the RPC with an invalid close code (1002)
+        self.recent, self._buffered, self.replayed = {}, 0, 0   # program mode: recent trades of unwanted coins
+        self._program_since = None
         self.ws = None
         self._tokens, self._last = 0.0, None
         self.on_mode = None                    # callback(mode) when auto switches (the service persists it)
@@ -177,9 +180,17 @@ class LogStream:
     def subscribe(self, mints, now=None):
         import time as _t
         now = now or _t.time()
-        for m in set(mints) - self.want:
+        new = set(mints) - self.want
+        for m in new:
             self.want_ts[m] = now
         self.want |= set(mints)
+        # program mode: trades of a coin that came in before we wanted it (bundles in the creation slot, the
+        # seconds until the create reached us) are replayed from the buffer, so the stream has them all
+        for m in new:
+            for ts, msg in self.recent.pop(m, ()):
+                if now - ts <= self.BUFFER_SEC:
+                    self.replayed += 1
+                    self.on_msg(msg)
 
     def unsubscribe(self, mints):
         self.want -= set(mints)
@@ -242,11 +253,33 @@ class LogStream:
             log.warning("%s: %d Rate-Limit-Abbrüche in %d min, wechsle auf ein einziges Abo auf Programmebene",
                         self.name, recent, self.RATE_LIMIT_WINDOW // 60)
 
-    def deliver(self, m):
-        for msg in self.parser(m):
+    def deliver(self, m, now=None):
+        msgs = self.parser(m)
+        if not msgs:
+            return
+        import time as _t
+        now = now or _t.time()
+        for msg in msgs:
             if self.mode == "program" and msg.get("mint") not in self.want:
+                self._buffer(msg, now)
                 continue
             self.on_msg(msg)
+
+    def _buffer(self, msg, now):
+        q = self.recent.get(msg.get("mint"))
+        if q is None:
+            q = self.recent[msg.get("mint")] = deque(maxlen=200)
+        msg["_rx"] = now                  # when it arrived; the replay keeps the real timing
+        q.append((now, msg))
+        self._buffered += 1
+        if self._buffered % 2000 == 0:   # drop coins nobody asked for within the buffer time
+            cut = now - self.BUFFER_SEC
+            for k in [k for k, v in self.recent.items() if not v or v[-1][0] < cut]:
+                del self.recent[k]
+
+    def program_complete_since(self):
+        """Since when the program-wide subscription delivers every pump.fun trade (None if it does not)."""
+        return self._program_since if self.mode == "program" and self.program in self.subs else None
 
     async def run(self, stop):
         import time as _t
@@ -258,6 +291,7 @@ class LogStream:
                 async with websockets.connect(self.url, ping_interval=20, ping_timeout=20, max_size=2 ** 22,
                                               open_timeout=15) as ws:
                     self.connected, self.subs, self.pending = True, {}, {}
+                    self._program_since = None
                     up_since = _t.monotonic()
                     self.reconnects += 1
                     log.info("%s verbunden (%s, %s)", self.name, self.url.split("?")[0],
@@ -286,6 +320,8 @@ class LogStream:
                                 acc = self.pending.pop(m["id"])
                                 if "result" in m:
                                     self.subs[acc] = m["result"]
+                                    if acc == self.program:
+                                        self._program_since = _t.time()
                                 else:
                                     self.rejects += 1
                                     log.warning("logsSubscribe abgelehnt: %s", str(m.get("error"))[:160])

@@ -168,7 +168,8 @@ class Engine:
             if kind in ("buy", "sell"):
                 if st.migrated:
                     return st
-                st.apply_trade(m, now)
+                if st.apply_trade(m, now) is None:
+                    return st          # duplicate or the dev buy of the create transaction
                 self.counters["trades"] += 1
                 if mint in self.book.open:
                     self.book.check(self.conn, st, now, self.quote_fn)

@@ -60,6 +60,8 @@ def ensure_schema(conn):
         for name, typ in cols:
             if name not in have:
                 db.retry_locked(conn, lambda: conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}"))
+    db.retry_locked(conn, lambda: conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sniper_launches_created ON sniper_launches(created_ts)"))
     global LAUNCH_COLS
     LAUNCH_COLS = None
     return conn

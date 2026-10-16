@@ -85,6 +85,7 @@ class StreamTrade:
     v_sol: float
     v_tok: float
     mcap_sol: float
+    slot: int | None = None
 
 
 @dataclass
@@ -136,6 +137,8 @@ class LaunchState:
     seen_net_tokens: float = 0.0                      # tokens bought minus sold by the trades we saw
     n_seen: int = 0
     max_trades: int = 3000
+    stream_complete: bool = False                     # every trade since the creation is in the stream (RPC program mode)
+    _keys: set = field(default_factory=set, repr=False)
     learned: bool = False                             # picked by the accepted research rule (sniper.research)
     create_slot: int | None = None                    # slot of the creation (RPC create stream), bundle reference
     path: PricePath | None = None                     # bucketed mcap path for exit replays (sniper_paths)
@@ -174,7 +177,15 @@ class LaunchState:
                         sol=f(m.get("solAmount")), tokens=f(m.get("tokenAmount")),
                         new_balance=f(m.get("newTokenBalance"), None) if m.get("newTokenBalance") is not None else None,
                         v_sol=f(m.get("vSolInBondingCurve")), v_tok=f(m.get("vTokensInBondingCurve")),
-                        mcap_sol=f(m.get("marketCapSol")))
+                        mcap_sol=f(m.get("marketCapSol")), slot=m.get("slot"))
+        key = (t.sig, t.wallet, round(t.tokens, 3), side)
+        if t.sig and key in self._keys:
+            return None            # the same trade twice (buffer replay, reconnect, two sources)
+        if t.sig and t.sig == self.create_sig and t.wallet == self.creator and side == "buy" and self.dev_tokens:
+            self._keys.add(key)    # the dev buy inside the create transaction is already in apply_create
+            return None
+        if t.sig:
+            self._keys.add(key)
         if len(self.trades) < self.max_trades:
             self.trades.append(t)
         self.n_seen += 1
