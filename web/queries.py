@@ -1290,10 +1290,15 @@ def _pid_running(name):
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
         pid = int(open(os.path.join(root, "data", "pids", f"{name}.pid")).read().strip())
-        os.kill(pid, 0)
-        return True
     except Exception:
         return None  # unknown (no pid file: launchd, other machine, tests)
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
 
 
 SNIPER_RPC_WS_MAX_SUBS = 150  # logsSubscribe per websocket (sniper/README.md)
@@ -1575,14 +1580,15 @@ def overview(conn):
     }
 
 
+def _table_counts(conn):
+    """Rows per table. COUNT(*) scans whole tables, so callers cache this for minutes."""
+    return {t: scalar(conn, f"SELECT COUNT(*) FROM '{t}'", default=0) for t in sorted(tables(conn)) if not t.startswith("sqlite_")}
+
+
 def system(conn):
     from .db import db_path
     path = db_path()
-    counts = {}
-    for t in sorted(tables(conn)):
-        if t.startswith("sqlite_"):
-            continue
-        counts[t] = scalar(conn, f"SELECT COUNT(*) FROM '{t}'", default=0)
+    counts = cache.get(("table_counts", path), 300, lambda: _table_counts(conn))
     last = {}
     for t, col in (("trades", "ts"), ("token_prices", "ts"), ("signal_metrics", "ts"), ("signals", "ts"),
                    ("model_predictions", "ts"), ("model_versions", "ts"), ("ct_events", "ts"), ("ct_equity", "ts"),
@@ -1608,8 +1614,114 @@ def system(conn):
         size = None
     return {"db_path": path, "db_size": size, "tables": counts, "last": last, "services": services,
             "tier_source": tier_source(conn), "now": now_ts(), "sol_usd": _f(sol_usd(conn), 2),
+            "health": cache.get(("health", path), 10, lambda: services_health(conn)),
+            "backup": cache.get(("backup",), 60, backup_status),
             "api_usage": cache.get(("api_usage",), 10, api_usage),
             "rpc_pool": cache.get(("rpc_pool",), 10, lambda: rpc_pool(usage=cache.get(("api_usage",), 10, api_usage)))}
+
+
+# ====================================================================== health of all services
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# service -> (German label, what it does, SQL for its newest activity ts, expected max gap in s)
+SERVICE_INFO = {
+    "signals": ("Signale", "Trades sammeln, Smart-Money-Signale", "SELECT MAX(ts) FROM trades", 15 * 60),
+    "copytrade": ("Copy-Trading", "Wallets pollen, Papier- und Echtkäufe", "SELECT MAX(last_polled) FROM ct_wallets WHERE active=1", 15 * 60),
+    "safety": ("Rug-Schutz", "Coins auf Rug, Honeypot, Insider prüfen", "SELECT MAX(ts) FROM safety_tokens", 30 * 60),
+    "sniper": ("Launch-Sniper", "neue Launches prüfen, Papierkäufe", None, SNIPER_HB_STALE_S),
+    "market": ("Markt", "Marktphase, Sektoren, Narrative", "SELECT MAX(ts) FROM market_snapshots", 30 * 60),
+    "intel": ("Zentrale", "Merkmale, Ticker, Quellen-Auswertung", "SELECT MAX(ts) FROM intel_events", 30 * 60),
+    "research": ("Modell & Forschung", "Wallet-Bewertung, Retraining", "SELECT MAX(ts) FROM model_versions", 30 * 3600),
+    "web": ("Dashboard", "diese Oberfläche", None, None),
+}
+
+
+def _service_names():
+    try:
+        import mayham  # type: ignore  (root launcher; only defs at import time)
+        return list(mayham.SERVICES)
+    except Exception:
+        return list(SERVICE_INFO)
+
+
+def _log_mtime(name):
+    try:
+        return int(os.path.getmtime(os.path.join(os.getenv("MAYHAM_LOG_DIR") or os.path.join(ROOT_DIR, "logs"), f"{name}.log")))
+    except OSError:
+        return None
+
+
+def _json_file(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def backup_status(now=None):
+    """Newest backup archive (deploy/ops.py: BACKUP_DIR, mayhambot-*.tar.gz) and the watchdog's view of it.
+    Only file names, sizes and times; the archive is never opened."""
+    import glob
+    now = now or time.time()
+    d = os.path.expanduser(os.getenv("BACKUP_DIR") or "~/mayhambot-backups")
+    files = sorted(glob.glob(os.path.join(d, "mayhambot-*.tar.gz")))
+    last = files[-1] if files else None
+    ts = int(os.path.getmtime(last)) if last else None
+    wd = _json_file(os.path.join(ROOT_DIR, "data", "watchdog_state.json")) or {}
+    au = _json_file(os.path.join(ROOT_DIR, "data", "autoupdate_state.json")) or {}
+    problems = {k: v.get("msg") for k, v in (wd.get("problems") or {}).items() if isinstance(v, dict)}
+    return {"last_name": os.path.basename(last) if last else None, "last_ts": ts,
+            "last_size": os.path.getsize(last) if last else None, "count": len(files),
+            "age_s": int(now - ts) if ts else None, "ok": bool(ts and now - ts <= 3 * 3600),
+            "watchdog_ts": int(wd["last_run"]) if wd.get("last_run") else None, "problems": problems,
+            "autoupdate": {"deployed": (au.get("deployed") or "")[:7] or None, "last_deploy": au.get("last_deploy"),
+                           "bad": (au.get("bad") or "")[:7] or None,
+                           "disabled": os.path.exists(os.path.join(ROOT_DIR, "data", "NO_AUTO_UPDATE"))}}
+
+
+def services_health(conn, now=None):
+    """One row per app service: process running, newest data it wrote, and whether that is overdue.
+    state: ok | langsam (activity older than expected) | steht (process gone or no activity for 3x the gap) | neu (no data yet)."""
+    now = int(now or time.time())
+    out = []
+    names = _service_names()
+    for name in names + [k for k in SERVICE_INFO if k not in names and k != "web"]:
+        label, what, sql, gap = SERVICE_INFO.get(name, (name, "", None, None))
+        running = _pid_running(name)
+        last, extra = None, {}
+        if name == "sniper":
+            st = sniper_stream(conn, now) if has(conn, "sniper_state") else None
+            if st:
+                last = st.get("heartbeat_ts")
+                extra = {"connected": st.get("connected"), "launch_source": st.get("active_launch_source"),
+                         "launches_per_min": st.get("launches_per_min"), "trade_source": st.get("trade_source"),
+                         "rpc_ws_connected": st.get("rpc_ws_connected")}
+        elif sql:
+            tbl = re.search(r"FROM (\w+)", sql).group(1)
+            if has(conn, tbl):
+                try:
+                    last = scalar(conn, sql)
+                except Exception:
+                    last = None
+        elif name == "web":
+            last = now
+        logm = _log_mtime(name)
+        age = now - int(last) if last else None
+        if running is False:
+            state = "steht"
+        elif not last:
+            state = "neu"
+        elif gap and age > 3 * gap:
+            state = "steht"
+        elif gap and age > gap:
+            state = "langsam"
+        else:
+            state = "ok"
+        if name == "sniper" and state == "ok" and extra.get("connected") is False:
+            state = "langsam"
+        out.append({"name": name, "label": label, "what": what, "running": running, "last_ts": int(last) if last else None,
+                    "age_s": age, "expected_s": gap, "log_ts": logm, "state": state, **extra})
+    return out
 
 
 # ====================================================================== API budgets (core.http usage files)

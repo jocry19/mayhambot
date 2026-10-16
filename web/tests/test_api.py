@@ -410,3 +410,46 @@ def test_sniper_launch_sources(tmp_path):
     Q._SNIPER_HIST.clear()
     assert s["connected"] is True and s["active_launch_source"] == "rpc" and s["launches_per_min"] == 9.0
     assert [x["source"] for x in s["launch_sources"]] == ["pumpportal", "rpc"]
+
+
+def test_system_health_backup_and_errors(demo, empty, tmp_path, monkeypatch):
+    import time as _t
+
+    from web import queries as Q
+    from web.server import app
+
+    s = _client(demo).get("/api/system").json()
+    names = {r["name"]: r for r in s["health"]}
+    assert {"signals", "copytrade", "sniper", "web"} <= set(names)
+    assert all(r["state"] in ("ok", "langsam", "steht", "neu") for r in s["health"])
+    assert names["web"]["state"] == "ok" and "backup" in s
+    e = _client(empty).get("/api/system").json()
+    assert all(r["state"] in ("neu", "ok") for r in e["health"])
+    # backups: newest archive by name, never opened; watchdog problems passed through
+    bd = tmp_path / "bk"
+    bd.mkdir()
+    (bd / "mayhambot-20261016-0100.tar.gz").write_bytes(b"x" * 10)
+    (bd / "mayhambot-20261016-1300.tar.gz").write_bytes(b"x" * 20)
+    monkeypatch.setenv("BACKUP_DIR", str(bd))
+    b = Q.backup_status(now=_t.time() + 60)
+    assert b["last_name"] == "mayhambot-20261016-1300.tar.gz" and b["count"] == 2 and b["ok"] and b["last_size"] == 20
+    assert not Q.backup_status(now=_t.time() + 4 * 3600)["ok"]
+    # a view that hits a missing table answers 503 with a German message instead of a bare 500
+    import sqlite3 as _s
+
+    @app.get("/api/_test_missing")
+    def _missing():
+        raise _s.OperationalError("no such table: intel_quotes")
+
+    app.router.routes.insert(0, app.router.routes.pop())  # ahead of the SPA catch-all
+    try:
+        r = _client(empty).get("/api/_test_missing")
+        assert r.status_code == 503 and "Daten fehlen noch" in r.json()["detail"] and r.json()["missing"] == "intel_quotes"
+    finally:
+        app.router.routes[:] = [x for x in app.router.routes if getattr(x, "path", "") != "/api/_test_missing"]
+
+
+def test_pid_states(tmp_path, monkeypatch):
+    from web import queries as Q
+
+    assert Q._pid_running("gibtsnicht-xyz") is None

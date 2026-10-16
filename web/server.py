@@ -18,6 +18,7 @@ import base64
 import hmac
 import json
 import os
+import sqlite3
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -32,7 +33,30 @@ STATIC = Path(__file__).resolve().parent / "static"
 PASSWORD = os.getenv("WEB_PASSWORD", "")
 USER = os.getenv("WEB_USER", "mayham")
 
+
 app = FastAPI(title="mayhambot", docs_url="/api/docs", openapi_url="/api/openapi.json")
+
+
+@app.exception_handler(sqlite3.OperationalError)  # handled inside the app: no traceback, page gets the message
+@app.exception_handler(Exception)                   # anything else: still a German message (Starlette logs it too)
+async def _unhandled(request: Request, exc: Exception):
+    """A view that hits a table another service has not created yet (or any other bug) answers with a German
+    message instead of a bare 500, so the page can say what is missing. Keys are stripped from the text."""
+    msg = str(exc)
+    try:
+        from core.http import redact  # type: ignore
+        msg = redact(msg)
+    except Exception:
+        pass
+    if isinstance(exc, sqlite3.OperationalError) and ("no such table" in msg or "no such column" in msg):
+        what = msg.split(":", 1)[-1].strip()
+        return JSONResponse({"detail": f"Daten fehlen noch ({what}). Der zuständige Dienst hat seine Tabelle noch nicht angelegt "
+                                       "oder läuft mit einer älteren Version.", "missing": what}, status_code=503)
+    if isinstance(exc, sqlite3.OperationalError) and "locked" in msg:
+        return JSONResponse({"detail": "Datenbank gerade beschäftigt, nächster Versuch gleich automatisch."}, status_code=503)
+    import logging
+    logging.getLogger("web").exception("Fehler in %s", request.url.path)
+    return JSONResponse({"detail": f"Fehler in dieser Ansicht: {type(exc).__name__}: {msg[:200]}"}, status_code=500)
 
 
 class Json(JSONResponse):
@@ -358,7 +382,7 @@ def intel_coin(mint: str):
 
 @app.get("/api/system")
 def system():
-    return ok(q.system(read_conn()))
+    return ok(q.cache.get(("system",), 5, lambda: q.system(read_conn())))
 
 
 @app.get("/api/search")

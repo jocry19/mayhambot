@@ -1,5 +1,5 @@
 import { TIER_SOURCE, ago, compact, dt, dur, n, pct, usePoll } from "../lib.js";
-import { Card, Empty, Table, Tile } from "../ui.jsx";
+import { Callout, Card, Empty, Table, Tile } from "../ui.jsx";
 
 const GROUP = { helius: "Helius (RPC)", geckoterminal: "GeckoTerminal" };
 
@@ -138,6 +138,59 @@ function RpcPool({ p }) {
   );
 }
 
+const STATE = { ok: ["läuft", "good"], langsam: ["verzögert", "warn"], steht: ["steht", "bad"], neu: ["noch keine Daten", ""] };
+const LSRC = { pumpportal: "PumpPortal", rpc: "Solana-RPC" };
+const every = (s) => (s == null ? "–" : s < 120 ? `${n(s)} s` : s < 7200 ? `${n(s / 60)} min` : `${n(s / 3600)} h`);
+
+function svcDetail(r) {
+  if (r.name === "sniper" && r.last_ts) {
+    return [r.connected ? "Datenstrom verbunden" : "Datenstrom getrennt",
+      r.launch_source ? `Launches zuerst über ${LSRC[r.launch_source] || r.launch_source}${r.launches_per_min != null ? ` (${n(r.launches_per_min, 1)}/min)` : ""}` : "",
+      r.trade_source ? `Trades über ${LSRC[r.trade_source] || r.trade_source}${r.trade_source === "rpc" ? (r.rpc_ws_connected ? ", Websocket 2 verbunden" : ", Websocket 2 getrennt") : ""}` : ""].filter(Boolean).join(" · ");
+  }
+  return r.what;
+}
+
+/** All app services: process, newest data each one wrote, overdue or not. */
+function Health({ rows }) {
+  if (!rows?.length) return null;
+  const bad = rows.filter((r) => r.state === "steht");
+  return (
+    <Card title="Zustand der Dienste" sub={bad.length ? `${bad.length} von ${rows.length} stehen: ${bad.map((r) => r.label).join(", ")}` : `alle ${rows.length} Dienste liefern Daten oder starten gerade`} flush>
+      <Table rows={rows} rowKey={(r) => r.name} cols={[
+        { k: "label", l: "Dienst", fmt: (r) => <span><span className="b">{r.label}</span> <span className="mono dim" style={{ fontSize: 11.5 }}>{r.name}</span></span> },
+        { k: "state", l: "Status", sort: (r) => ["steht", "langsam", "neu", "ok"].indexOf(r.state), fmt: (r) => {
+          const [l, c] = STATE[r.state] || [r.state, ""];
+          return <span className={`badge ${c}`} title={r.running === false ? "Prozess läuft nicht" : r.running == null ? "Prozess-Status unbekannt (kein PID-File), bewertet nach den Daten" : "Prozess läuft"}>{l}</span>;
+        } },
+        { k: "last_ts", l: "Letzte Daten", r: true, sort: (r) => r.last_ts || 0, fmt: (r) => (r.name === "web" ? "jetzt" : r.last_ts ? <span className={r.state === "steht" ? "down" : r.state === "langsam" ? "warn-ink" : ""}>{ago(r.last_ts)}</span> : "–") },
+        { k: "expected_s", l: "Erwartet alle", r: true, fmt: (r) => (r.expected_s ? every(r.expected_s) : "–") },
+        { k: "what", l: "Aufgabe und Stand", sort: false, fmt: (r) => <span className="t2" style={{ whiteSpace: "normal", display: "inline-block", maxWidth: 440 }}>{svcDetail(r)}</span> },
+        { k: "log_ts", l: "Log", r: true, sort: (r) => r.log_ts || 0, fmt: (r) => (r.log_ts ? <span className="dim">{ago(r.log_ts)}</span> : "–") },
+      ]} />
+    </Card>
+  );
+}
+
+/** Backup, watchdog and auto-update as tiles; open watchdog problems as one callout. */
+function Ops({ b }) {
+  if (!b) return null;
+  const au = b.autoupdate || {};
+  const probs = Object.values(b.problems || {}).filter(Boolean);
+  return (
+    <>
+      <div className="tiles wrap-sub">
+        <Tile label="Letztes Backup" value={b.last_ts ? <span className={b.ok ? "" : "down"}>{ago(b.last_ts)}</span> : <span className="down">keins</span>}
+          sub={b.last_ts ? `${n(b.count)} Backups · ${n((b.last_size || 0) / 1e6, 1)} MB · stündlich erwartet` : "Backups liegen in BACKUP_DIR (Standard ~/mayhambot-backups)"} />
+        <Tile label="Wächter" value={b.watchdog_ts ? ago(b.watchdog_ts) : "–"} sub={b.watchdog_ts ? (probs.length ? `${probs.length} offene Probleme` : "keine offenen Probleme") : "läuft auf diesem Rechner nicht"} />
+        <Tile label="Auto-Update" value={au.disabled ? "aus" : au.deployed ? <span className="mono" style={{ fontSize: 17 }}>{au.deployed}</span> : "–"}
+          sub={au.disabled ? "abgeschaltet (data/NO_AUTO_UPDATE)" : au.last_deploy ? `eingespielt ${ago(au.last_deploy)}${au.bad ? ` · ${au.bad} zurückgerollt` : ""}` : "noch kein automatisches Update"} />
+      </div>
+      {probs.length > 0 && <Callout kind="bad" icon="alert">Wächter meldet: {probs.join(" · ")}</Callout>}
+    </>
+  );
+}
+
 export default function System() {
   const { data: d } = usePoll("/api/system", 10000);
   if (!d) return <div className="empty">Lade …</div>;
@@ -152,11 +205,13 @@ export default function System() {
         <Tile label="Letztes Modell" value={ago(d.last.model_versions)} />
         <Tile label="SOL-Preis (aus Trades)" value={`$${n(d.sol_usd, 0)}`} />
       </div>
+      <Health rows={d.health} />
+      <Ops b={d.backup} />
       <CreditsTotal t={d.api_usage?.credits} />
       <ApiUsage u={d.api_usage} />
       <RpcPool p={d.rpc_pool} />
       <div className="grid g2">
-        <Card title="Dienste" sub="Prozesse der App (python mayham.py status)" flush>
+        <Card title="Prozesse" sub="python mayham.py status" flush>
           <Table rows={d.services} rowKey={(r) => r.name} empty="Keine Prozess-Infos (App läuft woanders oder als launchd/systemd-Dienst)" cols={[
             { k: "name", l: "Dienst" },
             { k: "running", l: "Status", fmt: (r) => <span className={`badge ${r.running ? "good" : "bad"}`}>{r.running ? "läuft" : "aus"}</span> },
@@ -164,7 +219,7 @@ export default function System() {
           ]} />
           <div className="help" style={{ padding: "8px 14px" }}>{TIER_SOURCE[d.tier_source]}.</div>
         </Card>
-        <Card title="Tabellen" sub="Datensätze in der gemeinsamen Datenbank" flush>
+        <Card title="Tabellen" sub="Datensätze in der gemeinsamen Datenbank, alle 5 min gezählt" flush>
           <Table rows={rows} rowKey={(r) => r.t} tall initialSort={{ k: "c", d: "desc" }} cols={[
             { k: "t", l: "Tabelle", fmt: (r) => <span className="mono">{r.t}</span> },
             { k: "label", l: "" , fmt: (r) => <span className="t2">{r.label}</span> },

@@ -1,8 +1,8 @@
-import { StrictMode, useEffect, useRef, useState } from "react";
+import { Component, StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { MODE_LABEL, api, ago, go, getTheme, mc, refreshAll, setTheme, usePoll, useRoute, useThemeName } from "./lib.js";
-import { Icon, Toasts } from "./ui.jsx";
+import { Callout, Icon, Toasts } from "./ui.jsx";
 import Overview from "./pages/Overview.jsx";
 import Signals from "./pages/Signals.jsx";
 import Coins from "./pages/Coins.jsx";
@@ -87,6 +87,26 @@ function SideFoot() {
   );
 }
 
+/** A page that throws while rendering shows this instead of a blank screen; the menu keeps working. */
+class PageGuard extends Component {
+  constructor(p) { super(p); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err, info) { console.error("Seite abgestürzt", err, info?.componentStack); }
+  render() {
+    if (!this.state.err) return this.props.children;
+    return (
+      <div className="col" style={{ gap: 12, maxWidth: 720 }}>
+        <Callout kind="bad" icon="alert">
+          Diese Seite konnte nicht angezeigt werden. Meist fehlen Daten eines Dienstes, der gerade erst startet oder eine ältere
+          Version hat. Die anderen Seiten funktionieren weiter.
+        </Callout>
+        <div className="mono dim" style={{ fontSize: 12 }}>{String(this.state.err?.message || this.state.err).slice(0, 300)}</div>
+        <div><button className="btn" onClick={() => this.setState({ err: null })}>Erneut versuchen</button></div>
+      </div>
+    );
+  }
+}
+
 function Page({ route }) {
   const [a, b] = route.parts;
   switch (a) {
@@ -156,7 +176,7 @@ function App() {
             </button>
           </div>
         </header>
-        <div className="content"><Page route={route} /></div>
+        <div className="content"><PageGuard key={route.parts.join("/")}><Page route={route} /></PageGuard></div>
       </main>
       <Toasts />
     </div>
