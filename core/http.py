@@ -14,8 +14,11 @@ log = logging.getLogger("mayhambot.http")
 _SECRET_RE = re.compile(r"((?:api[-_]?key|apikey|token)=)[^&\s'\"]+", re.I)
 
 
+_BOT_TOKEN_RE = re.compile(r"(/bot)\d+:[A-Za-z0-9_-]+")  # Telegram: api.telegram.org/bot<id>:<secret>/...
+
+
 def redact(text):
-    return _SECRET_RE.sub(r"\1***", str(text))
+    return _BOT_TOKEN_RE.sub(r"\1***", _SECRET_RE.sub(r"\1***", str(text)))
 
 
 _old_factory = logging.getLogRecordFactory()
@@ -31,6 +34,15 @@ def _redacting_factory(*a, **kw):
 
 
 logging.setLogRecordFactory(_redacting_factory)
+
+# Tracebacks (log.exception) are formatted after the record exists, so redact the final text as well.
+if not getattr(logging.Formatter.format, "_redacting", False):
+    _old_format = logging.Formatter.format
+
+    def _redacting_format(self, record):
+        return redact(_old_format(self, record))
+    _redacting_format._redacting = True
+    logging.Formatter.format = _redacting_format
 
 # minimum seconds between calls per host (keyless public limits)
 HOST_INTERVAL = {
