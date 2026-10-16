@@ -41,6 +41,7 @@ class SniperSettings:
     stale_sec: int = field(default_factory=lambda: _i("SNIPER_STALE_SEC", 180))   # no launch that long -> reconnect
     ws_max_subs: int = field(default_factory=lambda: _i("SNIPER_WS_MAX_SUBS", 150))
     ws_subs_per_sec: float = field(default_factory=lambda: _f("SNIPER_WS_SUBS_PER_SEC", 4.0))   # paced subscribe requests
+    rug_p_block: float = field(default_factory=lambda: _f("SNIPER_RUG_P_BLOCK", 0.59))   # safety's launch model
     use_learned_rule: bool = field(default_factory=lambda: _b("SNIPER_USE_LEARNED_RULE", True))  # paper only, if accepted
     research_hours: float = field(default_factory=lambda: _f("SNIPER_RESEARCH_HOURS", 72))       # window of the hourly run
     trade_sub_mode: str = field(default_factory=lambda: _s("SNIPER_TRADE_SUB_MODE", "auto"))  # auto | mints | program

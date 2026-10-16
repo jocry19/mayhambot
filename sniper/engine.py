@@ -27,6 +27,7 @@ SKIP_LABELS = {
     "risk": "Risiko zu hoch",
     "score": "Score zu niedrig",
     "safety": "Rug-Schutz",
+    "rug_p": "Rug-Modell (Wahrscheinlichkeit zu hoch)",
     "capacity": "kein Platz (Limits, Guthaben)",
     "budget": "API-Budget erschöpft, nicht tief geprüft",
     "external": "Pool außerhalb pump.fun (nur beobachtet)",
@@ -83,6 +84,7 @@ class Engine:
         if not store.get_state(self.conn, "outcome_fix_ts"):
             # from here on max/min_ret_60m start at the decision price; research trusts them only after this
             store.set_state(self.conn, "outcome_fix_ts", str(int(time.time())))
+        self._rug_model = (0.0, None, None)
         self.trades_live = True
         self.learned = None        # accepted rule from sniper.research (refreshed by the service), None = fixed rules    # the service clears it while launches arrive without any trades (blind stream)
         self.stream_pools = None   # pools whose trades we receive (None = all); the RPC log stream decodes pump only
@@ -229,8 +231,29 @@ class Engine:
         elif now - st.created_ts >= self.cfg.max_watch_sec or st.migrated:
             self._unsub(st)
 
+    def rug_p(self, F, now=None):
+        """Rug probability within 60 min from the rug protection's learned launch model (safety.backtest,
+        retrained hourly on these launches); None without a model. The model is re-read every 10 minutes."""
+        now = now or time.time()
+        if now - self._rug_model[0] > 600:
+            try:
+                from safety import backtest, store as sstore
+                self._rug_model = (now, sstore.cache_get(self.conn, "launch_model", 86400 * 2), backtest.predict)
+            except Exception as e:  # noqa: BLE001 - the sniper works without the model
+                log.debug("launch_model not available: %s", e)
+                self._rug_model = (now, None, None)
+        _ts, model, predict = self._rug_model
+        if not model:
+            return None
+        try:
+            return round(predict(model, F), 4)
+        except Exception:  # noqa: BLE001
+            return None
+
     def _row(self, st, a, now, decision, reason, stage):
         F = a.features
+        if "rug_p" not in F:
+            F["rug_p"] = self.rug_p(F, now)
         sol_usd = self.sol_usd_fn() or 0.0
         row = dict(mint=st.mint, source=st.source, pool=st.pool, symbol=st.symbol, name=st.name, uri=st.uri,
                    creator=st.creator, created_ts=int(st.created_ts), create_sig=st.create_sig,
@@ -249,7 +272,7 @@ class Engine:
                    safety_risk=F.get("safety_risk"), safety_level=F.get("safety_level"), model_p=F.get("model_p"),
                    mcap_decide_sol=st.base_mcap_sol, mcap_decide_usd=(st.base_mcap_sol or 0) * sol_usd or None,
                    sol_usd=sol_usd or None, reasons_json=store.j(a.reasons[:8]), positives_json=store.j(a.positives[:6]),
-                   migrated=int(st.migrated))
+                   migrated=int(st.migrated), rug_p=F.get("rug_p"))
         if stage >= 2:
             row["features_json"] = store.j(dict(F, momentum_parts=a.momentum_parts, insiders=a.insiders))
         return row
@@ -390,6 +413,12 @@ class Engine:
             a = analyze(st, self.cfg, enr, self.tiers, now)
             st.insiders.update(a.insiders)
             reason = a.skip_reason(self.cfg)
+            p_rug = self.rug_p(a.features, now)
+            a.features["rug_p"] = p_rug
+            if p_rug is not None and p_rug >= self.cfg.rug_p_block and reason in (None, "score", "risk"):
+                reason = "rug_p"
+                a.reasons.append({"check": "rug_p", "risk": round(100 * p_rug, 1),
+                                  "text": f"Rug-Modell: {100 * p_rug:.0f} % Rug-Wahrscheinlichkeit in 60 min"})
             if reason == "score" and st.learned:
                 reason = None   # the accepted rule replaces the momentum score; bundles, insiders, risk still block
             if reason is None and self.cfg.require_launch_data and st.source == "pumpportal" \

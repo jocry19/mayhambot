@@ -55,6 +55,7 @@ class Service:
         self.rpc_trades = 0
         self.started = time.time()
         self._blind_warned = 0.0
+        self._research_ts = None
         self.ws_msgs = 0
         self._dex_conn = None
         self._hb_conn = store.connect(db_path)
@@ -312,7 +313,8 @@ class Service:
             "trade_source": self.trades_via, "rpc_ws_connected": self.logs.connected, "rpc_ws_subs": len(self.logs.subs),
             "rpc_ws_msgs": self.logs.msgs, "rpc_ws_mode": self.logs.mode, "rpc_ws_wanted": len(self.logs.want),
             "rpc_ws_attempts": self.logs.attempts, "rpc_ws_rejects": self.logs.rejects,
-            "rpc_ws_reconnects": self.logs.reconnects, **self.stream_health(now), **self._launch_status(now)}))
+            "rpc_ws_reconnects": self.logs.reconnects,
+            "learned_rule": (self.engine.learned or {}).get("conditions"), "research_ts": self._research_ts, **self.stream_health(now), **self._launch_status(now)}))
 
     def any_connected(self):
         return bool(self.connected or self.logs.connected or (self.creates and self.creates.connected))
@@ -343,6 +345,7 @@ class Service:
             rule = research.learned_rule(conn) if self.cfg.use_learned_rule else None
         finally:
             conn.close()
+        self._research_ts = rep.get("ts")
         with self.engine.lock:
             changed = (rule or {}).get("conditions") != (self.engine.learned or {}).get("conditions")
             self.engine.learned = rule

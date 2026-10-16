@@ -133,12 +133,36 @@ Kauf nur bei `score ≥ SNIPER_MIN_SCORE` (40), `risk ≤ SNIPER_MAX_RISK` (45) 
 
 `service_status` (lesen mit `json.loads(store.get_state(conn, "service_status"))`): `ts` (Unix-Sekunden; älter als
 30 s = Dienst steht), `connected` (irgendeine Quelle offen: PumpPortal, RPC-Launches oder RPC-Trades),
-`pumpportal_connected`, `trade_sources: {pumpportal|rpc: {active, connected, trades_per_min, …}}` (rpc zusätzlich
+`pumpportal_connected`, `learned_rule` (Bedingungen der angenommenen Forschungsregel oder `null`), `research_ts`, `trade_sources: {pumpportal|rpc: {active, connected, trades_per_min, …}}` (rpc zusätzlich
 `mode`, `subs`, `wanted`, `attempts`, `rejects`, `reconnects`), `trades_per_min` (5 min), `blind` (Launches ohne
 Trades seit 5 min), `launch_sources`, `active_launch_source`, `launches_per_min`, `ws_msgs` (Nachrichten seit Start), `subscribed`
 (Coins im Trade-Abo), `in_memory`, `queue` (Kandidaten in der Warteschlange für Stufe 2), `open_positions`,
 `budget: {rpc|api|deep: {used_last_min, per_min, total}}`, `counters: {creates, trades, migrations, stage1, stage2,
 entries}` (seit Start), `pump_api_ok` (`null`, wenn die pump.fun-API aus ist). Beim Beenden wird einmal `connected: false` geschrieben.
+
+## Forschung an echten Ausgängen (`python -m sniper research`)
+
+Stündlich im Dienst (Fenster `SNIPER_RESEARCH_HOURS`, Standard 72 h) und von Hand über die Kommandozeile:
+
+- **Preisverlauf** je Launch in `sniper_paths` (5-s-Stufen mit Tief/Hoch für 15 min, dann 30 s bis 65 min). Damit
+  werden Ausstiegsregeln exakt nachgespielt, inklusive der Frage, ob erst der Stop oder erst der Gewinn kam.
+  Ältere Launches ohne Verlauf laufen über die Stände nach 1/5/15/60 min.
+- **Merkmale**: Rangkorrelation mit dem Netto-Ergebnis, AUC für Verdopplung und Rug, Ergebnis je Fünftel.
+- **Ausstiege**: Raster aus Take-Profit, Anteil, Trailing, Stop und Zeit-Stop, alles nach Kosten (Curve-Gebühr
+  und Slippage auf beiden Seiten, Priority-Fee je Transaktion, wie im Papierbuch).
+- **Risiko-Schwellen**: Rug- und Verdopplungsrate je Stufe von Bundle-Anteil, Curve-Schätzung, Dev-Anteil, Top-10,
+  schnellen Käufern und Dev-Launches der letzten 24 h, auch nur unter Launches mit Pump.
+- **Regelsuche** mit zeitlicher Trennung: Regeln (eine oder zwei Bedingungen plus Ausstieg) werden an den älteren
+  70 % gewählt und einmal an den neueren 30 % gemessen. **Angenommen** wird eine Regel nur, wenn der Testteil nach
+  Kosten im Plus ist (Bootstrap-Untergrenze über 0, mindestens 30 Trades). Erst dann kauft der Sniper damit im
+  Papiermodus, mit ihren eigenen Ausstiegen; Bundles, Insider, Risiko, Rug-Modell und Rug-Schutz blocken weiter.
+  Hält eine Regel in einem späteren Lauf nicht mehr, wird sie zurückgezogen.
+- **Rug-Modell**: `rug_p` je Launch aus dem gelernten Modell des Rug-Schutzes (`safety.backtest`); ab
+  `SNIPER_RUG_P_BLOCK` (0,59) wird nicht gekauft. In der Regelsuche bleibt es draußen, weil es an denselben
+  Launches gelernt ist.
+
+`max_ret_60m`/`min_ret_60m` zählen erst ab dem Entscheidungspreis (`outcome_fix_ts` in `sniper_state` markiert,
+ab wann); davor enthielten sie den Pump vor dem Entscheid. Die Forschung nutzt bei älteren Zeilen nur die Stände.
 
 ## Einstellungen (`.env`, alle optional)
 
@@ -150,6 +174,8 @@ entries}` (seit Start), `pump_api_ok` (`null`, wenn die pump.fun-API aus ist). B
 | `SNIPER_LAUNCH_SOURCES` / `SNIPER_STALE_SEC` | both / 180 | Launch-Quellen (`both`, `pumpportal`, `rpc`), Neuverbindung bei Stille |
 | `SNIPER_WS_URL` / `SNIPER_WS_MAX_SUBS` | wss://api.mainnet-beta.solana.com / 150 | RPC-Log-Datenstrom |
 | `SNIPER_WS_SUBS_PER_SEC` | 4 | neue logsSubscribe-Anfragen pro Sekunde |
+| `SNIPER_USE_LEARNED_RULE` / `SNIPER_RESEARCH_HOURS` | 1 / 72 | angenommene Forschungsregel im Papiermodus nutzen / Fenster |
+| `SNIPER_RUG_P_BLOCK` | 0.59 | kein Kauf ab dieser Rug-Wahrscheinlichkeit des Rug-Modells |
 | `SNIPER_TRADE_SUB_MODE` | auto | `mints` (ein Abo je Coin), `program` (ein Abo, lokal gefiltert), `auto` (mints, bei Rate-Limit program) |
 | `SNIPER_RPC_PER_MIN` / `SNIPER_MAX_RPC_PER_LAUNCH` | 10 / 5 | RPC-Deckel |
 | `SNIPER_PUMP_API_PER_MIN` | 40 | pump.fun-API-Deckel |

@@ -24,6 +24,8 @@ BASE_FEATURES = ["n_trades", "n_buyers", "n_sellers", "buy_sol", "sell_sol", "ne
                  "unseen_pct", "bundle_pct", "bundle_wallets", "dev_buy_pct", "dev_sold_pct", "top10_pct",
                  "fast_buyers", "dev_launches", "dev_launches_24h", "n_smart", "n_good", "curve_progress",
                  "mcap_decide_sol", "risk"]
+# rug_p (safety's launch model) is left out on purpose: that model is trained on these same launches, so it
+# would leak the later outcomes into the earlier half of the time split
 DERIVED = {
     "buy_share": lambda r: _div(r["buy_sol"], (r["buy_sol"] or 0) + (r["sell_sol"] or 0)),
     "buyers_minus_sellers": lambda r: (r["n_buyers"] or 0) - (r["n_sellers"] or 0),

@@ -193,3 +193,20 @@ def test_learned_rule_buys_in_paper_with_its_own_exits(conn):
         tt += 1
         assert tt < T0 + 400
     assert conn.execute("SELECT exit_reason FROM sniper_positions").fetchone()[0] == "tp1"
+
+
+def test_rug_model_blocks_and_is_stored(conn):
+    from safety import store as sstore
+    sstore.ensure_schema(conn)
+    c = cfg()
+    eng = Engine(c, conn, enricher=FakeEnricher())
+    eng._rug_model = (9e18, {"stub": True}, lambda model, F: 0.8)     # a fresh "model" that calls every launch a rug
+    cv = Curve("RUGGY")
+    eng.handle(cv.create(), T0)
+    organic(eng, cv, T0 + 1, n=30)
+    st = eng.tick(T0 + c.decide_sec + 1)[0]
+    assert conn.execute("SELECT rug_p FROM sniper_launches WHERE mint='RUGGY'").fetchone()[0] == 0.8
+    enr = {"early": early_from(cv), "funders": {f"buyer{i:03d}": f"f{i}" for i in range(6)},
+           "coin": {"twitter": "x"}, "creator_hist": {"n": 1}, "dev_coins": {"n": 1, "n24": 1, "n_complete": 0}}
+    _a, reason, pos = eng.finalize(st, enr, now=T0 + 22)
+    assert reason == "rug_p" and pos is None and eng.enricher.gates == 0

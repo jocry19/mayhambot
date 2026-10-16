@@ -49,9 +49,19 @@ CREATE TABLE IF NOT EXISTS sniper_paths (
 """
 
 
+ADDED_COLS = {"sniper_launches": [("rug_p", "REAL")]}   # columns added after the first release
+
+
 def ensure_schema(conn):
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='sniper_state'").fetchone() is None:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='sniper_paths'").fetchone() is None:
         db.retry_locked(conn, lambda: conn.executescript(SCHEMA))
+    for table, cols in ADDED_COLS.items():
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, typ in cols:
+            if name not in have:
+                db.retry_locked(conn, lambda: conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}"))
+    global LAUNCH_COLS
+    LAUNCH_COLS = None
     return conn
 
 
