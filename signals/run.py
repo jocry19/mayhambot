@@ -13,7 +13,7 @@ import time
 from core import db, scoring, wallets
 from core.config import settings
 from core.sources import market, wallet_source
-from signals import engine, funnel, notifier
+from signals import engine, funnel, notifier, plan
 
 log = logging.getLogger("mayhambot.run")
 
@@ -28,6 +28,9 @@ def refresh_watchlist(conn, cycle):
     hot = [r[0] for r in conn.execute(
         """SELECT DISTINCT t.mint FROM trades t JOIN wallets w ON w.address=t.wallet
            WHERE w.is_smart=1 AND t.side='buy' AND t.ts > ?""", (int(time.time()) - 7200,))]
+    # calls of the last hours stay watched, so their prices keep coming for the target / stop follow-up
+    hot += [r[0] for r in conn.execute("SELECT DISTINCT mint FROM signals WHERE ts > ?",
+                                       (int(time.time()) - plan.FOLLOW_HOURS * 3600,)) if r[0] not in hot]
     tracked = [r[0] for r in conn.execute("SELECT mint FROM tokens WHERE tracked=1")]
     infos = market.token_info(list(dict.fromkeys(tracked + hot)))
     db.upsert_tokens(conn, [t for t in infos if t.mint in set(hot)], tracked=True)
@@ -212,6 +215,10 @@ def cycle(conn, i):
     sigs = engine.evaluate(conn, mints)
     notifier.notify(conn, sigs)
     engine.update_outcomes(conn)
+    try:
+        notifier.notify_followups(plan.check_levels(conn))  # target / stop reached: follow-up alert for manual trading
+    except Exception:  # noqa: BLE001 - follow-ups must never stop signals
+        log.exception("signal follow-up check failed")
     if funnel.report_due():  # after evaluate, so last_cycle is filled; due by the file's age, not process uptime
         try:
             funnel.write_report(conn)

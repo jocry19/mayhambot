@@ -94,6 +94,15 @@ MIGRATIONS = [
     ("signals", "ev_n", "INTEGER"),                 # replayed setups behind that EV
     ("signals", "reason", "TEXT"),
     ("signals", "outcome_flag", "TEXT"),            # ok | dead (pool died, counted as -95 %) | gap (no price near)                  # German plain-text why / why not
+    ("signals", "max_ret_15m", "REAL"),             # peak after the call within 15 min
+    ("signals", "max_ret_4h", "REAL"),              # ... within 4 h
+    ("signals", "peak_min_1h", "REAL"),             # minutes from the call to the 1 h peak
+    ("signals", "dd_before_peak_1h", "REAL"),       # lowest return before that peak (how deep it dipped first)
+    ("signals", "call_no", "INTEGER"),              # 1 = first call on this coin, 2 = re-call on fresh smart inflow ...
+    ("signals", "target_ret", "REAL"),              # take-profit mark sent with the alert (from past peaks)
+    ("signals", "stop_ret", "REAL"),                # stop mark sent with the alert (from past dips)
+    ("signals", "target_hit_ts", "INTEGER"),        # first time the price reached the target (follow-up alert sent)
+    ("signals", "stop_hit_ts", "INTEGER"),          # first time the price fell to the stop before the target
     ("signal_metrics", "ev", "REAL"),
     ("signal_metrics", "model_exp_net", "REAL"),   # model's expected 1h return after costs (for later replays)
 ]

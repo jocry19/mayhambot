@@ -55,6 +55,14 @@ def format_signal(s) -> str:
         f"Wallets: {s['n_ultra'] or 0} Ultra · {s['n_smart'] or 0} Smart · {s['n_good'] or 0} Good · Qualität {s['avg_quality']:.0f}"
         if "n_ultra" in keys else f"{s['smart_buyers']} Smart Wallets · Qualität {s['avg_quality']:.0f}",
     ]
+    if "liquidity_usd" in keys:
+        lines.append(f"Liquidität {_usd(s['liquidity_usd'])}"
+                     + (f" · Call Nr. {s['call_no']} auf diesen Coin" if "call_no" in keys and (s["call_no"] or 1) > 1 else ""))
+    if "target_ret" in keys and s["target_ret"] is not None and s["price_usd"]:
+        p0 = s["price_usd"]
+        stop = s["stop_ret"] if s["stop_ret"] is not None else None
+        lines.append(f"📋 Plan: Einstieg ~{p0:.8g} $ · Ziel <b>{s['target_ret'] * 100:+.0f} %</b> ({p0 * (1 + s['target_ret']):.8g} $)"
+                     + (f" · Stopp {stop * 100:.0f} % ({p0 * (1 + stop):.8g} $)" if stop is not None else ""))
     if "prediction" in keys and s["prediction"] is not None:
         lines.append(f"Vorhersage {s['prediction']*100:.0f}% · {html.escape(s['prediction_label'] or '')}")
     if "ev" in keys and s["ev"] is not None:
@@ -78,3 +86,24 @@ def notify(conn, signals):
         ok = all(n.send(text) is not False for n in ns)
         conn.execute("UPDATE signals SET notified=? WHERE id=?", (1 if ok else 0, s["id"]))
     conn.commit()
+
+
+def format_followup(e) -> str:
+    name = html.escape(e["symbol"] or e["mint"][:6])
+    call = f" (Call Nr. {e['call_no']})" if (e.get("call_no") or 1) > 1 else ""
+    if e["kind"] == "target":
+        head = f"🎯 <b>{name}{call}: Ziel {e['ret'] * 100:+.0f} % erreicht</b> nach {e['minutes']} min"
+        tail = "Gewinn sichern oder Stopp nachziehen."
+    else:
+        head = f"🔻 <b>{name}{call}: Stopp {e['ret'] * 100:.0f} % erreicht</b> nach {e['minutes']} min"
+        tail = "Laut Plan raus."
+    return "\n".join([head, f"Preis {e['price']:.8g} $ · {tail}", f"<code>{e['mint']}</code>",
+                      f'<a href="https://dexscreener.com/solana/{e["mint"]}">DexScreener</a>'])
+
+
+def notify_followups(events):
+    ns = active_notifiers()
+    for e in events:
+        text = format_followup(e)
+        for n in ns:
+            n.send(text)

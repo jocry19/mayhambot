@@ -214,6 +214,13 @@ ROI, consistency (profit not from one lucky hit), scaled by confidence (number o
   - It fits mean TP return after costs per bucket (entities 1/2/3+, net <200/<500/>=500, smart sellers 0/1+), shrunk toward the global mean (`SIGNAL_EV_SHRINK` 10).
   - It fits on the first two thirds and tests the rule "EV > `SIGNAL_MIN_EV`" on the last third. The table goes active only if that out-of-sample run made money with at least 10 signals.
   - While a table is active, EV > `SIGNAL_MIN_EV` replaces the wallets, net and score minimums. Rug protection still vetoes at a safety factor below 0.6.
+
+### Following signals by hand (signals/plan.py, 2026-10-16)
+
+- **Peak after the call:** update_outcomes also stores max_ret_15m, max_ret_4h, peak_min_1h (minutes to the 1 h high) and dd_before_peak_1h (deepest dip before it). `funnel --outcomes` and the hourly report show hit rates of +25 / +50 / +100 %, median peaks, minutes to the peak, the dip before it, and how many alert targets / stops were hit, per score band and for "all".
+- **Several calls per coin:** inside `SIGNAL_COOLDOWN_MIN` a coin is called again when at least one smart wallet that was not in its last call buys now and `SIGNAL_RECALL_MIN` (15) minutes have passed (or the score rose by 15). `call_no` counts calls on the coin in 24 h, and the reason names the previous call and the price move since.
+- **Plan in the alert:** entry price, liquidity, target and stop. Target = the 1 h peak `SIGNAL_TARGET_SHARE` (60 %) of the calls of the last 14 days reached; stop = deep enough that 90 % of the calls that reached the target survived their dip, minus 5 points. Defaults +50 % / -30 % until `SIGNAL_PLAN_MIN_N` (8) calls have results. Stored as target_ret / stop_ret.
+- **Follow-up:** each cycle `plan.check_levels` finds the first target or stop crossing of the calls of the last 4 h (those coins stay watched), stores target_hit_ts / stop_hit_ts and sends one alert ("Ziel erreicht" / "Stopp erreicht"). Crossings older than 15 min (e.g. after a restart) are stored without an alert.
   - Without an active table the fixed minimums count distinct entities (clusters), not wallets, and the model's own `exp_net_ret` (TP exit, after costs) must be at least `SIGNAL_MODEL_MIN_EXP_NET` (default 0), else the funnel counts `low_ev`.
   - Every run is a row in `signal_calibration`.
 - Each signal stores `ev`, `ev_n` and `reason`, a German "Dafür … Dagegen …" text. The Telegram alert shows both.

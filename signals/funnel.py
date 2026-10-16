@@ -86,25 +86,52 @@ def funnel(conn, hours=10, cfg=settings, now=None):
 COST = 0.06  # round trip: fees + slippage + priority, as in copytrade paper trading
 
 
+def _med(vals):
+    vals = sorted(v for v in vals if v is not None)
+    return round(vals[len(vals) // 2], 3) if vals else None
+
+
+def peak_after_call(rows):
+    """How high calls ran after the call, for selling at the high by hand: hit rates of +25 / +50 / +100 % at the
+    1 h peak, median peaks in 15 min / 1 h / 4 h, minutes to the 1 h peak, the dip before it, and how the alert's
+    target / stop played out (selling exactly at the target, after costs)."""
+    n = len(rows)
+    mx = [r["max_ret_1h"] or 0 for r in rows]
+    out = dict(hit_25=round(sum(x >= 0.25 for x in mx) / n, 3), hit_100=round(sum(x >= 1.0 for x in mx) / n, 3),
+               median_max_ret_15m=_med(r["max_ret_15m"] for r in rows),
+               median_max_ret_4h=_med(r["max_ret_4h"] for r in rows),
+               median_peak_min_1h=_med(r["peak_min_1h"] for r in rows),
+               median_dip_before_peak=_med(r["dd_before_peak_1h"] for r in rows))
+    planned = [r for r in rows if r["target_hit_ts"] or r["stop_hit_ts"]]
+    if planned:
+        out.update(target_hits=sum(1 for r in planned if r["target_hit_ts"]),
+                   stop_hits=sum(1 for r in planned if r["stop_hit_ts"]))
+    return out
+
+
 def outcomes(conn, hours=168, cost=COST, now=None, bands=(0, 20, 30, 40, 50, 60, 101)):
     """Signal results by score band after costs: hit rate (+50% max within 1h), median max_ret_1h, mean ret_1h
     minus costs. This is what the score bands get calibrated on."""
     now = now or int(time.time())
-    rows = conn.execute("SELECT score, ret_1h, max_ret_1h FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NOT NULL",
+    rows = conn.execute("SELECT score, ret_1h, max_ret_1h, max_ret_15m, max_ret_4h, peak_min_1h, dd_before_peak_1h, "
+                        "target_hit_ts, stop_hit_ts FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NOT NULL",
                         (now - int(hours * 3600), now - 3900)).fetchall()
     missing = conn.execute("SELECT COUNT(*) FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NULL",
                            (now - int(hours * 3600), now - 3900)).fetchone()[0]
     out = []
-    for lo, hi in zip(bands, bands[1:]):
-        b = [r for r in rows if lo <= (r["score"] or 0) < hi]
+    groups = [(f"{lo}-{hi - 1 if hi > 100 else hi}", [r for r in rows if lo <= (r["score"] or 0) < hi])
+              for lo, hi in zip(bands, bands[1:])]
+    for name, b in groups + ([("all", rows)] if rows else []):
         if not b:
             continue
         mx = sorted(r["max_ret_1h"] or 0 for r in b)
-        out.append(dict(band=f"{lo}-{hi - 1 if hi > 100 else hi}", n=len(b),
-                        hit_50=round(sum(1 for r in b if (r["max_ret_1h"] or 0) >= 0.5) / len(b), 3),
-                        median_max_ret_1h=round(mx[len(mx) // 2], 3),
-                        mean_ret_1h_after_cost=round(sum(r["ret_1h"] for r in b) / len(b) - cost, 3),
-                        dead=sum(1 for r in b if r["ret_1h"] <= -0.9)))
+        d = dict(band=name, n=len(b),
+                 hit_50=round(sum(1 for r in b if (r["max_ret_1h"] or 0) >= 0.5) / len(b), 3),
+                 median_max_ret_1h=round(mx[len(mx) // 2], 3),
+                 mean_ret_1h_after_cost=round(sum(r["ret_1h"] for r in b) / len(b) - cost, 3),
+                 dead=sum(1 for r in b if r["ret_1h"] <= -0.9))
+        d.update(peak_after_call(b))
+        out.append(d)
     if missing:  # due but unmeasurable (no price near +1h): listed, so a gap never hides a loser silently
         out.append(dict(band="no 1h price", n=missing))
     return out
@@ -148,7 +175,10 @@ def write_report(conn, path=None, now=None):
                recent_signals=[dict(r, tradable_strict=(r["liquidity_usd"] or 0) >= TRADABLE_LIQ_USD)
                                for r in conn.execute(
                    "SELECT ts, symbol, score, ev, ev_n, smart_buyers, net_usd, liquidity_usd, mcap_usd, ret_1h, "
-                   "max_ret_1h, outcome_flag, reason FROM signals ORDER BY ts DESC LIMIT 20")])
+                   "max_ret_15m, max_ret_1h, max_ret_4h, peak_min_1h, dd_before_peak_1h, call_no, target_ret, stop_ret, "
+                   "target_hit_ts, stop_hit_ts, outcome_flag, reason FROM signals ORDER BY ts DESC LIMIT 20")])
+    from signals import plan
+    rep["plan_next"] = plan.levels(conn, now)
     rs = rep["recent_signals"]
     rep["tradable_strict_share"] = round(sum(r["tradable_strict"] for r in rs) / len(rs), 3) if rs else None
     tmp = path.with_suffix(".tmp")

@@ -17,6 +17,7 @@ import time
 from core import scoring
 from core.config import settings
 from signals import ev as ev_mod
+from signals import plan
 from signals.backtest import DEAD_RET, price_near
 
 log = logging.getLogger("mayhambot.signals")
@@ -497,6 +498,21 @@ def prune_metrics(conn, now=None, days=METRICS_KEEP_DAYS):
     return n
 
 
+RECALL_MIN = int(os.getenv("SIGNAL_RECALL_MIN", 15))
+
+
+def fresh_buyers(m, last):
+    """Smart wallets buying now that were not in the coin's last call: a re-call inside the cooldown needs at least
+    one (and RECALL_MIN minutes since that call), so a coin can be called again on new smart money without spam."""
+    if not last:
+        return 0
+    try:
+        before = {w.get("wallet") for w in json.loads(last["wallets_json"] or "[]")}
+    except ValueError:
+        before = set()
+    return sum(1 for w in m.get("wallets") or [] if w.get("tier") in ("ultra", "smart") and w.get("wallet") not in before)
+
+
 def evaluate(conn, mints, cfg=settings, now=None):
     """Compute + store metrics for each mint; create signals that pass thresholds. Returns new signal rows."""
     now = now or int(time.time())
@@ -509,6 +525,7 @@ def evaluate(conn, mints, cfg=settings, now=None):
     f.update({k: 0 for k in FUNNEL_KEYS}, max_score=0.0, min_score=None, min_net=min_net, ev_active=bool(ev_table),
              max_ev=None, max_model_exp_net=None)
     model_guard.reset()
+    lv = None  # trade plan levels, computed once when the first signal of this cycle fires
     for mint in mints:
         tok = conn.execute("SELECT symbol, name, price_usd, mcap_usd, liquidity_usd FROM tokens WHERE mint=?",
                            (mint,)).fetchone()
@@ -555,29 +572,54 @@ def evaluate(conn, mints, cfg=settings, now=None):
             continue
         contrib = json.dumps(m["contributions"])
         sp = m.get("safety") or {}
-        last = conn.execute("SELECT ts, score FROM signals WHERE mint=? ORDER BY ts DESC LIMIT 1", (mint,)).fetchone()
-        if last and now - last["ts"] < cfg.signal_cooldown_min * 60 and m["score"] < last["score"] + 15:
+        last = conn.execute("SELECT ts, score, price_usd, wallets_json FROM signals WHERE mint=? ORDER BY ts DESC LIMIT 1",
+                            (mint,)).fetchone()
+        fresh = fresh_buyers(m, last)
+        if last and now - last["ts"] < cfg.signal_cooldown_min * 60 and m["score"] < last["score"] + 15 and not (
+                fresh and now - last["ts"] >= RECALL_MIN * 60):
             f["cooldown"] += 1
             continue
         f["fired"] += 1
+        call_no = 1 + conn.execute("SELECT COUNT(*) FROM signals WHERE mint=? AND ts>?", (mint, now - 86400)).fetchone()[0]
+        reason = explain(m, cfg)
+        if last and call_no > 1:
+            p_now, p_last = (tok["price_usd"] if tok else None), last["price_usd"]
+            reason += (f". Call Nr. {call_no} auf diesen Coin: letzter vor {(now - last['ts']) // 60} min"
+                       + (f", Preis seitdem {(p_now / p_last - 1) * 100:+.0f} %" if p_now and p_last else "")
+                       + (f", {fresh} neue Smart-Käufer seitdem" if fresh else ""))
+        if lv is None:
+            lv = plan.levels(conn, now)
+        f["recalls"] = f.get("recalls", 0) + (call_no > 1)
         cur = conn.execute(
             """INSERT INTO signals(ts, mint, symbol, score, net_usd, buy_usd, smart_buyers, avg_quality, price_usd,
                                    mcap_usd, wallets_json, buy_sol, net_sol, liquidity_usd, n_ultra, n_smart, n_good,
                                    prediction, prediction_label, contributions_json, model_version,
                                    score_raw, safety_factor, safety_risk, safety_level, safety_reasons_json,
-                                   ev, ev_n, reason)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                   ev, ev_n, reason, call_no, target_ret, stop_ret)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (now, mint, tok["symbol"] if tok else "", m["score"], m["net_usd"], m["buy_usd"], m["smart_buyers"],
              m["avg_quality"], tok["price_usd"] if tok else None, tok["mcap_usd"] if tok else None,
              json.dumps(m["wallets"]), m["buy_sol"], m["net_sol"], tok["liquidity_usd"] if tok else None,
              m["n_ultra"], m["n_smart"], m["n_good"], pred, pred_label, contrib, m["model_version"],
              m.get("score_raw", m["score"]), sp.get("factor"), sp.get("risk"), sp.get("level"),
-             json.dumps(sp.get("reasons") or [], ensure_ascii=False), m.get("ev"), m.get("ev_n"), explain(m, cfg)))
+             json.dumps(sp.get("reasons") or [], ensure_ascii=False), m.get("ev"), m.get("ev_n"), reason, call_no,
+             lv["target"], lv["stop"]))
         new.append(conn.execute("SELECT * FROM signals WHERE id=?", (cur.lastrowid,)).fetchone())
     conn.commit()
     f["model"] = model_guard.stats()
     model_guard.check(conn)
     return new
+
+
+def peak_stats(pts, t0, p0, horizon=3600):
+    """The 1 h high after the call, as a manual trader sees it: minutes to the peak and the deepest dip before it
+    (what a stop must survive to catch that peak). Empty when there is no price within the hour."""
+    w = [(t, v) for t, v in pts if t0 < t <= t0 + horizon]
+    if not w:
+        return {}
+    i = max(range(len(w)), key=lambda k: w[k][1])
+    before = [v for _, v in w[:i + 1]]
+    return dict(peak_min_1h=round((w[i][0] - t0) / 60, 1), dd_before_peak_1h=min(0.0, min(before) / p0 - 1))
 
 
 def update_outcomes(conn, now=None, cfg=settings):
@@ -591,7 +633,8 @@ def update_outcomes(conn, now=None, cfg=settings):
     now = now or int(time.time())
     dead_liq = cfg.min_liquidity_usd / 4
     for s in conn.execute("SELECT * FROM signals WHERE ts > ? AND (ret_1h IS NULL OR max_ret_1h IS NULL "
-                          "OR max_ret_24h IS NULL OR ret_6h IS NULL)", (now - 72 * 3600,)).fetchall():
+                          "OR max_ret_24h IS NULL OR ret_6h IS NULL OR max_ret_4h IS NULL OR max_ret_15m IS NULL)",
+                          (now - 72 * 3600,)).fetchall():
         p0 = s["price_usd"]
         if not p0:
             continue
@@ -629,6 +672,11 @@ def update_outcomes(conn, now=None, cfg=settings):
                     upd["max_mcap_1h"] = s["mcap_usd"] * (1 + upd["max_ret_1h"])
             elif upd["ret_1h"] == DEAD_RET:
                 upd["max_ret_1h"] = DEAD_RET
+            upd.update(peak_stats(pts, s["ts"], p0))
+        for key, dt in (("max_ret_15m", 900), ("max_ret_4h", 4 * 3600)):
+            w = [v for t, v in pts if t <= s["ts"] + dt]
+            if now >= s["ts"] + dt and w:
+                upd[key] = max(w) / p0 - 1
         if now >= s["ts"] + 86400 and pts:
             upd["max_ret_24h"] = max(v for _, v in pts) / p0 - 1
         upd["outcome_flag"] = "dead" if "dead" in flags else "gap" if "gap" in flags else "ok"
