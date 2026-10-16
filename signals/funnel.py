@@ -89,8 +89,10 @@ def outcomes(conn, hours=168, cost=COST, now=None, bands=(0, 20, 30, 40, 50, 60,
     """Signal results by score band after costs: hit rate (+50% max within 1h), median max_ret_1h, mean ret_1h
     minus costs. This is what the score bands get calibrated on."""
     now = now or int(time.time())
-    rows = conn.execute("SELECT score, ret_1h, max_ret_1h FROM signals WHERE ts>=? AND ret_1h IS NOT NULL",
-                        (now - int(hours * 3600),)).fetchall()
+    rows = conn.execute("SELECT score, ret_1h, max_ret_1h FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NOT NULL",
+                        (now - int(hours * 3600), now - 3900)).fetchall()
+    missing = conn.execute("SELECT COUNT(*) FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NULL",
+                           (now - int(hours * 3600), now - 3900)).fetchone()[0]
     out = []
     for lo, hi in zip(bands, bands[1:]):
         b = [r for r in rows if lo <= (r["score"] or 0) < hi]
@@ -100,7 +102,10 @@ def outcomes(conn, hours=168, cost=COST, now=None, bands=(0, 20, 30, 40, 50, 60,
         out.append(dict(band=f"{lo}-{hi - 1 if hi > 100 else hi}", n=len(b),
                         hit_50=round(sum(1 for r in b if (r["max_ret_1h"] or 0) >= 0.5) / len(b), 3),
                         median_max_ret_1h=round(mx[len(mx) // 2], 3),
-                        mean_ret_1h_after_cost=round(sum(r["ret_1h"] for r in b) / len(b) - cost, 3)))
+                        mean_ret_1h_after_cost=round(sum(r["ret_1h"] for r in b) / len(b) - cost, 3),
+                        dead=sum(1 for r in b if r["ret_1h"] <= -0.9)))
+    if missing:  # due but unmeasurable (no price near +1h): listed, so a gap never hides a loser silently
+        out.append(dict(band="no 1h price", n=missing))
     return out
 
 

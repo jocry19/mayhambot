@@ -15,6 +15,7 @@ import time
 from core import scoring
 from core.config import settings
 from signals import ev as ev_mod
+from signals.backtest import DEAD_RET, price_near
 
 log = logging.getLogger("mayhambot.signals")
 MANUAL_DEFAULT_SCORE = 70.0
@@ -428,35 +429,58 @@ def evaluate(conn, mints, cfg=settings, now=None):
     return new
 
 
-def update_outcomes(conn, now=None):
-    """Fill ret_5m / ret_15m / ret_1h / max_ret_1h for recent signals from later prices."""
+def update_outcomes(conn, now=None, cfg=settings):
+    """Fill ret_5m / ret_15m / ret_1h / ret_6h / max_ret_1h / max_ret_24h for signals of the last 3 days.
+
+    Unbiased on purpose: a return is the price within a tolerance around the horizon (2 min for 5m, 5 min for
+    15m / 1h, 30 min for 6h), never an arbitrary later print. A coin that died (liquidity below a quarter of
+    MIN_LIQUIDITY_USD) with no price near or after the horizon counts as DEAD_RET instead of dropping out of the
+    stats, so rugs are not survivorship-filtered. outcome_flag: ok | dead | gap (no price near the horizon).
+    Prices: token_prices (DexScreener) first; pool trade prints only where no snapshot is near."""
     now = now or int(time.time())
+    dead_liq = cfg.min_liquidity_usd / 4
     for s in conn.execute("SELECT * FROM signals WHERE ts > ? AND (ret_1h IS NULL OR max_ret_1h IS NULL "
-                          "OR max_ret_24h IS NULL)", (now - 26 * 3600,)).fetchall():
+                          "OR max_ret_24h IS NULL OR ret_6h IS NULL)", (now - 72 * 3600,)).fetchall():
         p0 = s["price_usd"]
         if not p0:
             continue
-        pts = conn.execute(
-            """SELECT ts, price_usd FROM token_prices WHERE mint=? AND ts>? AND ts<=? AND price_usd>0
-               UNION ALL SELECT ts, price_usd FROM trades WHERE mint=? AND ts>? AND ts<=? AND price_usd>0
-               ORDER BY ts""", (s["mint"], s["ts"], s["ts"] + 86400, s["mint"], s["ts"], s["ts"] + 86400)).fetchall()
-        h1 = [r for r in pts if r["ts"] <= s["ts"] + 3600]
+        snap = [(r[0], r[1]) for r in conn.execute(
+            "SELECT ts, price_usd FROM token_prices WHERE mint=? AND ts>? AND ts<=? AND price_usd>0 ORDER BY ts",
+            (s["mint"], s["ts"], s["ts"] + 86400))]
+        prints = [(r[0], r[1]) for r in conn.execute(
+            "SELECT ts, price_usd FROM trades WHERE mint=? AND ts>? AND ts<=? AND price_usd>0 ORDER BY ts",
+            (s["mint"], s["ts"], s["ts"] + 86400))]
+        pts = sorted(snap + prints)
+        tok = conn.execute("SELECT liquidity_usd FROM tokens WHERE mint=?", (s["mint"],)).fetchone()
+        dead = bool(tok and tok[0] is not None and tok[0] < dead_liq)
+        flags = []
 
-        def at(dt):
-            for r in pts:
-                if r["ts"] >= s["ts"] + dt:
-                    return r["price_usd"] / p0 - 1
+        def ret(dt, tol):
+            if now < s["ts"] + dt + tol:
+                return None  # not due yet
+            p = price_near(snap, s["ts"] + dt, tol)
+            if p is None:
+                p = price_near(pts, s["ts"] + dt, tol)
+            if p is not None:
+                return p / p0 - 1
+            if dead and not any(t > s["ts"] + dt for t, _ in pts):
+                flags.append("dead")
+                return DEAD_RET
+            flags.append("gap")
             return None
-        upd = {"ret_5m": at(300), "ret_15m": at(900), "ret_1h": at(3600) if now >= s["ts"] + 3600 else None,
-               "ret_6h": at(6 * 3600) if now >= s["ts"] + 6 * 3600 else None}
-        if h1 and now >= s["ts"] + 3600:
-            upd["max_ret_1h"] = max(r["price_usd"] for r in h1) / p0 - 1
-            if s["mcap_usd"]:
-                upd["max_mcap_1h"] = s["mcap_usd"] * (1 + upd["max_ret_1h"])
-        if pts and now >= s["ts"] + 86400:
-            upd["max_ret_24h"] = max(r["price_usd"] for r in pts) / p0 - 1
+        upd = {"ret_5m": ret(300, 120), "ret_15m": ret(900, 300), "ret_1h": ret(3600, 300),
+               "ret_6h": ret(6 * 3600, 1800)}
+        h1 = [v for t, v in pts if t <= s["ts"] + 3600]
+        if now >= s["ts"] + 3600:
+            if h1:
+                upd["max_ret_1h"] = max(h1) / p0 - 1
+                if s["mcap_usd"]:
+                    upd["max_mcap_1h"] = s["mcap_usd"] * (1 + upd["max_ret_1h"])
+            elif upd["ret_1h"] == DEAD_RET:
+                upd["max_ret_1h"] = DEAD_RET
+        if now >= s["ts"] + 86400 and pts:
+            upd["max_ret_24h"] = max(v for _, v in pts) / p0 - 1
+        upd["outcome_flag"] = "dead" if "dead" in flags else "gap" if "gap" in flags else "ok"
         sets = {k: v for k, v in upd.items() if v is not None}
-        if sets:
-            conn.execute(f"UPDATE signals SET {', '.join(k + '=?' for k in sets)} WHERE id=?",
-                         (*sets.values(), s["id"]))
+        conn.execute(f"UPDATE signals SET {', '.join(k + '=?' for k in sets)} WHERE id=?", (*sets.values(), s["id"]))
     conn.commit()

@@ -68,7 +68,7 @@ def calibrate(conn, hours=CALIB_HOURS, now=None, cost=backtest.COST, min_ev=MIN_
     since, until = now - int(hours * 3600), now - 3600
     data = backtest.load(conn, since, until, window)
     snaps = backtest.snapshots(data, since, until, window)
-    res = backtest.replay(snaps, data["prices"], BASE_RULE)
+    res = backtest.replay(snaps, data["prices"], BASE_RULE, watched=data.get("watched"))
     res.sort(key=lambda r: r["t"])
     cut = len(res) * 2 // 3
     train, test = res[:cut], res[cut:]

@@ -55,3 +55,17 @@ def test_point_in_time_tiers_and_walk_forward():
     grid = dict(wallets=[1], net=[100], score=[0], p=[None], sellers=[None])
     wf = backtest.walk_forward(snaps, prices, grid, folds=2, min_n=3)
     assert wf["oos"]["n"] == 10 and wf["oos"]["mean_tp"] < 0          # the future lost money
+
+
+def test_outcome_uses_price_near_the_hour_and_counts_dead_coins():
+    t = 10_000
+    # price near +1h: the print 3 h later must not be used
+    series = [(t + 10, 1.0), (t + 600, 1.2), (t + 3500, 0.9), (t + 3 * 3600, 5.0)]
+    o = backtest.outcome(series, t)
+    assert round(o["ret_1h"], 3) == -0.1 and round(o["max_ret_1h"], 3) == 0.2
+    # watched coin that stops trading after 10 min: dead, not dropped
+    dead = [(t + 10, 1.0), (t + 600, 0.4)]
+    o = backtest.outcome(dead, t, watched=[(t - 300, 1.0)])
+    assert o["ret_1h"] == backtest.DEAD_RET and o["dead"]
+    # unwatched coin without later prices: not measurable
+    assert backtest.outcome(dead, t) is None

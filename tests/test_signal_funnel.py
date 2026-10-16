@@ -67,10 +67,33 @@ def test_outcomes_by_band_after_costs(tmp_path):
     now = 50_000
     for score, r1, mx in ((25, 0.10, 0.6), (28, -0.20, 0.1), (45, 0.30, 0.9)):
         c.execute("INSERT INTO signals(ts, mint, score, ret_1h, max_ret_1h) VALUES (?,?,?,?,?)",
-                  (now - 100, "M", score, r1, mx))
-    c.execute("INSERT INTO signals(ts, mint, score) VALUES (?,?,30)", (now - 100, "OPEN"))   # no result yet
+                  (now - 5000, "M", score, r1, mx))
+    c.execute("INSERT INTO signals(ts, mint, score) VALUES (?,?,30)", (now - 100, "OPEN"))   # not due yet
+    c.execute("INSERT INTO signals(ts, mint, score) VALUES (?,?,30)", (now - 5000, "GAP"))   # due, no price
     c.commit()
-    b = {x["band"]: x for x in funnel.outcomes(c, hours=1, now=now)}
+    b = {x["band"]: x for x in funnel.outcomes(c, hours=2, now=now)}
+    assert b["no 1h price"]["n"] == 1
     assert b["20-30"]["n"] == 2 and b["20-30"]["hit_50"] == 0.5
     assert b["20-30"]["mean_ret_1h_after_cost"] == round(-0.05 - 0.06, 3)
     assert b["40-50"]["n"] == 1 and "30-40" not in b
+
+
+def test_update_outcomes_bounded_and_dead(tmp_path):
+    from signals import engine
+    c = conn_with(None, tmp_path)
+    now = 100_000
+    t = now - 5 * 3600
+    c.execute("INSERT INTO signals(ts, mint, score, price_usd) VALUES (?,?,?,?)", (t, "LIVE", 50, 1.0))
+    c.execute("INSERT INTO signals(ts, mint, score, price_usd) VALUES (?,?,?,?)", (t, "RUG", 50, 1.0))
+    c.execute("INSERT INTO tokens(mint, liquidity_usd) VALUES ('RUG', 10)")
+    c.execute("INSERT INTO tokens(mint, liquidity_usd) VALUES ('LIVE', 50000)")
+    for ts, p in ((t + 300, 1.1), (t + 3550, 1.3), (t + 4 * 3600, 9.0)):
+        c.execute("INSERT INTO token_prices(mint, ts, price_usd) VALUES ('LIVE',?,?)", (ts, p))
+    c.execute("INSERT INTO token_prices(mint, ts, price_usd) VALUES ('RUG',?,0.5)", (t + 200,))
+    c.commit()
+    engine.update_outcomes(c, now=now)
+    live = c.execute("SELECT * FROM signals WHERE mint='LIVE'").fetchone()
+    rug = c.execute("SELECT * FROM signals WHERE mint='RUG'").fetchone()
+    assert round(live["ret_1h"], 3) == 0.3 and round(live["ret_5m"], 3) == 0.1 and live["outcome_flag"] == "gap"
+    assert live["ret_15m"] is None                         # nothing within 5 min of +15m: no stale substitute
+    assert rug["ret_1h"] == -0.95 and rug["max_ret_1h"] == 0.5 - 1 and rug["outcome_flag"] == "dead"

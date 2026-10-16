@@ -77,12 +77,20 @@ def load(conn, since, until, window):
             prices[r[0]].append((r[1], r[2]))
     for m in prices:
         prices[m].sort()
+    watched = defaultdict(list)
+    for i in range(0, len(mints), 400):
+        part = mints[i:i + 400]
+        for r in conn.execute(f"SELECT mint, ts, price_usd FROM token_prices WHERE mint IN ({','.join('?' * len(part))}) "
+                              "AND ts>=? AND ts<=? AND price_usd>0", (*part, since - 3600, until + 3700)):
+            watched[r[0]].append((r[1], r[2]))
+    for m in watched:
+        watched[m].sort()
     preds = defaultdict(list)
     if _has(conn, "model_predictions"):
         for r in conn.execute("SELECT mint, ts, p_1h FROM model_predictions WHERE ts>=? AND ts<=? AND p_1h IS NOT NULL "
                               "ORDER BY ts", (since - 900, until)):
             preds[r[0]].append((r[1], r[2]))
-    return dict(versions=versions, pit=pit, clusters=clusters, smart=smart, prices=prices, preds=preds)
+    return dict(versions=versions, pit=pit, clusters=clusters, smart=smart, prices=prices, preds=preds, watched=watched)
 
 
 def metrics_at(trades, tiers, clusters, t, window, cfg=settings):
@@ -112,18 +120,44 @@ def metrics_at(trades, tiers, clusters, t, window, cfg=settings):
                 ultra=any(tiers[w][0] == "ultra" for w in buyers))
 
 
-def outcome(series, t, tp=TP):
+DEAD_RET = -0.95  # a coin whose pool died and stopped trading
+
+
+def price_near(pts, t, tol):
+    """Price at t: the last point in [t - tol, t], else the first in (t, t + tol]. None if nothing that close."""
+    best = None
+    for ts, p in pts:
+        if ts > t + tol:
+            break
+        if ts <= t:
+            if ts >= t - tol:
+                best = p
+        elif best is None:
+            return p
+    return best
+
+
+def outcome(series, t, tp=TP, watched=None):
+    """Entry: first price within 5 min after t. ret_1h: price within 5 min of t + 1h (never a later print).
+    A watched coin (DexScreener snapshots right before t) that has no price at all after t + 30 min counts as dead
+    (DEAD_RET) instead of silently dropping out; an unwatched coin without prices is not measurable (None)."""
     i = bisect.bisect_left(series, (t,))
     if i >= len(series) or series[i][0] > t + 300:
         return None
     p0 = series[i][1]
     path = [p for ts, p in series[i:] if ts <= t + 3600]
-    if not path or series[-1][0] < t + 3000:  # no price near the 1h mark: not measurable
-        return None
-    r1 = path[-1] / p0 - 1
     mx = max(path) / p0 - 1
+    p1 = price_near(series[i:], t + 3600, 300)
+    if p1 is None:
+        was_watched = bool(watched) and price_near(watched, t, 1800) is not None
+        if was_watched and not any(ts > t + 1800 for ts, _ in series[i:]):
+            r1 = DEAD_RET
+        else:
+            return None
+    else:
+        r1 = p1 / p0 - 1
     tp_exit = tp if mx >= tp else r1
-    return dict(ret_1h=r1, max_ret_1h=mx, tp_ret=tp_exit)
+    return dict(ret_1h=r1, max_ret_1h=mx, tp_ret=tp_exit, dead=r1 == DEAD_RET)
 
 
 def p_at(pr, t):
@@ -153,7 +187,7 @@ def _keep(m, pm, c):
                 or (c["sellers"] is not None and m["sellers"] > c["sellers"]))
 
 
-def replay(snaps, prices, c, cfg=settings):
+def replay(snaps, prices, c, cfg=settings, watched=None):
     last, res = {}, []
     for t, mint, m, pm in snaps:
         if not _keep(m, pm, c):
@@ -161,7 +195,7 @@ def replay(snaps, prices, c, cfg=settings):
         if mint in last and t - last[mint] < cfg.signal_cooldown_min * 60:
             continue
         last[mint] = t
-        o = outcome(prices.get(mint, []), t)
+        o = outcome(prices.get(mint, []), t, watched=(watched or {}).get(mint))
         if o:
             res.append(dict(o, t=t, mint=mint, **m))
     return res
@@ -175,7 +209,7 @@ def summary(res, cost=COST):
     return dict(n=k, hit_50=round(sum(1 for o in res if o["max_ret_1h"] >= 0.5) / k, 3),
                 mean_ret_1h=round(sum(o["ret_1h"] for o in res) / k - cost, 4),
                 mean_tp=round(sum(tp) / k, 4), median_tp=round(tp[k // 2], 4), sum_tp=round(sum(tp), 3),
-                win_rate=round(sum(1 for x in tp if x > 0) / k, 3))
+                win_rate=round(sum(1 for x in tp if x > 0) / k, 3), dead=sum(1 for o in res if o.get("dead")))
 
 
 def configs(grid):
@@ -183,7 +217,7 @@ def configs(grid):
     return [dict(zip(keys, v)) for v in itertools.product(*(grid[k] for k in keys))]
 
 
-def walk_forward(snaps, prices, grid, folds=4, min_n=5, cfg=settings, cost=COST):
+def walk_forward(snaps, prices, grid, folds=4, min_n=5, cfg=settings, cost=COST, watched=None):
     """Split the snapshots in time into `folds` equal parts. For fold k >= 1 the rule set with the best mean TP
     return (at least min_n signals) on folds < k is chosen and judged on fold k only. The out-of-sample sum is
     the honest estimate; the in-sample winner over everything is shown next to it as the overfit reference."""
@@ -198,13 +232,13 @@ def walk_forward(snaps, prices, grid, folds=4, min_n=5, cfg=settings, cost=COST)
         test = [s for s in snaps if edges[k] <= s[0] < edges[k + 1]]
         best, best_v = None, None
         for c in cs:
-            sm = summary(replay(train, prices, c, cfg), cost)
+            sm = summary(replay(train, prices, c, cfg, watched), cost)
             if sm["n"] >= min_n and (best_v is None or sm["mean_tp"] > best_v):
                 best, best_v = c, sm["mean_tp"]
         if best is None:
             fold_rows.append(dict(fold=k, chosen=None))
             continue
-        r = replay(test, prices, best, cfg)
+        r = replay(test, prices, best, cfg, watched)
         oos += r
         chosen.append(best)
         fold_rows.append(dict(fold=k, chosen=best, train_mean_tp=best_v, test=summary(r, cost)))
@@ -221,12 +255,12 @@ def run(conn, hours=48, now=None, grid=None, cfg=settings, cost=COST, folds=4, m
     snaps = snapshots(data, since, until, window, cfg)
     out = []
     for c in configs(grid):
-        out.append(dict(c, **summary(replay(snaps, data["prices"], c, cfg), cost)))
+        out.append(dict(c, **summary(replay(snaps, data["prices"], c, cfg, data["watched"]), cost)))
     live = dict(wallets=cfg.signal_min_wallets, net=cfg.signal_min_net_usd, score=0, p=None, sellers=None)
-    wf = walk_forward(snaps, data["prices"], grid, folds, min_n, cfg, cost) if folds > 1 else None
+    wf = walk_forward(snaps, data["prices"], grid, folds, min_n, cfg, cost, data["watched"]) if folds > 1 else None
     return dict(hours=hours, snapshots=len(snaps), coins=len(data["smart"]), pit=data["pit"],
                 versions=len(data["versions"]), results=out, walk_forward=wf,
-                live_like=dict(live, **summary(replay(snaps, data["prices"], live, cfg), cost)))
+                live_like=dict(live, **summary(replay(snaps, data["prices"], live, cfg, data["watched"]), cost)))
 
 
 def main():

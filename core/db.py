@@ -88,7 +88,8 @@ MIGRATIONS = [
     ("signals", "max_ret_24h", "REAL"),
     ("signals", "ev", "REAL"),                      # expected TP return after costs (signals.ev), NULL = no table
     ("signals", "ev_n", "INTEGER"),                 # replayed setups behind that EV
-    ("signals", "reason", "TEXT"),                  # German plain-text why / why not
+    ("signals", "reason", "TEXT"),
+    ("signals", "outcome_flag", "TEXT"),            # ok | dead (pool died, counted as -95 %) | gap (no price near)                  # German plain-text why / why not
     ("signal_metrics", "ev", "REAL"),
     ("signal_metrics", "model_exp_net", "REAL"),   # model's expected 1h return after costs (for later replays)
 ]
