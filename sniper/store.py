@@ -67,6 +67,29 @@ def ensure_schema(conn):
     return conn
 
 
+RUG_LABEL_VERSION = "2"
+
+
+def relabel_rugs(conn, min_base):
+    """One-time fix of old `rugged` labels: a clean crash to -90% inside the hour counts as a rug, and pump launches
+    with a broken base price (below the curve's start) get no label at all, so rug models don't train on them."""
+    if get_state(conn, "rug_label_version") == RUG_LABEL_VERSION:
+        return 0
+    fix_ts = float(get_state(conn, "outcome_fix_ts") or 9e18)
+
+    def write():
+        a = conn.execute(
+            "UPDATE sniper_launches SET rugged=1 WHERE done=1 AND COALESCE(rugged,0)=0 AND min_ret_60m <= -0.9 "
+            "AND decided_ts >= ? AND NOT (pool='pump' AND COALESCE(mcap_decide_sol,0) < ?)", (fix_ts, min_base)).rowcount
+        b = conn.execute(
+            "UPDATE sniper_launches SET rugged=NULL WHERE done=1 AND rugged IS NOT NULL AND pool='pump' "
+            "AND mcap_decide_sol IS NOT NULL AND mcap_decide_sol < ?", (min_base,)).rowcount
+        conn.execute("INSERT OR REPLACE INTO sniper_state VALUES ('rug_label_version', ?)", (RUG_LABEL_VERSION,))
+        conn.commit()
+        return a + b
+    return db.retry_locked(conn, write)
+
+
 def connect(path=None):
     return ensure_schema(db.connect(path))
 

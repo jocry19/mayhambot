@@ -84,12 +84,13 @@ class Engine:
         if not store.get_state(self.conn, "outcome_fix_ts"):
             # from here on max/min_ret_60m start at the decision price; research trusts them only after this
             store.set_state(self.conn, "outcome_fix_ts", str(int(time.time())))
+        store.relabel_rugs(self.conn, research.MIN_BASE_MCAP)
         self._rug_model = (0.0, None, None)
         self.trades_live = True
         # the RPC program stream carries every pump.fun trade anyway: quiet launches stay "subscribed", so their
         # outcomes come from the curve itself instead of DexScreener quotes of untraded coins
         self.free_stream = False
-        self.learned = None        # accepted rule from sniper.research (refreshed by the service), None = fixed rules    # the service clears it while launches arrive without any trades (blind stream)
+        self.learned = None        # accepted rule from sniper.research (refreshed by the service), None = fixed rules
         self.stream_pools = None   # pools whose trades we receive (None = all); the RPC log stream decodes pump only
         self.book = PaperBook(cfg, conn)
         self.counters = {"creates": 0, "trades": 0, "migrations": 0, "stage1": 0, "stage2": 0, "entries": 0}
@@ -349,7 +350,12 @@ class Engine:
             r60 = upd.get(f"ret_{last}m")
             dev_sold = self.conn.execute("SELECT dev_sold_pct FROM sniper_launches WHERE mint=?", (st.mint,)).fetchone()
             dump = (dev_sold and (dev_sold[0] or 0) >= 50) or any(s >= 0.5 for w, s in st.insider_sold.items())
-            upd["rugged"] = int(r60 is not None and (r60 <= -0.8 or (dump and r60 <= -0.5)))
+            if st.pool == "pump" and (base or 0) < research.MIN_BASE_MCAP:
+                upd["rugged"] = None     # broken base: returns are meaningless, keep it out of every rug model
+            else:
+                # a crash to -90% inside the hour is a rug even if a dead-cat bounce lifts the 60m price again
+                crash = upd.get("min_ret_60m") is not None and upd["min_ret_60m"] <= -0.9
+                upd["rugged"] = int(r60 is not None and (r60 <= -0.8 or crash or (dump and r60 <= -0.5)))
             if st.stage >= 2:
                 store.save_curve(self.conn, st.mint, [p for p in st.curve if p[0] - st.created_ts <= 900])
             if st.n_seen or st.external_ts:   # a path with movement: replays of exit rules need it

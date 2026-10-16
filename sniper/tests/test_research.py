@@ -243,3 +243,18 @@ def test_broken_base_is_not_bought(conn):
     st.mcap_sol, st.v_tok = 0.0, 0.0
     assert eng.tick(T0 + c.decide_sec + 1) == []
     assert conn.execute("SELECT skip_reason FROM sniper_launches WHERE mint='ZERO'").fetchone()[0] == "no_price"
+
+
+def test_old_rug_labels_are_fixed_once(conn):
+    """Rug labels for rug models: a clean crash to -90 % is a rug, a broken base gets no label."""
+    store.set_state(conn, "outcome_fix_ts", "100")
+    store.set_state(conn, "rug_label_version", "1")
+    rows = [("CRASH", 200, 30.0, -0.95, 0), ("OLDCRASH", 50, 30.0, -0.95, 0), ("BROKEN", 200, 0.5, 0.0, 0),
+            ("FINE", 200, 30.0, -0.3, 0)]
+    for mint, ts, base, mn, rug in rows:
+        store.save_launch(conn, {"mint": mint, "pool": "pump", "decided_ts": ts, "mcap_decide_sol": base,
+                                 "min_ret_60m": mn, "rugged": rug, "done": 1})
+    assert store.relabel_rugs(conn, research.MIN_BASE_MCAP) == 2
+    got = {r["mint"]: r["rugged"] for r in conn.execute("SELECT mint, rugged FROM sniper_launches")}
+    assert got == {"CRASH": 1, "OLDCRASH": 0, "BROKEN": None, "FINE": 0}   # before the outcome fix min is unclean
+    assert store.relabel_rugs(conn, research.MIN_BASE_MCAP) == 0         # once per label version

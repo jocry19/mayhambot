@@ -164,6 +164,10 @@ Stündlich im Dienst (Fenster `SNIPER_RESEARCH_HOURS`, Standard 72 h) und von Ha
 `max_ret_60m`/`min_ret_60m` zählen erst ab dem Entscheidungspreis (`outcome_fix_ts` in `sniper_state` markiert,
 ab wann); davor enthielten sie den Pump vor dem Entscheid. Die Forschung nutzt bei älteren Zeilen nur die Stände.
 
+`rugged` = 1, wenn der Kurs nach 60 min ≤ −80 % steht, innerhalb der Stunde (sauber gemessen) auf ≤ −90 % fiel,
+oder ≤ −50 % nach Dev-/Insider-Abverkauf. Pump-Launches mit kaputtem Basispreis (< 27,9 SOL) bekommen kein Label
+(NULL), damit kein Rug-Modell darauf lernt. Alte Zeilen korrigiert `store.relabel_rugs` einmal je `RUG_LABEL_VERSION`.
+
 ## Einstellungen (`.env`, alle optional)
 
 | Variable | Standard | Bedeutung |
