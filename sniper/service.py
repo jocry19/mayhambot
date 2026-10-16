@@ -38,6 +38,13 @@ class Service:
                         "nur mit aufgeladenem Key, nehme den RPC-Log-Datenstrom")
         self.logs = rpcws.LogStream(cfg.ws_url, self._on_rpc_trade, cfg.ws_max_subs, subs_per_sec=cfg.ws_subs_per_sec,
                                     mode=cfg.trade_sub_mode, program=rpcws.PUMP_PROGRAM)
+        self.logs.on_mode = self._save_mode
+        try:
+            saved = json.loads(store.get_state(self.conn, "rpc_trade_mode") or "{}")
+        except ValueError:
+            saved = {}
+        if cfg.trade_sub_mode == "auto" and saved.get("mode") == "program" and time.time() - saved.get("ts", 0) < 86400:
+            self.logs.mode = "program"   # the public RPC refused per-coin subscriptions recently: start where we were
         srcs = cfg.launch_sources.lower()
         self.use_pp = srcs in ("both", "pumpportal")
         self.creates = rpcws.LogStream(cfg.ws_url, lambda m: self._on_create(m, "rpc"), 1, parser=rpcws.parse_creates,
@@ -51,6 +58,7 @@ class Service:
         self.engine.stream_pools = None if self.trades_via == "pumpportal" else {"pump"}
         self.connected = False
         self.pp_ws = None
+        self.pp_fails = 0
         self.trade_samples = deque(maxlen=120)    # (ts, trades, rpc trades) every heartbeat, for trades per minute
         self.rpc_trades = 0
         self.started = time.time()
@@ -67,6 +75,10 @@ class Service:
         self.launch_log[src].append(now)
         if self.engine.handle(m, now) is not None:
             self.first_log[src].append(now)
+
+    def _save_mode(self, mode):
+        store.set_state(self._hb_conn if hasattr(self, "_hb_conn") else self.conn, "rpc_trade_mode",
+                        json.dumps({"mode": mode, "ts": int(time.time())}))
 
     def launch_rates(self, now=None):
         now = now or time.time()
@@ -134,6 +146,9 @@ class Service:
                 async with websockets.connect(url, ping_interval=20, ping_timeout=20,
                                               max_size=2 ** 22, open_timeout=15) as ws:
                     self.connected, backoff = True, 2
+                    if self.pp_fails:
+                        log.info("PumpPortal wieder erreichbar nach %d Fehlversuchen", self.pp_fails)
+                    self.pp_fails = 0
                     await ws.send(json.dumps({"method": "subscribeNewToken"}))
                     await ws.send(json.dumps({"method": "subscribeMigration"}))
                     with self.engine.lock:
@@ -176,10 +191,18 @@ class Service:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 - reconnect with back-off
-                log.warning("PumpPortal getrennt (%s), neuer Versuch in %d s", e, backoff)
+                self.pp_fails += 1
+                # a long outage (HTTP 502 for hours) while the RPC launch source works: try every 10 minutes and
+                # log only now and then instead of a warning per minute
+                cap = 600 if self.pp_fails >= 10 and self.creates and self.creates.connected else 60
+                backoff = min(backoff, cap)
+                if self.pp_fails <= 3 or self.pp_fails % 10 == 0:
+                    log.warning("PumpPortal getrennt (%s), Fehlversuch %d, neuer Versuch in %d s", e, self.pp_fails,
+                                backoff)
             self.connected = False
             await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 60)
+            cap = 600 if self.pp_fails >= 10 and self.creates and self.creates.connected else 60
+            backoff = min(backoff * 2, cap)
 
     async def route_subs(self):
         """Hand new (un)subscriptions to the active trade source. Runs on its own, so the RPC log stream gets its
@@ -325,7 +348,8 @@ class Service:
                                "trades_per_min": None if tot is None or rpc is None else round(tot - rpc, 1)},
                 "rpc": {"active": self.trades_via == "rpc", "connected": self.logs.connected, "mode": self.logs.mode,
                         "subs": self.logs.active_subs(), "wanted": len(self.logs.want), "attempts": self.logs.attempts,
-                        "rejects": self.logs.rejects, "reconnects": self.logs.reconnects, "trades_per_min": rpc}}
+                        "rejects": self.logs.rejects, "reconnects": self.logs.reconnects,
+                        "server_drops": self.logs.server_drops, "trades_per_min": rpc}}
 
     def _launch_status(self, now):
         rates = self.launch_rates(now)

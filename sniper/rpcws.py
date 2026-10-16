@@ -169,8 +169,10 @@ class LogStream:
         self.rejects = 0                       # refused subscriptions + rate-limit closes
         self.rate_limit_log = deque(maxlen=50)
         self.reconnects = 0
+        self.server_drops = 0                  # closes by the RPC with an invalid close code (1002)
         self.ws = None
         self._tokens, self._last = 0.0, None
+        self.on_mode = None                    # callback(mode) when auto switches (the service persists it)
 
     def subscribe(self, mints, now=None):
         import time as _t
@@ -232,6 +234,11 @@ class LogStream:
         recent = sum(1 for t in self.rate_limit_log if now - t <= self.RATE_LIMIT_WINDOW)
         if self.auto and self.mode == "mints" and self.program and recent >= self.RATE_LIMIT_SWITCH:
             self.mode = "program"
+            if self.on_mode:
+                try:
+                    self.on_mode("program")
+                except Exception:  # noqa: BLE001
+                    pass
             log.warning("%s: %d Rate-Limit-Abbrüche in %d min, wechsle auf ein einziges Abo auf Programmebene",
                         self.name, recent, self.RATE_LIMIT_WINDOW // 60)
 
@@ -294,7 +301,13 @@ class LogStream:
                 raise
             except Exception as e:  # noqa: BLE001
                 txt = str(e)
-                if "1013" in txt or "Too many subscriptions" in txt:
+                if "1002" in txt and up_since is not None and _t.monotonic() - up_since >= 30:
+                    # the public RPC ends long, busy streams with a close frame carrying an invalid status code
+                    # (websockets answers 1002); nothing on our side: reconnect quickly, the syncer resubscribes
+                    self.server_drops += 1
+                    backoff = 2
+                    log.info("%s vom RPC getrennt (1002, ohne gültigen Abschluss), verbinde neu", self.name)
+                elif "1013" in txt or "Too many subscriptions" in txt:
                     self.note_rate_limit(_t.monotonic())
                     backoff = max(backoff, 15)
                     log.warning("%s: Rate-Limit beim RPC (%d Abos aktiv), neuer Versuch in %d s",

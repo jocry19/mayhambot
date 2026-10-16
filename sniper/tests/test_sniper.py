@@ -565,3 +565,34 @@ def test_blind_stream_alarm_and_no_stream_label(tmp_path):
     hb = json.loads(store.get_state(svc.conn, "service_status"))
     assert hb["connected"] is True and hb["pumpportal_connected"] is False and hb["pump_api_ok"] is None
     assert hb["trade_sources"]["rpc"]["active"] is True and hb["trade_sources"]["rpc"]["mode"] == "mints"
+
+
+def test_program_mode_survives_a_restart_and_pumpportal_backs_off(tmp_path):
+    import asyncio
+    from sniper.service import Service
+    svc = Service(cfg(), db_path=str(tmp_path / "s.db"))
+    assert svc.logs.mode == "mints"
+    for t in (1, 2, 3):
+        svc.logs.note_rate_limit(t)
+    assert svc.logs.mode == "program"
+    svc2 = Service(cfg(), db_path=str(tmp_path / "s.db"))
+    assert svc2.logs.mode == "program"          # no new round of refused per-coin subscriptions after an update
+
+    class Boom:
+        def __init__(self, *a, **k):
+            raise OSError("server rejected WebSocket connection: HTTP 502")
+    import websockets
+    sleeps = []
+
+    async def fake_sleep(s):
+        sleeps.append(s)
+        if len(sleeps) >= 14:
+            svc2.stop.set()
+    orig_connect, orig_sleep = websockets.connect, asyncio.sleep
+    websockets.connect, asyncio.sleep = Boom, fake_sleep
+    try:
+        svc2.creates.connected = True
+        asyncio.run(svc2.ws_loop())
+    finally:
+        websockets.connect, asyncio.sleep = orig_connect, orig_sleep
+    assert sleeps[:6] == [2, 4, 8, 16, 32, 60] and max(sleeps) == 600 and svc2.pp_fails >= 10
