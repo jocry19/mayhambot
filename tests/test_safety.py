@@ -629,3 +629,25 @@ def test_history_falls_back_to_network_features_for_fresh_launches():
     c.commit()                                    # nothing in intel_latest: the new launch is not in the universe
     h = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True).checks["history"]
     assert h["status"] == "ok" and h["data"]["dev_launches"] == 3 and h["risk"] >= 50
+
+
+class _JupiterDown(FakeFetcher):
+    def jupiter_quote(self, *a, **k):
+        self._spend()
+        raise RuntimeError("429 for https://lite-api.jup.ag/swap/v1/quote")
+
+
+def test_sell_sim_survives_jupiter_rate_limit_only_for_structurally_safe_tokens():
+    c = conn()
+    a = safety.assess(MINT, c, deep=False, fetcher=_JupiterDown(clean()), cfg=CFG, force=True)
+    sim = a.checks["sell_sim"]
+    assert sim["status"] == "ok" and sim["data"]["fallback"] == "structural" and a.level == "low"
+    # Token-2022 (fees, hooks, pause possible) or a freeze authority: no answer -> unchecked, not safe
+    s = clean()
+    s["program"] = checks.TOKEN_2022
+    a = safety.assess(MINT, conn(), deep=False, fetcher=_JupiterDown(s), cfg=CFG, force=True)
+    assert a.checks["sell_sim"]["status"] == "error" and a.level == "unchecked" and a.blocked
+    s = clean()
+    s["dex"] = "someclmm"
+    a = safety.assess(MINT, conn(), deep=False, fetcher=_JupiterDown(s), cfg=CFG, force=True)
+    assert a.checks["sell_sim"]["status"] == "error" and a.blocked

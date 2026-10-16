@@ -366,15 +366,48 @@ def check_authorities(ctx):
     return r.finish()
 
 
+AMM_DEXES = {"pumpfun", "pumpswap", "raydium", "meteora", "orca"}
+SPL_TOKEN = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+
+def _structural_sell(ctx, why):
+    """When Jupiter cannot be asked (429/403/outage): a plain SPL token (no Token-2022 extensions, so no transfer
+    fee, hook or pause) without freeze authority in a standard AMM pool or the pump.fun curve cannot be made
+    unsellable or taxed by its creator. Liquidity being pulled is the liquidity/exit checks' job. Anything else
+    stays unanswered (the coverage gate then treats the coin as unchecked, not as safe)."""
+    try:
+        mi = ctx.mint_info()
+        dex = ((ctx.pair() or {}).get("dexId") or "").lower()
+    except Exception:  # noqa: BLE001
+        return None
+    if not mi or mi.get("program") != SPL_TOKEN or mi.get("freezeAuthority") or dex not in AMM_DEXES:
+        return None
+    r = CheckResult("sell_sim", "Verkaufs-Simulation")
+    r.data.update(fallback="structural", dex=dex, jupiter_error=str(why)[:120])
+    r.positives.append(f"Jupiter gerade nicht erreichbar; Standard-SPL-Token ohne Freeze-Recht im {dex}-Pool: "
+                       "Verkauf kann nicht gesperrt und nicht besteuert werden.")
+    return r.finish()
+
+
 def check_sell_sim(ctx):
     r = CheckResult("sell_sim", "Verkaufs-Simulation")
     lamports = int(ctx.cfg.sim_size_sol * 1e9)
-    buy = ctx.f.jupiter_quote(SOL_MINT, ctx.mint, lamports)
+    try:
+        buy = ctx.f.jupiter_quote(SOL_MINT, ctx.mint, lamports)
+        sell = None
+        if buy and not buy.get("error") and int(buy.get("outAmount") or 0):
+            sell = ctx.f.jupiter_quote(ctx.mint, SOL_MINT, int(buy["outAmount"]))
+    except BudgetExceeded:
+        raise
+    except Exception as e:  # noqa: BLE001 - Jupiter rate limit / outage: fall back to the token's structure
+        fb = _structural_sell(ctx, e)
+        if fb is None:
+            raise
+        return fb
     if not buy or buy.get("error") or not int(buy.get("outAmount") or 0):
         r.status = "unknown"
         r.add(10, "Jupiter findet keinen Kaufweg (noch nicht handelbar oder zu wenig Liquidität).")
         return r.finish()
-    sell = ctx.f.jupiter_quote(ctx.mint, SOL_MINT, int(buy["outAmount"]))
     if not sell or sell.get("error") or not int(sell.get("outAmount") or 0):
         r.hard = True
         r.add(85, "Kaufen geht, Verkaufen nicht: Jupiter findet keinen Verkaufsweg (Honeypot-Verdacht).")

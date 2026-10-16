@@ -71,7 +71,7 @@ count for `SAFETY_CARRY_MAX_AGE_SEC`=2 h. Findings that were made keep their lev
 | check | data | hard flag when | risk from |
 |---|---|---|---|
 | `authorities` | `getAccountInfo(mint)` | mint or freeze authority active; Token-2022 permanent delegate, non-transferable, default-frozen, pausable, transfer fee ≥ `TAX_CRIT` | transfer hook, transfer fee |
-| `sell_sim` | Jupiter quote SOL→token→SOL (`SAFETY_SIM_SIZE_SOL`) | no sell route while buy works (honeypot); hidden tax ≥ `TAX_CRIT` | round-trip loss minus price impact minus `FEE_ALLOWANCE` |
+| `sell_sim` | Jupiter quote SOL→token→SOL (`SAFETY_SIM_SIZE_SOL`) | no sell route while buy works (honeypot); hidden tax ≥ `TAX_CRIT` | round-trip loss minus price impact minus `FEE_ALLOWANCE` ; Jupiter 429/5xx are retried with back-off (live paths one round more); if Jupiter stays unreachable, a plain SPL token without freeze authority in a pump.fun/pumpswap/Raydium/Meteora/Orca pool passes structurally (cannot be blocked or taxed), anything else stays unanswered → `unchecked` |
 | `holders` | `getTokenLargestAccounts` + owners | – | top-10 and top-1 share; pools, bonding curves, lockers and burn are excluded |
 | `insiders` (deep) | first tx of each top holder (cached a day) | – | fresh wallets (< `FRESH_WALLET_DAYS`, ≤ `FRESH_WALLET_MAX_TXS` txs), holders with the same funder or funded by the creator, RugCheck insider flags |
 | `bundles` (deep) | oldest signatures of the mint + launch txs (cached forever) | – | supply bought in the first `BUNDLE_SLOTS` slots, buys in the creation block, how much they still hold, shared funders |

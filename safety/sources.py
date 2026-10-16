@@ -111,7 +111,9 @@ class Fetcher:
         _space(self.cfg.jupiter_url.split("/")[2])
         headers = {"x-api-key": self.cfg.jupiter_api_key} if self.cfg.jupiter_api_key else None
         try:
-            return http.get_json(f"{self.cfg.jupiter_url}/swap/v1/quote", priority=self.lane, retries=1, headers=headers, params={
+            # core.http backs off on 429/5xx (Retry-After, host penalty); live paths may wait one round more
+            return http.get_json(f"{self.cfg.jupiter_url}/swap/v1/quote", priority=self.lane,
+                                 retries=2 if self.lane == "live" else 1, headers=headers, params={
                 "inputMint": input_mint, "outputMint": output_mint, "amount": int(amount_raw),
                 "slippageBps": slippage_bps})
         except Exception as e:  # noqa: BLE001 - 400 "no route" is an answer, not an outage
