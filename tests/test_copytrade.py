@@ -343,3 +343,23 @@ def test_db_writes_never_hold_the_lock(tmp_path):
         assert store.retry_locked(flaky) == "ok" and len(calls) == 2
     finally:
         st_mod.time.sleep = orig
+
+
+def test_helius_rpc_uses_shared_limiter(monkeypatch):
+    from copytrade import http as cthttp
+
+    hosts = []
+    monkeypatch.setattr(cthttp, "throttle", lambda host: hosts.append(host))
+
+    class R:
+        status_code, text, headers = 200, "", {}
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"result": 7}
+
+    monkeypatch.setattr(cthttp._session, "request", lambda *a, **k: R())
+    rpc = chain.Rpc(Settings(rpc_url="https://mainnet.helius-rpc.com/?api-key=k"))
+    assert rpc.shared and rpc.call("getSlot", []) == 7 and hosts == ["mainnet.helius-rpc.com"]

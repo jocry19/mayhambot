@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 from . import http
 from .config import QUOTE_MINTS, SOL_MINT, Settings
@@ -19,11 +20,13 @@ class Rpc:
     def __init__(self, settings: Settings):
         self.url = settings.rpc_url
         self.lim = http.limiter("rpc:" + self.url, settings.rpc_max_rps)
+        self.shared = http.throttle is not None and (urlparse(self.url).hostname or "") in http.SHARED_HOSTS
         self._id = 0
 
     def call(self, method: str, params: list[Any]) -> Any:
         self._id += 1
-        self.lim.wait()
+        if not self.shared:  # Helius / public RPC: core.http.throttle() spaces calls across all processes
+            self.lim.wait()
         d = http.post_json(self.url, {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params})
         if "error" in d:
             raise RuntimeError(f"rpc {method}: {d['error']}")
