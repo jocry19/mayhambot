@@ -36,7 +36,7 @@ function ApiUsage({ u }) {
             { k: "budget_per_min", l: "Budget/min", r: true, fmt: (r) => (r.budget_per_min ? n(r.budget_per_min) : <span className="dim">ohne</span>) },
             { k: "load", l: "Auslastung", sort: (r) => r.load ?? -1, fmt: (r) => <LoadBar v={r.load} /> },
             ...(credits ? [{ k: "credits_month", l: "Credits Monat", r: true, sort: (r) => (r.credits_cap ? r.credits_month / r.credits_cap : -1),
-              fmt: (r) => (r.credits_month != null ? <span title={r.credits_cap ? `${n(r.credits_month)} von ${n(r.credits_cap)}` : undefined}>
+              fmt: (r) => (r.credits_month != null ? <span title={[r.credits_cap ? `Monat ${n(r.credits_month)} von ${n(r.credits_cap)}` : "", r.credits_day_budget ? `heute ${n(r.credits_today)} von ${n(r.credits_day_budget)}` : "", r.share_pct != null ? `Anteil ${n(r.share_pct)} %` : "", r.refused ? `${n(r.refused)} Abfragen wegen Budget abgelehnt` : ""].filter(Boolean).join(" · ") || undefined}>
                 {compact(r.credits_month)}{r.credits_cap ? <> / {compact(r.credits_cap)} <LoadBar v={r.credits_month / r.credits_cap} /></> : ""}</span> : "–") }] : []),
           ]} />
       )}
