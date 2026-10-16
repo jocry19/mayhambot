@@ -84,6 +84,9 @@ def main(argv=None):
             s = (ev.get("significant") or {}).get(lens)
             if s:
                 print(f"  -> {'klar' if s['clear'] else 'nicht klar'}: {s['text']}")
+        print("\nWalk-forward (älterer Teil wählt, neuerer Teil prüft):")
+        for lens, w in (ev.get("walk_forward") or {}).items():
+            print(f"  {lens:<16} {'OK' if w.get('ok') else '--'}  {w.get('text')}")
         print("\n(Phasen:", ", ".join(LABELS.values()) + ")")
 
 

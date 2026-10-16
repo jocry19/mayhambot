@@ -270,3 +270,20 @@ def test_web_market_endpoints(monkeypatch):
     r = c.get("/api/market/coin/M000")
     assert r.status_code == 200 and r.json()["sector"] == "celeb"
     wdb.cache.clear()
+
+
+def test_walk_forward_confirms_only_out_of_sample():
+    rnd = random.Random(3)
+    hit = lambda r: (r["max_ret_60m"] or 0) >= 1.0  # noqa: E731
+    rows = []
+    for i in range(800):
+        lab = "risk_on" if i % 2 else "risk_off"
+        p = 0.25 if lab == "risk_on" else 0.05
+        rows.append({"decided_ts": i, "created_ts": i, "label": lab, "sector_heat": None, "term_heat": None,
+                     "max_ret_60m": 1.5 if rnd.random() < p else -0.5})
+    wf = evaluate.walk_forward(rows, hit)
+    assert wf["by_phase"]["ok"] and wf["by_phase"]["best"] == "Risk-on"
+    assert not wf["by_sector_heat"]["ok"]
+    # same rates everywhere: nothing confirmed
+    flat = [dict(r, max_ret_60m=1.5 if rnd.random() < 0.1 else -0.5) for r in rows]
+    assert not evaluate.walk_forward(flat, hit)["by_phase"]["ok"]

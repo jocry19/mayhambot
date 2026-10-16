@@ -104,6 +104,7 @@ function Evaluation({ ev }) {
   const g = la[lens] || {};
   const rows = Object.entries(g).map(([k, v]) => ({ k, ...v }));
   const verdict = (ev.significant || {})[lens];
+  const wf = (ev.walk_forward || {})[lens];
   const gate = la.gate || {};
   return (
     <div className="col" style={{ gap: 10 }}>
@@ -123,6 +124,11 @@ function Evaluation({ ev }) {
           {verdict.clear ? <span className="badge good">klarer Unterschied</span> : <span className="badge">noch nicht klar</span>} {verdict.text}
           {gate.candidates ? <> · Sniper-Tor im Rückblick: {n(gate.blocked)} von {n(gate.candidates)} Papier-Käufen wären in Risk-off gesperrt worden
             (deren Trefferquote {pct(gate.blocked_hit_rate, 0)}, die übrigen {pct(gate.kept_hit_rate, 0)}).</> : null}
+        </div>
+      )}
+      {wf && (
+        <div className="help" style={{ padding: "0 14px 10px" }}>
+          {wf.ok ? <span className="badge good">Walk-forward bestätigt</span> : <span className="badge">Walk-forward offen</span>} Älterer Teil wählt die beste und schlechteste Gruppe, neuerer Teil prüft: {wf.text}
         </div>
       )}
     </div>

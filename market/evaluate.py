@@ -118,6 +118,7 @@ def evaluate(conn, days=14, now=None, cfg=default_cfg):
                           "kept_hit_rate": round(sum(map(hit, kept)) / len(kept), 4) if kept else None,
                           "blocked_rug_rate": round(sum(1 for r in blocked if r["rugged"]) / len(blocked), 4) if blocked else None}
             out["launches"] = la
+            out["walk_forward"] = walk_forward(rows, hit)
     if store.has(conn, "signals"):
         rows = []
         for r in conn.execute("SELECT ts, mint, score, max_ret_1h FROM signals WHERE ts>=? AND max_ret_1h IS NOT NULL", (since,)):
@@ -153,6 +154,52 @@ def significance(ev, min_n=40):
         verdicts[lens] = {"clear": abs(z) >= 2, "z": round(z, 2), "best": hi[0], "worst": lo[0],
                           "text": f"{hi[0]}: {p1:.0%} Treffer gegen {lo[0]}: {p2:.0%} (z = {z:.1f})"}
     return verdicts
+
+
+LENSES = {
+    "by_phase": lambda r: LABELS.get(r["label"], r["label"]),
+    "by_sector_heat": lambda r: _bucket(r["sector_heat"], HEAT_BUCKETS),
+    "by_term": lambda r: "mit heißem Narrativ" if (r["term_heat"] or 0) >= 60 else
+    ("mit Narrativ" if r["term_heat"] is not None else "ohne Narrativ"),
+}
+
+
+def _z(p1, n1, p2, n2):
+    p = (p1 * n1 + p2 * n2) / (n1 + n2)
+    se = (p * (1 - p) * (1 / n1 + 1 / n2)) ** 0.5
+    return (p1 - p2) / se if se else 0.0
+
+
+def walk_forward(rows, hit, min_n=40):
+    """Out-of-sample check before a switch goes on: the older half of the launches picks the best and the worst
+    group of each lens, the newer half must confirm it (same direction, z >= 2 on data the choice never saw).
+    -> {lens: {ok, best, worst, train {...}, test {best_rate, worst_rate, n_best, n_worst, z}, text}}"""
+    rows = sorted(rows, key=lambda r: r["decided_ts"] or r["created_ts"] or 0)
+    half = len(rows) // 2
+    train, test = rows[:half], rows[half:]
+    out = {}
+    for lens, key in LENSES.items():
+        tr = {k: v for k, v in _group(train, key, hit).items() if v["n"] >= min_n}
+        if len(tr) < 2:
+            out[lens] = {"ok": False, "text": f"zu wenig Daten im älteren Teil (je Gruppe {min_n} nötig)"}
+            continue
+        best = max(tr, key=lambda k: tr[k]["hit_rate"])
+        worst = min(tr, key=lambda k: tr[k]["hit_rate"])
+        te = _group(test, key, hit)
+        b, w = te.get(best), te.get(worst)
+        if not b or not w or b["n"] < min_n or w["n"] < min_n:
+            out[lens] = {"ok": False, "best": best, "worst": worst,
+                         "text": f"{best} gegen {worst}: im neueren Teil zu wenig Daten"}
+            continue
+        z = _z(b["hit_rate"], b["n"], w["hit_rate"], w["n"])
+        ok = z >= 2
+        out[lens] = {"ok": ok, "best": best, "worst": worst,
+                     "train": {"best_rate": tr[best]["hit_rate"], "worst_rate": tr[worst]["hit_rate"]},
+                     "test": {"best_rate": b["hit_rate"], "worst_rate": w["hit_rate"], "n_best": b["n"],
+                              "n_worst": w["n"], "z": round(z, 2)},
+                     "text": f"{best} {b['hit_rate']:.0%} gegen {worst} {w['hit_rate']:.0%} im neueren Teil (z = {z:.1f}), "
+                             + ("bestätigt" if ok else "nicht bestätigt")}
+    return out
 
 
 def to_json(ev):
