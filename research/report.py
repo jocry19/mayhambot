@@ -150,7 +150,7 @@ def render(d):
     tf = d["tier_forward"]
     if tf:
         L.append(f"## Sagen die Tiers etwas voraus? (nächste Käufe, Pump ≥ Schwelle in {d['horizon']}, ohne Blick in die Zukunft)\n")
-        L.append("| Tier | Käufe | Pump-Quote | 95 %-Bereich | Median max. Anstieg |")
+        L.append("| Tier | Käufe | Pump-Quote | 95 %-Bereich | Median max. Anstieg (max. +5000 %) |")
         L.append("|---|---|---|---|---|")
         for t in ("ultra", "smart", "good", "none"):
             if t in tf:

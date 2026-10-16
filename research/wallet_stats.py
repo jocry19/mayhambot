@@ -67,6 +67,9 @@ def _influence(ds, cutoff, win_s):
                 continue
             i, j = bisect.bisect_right(fts, t0), bisect.bisect_right(fts, t0 + win_s)
             followers = sum(1 for k in range(i, j) if firsts[k][1] != w)
+            # new buyers in the same span BEFORE the buy = the coin's normal traffic; influence is the excess
+            base = bisect.bisect_left(fts, t0) - bisect.bisect_left(fts, t0 - win_s)
+            followers = max(0, followers - base)
             a, b = bisect.bisect_right(pts, t0), bisect.bisect_right(pts, t0 + win_s)
             follow_usd = sum(pool[k].usd for k in range(a, b) if pool[k].wallet != w)
             c = bisect.bisect_left(pts, t0 - win_s)
@@ -137,7 +140,7 @@ def summarize(P):
     med_f = median([x[0] for x in inf]) if inf else None
     med_usd = median([x[1] for x in inf]) if inf else None
     med_lift = median([x[2] for x in inf]) if inf else None
-    infl_raw = 1 - math.exp(-(med_f or 0) / 5)
+    infl_raw = 1 - math.exp(-(med_f or 0) / 4)
     infl_c = (k * infl_raw + 3 * 0.3) / (k + 3)
     med_rank = median([x[3] for x in inf]) if inf else None
     lead = (k * (1 - med_rank) + 3 * 0.5) / (k + 3) if inf else 0.5

@@ -13,7 +13,7 @@ PRIOR_COEF = dict(n_ultra=0.9, n_smart=0.5, n_good=0.2, net_sol_ultra=0.25, net_
                   log_age=-0.1, sell_ratio=-0.8, entry_span=-0.01, hhi=-0.3, crowd_buyers=0.1,
                   crowd_net=0.03, momentum=0.2)
 PRIOR_BIAS = {"15m": -1.6, "1h": -1.9, "6h": -2.3}
-PRIOR_CENTER = dict(log_mcap=5.3, log_age=2.5, wq_mean=55.0)
+PRIOR_CENTER = dict(log_mcap=5.3, log_age=2.5)
 
 
 def prior_model(horizon):

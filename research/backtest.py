@@ -20,15 +20,18 @@ from research import stats, wallet_stats
 log = logging.getLogger("research.backtest")
 
 
-def checkpoints(start, end, max_points=30):
-    span = end - start
-    if span < 2 * 3600:
+def checkpoints(ts_list, max_points=24, min_gap=1800):
+    """Checkpoints at quantiles of the trade timestamps (from the 35 % to the 97 % quantile), so they follow
+    where the data actually is (wallet backfills reach back months, live data is dense at the end)."""
+    if len(ts_list) < 50 or ts_list[-1] - ts_list[0] < 2 * 3600:
         return []
-    step = min(24 * 3600, max(3600, span // 24))
-    first = start + max(2 * step, int(span * 0.2))
-    pts = list(range(first, end, step))
-    if len(pts) > max_points:
-        pts = pts[-max_points:]
+    n = len(ts_list)
+    pts = []
+    for i in range(max_points):
+        q = 0.35 + (0.97 - 0.35) * i / max(1, max_points - 1)
+        t = ts_list[min(n - 1, int(q * n))]
+        if not pts or t - pts[-1] >= min_gap:
+            pts.append(t)
     return pts
 
 
@@ -57,7 +60,7 @@ def _coin_events(ds, tmap, a, b, ms):
         if t.side != "buy":
             continue
         ti = tmap.get(t.wallet)
-        if not ti or not ti[0]:
+        if not ti or not (ti[0] or ti[1] >= ms.event_min_score):
             continue
         if t.ts - last.get(t.mint, -10 ** 12) < ms.event_dedupe_min * 60:
             continue
@@ -67,12 +70,12 @@ def _coin_events(ds, tmap, a, b, ms):
             continue
         last[t.mint] = t.ts
         out.append(dict(mint=t.mint, ts=t.ts, f=f, x=ev.vector(f), labels=ev.labels_at(t.mint, t.ts, ds.pidx, ms.horizons),
-                        baseline=ev.baseline_score(f), trigger_tier=ti[0], wallets=len(wallets)))
+                        baseline=ev.baseline_score(f), trigger_tier=ti[0] or "scored", wallets=len(wallets)))
     return out
 
 
-def run(ds, ms=msettings, max_points=30):
-    cps = checkpoints(ds.start, ds.end, max_points)
+def run(ds, ms=msettings, max_points=24):
+    cps = checkpoints(ds.ts_list, max_points)
     res = dict(checkpoints=cps, events=[], wallet_events=[], preds={h[0]: [] for h in ms.horizons},
                weights=[], tier_counts=[], tier_forward={})
     if not cps:
@@ -86,7 +89,8 @@ def run(ds, ms=msettings, max_points=30):
         known = [(we["comps"], we["y"]) for we in res["wallet_events"] if we["ts"] + we["sec"] <= c]
         weights, winfo = learn.learn_wallet_weights(known)
         tiers = tier_all(st, weights)
-        tmap = {w: (t, sc, s["influence_usd"] or 0.0) for w, (t, sc, s) in tiers.items()}
+        tmap = {w: (t, sc, s["influence_usd"] or 0.0) for w, (t, sc, s) in tiers.items()
+                if t or sc >= ms.event_min_score}
         counts = {t: sum(1 for v in tiers.values() if v[0] == t) for t in ("ultra", "smart", "good")}
         res["weights"].append(dict(ts=c, weights=weights, info=winfo))
         res["tier_counts"].append(dict(ts=c, **counts, wallets=len(st)))
@@ -94,7 +98,7 @@ def run(ds, ms=msettings, max_points=30):
         wev = _wallet_events(ds, st, c, nxt, h_wallet, ms.horizons)
         res["wallet_events"].extend(wev)
         for x in wallet_stats.first_buys(ds, c, nxt):
-            tier = tmap.get(x[0], (None,))[0] or "none"
+            tier = (tmap.get(x[0]) or (None,))[0] or "none"
             if x[0] not in st:
                 continue
             lab = ev.labels_at(x[1], x[2], ds.pidx, [h for h in ms.horizons if h[0] == h_wallet]).get(h_wallet)

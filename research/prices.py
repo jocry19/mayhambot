@@ -43,13 +43,19 @@ class PriceIndex:
         if mints is not None:
             mints = list(mints)
             cond, args = f" AND mint IN ({','.join('?' * len(mints))})", tuple(mints)
-        for r in conn.execute("SELECT mint, ts, price_usd FROM trades WHERE price_usd > 0" + cond, args):
-            pts[r[0]].append((r[1], r[2]))
+        trade_pts = defaultdict(list)
+        for r in conn.execute("SELECT mint, ts, price_usd, source FROM trades WHERE price_usd > 0" + cond, args):
+            trade_pts[r[0]].append((r[1], r[2], r[3]))
         for r in conn.execute("SELECT mint, ts, price_usd FROM token_prices WHERE price_usd > 0" + cond, args):
             pts[r[0]].append((r[1], r[2]))
         cand = defaultdict(list)
         for r in conn.execute("SELECT mint, tf_sec, ts, h, l, c FROM research_candles WHERE c > 0" + cond, args):
             cand[r[0]].append((r[1], r[2], r[3], r[4], r[5]))
+        # wallet-history prices are derived (SOL price today, multi-hop swaps) and can be far off: when a coin
+        # has candles, only candles + pool-feed trades count; otherwise all trades are used
+        for mint, tp in trade_pts.items():
+            pool_only = mint in cand
+            pts[mint].extend((t, p) for t, p, src in tp if not pool_only or src in ("geckoterminal", "test_pool"))
         idx = cls()
         for mint, cs in cand.items():
             for tf, ts, h, l, c in cs:

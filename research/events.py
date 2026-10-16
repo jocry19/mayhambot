@@ -27,6 +27,9 @@ FEATURE_NAMES = [f for f, _ in FEATURES]
 FEATURE_LABELS = dict(FEATURES)
 
 
+MAX_RET = 50.0  # +5000 %: anything above is treated as a data error and capped
+
+
 def slog(x):
     return math.copysign(math.log1p(abs(x)), x)
 
@@ -49,7 +52,7 @@ def features_at(mint, t, window_trades, tiers, pidx, created_at, to_sol, window_
             crowd_net -= tr.usd
         tinfo = tiers.get(tr.wallet)
         if not tinfo or not tinfo[0]:
-            continue
+            continue  # only tiered wallets count as smart money
         d = per.setdefault(tr.wallet, dict(address=tr.wallet, tier=tinfo[0], score=tinfo[1], infl=tinfo[2],
                                            buy_sol=0.0, sell_sol=0.0, first_ts=tr.ts, last_buy=0))
         if tr.side == "buy":
@@ -99,7 +102,7 @@ def labels_at(mint, t, pidx, horizons):
             continue
         mx = pidx.max_between(mint, t, t + sec)
         end = pidx.price_at(mint, t + sec)
-        mr = (mx / p0 - 1) if mx else 0.0
+        mr = min(MAX_RET, (mx / p0 - 1)) if mx else 0.0
         out[name] = dict(max_ret=mr, ret=(end / p0 - 1) if end else None, pumped=int(mr >= thr))
     return out
 

@@ -15,6 +15,8 @@ def main():
     mg = sub.add_parser("merge", parents=[common], help="merge a runner DB (trades, candles, research tables) into the app DB")
     mg.add_argument("path")
     sub.add_parser("report", parents=[common], help="print the latest research report")
+    sd = sub.add_parser("seed", parents=[common], help="seed winner wallets from public keyless sources (GMGN rank, pump.fun)")
+    sd.add_argument("--early-coins", type=int, default=10)
     sub.add_parser("selftest", parents=[common], help="run the whole pipeline on a synthetic market (no network)")
     a = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
@@ -28,6 +30,10 @@ def main():
             discovery.loop(conn)
         else:
             print(discovery.run_once(conn))
+    elif a.cmd == "seed":
+        from research import public_seeds
+        from research.store import connect
+        print(public_seeds.run(connect(), a.early_coins))
     elif a.cmd == "merge":
         from research.store import connect, merge
         print(merge(connect(), a.path))
