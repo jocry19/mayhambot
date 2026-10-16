@@ -1,0 +1,16 @@
+# Known centralised-exchange hot wallets on Solana (address  label). Used to
+# 1) flag a dev wallet that sends SOL to an exchange (cash-out),
+# 2) NOT link holders just because the same exchange withdrawal funded them.
+# Best-effort public labels (Solscan/Arkham); extend freely, one address per line.
+5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9  Binance
+9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM  Binance
+2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S  Binance
+H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS  Coinbase
+GJRs4FwHtemZ5ZE9x3FNvJ8TMwitKTh21yxdRPqn7npE  Coinbase
+2AQdpHJ2JpcEgPiATUXjQxA8QmafFegfQwSLWSprPicm  Coinbase
+5VCwKtCXgCJ6kit5FybXjvriW3xELsFDhYrPSqtJNmcD  OKX
+AC5RDfQFmDS1deWZos921JfqscXdByf8BKHs5ACWjtW2  Bybit
+FWznbcNXWQuHTawe9RxvQ2LdCENssh12dsznf4RiouN5  Kraken
+ASTyfSima4LLAdDgoFGkgqoKowG1LZFDr9fAQrg7iaJZ  MEXC
+u6PJ8DtQuPFnfmwHbGFULQ4u4EgjDiyYKjVEsynXq2w  Gate.io
+BmFdpraQhkiDQE6SnfG5omcA1VwzqfXrwtNYBwWTymy6  KuCoin
