@@ -51,7 +51,7 @@ def coin_context(conn, mint, ts=None, name=None, symbol=None, cfg=default_cfg):
     {mint, sector, sector_label, sector_hits, sector_heat, sector_rank, sector_n, sector_median_ret_h1,
      rs_sector_h1 (coin 1 h change minus the sector median, points), terms [{term, heat, lift, hit2x}],
      term_heat (hottest matching narrative), phase {score, label, label_de, age_s}, age_h, liq_mcap,
-     net_flow_usd, fresh (coin data younger than 30 min at ts)}"""
+     net_flow_usd, fresh (coin row written at or before ts, at most 30 min old)}"""
     ts = int(ts or time.time())
     row = _coin_row(conn, mint) or {"mint": mint}
     name = name if name is not None else row.get("name")
@@ -61,17 +61,21 @@ def coin_context(conn, mint, ts=None, name=None, symbol=None, cfg=default_cfg):
     out = {"mint": mint, "symbol": symbol, "name": name, "sector": primary,
            "sector_label": narratives.SECTOR_LABEL.get(primary, primary), "sector_hits": hits, "terms": [],
            "phase": None, "sector_heat": None}
-    fresh = row.get("updated_at") is not None and abs(ts - (row.get("updated_at") or 0)) <= 1800
+    # point in time: only a coin row written at or before ts and at most 30 min old counts; a row written after ts
+    # is the future for this ts and must not leak into measurement, walk-forward or model features
+    upd = row.get("updated_at")
+    fresh = upd is not None and 0 <= ts - upd <= 1800
     out["fresh"] = fresh
     pc = row.get("pair_created_at")
     out["age_h"] = round((ts - pc) / 3600, 2) if pc and pc <= ts else None
     mc, liq = row.get("mcap_usd"), row.get("liquidity_usd")
-    out["liq_mcap"] = round(liq / mc, 4) if mc and liq else None
+    out["liq_mcap"] = round(liq / mc, 4) if fresh and mc and liq else None
     out["net_flow_usd"] = net_flow(row) if fresh else None
     if not snap:
         return out
     out["phase"] = {"ts": snap["ts"], "score": snap["score"], "label": snap["label"],
-                    "label_de": LABELS.get(snap["label"], "–"), "age_s": ts - snap["ts"]}
+                    "label_de": LABELS.get(snap["label"], "–"), "age_s": ts - snap["ts"],
+                    "trend": snap.get("trend"), "slope_1h": snap.get("slope_1h")}
     secs = _sector_rows(conn, snap["ts"])
     ranked = sorted((s for s in secs.values() if s.get("heat") is not None), key=lambda s: -s["heat"])
     sec = secs.get(primary)
@@ -87,13 +91,14 @@ def coin_context(conn, mint, ts=None, name=None, symbol=None, cfg=default_cfg):
     mine = [terms[t] for t in narratives.terms_of(name, symbol) if t in terms]
     mine.sort(key=lambda t: -(t["heat"] or 0))
     out["terms"] = [{"term": t["term"], "heat": t["heat"], "lift": t["lift"], "hit2x": t["hit2x"],
-                     "n_recent": t["n_recent"]} for t in mine[:5]]
+                     "n_recent": t["n_recent"], "stage": t.get("stage"), "age_h": t.get("age_h")} for t in mine[:5]]
     out["term_heat"] = mine[0]["heat"] if mine else None
     return out
 
 
 FEATURES = ("mkt_phase", "mkt_sol_ret_24h", "mkt_breadth", "mkt_launch_hit2x", "mkt_smart_net",
-            "mkt_sector_heat", "mkt_sector_share_chg", "mkt_rs_sector_h1", "mkt_term_heat", "mkt_hot_term")
+            "mkt_sector_heat", "mkt_sector_share_chg", "mkt_rs_sector_h1", "mkt_term_heat", "mkt_hot_term",
+            "mkt_phase_slope_1h", "mkt_regime_age_h", "mkt_term_early")
 
 
 def features(conn, mint, ts=None, name=None, symbol=None):
@@ -109,6 +114,10 @@ def features(conn, mint, ts=None, name=None, symbol=None):
         "mkt_sector_heat": c.get("sector_heat"), "mkt_sector_share_chg": c.get("sector_vol_share_chg"),
         "mkt_rs_sector_h1": c.get("rs_sector_h1"), "mkt_term_heat": c.get("term_heat"),
         "mkt_hot_term": None if c.get("phase") is None else int((c.get("term_heat") or 0) >= 60),
+        "mkt_phase_slope_1h": p.get("slope_1h"),
+        "mkt_regime_age_h": None if not p.get("regime_since") else round((p["ts"] - p["regime_since"]) / 3600, 2),
+        "mkt_term_early": None if c.get("phase") is None else int(bool(c.get("terms")) and
+                                                                   c["terms"][0].get("stage") in ("new", "growing")),
     }
 
 

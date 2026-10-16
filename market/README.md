@@ -65,6 +65,26 @@ vom 16.10.2026: "flying", "tesla", "roadster" in 7 % aller Launches.
 **Wo das Geld sitzt**: Volumen-Anteil, Netto-Kauf, Median 1 h und Smart Money nach Market Cap (< 100k, 100k–1M,
 1–10M, > 10M) und Alter (< 1 h, 1–6 h, 6–24 h, 1–7 d, > 7 d).
 
+## Dynamik (`market/dynamics.py`, stündlich)
+
+- **Regime mit Übergängen**: das Label bekommt ±3 Punkte Hysterese (`regime`, `regime_since`), dazu EMA und Steigung
+  über 1 h und 3 h (kleinste Quadrate) und ein Trend: stabil, steigt, fällt, kippt nach oben, kippt nach unten.
+  `transitions` zählt stündliche Wechsel der letzten 14 Tage und gibt Laplace-geglättete Wahrscheinlichkeiten
+  "von Phase A in der nächsten Stunde nach B".
+- **Narrative mit Lebenszyklus**: jede Narrativ-Zeile bekommt `stage` (neu, wachsend, Höhepunkt, reif, abklingend),
+  `first_seen`, `peak_n`, `age_h` und `growth_1h` aus ihrer eigenen Historie.
+- **Sektor-Rotation mit Vorlauf**: `sector_lead` misst je Stunde quer über die Sektoren die Spearman-Rangkorrelation
+  zwischen Volumen-Anteils-Zuwachs, Smart-Money-Zufluss oder Hitze und der Sektor-Rendite der *folgenden* Stunde.
+  Bestätigt erst bei ≥ 12 Stunden, |t| ≥ 2 und gleichem Vorzeichen in beiden Hälften. `rotation_streaks` zeigt, wer
+  seit mehreren Runden Anteil gewinnt.
+- **Messung je Baustein**: `component_power` korreliert jede Phasen-Komponente mit der 2x-Rate der Launches der
+  folgenden Stunde (Rang-IC, ältere und neuere Hälfte getrennt). `learn_weights` passt Gewichte nur auf der älteren
+  Hälfte an, zieht sie zu 50 % zum Ausgangswert zurück und übernimmt sie nur, wenn sie auf der neueren Hälfte um
+  ≥ 0,05 IC besser sind. Wirkt erst mit `MARKET_LEARNED_WEIGHTS=true` (Standard aus).
+- Alles Zeitpunkt-genau: nur Zeilen mit ts ≤ t, Launch-Ergebnisse erst nach Ablauf ihres 60-min-Fensters, und eine
+  Coin-Zeile, die nach t geschrieben wurde, zählt für t nicht als frisch.
+- Ergebnis in `market_state` (`dynamics`, `learned_weights`), Intervall `MARKET_DYNAMICS_EVERY_SEC` (3600).
+
 ## Wirkung auf andere Pakete (aus, bis gemessen)
 
 - `signals/engine.apply_market`: Score × `signal_factor` (60 % Phase, 40 % Sektor-Hitze, höchstens ±15 %), eigene
@@ -75,7 +95,7 @@ vom 16.10.2026: "flying", "tesla", "roadster" in 7 % aller Launches.
 - Ein Snapshot älter als `MARKET_MAX_AGE_SEC` (30 min) wirkt nie.
 
 **Einschalten erst**, wenn `python -m market eval` (oder die Karte "Taugt die Marktanalyse?") einen klaren Unterschied
-zeigt: Trefferquote der besten gegen die schlechteste Gruppe, Zwei-Stichproben-z-Test |z| ≥ 2, je Gruppe ≥ 40 Launches.
+auch im Walk-forward (ältere Hälfte wählt, neuere bestätigt) zeigt: Trefferquote der besten gegen die schlechteste Gruppe, Zwei-Stichproben-z-Test |z| ≥ 2, je Gruppe ≥ 40 Launches.
 Die Karte zeigt auch, was das Sniper-Tor im Rückblick gesperrt hätte.
 
 ## Kosten und Last
@@ -91,10 +111,10 @@ Die Karte zeigt auch, was das Sniper-Tor im Rückblick gesperrt hätte.
 
 | Tabelle | Inhalt |
 |---|---|
-| `market_snapshots` | ts PK, score, label, coverage, components_json, SOL-Renditen/Vola, Meme-Sektor, breadth, universe_n, volume_h1_usd, volume_ratio, net_flow_usd, launches_1h, launch_ratio, launch_hit2x, launch_rug, launch_migrated, smart_net_usd, smart_buyers, top_sector, top_term, backfilled |
+| `market_snapshots` | ts PK, score, label, regime, regime_since, score_ema, slope_1h, slope_3h, trend, coverage, components_json, SOL-Renditen/Vola, Meme-Sektor, breadth, universe_n, volume_h1_usd, volume_ratio, net_flow_usd, launches_1h, launch_ratio, launch_hit2x, launch_rug, launch_migrated, smart_net_usd, smart_buyers, top_sector, top_term, backfilled |
 | `market_sectors` | (ts, sector) PK, n_tokens, mcap_usd, volume_h1_usd, vol_share, vol_share_chg, net_flow_usd, median_ret_h1, breadth, smart_net_usd, smart_buyers, launches, launch_hit2x, heat, top_json |
-| `market_terms` | (ts, term) PK, n_recent, n_base, lift, volume_h1_usd, hit2x, rug, n_outcomes, heat, mints_json |
+| `market_terms` | (ts, term) PK, n_recent, n_base, lift, volume_h1_usd, hit2x, rug, n_outcomes, heat, mints_json, stage, first_seen, peak_n, age_h, growth_1h |
 | `market_buckets` | (ts, kind 'mcap'/'age', bucket) PK, n, volume_h1_usd, vol_share, net_flow_usd, median_ret_h1, smart_net_usd |
 | `market_tokens` | mint PK, Metadaten (Beschreibung, Socials, Boosts), sectors_json, terms_json, Marktwerte mit Käufen/Verkäufen 1 h |
 | `market_sol` | ts PK, price_usd (SOL-Verlauf) |
-| `market_state` | key PK, value (`service_status` = Heartbeat je Runde) |
+| `market_state` | key PK, value (`service_status` = Heartbeat je Runde, `dynamics`, `learned_weights`) |

@@ -39,7 +39,13 @@ CREATE TABLE IF NOT EXISTS market_state (key TEXT PRIMARY KEY, value TEXT);
 """
 
 # columns added after the first release: (table, column, type)
-MIGRATIONS = []
+MIGRATIONS = [
+    ("market_snapshots", "regime", "TEXT"), ("market_snapshots", "regime_since", "INTEGER"),
+    ("market_snapshots", "score_ema", "REAL"), ("market_snapshots", "slope_1h", "REAL"),
+    ("market_snapshots", "slope_3h", "REAL"), ("market_snapshots", "trend", "TEXT"),
+    ("market_terms", "stage", "TEXT"), ("market_terms", "first_seen", "INTEGER"), ("market_terms", "peak_n", "INTEGER"),
+    ("market_terms", "age_h", "REAL"), ("market_terms", "growth_1h", "REAL"),
+]
 
 
 def ensure_schema(conn):

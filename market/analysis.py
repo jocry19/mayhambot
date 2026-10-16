@@ -198,7 +198,7 @@ def _baseline(conn, ts, col, hours=24):
 
 
 # ---------------------------------------------------------------- phase
-def phase(inputs):
+def phase(inputs, weights=None):
     """inputs (any may be None) -> (score 0..100, coverage 0..1, contributions {name: {weight, value, points, why}}).
     Missing inputs drop out and the remaining weights are renormalised; coverage says how much was there."""
     v = {
@@ -212,19 +212,20 @@ def phase(inputs):
         "launch_survival": lin(1 - inputs["launch_rug"] if inputs.get("launch_rug") is not None else None, 0.85, 1.0),
         "smart_flow": None if inputs.get("smart_net_usd") is None else 0.5 + 0.5 * math.tanh(inputs["smart_net_usd"] / 25000),
     }
-    have = {k: x for k, x in v.items() if x is not None}
-    wsum = sum(PHASE_WEIGHTS[k] for k in have)
+    weights = weights or PHASE_WEIGHTS
+    have = {k: x for k, x in v.items() if x is not None and weights.get(k)}
+    wsum = sum(weights[k] for k in have)
     if wsum <= 0:
         return None, 0.0, {}
     contrib = {}
     for k, x in have.items():
-        w = PHASE_WEIGHTS[k] / wsum
+        w = weights[k] / wsum
         contrib[k] = {"weight": round(w, 4), "value": round(x, 4), "points": round(100 * w * x, 2), "why": PHASE_WHY[k],
                       "raw": inputs.get({"sol_trend": "sol_ret_24h", "sol_week": "sol_ret_7d", "meme_sector": "meme_mcap_chg_24h",
                                          "volume": "volume_ratio", "launch_rate": "launch_ratio", "launch_hit": "launch_hit2x",
                                          "launch_survival": "launch_rug", "smart_flow": "smart_net_usd"}.get(k, k))}
     score = round(sum(c["points"] for c in contrib.values()), 1)
-    return score, round(wsum / sum(PHASE_WEIGHTS.values()), 3), contrib
+    return score, round(sum(PHASE_WEIGHTS[k] for k in have) / sum(PHASE_WEIGHTS.values()), 3), contrib
 
 
 # ---------------------------------------------------------------- sectors, buckets
@@ -364,7 +365,13 @@ def compute(conn, ts=None, external=None, live=True, cfg=default_cfg):
     meme = external.get("meme") or {}
     inputs = dict(sol, breadth=breadth, volume_ratio=(vol100 / vb) if vol100 and vb else None,
                   meme_mcap_chg_24h=meme.get("change_24h"), smart_net_usd=smart_net, **ls)
-    score, coverage, contrib = phase(inputs)
+    weights = None
+    if cfg.learned_weights:
+        from market import store as _st
+        lw = _st.get_state(conn, "learned_weights") or {}
+        if isinstance(lw, dict) and lw.get("adopt") and lw.get("weights"):
+            weights = lw["weights"]
+    score, coverage, contrib = phase(inputs, weights)
     recent = launches(conn, ts - cfg.term_recent_hours * 3600, ts)
     base = launches(conn, ts - cfg.term_base_hours * 3600, ts)
     done = [r for r in launches(conn, ts - cfg.term_base_hours * 3600, ts - 3600) if r["max_ret_60m"] is not None]
@@ -374,6 +381,10 @@ def compute(conn, ts=None, external=None, live=True, cfg=default_cfg):
         [(r["mint"], r["name"], r["symbol"]) for r in recent], [(r["mint"], r["name"], r["symbol"]) for r in base],
         outcomes=[(r["name"], r["symbol"], int((r["max_ret_60m"] or 0) >= 1.0), int(bool(r["rugged"]))) for r in done],
         volume=term_volume(uni) if live else None, min_count=cfg.term_min_count, keep=cfg.terms_kept)
+    from market import dynamics
+    th = dynamics.term_history(conn, ts)
+    for t in terms:
+        t.update(dynamics.lifecycle(t, th.get(t["term"]), ts))
     term_rows = [dict({k: v for k, v in t.items() if k != "mints"}, ts=ts, mints_json=json.dumps(t["mints"])) for t in terms]
     bucket_rows = buckets(ts, uni, flows) if live else []
     snap = {"ts": ts, "score": score, "label": label_for(score, cfg), "coverage": coverage,
@@ -389,4 +400,5 @@ def compute(conn, ts=None, external=None, live=True, cfg=default_cfg):
             "smart_buyers": len(set().union(*[d["buyers"] for d in flows.values()])) if flows else 0,
             "top_sector": next((r["sector"] for r in sec_rows if r["sector"] != narratives.OTHER and r["heat"] is not None), None),
             "top_term": terms[0]["term"] if terms else None, "backfilled": 0 if live else 1}
+    snap.update(dynamics.regime(conn, ts, score, cfg))
     return snap, sec_rows, term_rows, bucket_rows

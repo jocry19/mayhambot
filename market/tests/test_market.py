@@ -203,7 +203,7 @@ def test_backfill_evaluate_and_view(monkeypatch):
     la = ev["launches"]
     assert la["n"] > 500 and la["by_phase"] and la["by_term"]
     assert "gate" in la and la["gate"]["candidates"] > 0
-    assert set(ev["significant"]) == {"by_phase", "by_sector_heat", "by_term"}
+    assert set(ev["significant"]) == {"by_phase", "by_sector_heat", "by_term", "by_term_stage"}
     # one live round with the network replaced by fixtures
     monkeypatch.setattr(sources, "promoted", lambda: (sources.parse_promoted(fx("dexscreener_boosts.json"), "boost"), 3))
     monkeypatch.setattr(sources, "pairs_for", lambda mints: (sources.best_pairs(fx("dexscreener_tokens.json")), 1))
@@ -219,7 +219,7 @@ def test_backfill_evaluate_and_view(monkeypatch):
     v = view(conn, now=NOW + 400)
     assert v["available"] and v["phase"]["components"] and v["sectors"] and v["history"]
     assert v["switches"] == {"signal_weight": False, "sniper_gate": False, "signal_max_adj": 0.15,
-                             "sniper_riskoff_bump": 10.0, "sniper_hot_term_bonus": 5.0}
+                             "sniper_riskoff_bump": 10.0, "sniper_hot_term_bonus": 5.0, "learned_weights": False}
     json.dumps(v, default=str)
     assert context.summary(conn, NOW + 400)["label"] == snap["label"]
 
@@ -287,3 +287,120 @@ def test_walk_forward_confirms_only_out_of_sample():
     # same rates everywhere: nothing confirmed
     flat = [dict(r, max_ret_60m=1.5 if rnd.random() < 0.1 else -0.5) for r in rows]
     assert not evaluate.walk_forward(flat, hit)["by_phase"]["ok"]
+
+
+# ---------------------------------------------------------------- dynamics
+def test_regime_hysteresis_slope_and_transitions():
+    from market import dynamics
+    c = cfg()
+    assert dynamics.label_hyst("neutral", 56, c) == "neutral"      # 1 point over 55: stays
+    assert dynamics.label_hyst("neutral", 59, c) == "risk_on"
+    assert dynamics.label_hyst("risk_on", 53, c) == "risk_on"      # 2 below: stays
+    assert dynamics.label_hyst("risk_on", 50, c) == "neutral"
+    pts = [(i * 300, 40 + i) for i in range(13)]                    # +12 points per hour
+    assert dynamics.slope(pts, 1) == pytest.approx(12, abs=0.01)
+    conn = store.connect(os.path.join(tempfile.mkdtemp(), "r.db"))
+    rows = []
+    for h in range(48):  # alternating 6 h risk_off / 6 h risk_on, hourly
+        sc = 20 if (h // 6) % 2 == 0 else 70
+        rows.append({"ts": NOW - (48 - h) * 3600, "score": sc, "label": "risk_off" if sc == 20 else "risk_on",
+                     "components_json": "{}"})
+    store._insert(conn, "market_snapshots", rows)
+    r = dynamics.regime(conn, NOW, 72, c)
+    assert r["regime"] == "risk_on" and r["regime_since"] < NOW and r["trend"] in ("stabil", "steigt")
+    r2 = dynamics.regime(conn, NOW, 30, c)
+    assert r2["regime"] == "risk_off" and r2["regime_since"] == NOW and r2["slope_1h"] is None and r2["slope_3h"] is not None
+    tr = dynamics.transitions(conn, NOW)
+    assert tr["n"] == 47 and tr["p"]["risk_off"]["risk_off"] > 0.6 and tr["p"]["risk_on"]["risk_off"] > 0.1
+
+
+def test_term_lifecycle():
+    from market import dynamics
+    t = {"n_recent": 30}
+    assert dynamics.lifecycle(t, [], NOW)["stage"] == "new"
+    hist = [(NOW - 10800, 10), (NOW - 3600, 20)]
+    assert dynamics.lifecycle(t, hist, NOW)["stage"] == "growing"
+    assert dynamics.lifecycle({"n_recent": 10}, [(NOW - 10800, 40), (NOW - 3600, 30)], NOW)["stage"] == "fading"
+    lc = dynamics.lifecycle({"n_recent": 39}, [(NOW - 10800, 40), (NOW - 3600, 38)], NOW)
+    assert lc["stage"] == "peak" and lc["peak_n"] == 40 and lc["age_h"] == 3.0
+
+
+def test_sector_lead_finds_a_real_lead_only():
+    from market import dynamics
+    conn = store.connect(os.path.join(tempfile.mkdtemp(), "s.db"))
+    rnd = random.Random(5)
+    rows, chg = [], {}
+    sectors_ = ["ai", "dog", "cat", "frog", "celeb", "politics", "anime"]
+    for h in range(60):
+        ts = NOW - (60 - h) * 3600
+        for s in sectors_:
+            prev = chg.get(s, 0.0)
+            new = rnd.uniform(-0.05, 0.05)
+            rows.append({"ts": ts, "sector": s, "vol_share_chg": new, "heat": rnd.uniform(0, 100), "smart_net_usd": 0.0,
+                         "net_flow_usd": None, "median_ret_h1": 200 * prev + rnd.uniform(-1, 1)})  # last hour's share growth leads
+            chg[s] = new
+    store._insert(conn, "market_sectors", rows)
+    lead = dynamics.sector_lead(conn, NOW)
+    assert lead["vol_share_chg"]["confirmed"] and lead["vol_share_chg"]["ic"] > 0.5
+    assert not lead["heat"]["confirmed"]
+
+
+def test_component_power_and_learned_weights():
+    from market import dynamics
+    conn = make_db("on")
+    rnd = random.Random(9)
+    snaps = []
+    conn.execute("DELETE FROM sniper_launches")
+    launches = []
+    for h in range(60):
+        ts = NOW - (60 - h) * 3600
+        good = rnd.random()
+        comps = {"launch_hit": {"value": good, "weight": 0.5}, "sol_trend": {"value": rnd.random(), "weight": 0.5}}
+        snaps.append({"ts": ts, "score": 50.0, "label": "neutral", "components_json": json.dumps(comps)})
+        for i in range(40):  # launches in the next hour: 2x rate follows launch_hit, not sol_trend
+            launches.append((f"P{h}_{i}", "x", "x", ts + 60 + i * 60, 1.5 if rnd.random() < 0.05 + 0.3 * good else -0.5))
+    store._insert(conn, "market_snapshots", snaps)
+    conn.executemany("INSERT INTO sniper_launches(mint, name, symbol, created_ts, max_ret_60m) VALUES (?,?,?,?,?)", launches)
+    conn.commit()
+    p = dynamics.component_power(conn, NOW)
+    assert p["n_hours"] >= 50
+    assert p["rows"]["launch_hit"]["confirmed"] and p["rows"]["launch_hit"]["ic"] > 0.4
+    assert not p["rows"]["sol_trend"]["confirmed"]
+    lw = p["learned"]
+    assert lw and lw["weights"]["launch_hit"] > 0.14 and lw["n_new"] >= 25
+
+
+def test_service_dynamics_state(monkeypatch):
+    conn = make_db("on")
+    monkeypatch.setattr(sources, "apply_budgets", lambda c: None)
+    s = service.Service(cfg(), os.path.join(tempfile.mkdtemp(), "unused.db"))
+    s.conn = conn
+    s.backfill(hours=24, now=NOW)
+    d = s.dynamics(NOW)
+    assert d and set(d) == {"ts", "transitions", "sector_lead", "components"}
+    assert store.get_state(conn, "dynamics")["ts"] == NOW
+    snap, secs, terms, bks = analysis.compute(conn, NOW + 300, {})
+    assert snap["regime"] and snap["trend"] and all(t.get("stage") for t in terms)
+    store.save_snapshot(conn, snap, secs, terms, bks)
+    v = view(conn, now=NOW + 400)
+    assert v["dynamics"]["ts"] == NOW and "streak" in v["sectors"][0]
+    f = context.features(conn, "M000", NOW + 300)
+    assert set(f) == set(context.FEATURES) and f["mkt_term_early"] in (0, 1)
+
+
+def test_coin_context_never_uses_a_coin_row_from_the_future():
+    conn = make_db("off")
+    snap, secs, terms, bks = analysis.compute(conn, NOW, {"meme": {"change_24h": -9.0}})
+    store.save_snapshot(conn, snap, secs, terms, bks)
+    now = context.coin_context(conn, "M000", NOW + 30)
+    assert now["fresh"] and now["rs_sector_h1"] is not None
+    # the coin row gets rewritten 10 min after t: for t it is the future and must not count
+    tbl = "market_tokens" if store.has(conn, "market_tokens") and conn.execute(
+        "SELECT 1 FROM market_tokens WHERE mint='M000'").fetchone() else "tokens"
+    col = "updated_at" if tbl == "market_tokens" else "last_updated"
+    conn.execute(f"UPDATE {tbl} SET {col}=? WHERE mint='M000'", (NOW + 630,))
+    early = context.coin_context(conn, "M000", NOW + 30)
+    assert early["phase"] is not None and early["sector_heat"] is not None   # snapshot at or before t still counts
+    assert not early["fresh"] and early.get("rs_sector_h1") is None
+    assert early["net_flow_usd"] is None and early["liq_mcap"] is None
+    assert context.features(conn, "M000", NOW + 30)["mkt_rs_sector_h1"] is None

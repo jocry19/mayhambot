@@ -2,7 +2,7 @@
 import json
 import time
 
-from market import evaluate, narratives, store
+from market import dynamics, evaluate, narratives, store
 from market.analysis import LABELS, PHASE_WHY
 from market.config import settings as default_cfg
 
@@ -49,6 +49,14 @@ def view(conn, hours=24, now=None, cfg=default_cfg):
         t["since"] = first_seen.get(t["term"])
     bks = [dict(r) for r in conn.execute(
         "SELECT * FROM market_buckets WHERE ts=(SELECT MAX(ts) FROM market_buckets) ORDER BY kind, rowid")]
+    streaks = dynamics.rotation_streaks(conn, last["ts"])
+    for s in secs:
+        s["streak"] = streaks.get(s["sector"])
+    for t in terms:
+        t["stage_de"] = dynamics.STAGES.get(t.get("stage"), None)
+    dyn = store.get_state(conn, "dynamics") or {}
+    dyn = dyn if isinstance(dyn, dict) else {}
+    lw = store.get_state(conn, "learned_weights") or None
     rotation = rotation_text(secs)
     return {
         "available": True, "now": now,
@@ -59,9 +67,10 @@ def view(conn, hours=24, now=None, cfg=default_cfg):
         "thresholds": {"risk_off": cfg.riskoff_below, "risk_on": cfg.riskon_above, "hot": cfg.hot_above},
         "history": history, "sectors": secs, "sector_history": sec_hist, "terms": terms, "buckets": bks,
         "rotation": rotation, "evaluation": evaluate.evaluate(conn, days=14, now=now, cfg=cfg),
+        "dynamics": dyn, "learned_weights": lw, "learned_active": bool(cfg.learned_weights and isinstance(lw, dict) and lw.get("adopt")),
         "switches": {"signal_weight": cfg.signal_weight, "sniper_gate": cfg.sniper_gate,
                      "signal_max_adj": cfg.signal_max_adj, "sniper_riskoff_bump": cfg.sniper_riskoff_bump,
-                     "sniper_hot_term_bonus": cfg.sniper_hot_term_bonus},
+                     "sniper_hot_term_bonus": cfg.sniper_hot_term_bonus, "learned_weights": cfg.learned_weights},
     }
 
 

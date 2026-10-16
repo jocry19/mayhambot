@@ -4,7 +4,82 @@ import { ago, dt, go, n, pct, pctSigned, sign, usd, usdSigned, usePoll } from ".
 import { Bars, Callout, Card, Delta, Empty, Seg, Table, Tile } from "../ui.jsx";
 
 const LABEL_CLS = { risk_off: "bad", neutral: "", risk_on: "good", hot: "warn" };
-const LENS = [["by_phase", "Nach Marktphase"], ["by_sector_heat", "Nach Sektor-Hitze"], ["by_term", "Nach Narrativ"]];
+const LENS = [["by_phase", "Nach Marktphase"], ["by_sector_heat", "Nach Sektor-Hitze"], ["by_term", "Nach Narrativ"], ["by_term_stage", "Nach Narrativ-Stufe"]];
+const ORDER = ["risk_off", "neutral", "risk_on", "hot"];
+const RLABEL = { risk_off: "Risk-off", neutral: "Neutral", risk_on: "Risk-on", hot: "Heiß" };
+const COMP_LABEL = {
+  score: "Marktphase gesamt", sol_trend: "SOL 24 h", sol_week: "SOL 7 Tage", meme_sector: "Meme-Sektor 24 h", breadth: "Breite",
+  volume: "DEX-Volumen", launch_rate: "Launch-Rate", launch_hit: "2x-Quote Launches", launch_survival: "Launches ohne Rug", smart_flow: "Smart Money netto",
+};
+const STAGE_CLS = { new: "accent", growing: "good", peak: "warn", mature: "", fading: "bad" };
+
+function Confirmed({ ok }) {
+  return ok ? <span className="badge good">bestätigt</span> : <span className="badge">offen</span>;
+}
+
+function Regime({ p, tr }) {
+  const cur = p.regime || p.label;
+  const probs = tr?.p?.[cur];
+  return (
+    <div className="col" style={{ gap: 10 }}>
+      <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+        <span className={`badge ${LABEL_CLS[cur] || ""}`}>{RLABEL[cur] || "–"}</span>
+        <span className="t2">seit {p.regime_since ? ago(p.regime_since).replace("vor ", "") : "–"}</span>
+        <span className={p.trend?.startsWith("kippt") ? "warn-ink b" : "t2"}>Trend: {p.trend || "–"}</span>
+        <span className="dim">1 h {p.slope_1h == null ? "–" : `${p.slope_1h > 0 ? "+" : ""}${n(p.slope_1h, 1)} Pkt`} · 3 h {p.slope_3h == null ? "–" : `${p.slope_3h > 0 ? "+" : ""}${n(p.slope_3h, 1)} Pkt/h`} · geglättet {n(p.score_ema, 1)}</span>
+      </div>
+      {probs ? (
+        <>
+          <div className="dim" style={{ fontSize: 12 }}>Wahrscheinlichkeit für die nächste Stunde, gelernt aus {n(tr.n)} beobachteten Stundenwechseln:</div>
+          <Bars items={ORDER.map((k) => ({ label: RLABEL[k], value: probs[k] }))} fmt={(v) => pct(v)} max={1} />
+        </>
+      ) : <div className="dim">Übergänge werden stündlich gelernt, sobald genug Verlauf da ist.</div>}
+    </div>
+  );
+}
+
+function Power({ dyn, lw, active }) {
+  const comp = dyn?.components;
+  const lead = dyn?.sector_lead || {};
+  const rows = Object.entries(comp?.rows || {}).map(([k, v]) => ({ k, ...v, w: lw?.weights?.[k] }));
+  const leads = Object.entries(lead).map(([k, v]) => ({ k, ...v }));
+  return (
+    <div className="grid g2" style={{ gap: 16 }}>
+      <div>
+        <div className="b" style={{ margin: "0 14px 6px" }}>Bausteine der Phase gegen die nächste Stunde</div>
+        <div className="help" style={{ padding: "0 14px 6px" }}>Rangkorrelation (IC) des Werts zur Snapshot-Zeit mit der 2x-Quote der Launches der folgenden Stunde · {n(comp?.n_hours)} Stunden · bestätigt = gleiche Richtung in älterer und neuerer Hälfte und |t| ≥ 2</div>
+        <Table rows={rows} rowKey={(r) => r.k} empty="Noch keine Stunde mit Launch-Ergebnis" initialSort={{ k: "ic", d: "desc" }} cols={[
+          { k: "k", l: "Baustein", fmt: (r) => COMP_LABEL[r.k] || r.k },
+          { k: "ic", l: "IC", r: true, fmt: (r) => <span className={sign(r.ic)}>{n(r.ic, 2)}</span> },
+          { k: "ic_old", l: "älter", r: true, fmt: (r) => n(r.ic_old, 2) },
+          { k: "ic_new", l: "neuer", r: true, fmt: (r) => n(r.ic_new, 2) },
+          { k: "confirmed", l: "", fmt: (r) => <Confirmed ok={r.confirmed} /> },
+          { k: "w", l: "gelerntes Gewicht", r: true, fmt: (r) => (r.w == null ? "–" : pct(r.w)) },
+        ]} />
+        {lw && (
+          <div className="help" style={{ padding: "6px 14px 10px" }}>
+            Gelernte Gewichte (nur aus der älteren Hälfte, halb zur Startannahme gezogen): IC in der neueren Hälfte {n(lw.ic_learned_new, 2)} gegen {n(lw.ic_fixed_new, 2)} mit festen Gewichten ·{" "}
+            {lw.adopt ? <span className="badge good">besser</span> : <span className="badge">nicht besser</span>}{" "}
+            {active ? "· im Einsatz" : "· nicht im Einsatz (MARKET_LEARNED_WEIGHTS aus oder nicht besser)"}
+          </div>
+        )}
+      </div>
+      <div>
+        <div className="b" style={{ margin: "0 14px 6px" }}>Sektor-Rotation mit Vorlauf</div>
+        <div className="help" style={{ padding: "0 14px 6px" }}>Sagt eine Sektor-Größe jetzt den Median-Kurs des Sektors in einer Stunde voraus? Mittlere Querschnitts-IC je Stunde, t-Wert, ältere und neuere Hälfte</div>
+        <Table rows={leads} rowKey={(r) => r.k} empty="Noch zu wenig Stunden" cols={[
+          { k: "label", l: "Größe" },
+          { k: "ic", l: "IC", r: true, fmt: (r) => <span className={sign(r.ic)}>{n(r.ic, 2)}</span> },
+          { k: "t", l: "t", r: true, fmt: (r) => n(r.t, 1) },
+          { k: "ic_old", l: "älter", r: true, fmt: (r) => n(r.ic_old, 2) },
+          { k: "ic_new", l: "neuer", r: true, fmt: (r) => n(r.ic_new, 2) },
+          { k: "n_hours", l: "Stunden", r: true, fmt: (r) => n(r.n_hours) },
+          { k: "confirmed", l: "", fmt: (r) => <Confirmed ok={r.confirmed} /> },
+        ]} />
+      </div>
+    </div>
+  );
+}
 
 export function PhaseBadge({ p }) {
   if (!p || p.score == null) return <span className="dim">–</span>;
@@ -157,7 +232,7 @@ export default function Market() {
         <Seg value={hours} onChange={setHours} options={[[6, "6 h"], [24, "24 h"], [168, "7 Tage"]]} />
       </div>
       <div className="tiles">
-        <Tile label="Marktphase" value={<PhaseBadge p={p} />} sub={`Abdeckung ${pct(p.coverage)} · Stand ${ago(p.ts)}`} />
+        <Tile label="Marktphase" value={<PhaseBadge p={p} />} sub={`${p.trend ? `${p.trend} · ` : ""}Abdeckung ${pct(p.coverage)} · Stand ${ago(p.ts)}`} />
         <Tile label="SOL 24 h" value={pctSigned(p.sol_ret_24h, 1)} cls={sign(p.sol_ret_24h)} sub={`7 Tage ${pctSigned(p.sol_ret_7d, 1)} · $${n(p.sol_usd, 2)}`} />
         <Tile label="Breite" value={pct(p.breadth)} sub={`im Plus (1 h) von ${n(p.universe_n)} Coins`} />
         <Tile label="Launches" value={`${n(p.launches_1h)} / h`} sub={`2x in 60 min ${pct(p.launch_hit2x, 1)} · Rugs ${pct(p.launch_rug, 1)}`} />
@@ -175,6 +250,15 @@ export default function Market() {
         </Card>
       </div>
 
+      <div className="grid g-wide-left">
+        <Card title="Regime und Übergänge" sub={`Regime mit ±3 Punkten Puffer an den Grenzen, damit es nicht hin und her springt${d.dynamics?.ts ? ` · gelernt ${ago(d.dynamics.ts)}` : ""}`}>
+          <Regime p={p} tr={d.dynamics?.transitions} />
+        </Card>
+        <Card title="Rotation: wer seit mehreren Runden zulegt" sub="Aufeinanderfolgende 5-min-Runden mit wachsendem (grün) oder schrumpfendem (rot) Volumen-Anteil">
+          <Bars items={d.sectors.filter((s) => s.streak).sort((a, b) => b.streak - a.streak).slice(0, 8).map((s) => ({ label: s.label, value: s.streak, color: s.streak > 0 ? "var(--good)" : "var(--bad)" }))} fmt={(v) => `${v > 0 ? "+" : ""}${v}`} />
+        </Card>
+      </div>
+
       <Card title="Sektoren" sub="Hitze 0–100 aus Momentum (Median 1 h), Breite, Wachstum des Volumen-Anteils, Netto-Kauf, Smart Money und 2x-Rate neuer Launches · Klick zeigt die Top-Coins" flush>
         <Table rows={d.sectors} rowKey={(r) => r.sector} expand={(r) => <SectorDetail s={r} />} initialSort={{ k: "heat", d: "desc" }} cols={[
           { k: "label", l: "Sektor", fmt: (r) => <span className="b">{r.label}</span> },
@@ -185,6 +269,7 @@ export default function Market() {
           { k: "median_ret_h1", l: "Median 1 h", r: true, fmt: (r) => (r.median_ret_h1 == null ? "–" : <span className={sign(r.median_ret_h1)}>{r.median_ret_h1 > 0 ? "+" : ""}{n(r.median_ret_h1, 1)} %</span>) },
           { k: "net_flow_usd", l: "Netto-Kauf (geschätzt)", r: true, title: "Volumen × (Käufe − Verkäufe) / alle Trades, 1 h", fmt: (r) => <span className={sign(r.net_flow_usd)}>{usdSigned(r.net_flow_usd)}</span> },
           { k: "smart_net_usd", l: "Smart Money", r: true, fmt: (r) => <span className={sign(r.smart_net_usd)}>{usdSigned(r.smart_net_usd)}</span> },
+          { k: "streak", l: "Serie", r: true, title: "Runden in Folge mit wachsendem (+) oder schrumpfendem (−) Volumen-Anteil", fmt: (r) => (r.streak ? <span className={sign(r.streak)}>{r.streak > 0 ? "+" : ""}{r.streak}</span> : <span className="dim">–</span>) },
           { k: "launches", l: "Launches 1 h", r: true, fmt: (r) => n(r.launches) },
           { k: "launch_hit2x", l: "2x-Rate", r: true, title: "Launches dieses Sektors mit 2x in 60 min (geglättet), letzte 24 h", fmt: (r) => pct(r.launch_hit2x, 1) },
         ]} />
@@ -207,7 +292,9 @@ export default function Market() {
         <Table rows={d.terms} rowKey={(r) => r.term} initialSort={{ k: "heat", d: "desc" }} empty="Noch kein Narrativ häufig genug" cols={[
           { k: "term", l: "Narrativ", fmt: (r) => <span className="b">{r.term}</span> },
           { k: "heat", l: "Hitze", fmt: (r) => <HeatBar v={r.heat} /> },
+          { k: "stage", l: "Stufe", title: "neu < 1 h · wachsend +15 % ggü. 1 h · Höhepunkt ≥ 80 % des Hochs · abklingend < 50 % des Hochs", fmt: (r) => (r.stage_de ? <span className={`badge ${STAGE_CLS[r.stage] || ""}`}>{r.stage_de}</span> : "–") },
           { k: "n_recent", l: "Launches 3 h", r: true, fmt: (r) => n(r.n_recent) },
+          { k: "growth_1h", l: "ggü. 1 h", r: true, fmt: (r) => <Delta v={r.growth_1h} d={0} arrow={false} /> },
           { k: "lift", l: "Anstieg", r: true, title: "Anteil an den Launches jetzt / in den letzten 24 h", fmt: (r) => `${n(r.lift, 1)}x` },
           { k: "hit2x", l: "2x-Rate", r: true, title: "geglättet mit 10 durchschnittlichen Launches", fmt: (r) => pct(r.hit2x, 1) },
           { k: "rug", l: "Rugs", r: true, fmt: (r) => pct(r.rug, 1) },
@@ -215,6 +302,10 @@ export default function Market() {
           { k: "since", l: "Erstmals", r: true, fmt: (r) => (r.since ? ago(r.since) : "–") },
           { k: "mints", l: "Beispiele", sort: false, fmt: (r) => <span className="row" style={{ gap: 4 }}>{(r.mints || []).slice(0, 3).map((m) => <a key={m} className="mono" href={`#/coin/${m}`} onClick={(e) => { e.preventDefault(); go(`/coin/${m}`); }}>{m.slice(0, 4)}…</a>)}</span> },
         ]} />
+      </Card>
+
+      <Card title="Was sagt die nächste Stunde voraus?" sub="Jeder Baustein und jede Sektor-Größe gegen echte Ergebnisse, stündlich neu gemessen, ohne Blick in die Zukunft" flush>
+        <Power dyn={d.dynamics} lw={d.learned_weights} active={d.learned_active} />
       </Card>
 
       <Card title="Taugt die Marktanalyse?" sub="Echte Ergebnisse der Launches, gruppiert nach dem Markt-Stand im Moment der Entscheidung (ohne Blick in die Zukunft)" flush>

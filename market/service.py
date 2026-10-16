@@ -22,7 +22,7 @@ class Service:
             http.set_service("market")
         sources.apply_budgets(cfg)
         self.conn = store.connect(db_path)
-        self.last = {"boosts": 0, "coingecko": 0, "sol_hist": 0, "prune": 0}
+        self.last = {"boosts": 0, "coingecko": 0, "sol_hist": 0, "prune": 0, "dynamics": 0}
         self.meme = None
         self.calls = {"dexscreener": 0, "coingecko": 0}
         self.rounds = 0
@@ -107,6 +107,8 @@ class Service:
         snap, secs, terms, bks = analysis.compute(self.conn, now, {"meme": meme}, live=True, cfg=self.cfg)
         store.save_snapshot(self.conn, snap, secs, terms, bks)
         self.rounds += 1
+        if now - self.last["dynamics"] >= self.cfg.dynamics_every_sec:
+            self.dynamics(now)
         if now - self.last["prune"] >= 86400:
             store.prune(self.conn, self.cfg.keep_days)
             self.last["prune"] = now
@@ -117,6 +119,29 @@ class Service:
                  100 * (snap["coverage"] or 0), snap["universe_n"], ", ".join(top) or "–", snap["top_term"] or "–", took)
         self.heartbeat(now, took, n_tok)
         return snap
+
+    def dynamics(self, now=None):
+        """Hourly: regime transitions, sector lead ICs, per-component power and learned weights (market_state
+        'dynamics' and 'learned_weights'). Heavier queries, so not every round; the dashboard only reads the result."""
+        from market import dynamics
+        now = int(now or time.time())
+        self.last["dynamics"] = now
+        try:
+            t0 = time.time()
+            power = dynamics.component_power(self.conn, now)
+            d = {"ts": now, "transitions": dynamics.transitions(self.conn, now),
+                 "sector_lead": dynamics.sector_lead(self.conn, now), "components": power}
+            store.set_state(self.conn, "dynamics", d)
+            if power.get("learned"):
+                store.set_state(self.conn, "learned_weights", dict(power["learned"], ts=now))
+            lead = [v["label"] for v in d["sector_lead"].values() if v.get("confirmed")]
+            ok = [k for k, v in power["rows"].items() if v.get("confirmed")]
+            log.info("Markt-Dynamik: %d Stunden mit Launch-Ergebnis, bestätigte Bausteine: %s, Sektor-Vorlauf: %s (%.1fs)",
+                     power["n_hours"], ", ".join(ok) or "noch keine", ", ".join(lead) or "noch keiner", time.time() - t0)
+            return d
+        except Exception:  # noqa: BLE001 - the round itself already succeeded
+            log.exception("market dynamics failed")
+            return None
 
     def heartbeat(self, now, took=None, n_tok=None):
         """Service status for web/ and cli/ (market_state 'service_status')."""

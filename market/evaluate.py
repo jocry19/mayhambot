@@ -10,6 +10,7 @@ from collections import defaultdict
 from market import narratives, store
 from market.analysis import LABELS
 from market.config import settings as default_cfg
+from market.dynamics import STAGES as STAGE_LABEL
 
 HEAT_BUCKETS = [("kalt <40", 0, 40), ("mittel 40-60", 40, 60), ("heiß ≥60", 60, 101)]
 
@@ -39,8 +40,9 @@ class Timeline:
 
     def terms(self, snap_ts):
         if snap_ts not in self._term:
-            self._term[snap_ts] = {r[0]: (r[1], r[2]) for r in self.conn.execute(
-                "SELECT term, heat, hit2x FROM market_terms WHERE ts=?", (snap_ts,))}
+            has_stage = "stage" in {r[1] for r in self.conn.execute("PRAGMA table_info(market_terms)")}
+            q = "SELECT term, heat, hit2x, " + ("stage" if has_stage else "NULL") + " FROM market_terms WHERE ts=?"
+            self._term[snap_ts] = {r[0]: (r[1], r[2], r[3]) for r in self.conn.execute(q, (snap_ts,))}
         return self._term[snap_ts]
 
 
@@ -97,8 +99,10 @@ def evaluate(conn, days=14, now=None, cfg=default_cfg):
             sec = narratives.classify(d["name"], d["symbol"])[0]
             d["sector_heat"] = tl.sectors(s["ts"]).get(sec)
             terms = tl.terms(s["ts"])
-            th = [terms[t][0] for t in narratives.terms_of(d["name"], d["symbol"]) if t in terms]
-            d["term_heat"] = max(th) if th else None
+            mine = sorted((terms[t] for t in narratives.terms_of(d["name"], d["symbol"]) if t in terms),
+                          key=lambda x: -(x[0] or 0))
+            d["term_heat"] = mine[0][0] if mine else None
+            d["term_stage"] = mine[0][2] if mine else None
             rows.append(d)
         hit = lambda r: (r["max_ret_60m"] or 0) >= 1.0  # noqa: E731
         if rows:
@@ -108,7 +112,10 @@ def evaluate(conn, days=14, now=None, cfg=default_cfg):
                   "by_phase": {LABELS.get(k, k): v for k, v in by_phase.items()},
                   "by_sector_heat": _group(rows, lambda r: _bucket(r["sector_heat"], HEAT_BUCKETS), hit, _launch_extra),
                   "by_term": _group(rows, lambda r: "mit heißem Narrativ" if (r["term_heat"] or 0) >= 60 else
-                                    ("mit Narrativ" if r["term_heat"] is not None else "ohne Narrativ"), hit, _launch_extra)}
+                                    ("mit Narrativ" if r["term_heat"] is not None else "ohne Narrativ"), hit, _launch_extra),
+                  "by_term_stage": _group(rows, lambda r: STAGE_LABEL.get(r["term_stage"], "ohne Narrativ")
+                                          if r["term_heat"] is not None or r["term_stage"] else "ohne Narrativ",
+                                          hit, _launch_extra)}
             # what the sniper gate would have changed among launches the sniper bought or would have bought
             cand = [r for r in rows if r["decision"] == "enter"]
             blocked = [r for r in cand if r["label"] == "risk_off"]
@@ -140,7 +147,7 @@ def significance(ev, min_n=40):
     Two-proportion z-test, |z| >= 2 counts as clear (about 95 %)."""
     la = ev.get("launches") or {}
     verdicts = {}
-    for lens in ("by_phase", "by_sector_heat", "by_term"):
+    for lens in ("by_phase", "by_sector_heat", "by_term", "by_term_stage"):
         g = [(k, v) for k, v in (la.get(lens) or {}).items() if v["n"] >= min_n]
         if len(g) < 2:
             verdicts[lens] = {"clear": False, "text": f"zu wenig Daten (je Gruppe mindestens {min_n} nötig)"}
@@ -161,6 +168,7 @@ LENSES = {
     "by_sector_heat": lambda r: _bucket(r["sector_heat"], HEAT_BUCKETS),
     "by_term": lambda r: "mit heißem Narrativ" if (r["term_heat"] or 0) >= 60 else
     ("mit Narrativ" if r["term_heat"] is not None else "ohne Narrativ"),
+    "by_term_stage": lambda r: STAGE_LABEL.get(r.get("term_stage"), "ohne Narrativ"),
 }
 
 
