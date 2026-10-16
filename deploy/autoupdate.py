@@ -206,6 +206,16 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
     _save(st)
     r = subprocess.run([_python(), "mayham.py", "update"], cwd=ROOT, capture_output=True, text=True, timeout=1800)
     log((r.stdout + r.stderr).strip()[-4000:])
+    if r.returncode != 0 or "Update ok" not in r.stdout:
+        # crashed (e.g. pip) or the gate failed: never leave a new checkout behind the old running processes
+        if git("rev-parse", "HEAD") != head:
+            git("reset", "-q", "--hard", head)
+        st["bad"] = target
+        _save(st)
+        log(f"rolled back: {subject} (exit {r.returncode})")
+        alert(f"↩️ Update zurückgerollt: {subject}. Grund: Tests rot oder Update-Fehler, alte Version "
+              f"{head[:7]} läuft weiter. Details: logs/update.log")
+        return f"zurückgerollt {target[:7]}"
     # mayham.py update pulls the newest main, which may be past `target` when someone pushed during the backup
     now_head = git("rev-parse", "HEAD")
     if now_head != head and subprocess.run(["git", "merge-base", "--is-ancestor", target, now_head],

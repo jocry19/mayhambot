@@ -403,7 +403,9 @@ def _snapshot_db(src: Path, dst: Path):
     and, natively on this machine, in the live database (user's choice); damaged tables still abort."""
     s = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=60)
     d = sqlite3.connect(dst)
-    s.backup(d, pages=4096, sleep=0.05)
+    # one step: a paged backup restarts on every write from another connection and may never finish;
+    # in WAL mode a single-step read does not block the writers
+    s.backup(d)
     s.close()
     # full integrity_check: quick_check does not compare indexes with their tables on every SQLite version
     problems = [r[0] for r in d.execute("PRAGMA integrity_check").fetchall() if r[0] != "ok"]
@@ -524,6 +526,11 @@ def restore(args) -> int:
             tar.extractall(td)
         td = Path(td)
         if (td / "data" / "mayhambot.db").exists():
+            c = sqlite3.connect(td / "data" / "mayhambot.db")
+            chk = c.execute("PRAGMA integrity_check").fetchone()[0]
+            c.close()
+            if chk != "ok":
+                raise SystemExit(f"DB im Backup ist beschädigt ({chk}), nichts geändert")
             dst.parent.mkdir(parents=True, exist_ok=True)
             for suffix in ("", "-wal", "-shm"):
                 old = Path(str(dst) + suffix)
@@ -531,7 +538,8 @@ def restore(args) -> int:
                     old.rename(f"{old}.vor-restore-{stamp}")
             shutil.copy2(td / "data" / "mayhambot.db", dst)
         for f in (td / "data").rglob("*") if (td / "data").exists() else []:
-            if f.is_file() and f.name != "mayhambot.db":
+            # the Helius credit ledger and rate-limit state must never run backwards (monthly quota)
+            if f.is_file() and f.name != "mayhambot.db" and "ratelimit" not in f.relative_to(td).parts:
                 t = ROOT / f.relative_to(td)
                 t.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(f, t)

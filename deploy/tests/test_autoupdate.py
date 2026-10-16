@@ -20,6 +20,10 @@ if sys.argv[1:2] == ["update"]:
     if Path("RED").exists():
         subprocess.call(["git", "reset", "-q", "--hard", old])
         print("Update abgebrochen")
+    elif Path("PIP_FAILS").exists():
+        sys.exit(1)
+    else:
+        print("Update ok: x")
 '''
 
 
@@ -243,3 +247,12 @@ def test_service_budget_alerts_once_per_day(monkeypatch):
     c["per_service"]["safety"] = (4000, 3750)
     ops.check_service_budgets(st, c, noon)
     assert len(sent) == 2 and "aufgebraucht" in sent[1]
+
+
+def test_update_crash_after_pull_resets_checkout(repo):
+    work, push, head, alerts = repo
+    before = head()
+    push("needs_pip")
+    (work / "PIP_FAILS").write_text("")
+    assert autoupdate.run_once(alerts.append, health=lambda: (True, "ok")).startswith("zurückgerollt")
+    assert head() == before and not (work / "needs_pip").exists()
