@@ -310,12 +310,14 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
         return "warte (höchstens ein Deploy pro 10 min)"
 
     # no deploy without a fresh, verified backup (integrity_check in ops.backup); mayham.py update ignores its failure
+    log(f"backup before deploy of {subject} ...")
+    t_b = time.time()
     b = subprocess.run([_python(), "deploy/ops.py", "backup"], cwd=ROOT, capture_output=True, text=True, timeout=900)
     if b.returncode != 0:
         log(f"backup failed, update pending: {(b.stdout + b.stderr).strip()[-500:]}")
         return _once(st, alert, f"backup:{target}", f"⏸ Update {subject} wartet: Backup vor dem Update ist "
                      "fehlgeschlagen. Details: logs/update.log")
-    log(f"deploy {head[:7]} -> {subject}")
+    log(f"deploy {head[:7]} -> {subject} (backup {time.time() - t_b:.0f} s)")
     st["last_deploy"] = now
     st["deploying"] = {"head": head, "target": target, "at": now}
     _save(st)
