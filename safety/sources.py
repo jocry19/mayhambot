@@ -17,6 +17,8 @@ RUGCHECK = "https://api.rugcheck.xyz/v1"
 # hosts core.http does not know: keep our own polite spacing on top of its default
 EXTRA_SPACING = {"lite-api.jup.ag": 1.1, "api.jup.ag": 0.6, "api.rugcheck.xyz": 1.5}
 _last_call = {}
+# methods with a much tighter per-method limit on public nodes: extra bucket per endpoint and method
+SCARCE_METHODS = {"getTokenLargestAccounts"}
 
 
 class BudgetExceeded(Exception):
@@ -66,9 +68,13 @@ class Fetcher:
             return [own]
         return [own, pub] if self.priority else [pub, own]
 
-    def _take(self, host):
+    def _take(self, host, method=None):
         c = self.cfg
         helius = "helius" in host
+        if method in SCARCE_METHODS and not budget.take(
+                f"{host}_{method}", c.largest_per_min, spacing=c.largest_spacing_sec,
+                wait=c.priority_wait_sec if self.priority else 0):
+            return False
         return budget.take(host, c.helius_per_min if helius else c.public_per_min,
                            spacing=c.helius_spacing_sec if helius else c.public_spacing_sec,
                            reserve=c.helius_reserve if helius and not self.priority else 0,
@@ -80,7 +86,7 @@ class Fetcher:
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
         last, exhausted = None, False
         for url, host in self._targets():
-            if not self._take(host):
+            if not self._take(host, method):
                 continue
             self.rpc_calls[host] += 1
             try:

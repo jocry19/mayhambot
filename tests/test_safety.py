@@ -315,6 +315,8 @@ def test_quick_recheck_keeps_deep_findings_and_escalates():
     assert any(r["check"] == "bundles" for r in quick.reasons) and quick.blocked
     s = ruggy()
     s["holders"] = [(POOL, 300_000_000)] + [(f"H{i}", 10_000_000) for i in range(15)]  # top 10 share fell a lot
+    c.execute("UPDATE safety_cache SET ts = ts - 3600")  # holder snapshot expired
+    c.commit()
     esc = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(s), cfg=CFG, force=True)
     assert "carried_from" not in esc.checks["insiders"]["data"]
 
@@ -364,3 +366,32 @@ def test_exhausted_helius_credits_fall_back_to_public_or_skip(monkeypatch):
             pass
     finally:
         _cleanup(hel, pub)
+
+
+def test_holder_snapshot_cached_and_largest_accounts_capped(monkeypatch):
+    c = conn()
+    f1 = FakeFetcher(clean())
+    safety.assess(MINT, c, deep=False, fetcher=f1, cfg=CFG, force=True)
+    seen = []
+    f2 = FakeFetcher(clean())
+    orig = f2.rpc
+    f2.rpc = lambda m, p: seen.append(m) or orig(m, p)
+    safety.assess(MINT, c, deep=False, fetcher=f2, cfg=CFG, force=True)
+    assert "getTokenLargestAccounts" not in seen and "getMultipleAccounts" not in seen
+    from safety import sources
+    hel, pub = _uniq("helius"), _uniq("public")
+    cfg = SafetySettings()
+    cfg.helius_spacing_sec = cfg.public_spacing_sec = cfg.largest_spacing_sec = 0
+    cfg.largest_per_min, cfg.public_rpc_url = 2, f"https://{pub}"
+    monkeypatch.setattr(sources.http, "post_json", lambda url, payload, **kw: {"result": 1})
+    f = sources.Fetcher(cfg, rpc_url=f"https://{hel}/?api-key=x", priority=False)
+    try:
+        got = []
+        for _ in range(5):
+            try:
+                got.append(f.rpc("getTokenLargestAccounts", [MINT]))
+            except BudgetExceeded:
+                got.append(None)
+        assert got == [1, 1, 1, 1, None]   # 2 per endpoint and minute: public twice, then Helius twice
+    finally:
+        _cleanup(hel, pub, f"{hel}_getTokenLargestAccounts", f"{pub}_getTokenLargestAccounts")

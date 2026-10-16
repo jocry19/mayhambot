@@ -100,6 +100,10 @@ Enhanced API. Jupiter, DexScreener and RugCheck are keyless and not Helius.
   (launch: up to `SAFETY_LAUNCH_MAX_PAGES`=8 signature pages + `SAFETY_LAUNCH_MAX_TXS`=12 transactions, resumed across
   cycles when the budget runs out; coins older than `SAFETY_LAUNCH_MAX_AGE_H`=6 h skip it). Per coin at most
   `SAFETY_MAX_CALLS_PER_TOKEN`=30 calls in one run.
+- **getTokenLargestAccounts** (public nodes limit it hardest): one holder snapshot per mint is cached in
+  `safety_cache` and shared by every process, 10 min (`SAFETY_HOLDERS_TTL_SEC`), 2 min for hot coins
+  (`SAFETY_HOLDERS_TTL_HOT_SEC`); on top an own bucket per endpoint for this method, 30/min and ≥1.7 s apart
+  (`SAFETY_LARGEST_PER_MIN`, `SAFETY_LARGEST_SPACING_SEC`), i.e. at most 6 per 10 s per endpoint over all processes.
 - **Cache**: results per mint with TTL 15 min (pair < 6 h), 2 h (older), 6 h (blocked); launch forever, wallet
   profiles a day. `refresh` runs every `SAFETY_REFRESH_EVERY_SEC`=60 s, at most `SAFETY_REFRESH_MAX_TOKENS`=8 coins and
   stops early when the minute's budget cannot cover the next coin.

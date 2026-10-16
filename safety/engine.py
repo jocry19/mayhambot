@@ -133,7 +133,7 @@ def assess(mint, conn=None, deep=True, force=False, fetcher=None, cfg=None, prio
             return prev or Assessment(mint=mint, ts=int(time.time()), score=0.0, level="unchecked", blocked=False,
                                       coverage=0.0, error="offline")
         f = fetcher or Fetcher(cfg, priority=priority)
-        ctx = checks.Context(conn, mint, f, cfg, deep=deep)
+        ctx = checks.Context(conn, mint, f, cfg, deep=deep, hot=mint in set(hot_mints(conn, (), cfg)))
         results = _run(ctx, checks.QUICK, mint)
         if not deep and prev and prev.deep_ts:
             new = next((r.data.get("top10_pct") for r in results if r.name == "holders" and r.status == "ok"), None)

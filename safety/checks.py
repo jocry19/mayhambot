@@ -124,8 +124,9 @@ def funder_of(tx, wallet):
 # ---------------------------------------------------------------- context
 
 class Context:
-    def __init__(self, conn, mint, fetcher, cfg, deep=True):
+    def __init__(self, conn, mint, fetcher, cfg, deep=True, hot=False):
         self.conn, self.mint, self.f, self.cfg, self.deep = conn, mint, fetcher, cfg, deep
+        self.hot = hot or deep   # hot coins (signal, position, buy wish) get fresher holder snapshots
         self.now = int(time.time())
         self.exchanges = load_exchanges(cfg.exchanges_file)
         self._memo = {}
@@ -177,6 +178,18 @@ class Context:
     def holders(self):
         """Top holders aggregated by owner: [{owner, amount, pct, kind}] (kind: wallet|program|burn|pool)."""
         def load():
+            # getTokenLargestAccounts is the RPC method public nodes limit hardest: one snapshot per mint is
+            # shared by every process for SAFETY_HOLDERS_TTL_HOT_SEC / SAFETY_HOLDERS_TTL_SEC
+            ttl = self.cfg.holders_ttl_hot_sec if self.hot else self.cfg.holders_ttl_sec
+            cached = store.cache_get(self.conn, "holders:" + self.mint, ttl)
+            if cached is not None:
+                return cached
+            out = fetch()
+            if out:
+                store.cache_put(self.conn, "holders:" + self.mint, out)
+            return out
+
+        def fetch():
             mi = self.mint_info()
             supply = (mi or {}).get("supply_ui") or 0
             largest = (self.f.rpc("getTokenLargestAccounts", [self.mint]) or {}).get("value") or []

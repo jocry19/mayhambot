@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS safety_wallets (
     address TEXT PRIMARY KEY, n_txs INTEGER, complete INTEGER, first_ts INTEGER, last_ts INTEGER,
     funder TEXT, funded_sol REAL, checked_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS safety_cache (
+    key TEXT PRIMARY KEY, ts INTEGER, json TEXT
+);
 CREATE TABLE IF NOT EXISTS safety_launch (
     mint TEXT PRIMARY KEY, creator TEXT, created_slot INTEGER, created_ts INTEGER,
     reachable INTEGER, launch_json TEXT, checked_at INTEGER
@@ -32,7 +35,7 @@ MIGRATIONS = [("safety_tokens", "deep_ts", "INTEGER")]
 
 
 def ensure_schema(conn):
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='safety_launch'").fetchone() is None:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='safety_cache'").fetchone() is None:
         db.retry_locked(conn, lambda: conn.executescript(SCHEMA))
     for table, col, typ in MIGRATIONS:
         if col not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
@@ -118,5 +121,20 @@ def save_launch(conn, mint, d):
         conn.execute("INSERT OR REPLACE INTO safety_launch VALUES (?,?,?,?,?,?,?)",
                      (mint, d.get("creator"), d.get("created_slot"), d.get("created_ts"),
                       int(bool(d.get("reachable"))), _j(rest), int(time.time())))
+        conn.commit()
+    db.retry_locked(conn, write)
+
+
+def cache_get(conn, key, max_age):
+    r = conn.execute("SELECT ts, json FROM safety_cache WHERE key=?", (key,)).fetchone()
+    if r and time.time() - r["ts"] < max_age:
+        return json.loads(r["json"])
+    return None
+
+
+def cache_put(conn, key, value):
+    def write():
+        conn.execute("INSERT OR REPLACE INTO safety_cache VALUES (?,?,?)", (key, int(time.time()), _j(value)))
+        conn.execute("DELETE FROM safety_cache WHERE ts < ?", (int(time.time()) - 86400,))
         conn.commit()
     db.retry_locked(conn, write)
