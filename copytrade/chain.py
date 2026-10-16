@@ -51,23 +51,25 @@ class Rpc:
     def poll_fallbacks(self) -> int:
         return self.fallbacks
 
-    def call(self, method: str, params: list[Any]) -> Any:
+    def call(self, method: str, params: list[Any], priority: str = "live") -> Any:
+        """priority 'live' (default: own trades, fresh whale buys) or 'bulk' (backfill, discovery, net polls)."""
         self._id += 1
         url = _core_rpc_url(method, self.url) if _core_rpc_url and "helius" in self.url else self.url
         if not self.shared:  # Helius / public RPC: core.http.throttle() spaces calls across all processes
             self.lim.wait()
         kind = "public" if url != self.url or "helius" not in url else "helius"
         self.counts[f"{kind}:{method}"] = self.counts.get(f"{kind}:{method}", 0) + 1
-        d = http.post_json(url, {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params})
+        d = http.post_json(url, {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params},
+                           priority=priority, rpc_method=method)
         if "error" in d:
             raise RuntimeError(f"rpc {method}: {d['error']}")
         return d.get("result")
 
-    def read(self, method: str, params: list[Any], main_if_empty: bool = False) -> Any:
+    def read(self, method: str, params: list[Any], main_if_empty: bool = False, priority: str = "bulk") -> Any:
         """Public RPC first, main RPC on errors (or on an empty answer when main_if_empty)."""
         if self.public:
             try:
-                r = self.public.call(method, params)
+                r = self.public.call(method, params, priority)
                 if r is not None or not main_if_empty:
                     return r
             except CreditsExhausted:
@@ -75,7 +77,7 @@ class Rpc:
             except Exception as e:
                 log.debug("public rpc %s failed, using main rpc: %s", method, e)
             self.fallbacks += 1
-        return self.call(method, params)
+        return self.call(method, params, priority)
 
     def usage(self) -> dict[str, int]:
         out = dict(self.counts)
@@ -84,21 +86,24 @@ class Rpc:
         return out
 
     def signatures(self, address: str, limit: int = 50, until: str | None = None,
-                   before: str | None = None) -> list[dict]:
+                   before: str | None = None, priority: str = "bulk") -> list[dict]:
         opts: dict[str, Any] = {"limit": limit, "commitment": "confirmed"}
         if until:
             opts["until"] = until
         if before:
             opts["before"] = before
-        return self.read("getSignaturesForAddress", [address, opts]) or []
+        return self.read("getSignaturesForAddress", [address, opts], priority=priority) or []
 
-    def poll_signatures(self, address: str, limit: int = 15, until: str | None = None) -> list[dict]:
-        return self.signatures(address, limit=limit, until=until)
+    def poll_signatures(self, address: str, limit: int = 15, until: str | None = None,
+                        priority: str = "bulk") -> list[dict]:
+        return self.signatures(address, limit=limit, until=until, priority=priority)
 
-    def transaction(self, sig: str, main: bool = False) -> dict | None:
+    def transaction(self, sig: str, main: bool = False, priority: str = "bulk") -> dict | None:
         """main=True: our own live swap (straight to the main RPC, it sees fresh transactions first)."""
         params = [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}]
-        return self.call("getTransaction", params) if main else self.read("getTransaction", params)
+        if main:
+            return self.call("getTransaction", params, "live")
+        return self.read("getTransaction", params, priority=priority)
 
     def balance_sol(self, address: str) -> float:
         r = self.call("getBalance", [address, {"commitment": "confirmed"}])
@@ -120,7 +125,7 @@ def token_decimals(rpc: Rpc, mint: str) -> int:
         return _decimals_cache[mint]
     dec = 6
     try:
-        r = rpc.read("getTokenSupply", [mint]) if hasattr(rpc, "read") else rpc.call("getTokenSupply", [mint])
+        r = rpc.read("getTokenSupply", [mint], priority="live") if hasattr(rpc, "read") else rpc.call("getTokenSupply", [mint])
         dec = int(r["value"]["decimals"])
     except Exception as e:
         log.debug("decimals %s failed: %s", mint, e)

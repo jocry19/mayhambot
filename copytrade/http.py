@@ -84,8 +84,12 @@ def request_json(
     limiter_name: str | None = None,
     retries: int = 4,
     timeout: float = 20,
+    priority: str = "bulk",
+    rpc_method: str | None = None,
     **kw: Any,
 ) -> Any:
+    """priority: 'live' (fresh whale buy, own trade) or 'bulk' (backfill, discovery, safety-net polls) lane of
+    core.http's public-RPC window; rpc_method lets core apply its per-method limit."""
     last: Exception | None = None
     host = urlparse(url).hostname or ""
     shared = throttle is not None and host in SHARED_HOSTS
@@ -93,7 +97,7 @@ def request_json(
         if shared:
             # one budget for all mayhambot processes; raises CreditsExhausted when today's Helius share is gone
             # (not retried: the caller falls back to the public RPC)
-            throttle(host, cost=credit_cost(url, kw) if credit_cost else None)
+            _throttle(host, credit_cost(url, kw) if credit_cost else None, priority, rpc_method)
         elif limiter_name:
             limiter(limiter_name).wait()
         try:
@@ -117,6 +121,13 @@ def request_json(
                 time.sleep(min(2 ** attempt, 16))
     # requests puts the full URL (with any api-key) into its exception text: never pass it on raw
     raise RuntimeError(redact(f"{method} {url.split('?')[0]} failed: {last}"))
+
+
+def _throttle(host: str, cost, priority: str, method: str | None) -> None:
+    try:
+        throttle(host, cost=cost, priority=priority, method=method)
+    except TypeError:  # older core.http without lanes
+        throttle(host, cost=cost)
 
 
 def get_json(url: str, **kw: Any) -> Any:

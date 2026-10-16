@@ -92,21 +92,24 @@ def test_ws_swap_is_handled_once_even_when_polled_later(env, monkeypatch):
     tx = parsed_tx(-3_000_000_000, 0, 1_000_000)
     calls = []
 
-    def fake_call(self, method, params):
-        calls.append((self.url.split("?")[0], method))
+    def fake_call(self, method, params, priority="live"):
+        calls.append((self.url.split("?")[0], method, priority))
         if method == "getTransaction":
             return tx
         return [{"signature": "sig1"}]
 
     monkeypatch.setattr(chain.Rpc, "call", fake_call)
     tracker._seen.clear()
-    sw = tracker.process_signature(conn, s, rpc, W, "sig1")
+    sw = tracker.process_signature(conn, s, rpc, W, "sig1", received_at=time.time() - 0.4)
     assert sw and sw.side == "buy" and tracker.DETECTED["ws"] >= 1
-    assert calls == [("https://api.mainnet-beta.solana.com", "getTransaction")]  # no Helius credit
+    # public RPC (no Helius credit), live lane (a fresh whale buy may be copied)
+    assert calls == [("https://api.mainnet-beta.solana.com", "getTransaction", "live")]
+    assert tracker.WS_LATENCY and tracker.WS_LATENCY[-1] >= 0.4
     assert tracker.process_signature(conn, s, rpc, W, "sig1") is None  # duplicate notification
     conn.execute("UPDATE ct_wallets SET last_sig='old' WHERE address=?", (W,))
     row = conn.execute("SELECT * FROM ct_wallets WHERE address=?", (W,)).fetchone()
     assert tracker.poll(conn, s, rpc, row) == []  # the polling net sees sig1 again but does not act twice
+    assert calls[-1] == ("https://api.mainnet-beta.solana.com", "getSignaturesForAddress", "bulk")
 
 
 def test_covered_wallets_are_only_polled_as_safety_net(env):
@@ -124,7 +127,8 @@ def test_rpc_reads_public_first_live_paths_on_main(monkeypatch):
     from copytrade import http as cthttp
     urls = []
     monkeypatch.setattr(cthttp, "post_json", lambda url, p, **k: urls.append((url.split("?")[0], p["method"]))
-                        or {"result": {"value": 1}})
+                        or prios.append((k["priority"], k["rpc_method"])) or {"result": {"value": 1}})
+    prios = []
     rpc = chain.Rpc(Settings(rpc_url="https://mainnet.helius-rpc.com/?api-key=k", poll_rpc_url=""))
     monkeypatch.setattr(chain, "_core_rpc_url", lambda m, u: u)
     rpc.transaction("s")
@@ -133,6 +137,8 @@ def test_rpc_reads_public_first_live_paths_on_main(monkeypatch):
     rpc.balance_sol(W)
     hel = "https://mainnet.helius-rpc.com/"
     assert [u for u, _ in urls] == [chain.PUBLIC_RPC, chain.PUBLIC_RPC, hel, hel]
+    assert prios == [("bulk", "getTransaction"), ("bulk", "getSignaturesForAddress"), ("live", "getTransaction"),
+                     ("live", "getBalance")]
     # today's Helius share used up: core routes even the live read to the public RPC
     monkeypatch.setattr(chain, "_core_rpc_url", lambda m, u: chain.PUBLIC_RPC)
     rpc.balance_sol(W)

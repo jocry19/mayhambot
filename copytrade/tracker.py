@@ -22,6 +22,7 @@ WALLETS_FILE = Path(__file__).with_name("wallets.txt")
 # signatures already handled (websocket and polling both see the same transaction: act once)
 _seen: OrderedDict[str, None] = OrderedDict()
 DETECTED = {"ws": 0, "poll": 0}  # swaps found per source since the last hourly log line
+WS_LATENCY: list[float] = []  # seconds from websocket notification to recognised swap (hourly mean)
 
 
 def _mark(sig: str) -> bool:
@@ -188,11 +189,13 @@ def backfill(conn, s: Settings, rpc: chain.Rpc, wallet: str, limit: int = 80) ->
     return n
 
 
-def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row) -> list[chain.Swap]:
-    """New swaps since the last poll (oldest first)."""
+def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk") -> list[chain.Swap]:
+    """New swaps since the last poll (oldest first). priority 'live' for wallets nobody watches in real time;
+    the transactions of new finds are always read in the live lane (a fresh whale buy may follow)."""
     wallet = wallet_row["address"]
     last = wallet_row["last_sig"]
-    sigs = rpc.poll_signatures(wallet, limit=15, until=last) if last else rpc.poll_signatures(wallet, limit=1)
+    sigs = rpc.poll_signatures(wallet, limit=15, until=last, priority=priority) if last \
+        else rpc.poll_signatures(wallet, limit=1, priority=priority)
     now = int(time.time())
     if not sigs:
         conn.execute("UPDATE ct_wallets SET last_polled=? WHERE address=?", (now, wallet))
@@ -209,7 +212,7 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row) -> list[chain.Swap]:
             continue  # failed, or already handled from the websocket
         _mark(sg["signature"])
         try:
-            sw = chain.extract_swap(rpc.transaction(sg["signature"]), wallet, solusd)
+            sw = chain.extract_swap(rpc.transaction(sg["signature"], priority="live"), wallet, solusd)
         except Exception as e:
             log.debug("tx failed: %s", e)
             continue
@@ -225,7 +228,8 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row) -> list[chain.Swap]:
     return out
 
 
-def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, tries: int = 3) -> chain.Swap | None:
+def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, tries: int = 3,
+                      received_at: float | None = None) -> chain.Swap | None:
     """A transaction the websocket reported for a watched wallet -> stored swap (or None). Public RPC first; a
     brand-new transaction can be missing there for a moment, so retry and ask the main RPC on the last try."""
     if _known(conn, sig, wallet):
@@ -234,7 +238,8 @@ def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, 
     for i in range(tries):
         try:
             tx = rpc.read("getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
-                                                    "commitment": "confirmed"}], main_if_empty=i == tries - 1)
+                                                    "commitment": "confirmed"}], main_if_empty=i == tries - 1,
+                          priority="live")
         except Exception as e:
             log.debug("ws tx %s failed: %s", sig[:8], e)
         if tx:
@@ -248,6 +253,8 @@ def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, 
     if sw:
         store.save_swaps(conn, [sw], solusd)
         DETECTED["ws"] += 1
+        if received_at:
+            WS_LATENCY.append(time.time() - received_at)
     return sw
 
 

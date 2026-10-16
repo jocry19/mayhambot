@@ -143,7 +143,12 @@ slippage_bps` (Anteile: 0.2 = 20 %; `min_score`, `min_smart_buyers`, `max_signal
   je Wallet auf `CT_WS_URL` (Standard: öffentlicher Mainnet-Websocket, `off` = nur Polling, max. `CT_WS_MAX_WALLETS`=40).
   Ein Wal-Kauf ist damit nach ~1 s bekannt statt beim nächsten Poll. Abbrüche: Neuverbindung mit Backoff 1→60 s.
   Abgedeckte Wallets werden nur noch als Netz im 60-s-Takt gepollt; jede Transaktion wird nur einmal gehandelt.
-  Einmal pro Stunde eine Logzeile: Swaps per Websocket vs. per Polling, RPC-Aufrufe öffentlich vs. Helius.
+  Einmal pro Stunde eine Logzeile: Swaps per Websocket (mit mittlerer Zeit Meldung → erkannter Swap) vs. per Polling,
+  RPC-Aufrufe öffentlich vs. Helius.
+- Spuren am öffentlichen RPC (core.http): `live` für alles rund um einen frischen Wal-Kauf oder eigenen Trade
+  (getTransaction nach Websocket-Treffer oder Poll-Fund, Polls heißer Wallets ohne Websocket, getTokenSupply,
+  getBalance, sendTransaction, getSignatureStatuses), `bulk` für Backfill, Wal-Suche und die 60-s-Netzpolls;
+  die Methode wird immer mitgegeben.
 - **RPC:** Lesen (`getSignaturesForAddress`, `getTransaction`, `getTokenSupply`) für Polls, Websocket-Treffer,
   Wal-Suche und Backfill geht zuerst an `CT_POLL_RPC_URL` (Standard: öffentliches Mainnet-RPC, wenn `SOLANA_RPC_URL`
   Helius ist; `off` = alles über Helius), Helius nur als Fallback. Helius bleibt für Live-Pfade (`getBalance`,

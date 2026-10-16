@@ -68,10 +68,12 @@ class Engine:
         budget = max(1, int(self.s.rpc_max_rps * self.s.wallet_poll_seconds * 0.5))
         covered = self.stream.covered() if self.stream else set()
         batch = tracker.due_wallets(self.conn, self.s, covered=covered)[:budget]
+        hot = set(tracker.hot_wallets(self.conn, self.s)) - covered  # no live watch: polling is the fast path
         seen = 0
         for w in batch:
             try:
-                for sw in store.retry_locked(tracker.poll, self.conn, self.s, self.rpc, w):
+                prio = "live" if w["address"] in hot else "bulk"
+                for sw in store.retry_locked(tracker.poll, self.conn, self.s, self.rpc, w, prio):
                     seen += 1
                     self._on_swap(sw)
             except Exception as e:
@@ -94,11 +96,12 @@ class Engine:
             if left <= 0:
                 break
             try:
-                wallet, sig, _ = self.stream.events.get(timeout=min(0.5, left))
+                wallet, sig, got = self.stream.events.get(timeout=min(0.5, left))
             except Exception:  # queue.Empty
                 continue
             try:
-                sw = store.retry_locked(tracker.process_signature, self.conn, self.s, self.rpc, wallet, sig)
+                sw = store.retry_locked(tracker.process_signature, self.conn, self.s, self.rpc, wallet, sig,
+                                        3, got)
                 if sw:
                     n += 1
                     self._on_swap(sw)
@@ -115,11 +118,14 @@ class Engine:
         pub = sum(v for k, v in u.items() if k.startswith("public:"))
         hel = sum(v for k, v in u.items() if k.startswith("helius:"))
         st = self.stream
-        line = (f"detection last hour: {tracker.DETECTED['ws']} swaps via websocket, {tracker.DETECTED['poll']} via "
-                f"polling; websocket {'connected' if st and st.connected else 'off/disconnected'}"
+        lat = tracker.WS_LATENCY
+        line = (f"detection last hour: {tracker.DETECTED['ws']} swaps via websocket"
+                + (f" (mean {sum(lat) / len(lat):.2f}s notification->swap)" if lat else "")
+                + f", {tracker.DETECTED['poll']} via polling; websocket {'connected' if st and st.connected else 'off/disconnected'}"
                 + (f" ({len(st.covered())} wallets, {st.stats['connects']} connects)" if st else "")
                 + f"; rpc calls public {pub}, helius {hel}, fallbacks {self.rpc.fallbacks}")
         tracker.DETECTED.update(ws=0, poll=0)
+        tracker.WS_LATENCY.clear()
         self.rpc.counts.clear()
         if self.rpc.public:
             self.rpc.public.counts.clear()
