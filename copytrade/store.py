@@ -96,6 +96,8 @@ POSITION_COLUMNS = {
     "exit_hint": "TEXT", "exit_hint_at": "INTEGER",
     "param_version": "INTEGER",  # ct_param_versions.id the exits came from (NULL = preset)
     "use_inflow_exit": "INTEGER",  # sell when the copy-trader rush peaks (learned per mode/whale)
+    "safety_level": "TEXT",  # safety/ at entry: low | caution | high | critical | unchecked
+    "safety_score": "REAL", "safety_reasons": "TEXT",  # risk 0-100, JSON list of German reasons
 }
 
 

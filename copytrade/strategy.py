@@ -90,6 +90,31 @@ class Strategy:
             return "Guthaben zu klein"
         return None
 
+    def _safety(self, strategy: str, mint: str) -> tuple[dict, str | None]:
+        """Rug/honeypot/insider check (safety/). Paper: stored result only (no network), unchecked coins pass.
+        Live: fresh quick check right before the order; if it cannot be done, no real-money buy."""
+        live = self.executor(strategy).mode == "live" if strategy in control.STRATEGIES else False
+        try:
+            import safety  # type: ignore
+
+            if live:
+                a = safety.assess(mint, self.conn, deep=False)
+                info = {"level": a.level, "score": round(a.score, 1), "blocked": bool(a.blocked), "checked": True,
+                        "reasons": [r["text"] for r in a.reasons[:3]]}
+            else:
+                pen = safety.signal_penalty(self.conn, mint)
+                info = {"level": pen["level"], "score": pen["risk"], "checked": pen["checked"],
+                        "blocked": bool(safety.is_blocked(self.conn, mint)), "reasons": pen["reasons"]}
+        except Exception as e:
+            log.debug("safety check %s failed: %s", mint[:6], e)
+            if live:
+                return {"level": "unchecked", "checked": False}, "Rug-Prüfung nicht möglich (kein Echtgeld-Kauf)"
+            return {"level": "unchecked", "checked": False}, None
+        if info["blocked"]:
+            why = "; ".join(info["reasons"][:2]) or info["level"]
+            return info, f"Rug-Schutz blockiert ({why})"
+        return info, None
+
     def _skip(self, strategy: str, mint: str, why: str, snap=None, **data) -> None:
         sym = snap.symbol if snap else ""
         store.event(self.conn, "skip", f"[{strategy}] {sym or mint[:6] + '…'}: {why}",
@@ -138,6 +163,9 @@ class Strategy:
         avg_m5 = snap.buys_h1 / 12 if snap.buys_h1 else 0
         if avg_m5 and snap.buys_m5 > 3 * avg_m5 and snap.change_m5 > 30:
             return self._skip("whale", swap.mint, "Copy-Trader sind schon drin", snap)
+        safe, why = self._safety("whale", swap.mint)
+        if why:
+            return self._skip("whale", swap.mint, why, snap, wallet=swap.wallet, safety=safe)
 
         tp = p.take_profit
         if p.learned_tp and rank and rank["take_profit"]:
@@ -149,7 +177,7 @@ class Strategy:
         hold = rank["max_hold_min"] if (p.learned_tp and rank and rank["max_hold_min"]) else p.max_hold_min
         tier = learn.wallet_tier(self.conn, swap.wallet)
         feats = {"tier": tier, "size": learn.bucket_size(swap.sol_amount), "mcap": learn.bucket_mcap(snap.fdv),
-                 "liq": learn.bucket_liq(snap.liquidity_usd), "explore": explore}
+                 "liq": learn.bucket_liq(snap.liquidity_usd), "explore": explore, "safety": safe.get("level") or "-"}
         why = learn.blocked(self.conn, "whale", feats)
         if why:
             return self._skip("whale", swap.mint, f"gelernter Filter: {why} verliert", snap, wallet=swap.wallet)
@@ -157,7 +185,7 @@ class Strategy:
         info = {"explore": explore, "whale_sol": swap.sol_amount, "delay_s": round(age, 1),
                 "wallet_score": round(rank["score"] * 100, 2) if rank else None,
                 "wallet_hit_rate": rank["hit_rate"] if rank else None, "model_tier": tier,
-                "param_version": exits["version"]}
+                "param_version": exits["version"], "safety": safe}
         reason = (f"Wal {swap.wallet[:6]}… kaufte {swap.sol_amount:.1f} SOL"
                   + (f", Wal-Score {info['wallet_score']}" if rank else ", unbewertet"))
         if m == "manual":
@@ -234,6 +262,9 @@ class Strategy:
             return self._skip("signal", mint, f"Market Cap zu groß (${snap.fdv:,.0f})", snap)
         if sig["price_usd"] and snap.price_usd / sig["price_usd"] - 1 > 0.5:
             return self._skip("signal", mint, "seit dem Signal schon +50 %", snap)
+        safe, why = self._safety("signal", mint)
+        if why:
+            return self._skip("signal", mint, why, snap, safety=safe)
         try:
             wallets = [w.get("wallet") for w in json.loads(sig["wallets_json"] or "[]")]
         except (ValueError, TypeError, AttributeError):
@@ -241,7 +272,7 @@ class Strategy:
         exits = self._learned_exits(learn.params_for(self.conn, "signal"), p, p.take_profit, p.max_hold_min, inflow=0)
         info = {"signal_id": sig["id"], "signal_score": sig["score"], "smart_buyers": sig["smart_buyers"],
                 "net_usd": sig["net_usd"], "avg_quality": sig["avg_quality"], "wallets": wallets[:20],
-                "model": model, "signal_age_s": round(age, 1), "param_version": exits["version"]}
+                "model": model, "signal_age_s": round(age, 1), "param_version": exits["version"], "safety": safe}
         reason = (f"Signal-Score {sig['score']:.0f}, {sig['smart_buyers']} Smart Wallets, "
                   f"${(sig['net_usd'] or 0):,.0f} netto" + (f", Modell {score:.0f}" if model else ""))
         if m == "manual":
@@ -272,6 +303,7 @@ class Strategy:
             store.event(self.conn, "error", f"Kauf {snap.symbol} fehlgeschlagen: {fill.error}", "error")
             return None
         ex.adjust_balance(self.conn, -fill.sol)
+        safe = (meta or {}).get("safety") or {}
         meta = {**(meta or {}), "fill_source": fill.source, "impact": fill.price_impact,
                 "liq_usd": snap.liquidity_usd, "fdv": snap.fdv, "dex": snap.dex_id}
         cur = self.conn.execute(
@@ -279,13 +311,14 @@ class Strategy:
                  whale_price_sol, signal_id, opened_at, entry_price_sol, entry_price_usd, entry_mcap_usd, size_sol,
                  tokens, token_decimals, entry_cost_sol, take_profit, stop_loss, trail_activate, trail_drawdown,
                  max_hold_min, high_price_sol, last_price_sol, last_buys_m5, peak_buys_m5, entry_tx, meta,
-                 param_version, use_inflow_exit)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 param_version, use_inflow_exit, safety_level, safety_score, safety_reasons)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (ex.mode, strategy, managed, wallet, mint, snap.symbol, whale.signature if whale else None,
              whale.block_time if whale else None, whale.price_sol if whale else None, signal_id, int(time.time()),
              fill.price_sol, snap.price_usd, snap.fdv, size, fill.tokens, _decimals_cache.get(mint, 6), fill.sol,
              tp, sl, trail[0], trail[1], hold, snap.price_sol, snap.price_sol,
-             snap.buys_m5, snap.buys_m5, fill.tx, json.dumps(meta), version, inflow),
+             snap.buys_m5, snap.buys_m5, fill.tx, json.dumps(meta), version, inflow,
+             safe.get("level"), safe.get("score"), json.dumps(safe.get("reasons") or [], ensure_ascii=False)),
         )
         self.conn.commit()
         pid = cur.lastrowid
@@ -426,13 +459,14 @@ class Strategy:
                     strat = c["strategy"] if c["strategy"] in control.STRATEGIES else "signal"
                     p = control.preset(self.conn, strat)
                     size = c["size_sol"] or p.size_sol
-                    block = self._risk_block(strat, p, size, c["mint"])
+                    safe, block = self._safety(strat, c["mint"])
+                    block = block or self._risk_block(strat, p, size, c["mint"])
                     if block:
                         control.finish_command(self.conn, c["id"], "failed", block)
                         continue
                     pid = self.open(strat, "semi", c["mint"], size, snap, p, tp=p.take_profit,
                                     hold=p.max_hold_min, reason="von dir gekauft",
-                                    meta={"manual_buy": True})
+                                    meta={"manual_buy": True, "safety": safe})
                     control.finish_command(self.conn, c["id"], "done" if pid else "failed", str(pid or ""))
             except Exception as e:  # never let one command kill the loop
                 control.finish_command(self.conn, c["id"], "failed", str(e)[:200])

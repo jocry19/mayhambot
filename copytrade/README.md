@@ -124,7 +124,9 @@ slippage_bps` (Anteile: 0.2 = 20 %; `min_score`, `min_smart_buyers`, `max_signal
 | `ct_param_versions` | id, ts, strategy, scope ('mode' oder Wallet), params (JSON inkl. gelernter Filter `block`), n_train, n_test, train_gain, test_gain, baseline_test_gain, accepted, active, notes |
 | `ct_candles` | 1-Minuten-Kerzen, die das Lernen selbst geholt hat (sonst `research_candles`) |
 
-`ct_positions` hat zusätzlich `param_version` (welche gelernte Version die Ausstiege gesetzt hat, NULL = Preset) und `use_inflow_exit`.
+`ct_positions` hat zusätzlich `safety_level` (low/caution/high/critical/unchecked), `safety_score` (0–100) und
+`safety_reasons` (JSON-Liste deutscher Gründe) vom Rug-Schutz beim Kauf; dieselben Infos stehen in
+`ct_alerts.data.safety` und `ct_positions.meta.safety`. `param_version` (welche gelernte Version die Ausstiege gesetzt hat, NULL = Preset) und `use_inflow_exit`.
 
 ## So entscheidet der Bot (Modus 1)
 
@@ -151,6 +153,14 @@ Die Note A–E skaliert die Größe (A 1,5×, B 1,2×, C 1×, D 0,6×, E 0,4×).
 `max_signal_age_s`, Liquidität/Market Cap im Preset-Rahmen, Preis seit dem Signal nicht schon +50 %.
 Ausstieg: Ziel, Stop, Trailing, Zeit, oder „Smart Money steigt aus“ (die Wallets des Signals haben ≥ 50 % verkauft).
 Ultra- und Smart-Wallets des Modells werden außerdem als Wale für Modus 1 beobachtet.
+
+## Rug-Schutz (safety/)
+
+Vor jedem Kauf, in jedem Modus und auch bei deinem Kauf-Auftrag: `safety.is_blocked` (ohne Netz, Coins ohne Prüfung
+gehen durch). Mit echtem Geld zusätzlich direkt vor der Order `safety.assess(mint, deep=False)` (ca. 8 Abfragen);
+blockiert oder nicht prüfbar heißt: kein Echtgeld-Kauf. Übersprungene Käufe stehen mit Grund im Protokoll („skip“).
+Eine manuelle Freigabe (`safety.allow`) hat Vorrang. Die laufende Überwachung offener Positionen macht der
+Safety-Dienst selbst aus `ct_positions`.
 
 ## Selbstlernen (`learn.py`, `sim.py`)
 

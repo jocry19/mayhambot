@@ -175,7 +175,8 @@ def evaluate_trades(conn, s: Settings, limit: int = 20) -> int:
         meta = json.loads(p["meta"] or "{}")
         feats = {"strategy": p["strategy"], "mcap": bucket_mcap(p["entry_mcap_usd"] or meta.get("fdv")),
                  "liq": bucket_liq(meta.get("liq_usd")), "tier": meta.get("model_tier") or "-",
-                 "grade": (meta.get("model") or {}).get("grade") or "-", "explore": bool(meta.get("explore"))}
+                 "grade": (meta.get("model") or {}).get("grade") or "-", "explore": bool(meta.get("explore")),
+                 "safety": (meta.get("safety") or {}).get("level") or "-"}
         if not cs:
             if p["opened_at"] > time.time() - RETRY_S:
                 continue

@@ -153,6 +153,7 @@ def _signal(conn, score=80, buyers=4, age=10, mint=MINT):
                  (int(time.time()) - age, mint, "MEME", score, 9000, 10000, buyers, 70, 0.0003, 1e6,
                   _json.dumps([{"wallet": W, "buy_usd": 5000}])))
     conn.commit()
+    return conn.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 1").fetchone()
 
 
 def test_signal_mode_auto_buys_and_respects_preset(env):
@@ -363,3 +364,50 @@ def test_helius_rpc_uses_shared_limiter(monkeypatch):
     monkeypatch.setattr(cthttp._session, "request", lambda *a, **k: R())
     rpc = chain.Rpc(Settings(rpc_url="https://mainnet.helius-rpc.com/?api-key=k"))
     assert rpc.shared and rpc.call("getSlot", []) == 7 and hosts == ["mainnet.helius-rpc.com"]
+
+
+def test_rug_protection_blocks_buys(env, monkeypatch):
+    import json as _json
+
+    import safety
+
+    from copytrade import control
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    safety.block(conn, MINT, "Test-Rug")
+    assert st.on_whale_buy(whale_buy()) is None
+    assert st.on_signal(_signal(conn)) is None
+    control.request_buy(conn, MINT)
+    st.process_commands()
+    assert conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0] == 0
+    msgs = [r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'")]
+    assert sum("Rug-Schutz" in m for m in msgs) == 2
+    assert "Rug-Schutz" in conn.execute("SELECT result FROM ct_commands").fetchone()[0]
+    safety.allow(conn, MINT, "geprüft")  # your manual allow wins
+    pid = st.on_whale_buy(whale_buy())
+    p = conn.execute("SELECT * FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    assert p["safety_level"] and _json.loads(p["meta"])["safety"]["blocked"] is False
+
+
+def test_live_buy_requires_fresh_safety_check(env, monkeypatch):
+    import safety
+
+    from copytrade import control
+    s, conn, ex, state = env
+    live = PaperExecutor(s, rpc=None)
+    live.mode = "live"
+    st = strategy.Strategy(conn, s, {"paper": ex, "live": live})
+    control.set_live(conn, "signal", True)
+    calls = []
+
+    def assess_fail(mint, conn=None, deep=True, **k):
+        calls.append(deep)
+        raise RuntimeError("rpc down")
+
+    monkeypatch.setattr(safety, "assess", assess_fail)
+    assert st.on_signal(_signal(conn)) is None and calls == [False]
+    assert any("Rug-Prüfung nicht möglich" in r[0] for r in conn.execute("SELECT message FROM ct_events"))
+    ok = safety.Assessment(MINT, int(time.time()), 10.0, "low", False, 1.0)
+    monkeypatch.setattr(safety, "assess", lambda mint, conn=None, deep=True, **k: ok)
+    pid = st.on_signal(_signal(conn, mint=MINT))
+    assert pid and conn.execute("SELECT mode, safety_level FROM ct_positions").fetchone()[:] == ("live", "low")

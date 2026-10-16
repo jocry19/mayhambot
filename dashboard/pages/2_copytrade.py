@@ -427,10 +427,11 @@ with tab_trades:
                                Modus=cl.strategy.map(lambda x: control.STRATEGY_LABELS.get(x, x)),
                                Grund2=cl.exit_reason.map(lambda r: strategy_mod.EXIT_NAMES.get(r, r)),
                                MC_Kauf=cl.entry_mcap_usd.map(usd), MC_Verkauf=cl.exit_mcap_usd.map(usd),
-                               Wal=cl.wallet.map(short), Mint=cl.mint)
+                               Wal=cl.wallet.map(short), Mint=cl.mint,
+                               Rug=cl.safety_level.fillna("–") if "safety_level" in cl else "–")
                      .drop(columns=["Grund"]).rename(columns={"Grund2": "Grund", "MC_Kauf": "MC Kauf", "MC_Verkauf": "MC Verkauf"})
                      [["Coin", "Modus", "Kauf", "Verkauf", "Haltedauer", "Einsatz", "Ergebnis", "PnL", "Grund",
-                       "MC Kauf", "MC Verkauf", "Wal", "Mint"]], hide_index=True, width="stretch")
+                       "MC Kauf", "MC Verkauf", "Rug", "Wal", "Mint"]], hide_index=True, width="stretch")
     else:
         st.caption("Noch keine abgeschlossenen Trades.")
 
