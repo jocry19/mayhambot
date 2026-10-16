@@ -6,6 +6,7 @@ from collections import defaultdict
 
 from model.config import TIER_LABELS, msettings
 from research import stats
+from model.learn import weights_full
 from research.events import FEATURE_LABELS, FEATURE_NAMES
 from research.wallet_stats import COMPONENT_LABELS, COMPONENTS
 
@@ -88,6 +89,42 @@ def univariate(events, horizon):
     return sorted(out, key=lambda d: -(d["power"] or 0))
 
 
+def paper_vs_signals(conn):
+    """Per grade: how stored predictions turned out, and the copy-trader's paper P&L on the same coins
+    (paper position opened within 30 min after a prediction of that coin)."""
+    out = {"signals": [], "paper": []}
+    try:
+        rows = conn.execute("""SELECT score, max_ret_1h, ret_1h FROM model_predictions
+                               WHERE max_ret_1h IS NOT NULL""").fetchall()
+    except Exception:  # noqa: BLE001
+        rows = []
+    def grade(sc):
+        p = (sc or 0) / 100
+        return "A" if p >= 0.6 else "B" if p >= 0.45 else "C" if p >= 0.3 else "D" if p >= 0.15 else "E"
+    g = defaultdict(list)
+    for r in rows:
+        g[grade(r[0])].append(r)
+    for k in sorted(g):
+        v = g[k]
+        out["signals"].append(dict(grade=k, n=len(v), hit_50=sum(1 for r in v if (r[1] or 0) >= 0.5) / len(v),
+                                   median_max_ret_1h=stats.median([r[1] for r in v]),
+                                   median_ret_1h=stats.median([r[2] for r in v])))
+    try:
+        pos = conn.execute("""SELECT p.mode, p.pnl_pct, p.pnl_sol,
+                   (SELECT score FROM model_predictions m WHERE m.mint = p.mint AND m.ts <= p.opened_at
+                      AND m.ts >= p.opened_at - 1800 ORDER BY m.ts DESC LIMIT 1) AS score
+                FROM ct_positions p WHERE p.status = 'closed'""").fetchall()
+    except Exception:  # noqa: BLE001
+        pos = []
+    g = defaultdict(list)
+    for r in pos:
+        g[(r[0] or "?", grade(r[3]) if r[3] is not None else "ohne Signal")].append(r)
+    for (mode, gr), v in sorted(g.items()):
+        out["paper"].append(dict(mode=mode, grade=gr, n=len(v), win_rate=sum(1 for r in v if (r[1] or 0) > 0) / len(v),
+                                 avg_pnl_pct=sum(r[1] or 0 for r in v) / len(v), pnl_sol=sum(r[2] or 0 for r in v)))
+    return out
+
+
 def build(conn, version_id, bt, tiers_now, weights, weight_info, models, prev=None):
     ms = msettings
     main = "1h" if any(h[0] == "1h" for h in ms.horizons) else ms.horizons[0][0]
@@ -105,11 +142,13 @@ def build(conn, version_id, bt, tiers_now, weights, weight_info, models, prev=No
                 tier_counts=counts, weights=weights, weight_info=weight_info,
                 tier_profiles={}, tier_forward=m.get("tier_forward", {}),
                 combos=combos(evs, main), univariate=univariate(evs, main),
-                backtest={k: v for k, v in m.items() if k != "tier_forward"},
-                models={h: {"kind": mm.get("kind"), "n": mm.get("n"), "pos": mm.get("pos"),
+                backtest={k: v for k, v in m.items() if k not in ("tier_forward", "selection")},
+                models={h: {"kind": mm.get("kind"), "algo": (mm.get("cfg") or {}).get("algo", mm.get("kind")),
+                            "drop": (mm.get("cfg") or {}).get("drop"), "n": mm.get("n"), "pos": mm.get("pos"),
                             "weights": sorted(({"feature": f, "label": FEATURE_LABELS[f], "weight": c}
-                                               for f, c in zip(FEATURE_NAMES, mm["coef"])),
+                                               for f, c in zip(FEATURE_NAMES, weights_full(mm))),
                                               key=lambda d: -abs(d["weight"]))} for h, mm in models.items()},
+                selection=m.get("selection", {}), paper=paper_vs_signals(conn),
                 n_events=len(evs), n_labelled=sum(1 for e in evs if e["labels"].get(main)),
                 checkpoints=len(bt["checkpoints"]), tier_history=bt["tier_counts"], previous=prev)
     for t in ("ultra", "smart", "good"):
@@ -176,11 +215,46 @@ def render(d):
             if u["auc"] is not None:
                 L.append(f"| {u['label']} | {u['auc']:.2f} | {u['direction']} |")
         L.append("")
-    L.append("## Modell-Gewichte pro Horizont\n")
+    L.append("## Modell pro Horizont\n")
+    algo_name = {"logistic": "logistische Regression", "gbm": "Gradient Boosting (Entscheidungsbäume)"}
     for h, mm in d["models"].items():
-        kind = "gelernt" if mm["kind"] == "logistic" else "Startannahme (noch zu wenig Daten)"
-        L.append(f"**{h}** — {kind}, {mm['n']} Beispiele, {mm['pos']} Pumps. Stärkste Gewichte: " +
+        if mm["kind"] == "prior":
+            kind = "Startannahme (noch zu wenig Daten)"
+        else:
+            kind = f"gelernt: {algo_name.get(mm['algo'], mm['algo'])}" + (f", ohne Gruppe {mm['drop']}" if mm.get("drop") else "")
+        unit = "Anteil am Lernerfolg" if mm.get("algo") == "gbm" else "Gewicht pro Std.-Abw."
+        L.append(f"**{h}** — {kind}, {mm['n']} Beispiele, {mm['pos']} Pumps. Wichtigste Merkmale ({unit}): " +
                  ", ".join(f"{w['label']} {w['weight']:+.2f}" for w in mm["weights"][:6]) + "\n")
+    sel = d.get("selection") or {}
+    if any(v.get("status") == "selected" for v in sel.values()):
+        L.append("## Automatische Modellauswahl (ehrlicher Test auf den neuesten 30 % der Fälle)\n")
+        L.append("| Horizont | gewählt | Grund | Test-Fälle | Log-Loss Modell | Log-Loss ohne Wissen | AUC |")
+        L.append("|---|---|---|---|---|---|---|")
+        for h, v in sel.items():
+            if v.get("status") != "selected":
+                L.append(f"| {h} | Startannahme | {v.get('reason', '')} | – | – | – | – |")
+                continue
+            ho = v.get("holdout") or {}
+            c = v["chosen"]
+            L.append(f"| {h} | {algo_name.get(c['algo'], c['algo'])}{' ohne ' + c['drop'] if c.get('drop') else ''} | {v['why']} | "
+                     f"{v['n_test']} | {ho.get('logloss', float('nan')):.3f} | {v['base_logloss']:.3f} | "
+                     f"{'–' if ho.get('auc') is None else round(ho['auc'], 2)} |")
+        L.append("")
+    pp = d.get("paper") or {}
+    if pp.get("signals") or pp.get("paper"):
+        L.append("## Signale gegen Papier-Trading\n")
+        if pp.get("signals"):
+            L.append("| Note | Signale | +50 % in 1h erreicht | Median max. Anstieg 1h | Median Ergebnis nach 1h |")
+            L.append("|---|---|---|---|---|")
+            for r in pp["signals"]:
+                L.append(f"| {r['grade']} | {r['n']} | {_pct(r['hit_50'])} | {_pct(r['median_max_ret_1h'])} | {_pct(r['median_ret_1h'])} |")
+            L.append("")
+        if pp.get("paper"):
+            L.append("| Copy-Trader-Modus | Note beim Einstieg | Trades | Gewinnquote | Ø P&L | P&L gesamt (SOL) |")
+            L.append("|---|---|---|---|---|---|")
+            for r in pp["paper"]:
+                L.append(f"| {r['mode']} | {r['grade']} | {r['n']} | {_pct(r['win_rate'])} | {100 * r['avg_pnl_pct']:+.1f} % | {r['pnl_sol']:+.3f} |")
+            L.append("")
     bt = d["backtest"]
     if any(v.get("n") for v in bt.values()):
         L.append("## Walk-Forward-Backtest (jede Vorhersage nur mit Daten von davor)\n")

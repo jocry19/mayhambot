@@ -62,6 +62,19 @@ net SOL inflow and distinct net buyers per tier, tiered buyers in the last 5 min
 summed influence of the buyers, entry market cap (log10), token age, tiered sell ratio,
 entry timing spread, size concentration (HHI), crowd buyers, crowd net USD, price momentum.
 
+## Learning and automatic improvement — `model.learn`
+
+Every retrain: point-in-time events from the walk-forward backtest are split by time (oldest 70 % train, purged by
+the horizon; newest 30 % holdout). Candidates = {logistic regression, gradient-boosted trees (`research/gbm.py`)} ×
+{all features, without tier / crowd / price-time group}. Each is scored out of sample (log-loss, AUC). The current
+champion (cfg stored in the active version's token_model_json) is only replaced when a candidate beats it by more
+than 0.5 % log-loss; the winner is refit on all events. Full candidate table: `metrics_json["selection"]`.
+Explanations: logistic = coefficient × standardized value; trees = path contributions (Saabas), both summing to the
+log-odds. `weights_full(model)` gives one display weight per feature (coefficient, or share of gain for trees).
+Extra wallet columns: cluster_id (wallets that repeatedly buy the same coin within 60 s), exit_capture (sell price
+as share of the high after entry), median_hold_min. Report also compares stored signals with the copy-trader's
+paper P&L per grade (`paper_vs_signals`).
+
 ## Retraining — `model.train`
 
 ```bash

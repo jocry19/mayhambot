@@ -22,7 +22,22 @@ FEATURES = (
     ("crowd_buyers", "Alle Käufer im Fenster (log)"),
     ("crowd_net", "Netto-Inflow alle Wallets (log USD)"),
     ("momentum", "Preis-Momentum im Fenster (log)"),
+    # structure of the coin's order flow (deeper on-chain features)
+    ("n_clusters", "Unabhängige Smart-Money-Gruppen"),
+    ("smart_rank", "Smart Money vor der Masse (0 = als Erste)"),
+    ("exit_quality", "Ausstiegs-Qualität der Käufer"),
+    ("bundle_share", "Gebündelte Käufe (gleiche Sekunde)"),
+    ("top10_share", "Anteil der 10 größten Käufer"),
+    ("buyer_accel", "Beschleunigung neuer Käufer"),
+    ("early_sell", "Verkäufe der frühesten Käufer"),
+    ("first_tier_age", "Coin-Alter beim ersten Smart-Kauf (log10 min)"),
 )
+FEATURE_GROUPS = {
+    "tiers": ["n_ultra", "n_smart", "n_good", "net_sol_ultra", "net_sol_smart", "net_sol_good", "n_tiered_5m",
+              "wq_mean", "influence", "sell_ratio", "entry_span", "hhi", "n_clusters", "smart_rank", "exit_quality"],
+    "crowd": ["crowd_buyers", "crowd_net", "buyer_accel", "top10_share", "bundle_share", "early_sell"],
+    "price_time": ["log_mcap", "log_age", "momentum", "first_tier_age"],
+}
 FEATURE_NAMES = [f for f, _ in FEATURES]
 FEATURE_LABELS = dict(FEATURES)
 
@@ -34,9 +49,11 @@ def slog(x):
     return math.copysign(math.log1p(abs(x)), x)
 
 
-def features_at(mint, t, window_trades, tiers, pidx, created_at, to_sol, window_min):
+def features_at(mint, t, window_trades, tiers, pidx, created_at, to_sol, window_min, history=None):
     """window_trades: trades of this coin with t - window < ts <= t (objects with wallet, side, ts, usd, sol).
-    tiers: wallet -> (tier, score, influence_usd). Returns (features dict, per-wallet list) or (None, None)."""
+    history: all known trades of the coin up to t (for order-flow structure), defaults to window_trades.
+    tiers: wallet -> (tier, score, influence_usd[, cluster_id, exit_capture]).
+    Returns (features dict, per-wallet list) or (None, None)."""
     px = pidx.price_at(mint, t)
     if not px:
         return None, None
@@ -85,10 +102,62 @@ def features_at(mint, t, window_trades, tiers, pidx, created_at, to_sol, window_
     f["crowd_net"] = slog(crowd_net)
     p0 = pidx.price_at(mint, t - window_min * 60)
     f["momentum"] = max(-3.0, min(3.0, math.log(px / p0))) if p0 else 0.0
+    _structure(f, t, window_trades, history or window_trades, tiers, buyers, created_at)
     wallets = sorted(({"address": d["address"], "tier": d["tier"], "score": d["score"],
                        "net_sol": round(d["buy_sol"] - d["sell_sol"], 4), "first_ts": d["first_ts"]}
                       for d in per.values()), key=lambda d: (-d["net_sol"]))
     return f, wallets
+
+
+def _structure(f, t, window, history, tiers, buyers, created_at):
+    # independent groups: wallets of one cluster (same entity / bundle) count once
+    cl = set()
+    caps = []
+    for d in buyers:
+        ti = tiers.get(d["address"]) or ()
+        cl.add(ti[3] if len(ti) > 3 and ti[3] is not None else d["address"])
+        if len(ti) > 4 and ti[4] is not None:
+            caps.append(ti[4])
+    f["n_clusters"] = float(len(cl))
+    f["exit_quality"] = sum(caps) / len(caps) if caps else 0.0
+    # order of entry among all buyers of the coin so far
+    first = {}
+    for tr in history:
+        if tr.side == "buy" and tr.wallet not in first:
+            first[tr.wallet] = len(first)
+    n = max(1, len(first) - 1)
+    ranks = [first[d["address"]] / n for d in buyers if d["address"] in first]
+    f["smart_rank"] = sorted(ranks)[len(ranks) // 2] if ranks else 1.0
+    tier_first = [tr.ts for tr in history if tr.side == "buy" and (tiers.get(tr.wallet) or (None,))[0]]
+    if tier_first and created_at and created_at <= tier_first[0]:
+        f["first_tier_age"] = math.log10(1 + (tier_first[0] - created_at) / 60)
+    else:
+        f["first_tier_age"] = f["log_age"]
+    # bundles: buys of 3+ different wallets in the same second
+    by_sec = {}
+    buy_usd = 0.0
+    per_w = {}
+    for tr in window:
+        if tr.side != "buy":
+            continue
+        by_sec.setdefault(tr.ts, set()).add(tr.wallet)
+        buy_usd += tr.usd
+        per_w[tr.wallet] = per_w.get(tr.wallet, 0.0) + tr.usd
+    bundled = {s_ for s_, ws in by_sec.items() if len(ws) >= 3}
+    f["bundle_share"] = (sum(tr.usd for tr in window if tr.side == "buy" and tr.ts in bundled) / buy_usd) if buy_usd else 0.0
+    f["top10_share"] = (sum(sorted(per_w.values(), reverse=True)[:10]) / buy_usd) if buy_usd else 0.0
+    fts = {}
+    for tr in history:
+        if tr.side == "buy":
+            fts.setdefault(tr.wallet, tr.ts)
+    last5 = sum(1 for v in fts.values() if v > t - 300)
+    prev25 = sum(1 for v in fts.values() if t - 1800 < v <= t - 300)
+    f["buyer_accel"] = math.log((last5 + 1) / (prev25 / 5 + 1))
+    # did the coin's earliest buyers start selling in the window?
+    early = {w for w, i in first.items() if i < 20}
+    eb = sum(tr.usd for tr in history if tr.side == "buy" and tr.wallet in early)
+    es = sum(tr.usd for tr in window if tr.side == "sell" and tr.wallet in early)
+    f["early_sell"] = min(2.0, es / eb) if eb else 0.0
 
 
 def labels_at(mint, t, pidx, horizons):

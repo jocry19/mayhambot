@@ -47,9 +47,17 @@ CREATE INDEX IF NOT EXISTS idx_mp_mint ON model_predictions(mint, ts);
 """
 
 
+ADDED_COLUMNS = {"model_wallet_stats": [("cluster_id", "TEXT"), ("exit_capture", "REAL"), ("median_hold_min", "REAL")]}
+
+
 def ensure_schema(conn):
     conn.execute("PRAGMA busy_timeout=120000")  # the live app writes concurrently: wait instead of failing
     retry(lambda: conn.executescript(SCHEMA))
+    for table, cols in ADDED_COLUMNS.items():
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, typ in cols:
+            if name not in have:
+                retry(lambda: conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}"))
     return conn
 
 

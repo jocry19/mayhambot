@@ -12,12 +12,12 @@ from core.config import settings
 from research.config import rsettings
 from research.stats import median
 
-COMPONENTS = ("win", "early", "roi", "consistency", "timing", "lead", "influence", "rug_avoid")
+COMPONENTS = ("win", "early", "roi", "consistency", "timing", "lead", "influence", "rug_avoid", "exit")
 COMPONENT_LABELS = {
     "win": "Trefferquote", "early": "Frühe Einstiege (danach ≥2x)", "roi": "Rendite (ROI)",
     "consistency": "Konstanz", "timing": "Einstieg bei niedriger Market Cap",
     "lead": "Kauft vor der Masse", "influence": "Einfluss (Follower)",
-    "rug_avoid": "Rug-Vermeidung",
+    "rug_avoid": "Rug-Vermeidung", "exit": "Ausstiegs-Qualität (verkauft nahe am Hoch)",
 }
 
 
@@ -29,7 +29,7 @@ def _positions(trades, cutoff):
         k = (t.wallet, t.mint)
         a = agg.get(k)
         if a is None:
-            a = agg[k] = [0.0, 0.0, 0.0, 0.0, None, None, 0, 0.0]  # buy_usd, buy_tok, sell_usd, sell_tok, fts, fpx, n, buy_sol
+            a = agg[k] = [0.0, 0.0, 0.0, 0.0, None, None, 0, None]  # buy_usd, buy_tok, sell_usd, sell_tok, fts, fpx, n, first sell ts
         a[6] += 1
         if t.side == "buy":
             a[0] += t.usd
@@ -39,6 +39,8 @@ def _positions(trades, cutoff):
         else:
             a[2] += t.usd
             a[3] += t.tok
+            if a[7] is None:
+                a[7] = t.ts
     return agg
 
 
@@ -92,7 +94,7 @@ def compute(ds, cutoff, min_position_usd=None):
             bots.add(w)
         if a[1] <= 0 or a[0] < min_pos:
             continue
-        buy_usd, buy_tok, sell_usd, sell_tok, fts, fpx, n, _ = a
+        buy_usd, buy_tok, sell_usd, sell_tok, fts, fpx, n, sell_ts = a
         avg = buy_usd / buy_tok
         sold = min(sell_tok, buy_tok)
         sold_usd = sell_usd * (sold / sell_tok) if sell_tok else 0.0
@@ -108,11 +110,15 @@ def compute(ds, cutoff, min_position_usd=None):
         peak = pidx.max_between(m, fts, cutoff - 1)
         peak_mult = (max(peak, px_now) / fpx) if fpx and peak else None
         t2x = pidx.first_time_reaching(m, fts, cutoff - 1, 2 * fpx) if fpx else None
+        capture = hold = None
+        if sell_tok >= 0.5 * buy_tok and sell_tok > 0 and peak and fpx:
+            capture = min(1.0, (sell_usd / sell_tok) / max(peak, fpx))  # sold at what share of the high
+            hold = (sell_ts - fts) / 60 if sell_ts and fts else None
         per[w].append(dict(
             mint=m, buy_usd=buy_usd, pnl=pnl, realized=realized, roi=pnl / buy_usd, ts=fts,
             peak=peak_mult, min_to_2x=(t2x - fts) / 60 if t2x else None,
             entry_mcap=pidx.mcap(m, fpx), rug=crashed and sell_usd < 0.5 * buy_usd,
-            infl=infl.get((w, m))))
+            infl=infl.get((w, m)), capture=capture, hold=hold))
     out = {}
     for w, P in per.items():
         if w in bots:
@@ -144,16 +150,19 @@ def summarize(P):
     infl_c = (k * infl_raw + 3 * 0.3) / (k + 3)
     med_rank = median([x[3] for x in inf]) if inf else None
     lead = (k * (1 - med_rank) + 3 * 0.5) / (k + 3) if inf else 0.5
+    caps = [p["capture"] for p in P if p["capture"] is not None]
+    exit_c = (sum(caps) + 2 * 0.4) / (len(caps) + 2)
     mc = median([p["entry_mcap"] for p in P if p["entry_mcap"]])
     timing = min(1.0, max(0.0, 1 - (math.log10(mc) - 4) / 3)) if mc else 0.5
     comps = dict(
         win=(wins + 1) / (n + 2), early=(early + 0.5) / (n + 2), roi=0.5 + 0.5 * math.tanh(roi),
-        consistency=consistency, timing=timing, lead=lead, influence=infl_c, rug_avoid=1 - (rugs + 0.5) / (n + 2))
+        consistency=consistency, timing=timing, lead=lead, influence=infl_c, exit=exit_c, rug_avoid=1 - (rugs + 0.5) / (n + 2))
     return dict(
         n_tokens=n, win_rate=wins / n, early_rate=early / n, roi=roi,
         realized_pnl_usd=sum(p["realized"] for p in P), total_pnl_usd=total_pnl,
         median_entry_mcap=mc, median_min_to_2x=median([p["min_to_2x"] for p in P]),
         influence_followers=med_f, influence_usd=med_usd, inflow_lift_usd=med_lift, influence_samples=k, median_entry_rank=med_rank,
+        exit_capture=median(caps) if caps else None, median_hold_min=median([p["hold"] for p in P]),
         consistency=consistency, rug_rate=rugs / n, components=comps,
         last_ts=max(p["ts"] for p in P))
 
@@ -172,3 +181,39 @@ def first_buys(ds, a, b):
         if a <= t.ts < b and t.px > 0:
             out.append((t.wallet, t.mint, t.ts, t.px))
     return out
+
+
+def clusters(ds, wallets, cutoff, window_s=60, min_shared=2):
+    """Group wallets that repeatedly buy the same coin within `window_s` seconds of each other (same entity,
+    bundles, shared signal groups). Returns wallet -> cluster id (smallest member address)."""
+    wallets = set(wallets)
+    pair = {}
+    for mint, lst in ds.by_mint.items():
+        firsts = {}
+        for t in lst:
+            if t.ts >= cutoff:
+                break
+            if t.side == "buy" and t.wallet in wallets and t.wallet not in firsts:
+                firsts[t.wallet] = t.ts
+        if len(firsts) < 2:
+            continue
+        fl = sorted(firsts.items(), key=lambda x: x[1])
+        for i, (a, ta) in enumerate(fl):
+            for b, tb in fl[i + 1:]:
+                if tb - ta > window_s:
+                    break
+                k = (a, b) if a < b else (b, a)
+                pair[k] = pair.get(k, 0) + 1
+    parent = {}
+
+    def find(x):
+        while parent.get(x, x) != x:
+            parent[x] = parent.get(parent[x], parent[x])
+            x = parent[x]
+        return x
+    for (a, b), c in pair.items():
+        if c >= min_shared:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+    return {w: find(w) for w in wallets}

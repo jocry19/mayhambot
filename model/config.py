@@ -24,8 +24,8 @@ def _horizons():
 TIERS = ("ultra", "smart", "good")
 TIER_LABELS = {"ultra": "Ultra Smart", "smart": "Smart", "good": "Good"}
 
-PRIOR_WALLET_WEIGHTS = dict(win=0.17, early=0.17, roi=0.13, consistency=0.10, timing=0.08, lead=0.12,
-                            influence=0.13, rug_avoid=0.10)
+PRIOR_WALLET_WEIGHTS = dict(win=0.15, early=0.15, roi=0.12, consistency=0.10, timing=0.08, lead=0.12,
+                            influence=0.12, rug_avoid=0.08, exit=0.08)
 
 
 @dataclass

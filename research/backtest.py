@@ -65,7 +65,8 @@ def _coin_events(ds, tmap, a, b, ms):
         if t.ts - last.get(t.mint, -10 ** 12) < ms.event_dedupe_min * 60:
             continue
         f, wallets = ev.features_at(t.mint, t.ts, ds.window(t.mint, t.ts - W, t.ts), tmap, ds.pidx,
-                                    ds.created.get(t.mint), ds.to_sol, ms.window_min)
+                                    ds.created.get(t.mint), ds.to_sol, ms.window_min,
+                                    history=ds.window(t.mint, 0, t.ts))
         if f is None:
             continue
         last[t.mint] = t.ts
@@ -89,8 +90,10 @@ def run(ds, ms=msettings, max_points=24):
         known = [(we["comps"], we["y"]) for we in res["wallet_events"] if we["ts"] + we["sec"] <= c]
         weights, winfo = learn.learn_wallet_weights(known)
         tiers = tier_all(st, weights)
-        tmap = {w: (t, sc, s["influence_usd"] or 0.0) for w, (t, sc, s) in tiers.items()
-                if t or sc >= ms.event_min_score}
+        keep = [w for w, (t, sc, s) in tiers.items() if t or sc >= ms.event_min_score]
+        cl = wallet_stats.clusters(ds, keep, c)
+        tmap = {w: (tiers[w][0], tiers[w][1], tiers[w][2]["influence_usd"] or 0.0, cl.get(w), tiers[w][2].get("exit_capture"))
+                for w in keep}
         counts = {t: sum(1 for v in tiers.values() if v[0] == t) for t in ("ultra", "smart", "good")}
         res["weights"].append(dict(ts=c, weights=weights, info=winfo))
         res["tier_counts"].append(dict(ts=c, **counts, wallets=len(st)))

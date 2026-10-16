@@ -38,7 +38,14 @@ def run_once(conn=None, now=None, write_files=True):
     weights, winfo = learn.learn_wallet_weights(known)
     st, _ = wallet_stats.compute(ds, now + 1)
     tiers = tier_all(st, weights)
-    models = learn.fit_token_models(bt["events"], now=now)
+    champ = {}
+    v = conn.execute("SELECT token_model_json FROM model_versions WHERE active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if v:
+        champ = {h: m.get("cfg") for h, m in json.loads(v[0] or "{}").items() if m.get("cfg")}
+    models, selection = learn.select_models(bt["events"], champion=champ, now=now)
+    bt.setdefault("metrics", {})["selection"] = selection
+    tiered = [w for w, (t, _, _) in tiers.items() if t]
+    cl = wallet_stats.clusters(ds, tiered, now + 1)
     counts = {t: sum(1 for v in tiers.values() if v[0] == t) for t in ("ultra", "smart", "good")}
     prev = _previous(conn)
     cur = conn.execute(
@@ -53,12 +60,16 @@ def run_once(conn=None, now=None, write_files=True):
         rows.append((w, vid, now, tier, sc, s["n_tokens"], s["win_rate"], s["early_rate"], s["roi"],
                      s["realized_pnl_usd"], s["total_pnl_usd"], s["median_entry_mcap"], s["median_min_to_2x"],
                      s["influence_followers"], s["influence_usd"], s["inflow_lift_usd"], s["consistency"],
-                     s["rug_rate"], json.dumps(s["components"])))
+                     s["rug_rate"], json.dumps(s["components"]), cl.get(w), s.get("exit_capture"),
+                     s.get("median_hold_min")))
     conn.commit()
 
     def swap():  # one short write transaction, retried if the live app holds the lock
         conn.execute("DELETE FROM model_wallet_stats")
-        conn.executemany("INSERT INTO model_wallet_stats VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+        conn.executemany("""INSERT INTO model_wallet_stats(address, version, ts, tier, score, n_tokens, win_rate, early_rate,
+               roi, realized_pnl_usd, total_pnl_usd, median_entry_mcap, median_min_to_2x, influence_followers,
+               influence_usd, inflow_lift_usd, consistency, rug_rate, components_json, cluster_id, exit_capture,
+               median_hold_min) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
         conn.executemany("INSERT OR REPLACE INTO model_tier_history VALUES (?,?,?,?)",
                          [(vid, w, t, sc) for w, (t, sc, _) in tiers.items() if t])
         conn.execute("UPDATE model_versions SET active = (id = ?)", (vid,))

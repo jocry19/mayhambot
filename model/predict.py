@@ -41,24 +41,26 @@ def score_token(mint, now=None, conn=None, store=False, tiers=None):
     if not version:
         raise ModelNotTrained("no model version yet: run python -m model retrain")
     tiers = tiers if tiers is not None else tier_map(conn)
-    ds = data.load(conn, since_ts=now - max(W, 3 * 3600), mints=[mint])
+    ds = data.load(conn, mints=[mint])
     tok = conn.execute("SELECT symbol, pair_created_at, price_usd, mcap_usd FROM tokens WHERE mint=?", (mint,)).fetchone()
     created = ds.created.get(mint) or (tok["pair_created_at"] if tok else None)
     f, wallets = ev.features_at(mint, now, ds.window(mint, now - W, now), tiers, ds.pidx, created, ds.to_sol,
-                                msettings.window_min)
+                                msettings.window_min, history=ds.window(mint, 0, now))
     if f is None:
         return None
     x = ev.vector(f)
     preds = learn.predict(models, x)
     horizons, contribs = {}, {}
+    wfull = {n: learn.weights_full(m) for n, m in models.items()}
     for name, sec, thr in msettings.horizons:
         p, exp, con = preds[name]
         horizons[name] = dict(p_pump=round(p, 4), threshold=thr,
                               exp_max_ret=round(exp, 4) if exp is not None else round(p * thr * 1.5, 4),
-                              model=models[name].get("kind", "logistic"))
+                              model=models[name].get("kind", "logistic"),
+                              algo=(models[name].get("cfg") or {}).get("algo", models[name].get("kind")))
         tot = sum(abs(c) for c in con) or 1.0
         contribs[name] = sorted(({"feature": fn, "label": ev.FEATURE_LABELS[fn], "value": round(f[fn], 4),
-                                  "weight": round(models[name]["coef"][i], 4), "contribution": round(con[i], 4),
+                                  "weight": round(wfull[name][i], 4), "contribution": round(con[i], 4),
                                   "share": round(abs(con[i]) / tot, 4)} for i, fn in enumerate(ev.FEATURE_NAMES)),
                                 key=lambda d: -abs(d["contribution"]))
     main = "1h" if "1h" in horizons else msettings.horizons[0][0]

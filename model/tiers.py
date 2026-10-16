@@ -51,7 +51,9 @@ def _row(r):
             "stats": {k: d[k] for k in ("n_tokens", "win_rate", "early_rate", "roi", "realized_pnl_usd",
                                         "total_pnl_usd", "median_entry_mcap", "median_min_to_2x",
                                         "influence_followers", "influence_usd", "inflow_lift_usd",
-                                        "consistency", "rug_rate")}}
+                                        "consistency", "rug_rate")},
+            "cluster_id": d.get("cluster_id"), "exit_capture": d.get("exit_capture"),
+            "median_hold_min": d.get("median_hold_min")}
 
 
 def _conn(conn):
@@ -83,6 +85,7 @@ def wallet_tiers(conn=None, tier=None, limit=None):
 
 
 def tier_map(conn):
-    """wallet -> (tier, score, influence_usd) for tiered wallets (used by the live predictor)."""
-    return {r[0]: (r[1], r[2] or 0.0, r[3] or 0.0) for r in conn.execute(
-        "SELECT address, tier, score, influence_usd FROM model_wallet_stats WHERE tier IS NOT NULL")}
+    """wallet -> (tier, score, influence_usd, cluster_id, exit_capture) for tiered wallets (live predictor)."""
+    return {r[0]: (r[1], r[2] or 0.0, r[3] or 0.0, r[4], r[5]) for r in conn.execute(
+        """SELECT address, tier, score, influence_usd, cluster_id, exit_capture FROM model_wallet_stats
+           WHERE tier IS NOT NULL""")}
