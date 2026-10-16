@@ -124,14 +124,18 @@ def cycle(conn, i):
     bf = backfill(conn)
     if bf:
         db.retry_locked(conn, lambda: scoring.rescore_all(conn))
+    engine.last_cluster_stats.update(wallets=0, entities=0)
     sigs = engine.evaluate(conn, [r["mint"] for r in watch])
     notifier.notify(conn, sigs)
     engine.update_outcomes(conn)
     smart = conn.execute("SELECT COUNT(*) FROM wallets WHERE is_smart=1").fetchone()[0]
     ts = scoring.last_tier_sync
+    cs = engine.last_cluster_stats
     if ts:
-        log.info("tiers synced from model v%s: ultra %d / smart %d / good %d",
-                 ts["version"], ts["ultra"], ts["smart"], ts["good"])
+        log.info("tiers synced from model v%s: ultra %d / smart %d / good %d (%d scored, %d clusters, "
+                 "%d unscored kept heuristic); smart buyers this cycle: %d wallets = %d entities",
+                 ts["version"], ts["ultra"], ts["smart"], ts["good"], ts["scored"], ts["clusters"], ts["heuristic"],
+                 cs["wallets"], cs["entities"])
     else:
         log.info("tiers: heuristic (no active model version)")
     log.info("cycle %d: %d tokens, +%d trades, +%d backfill trades, %d smart wallets, %d signals (%.0fs)",

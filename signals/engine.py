@@ -35,14 +35,23 @@ class QualityCache:
             manual = bool(m and m["manual"])
             bot = bool(m and m["is_bot"])
             score = q["score"] if q["n"] else (MANUAL_DEFAULT_SCORE if manual else 0.0)
-            if self.model_version is not None:
-                tier = (self.model_tiers.get(wallet) or (None,))[0]
+            if wallet in self.model_tiers:  # scored by the active model version: its tier is the truth
+                tier = self.model_tiers[wallet][0]
                 if manual and not bot and tier not in ("ultra", "smart"):
                     tier = "smart"
-            else:
-                tier = scoring.tier_for(score, q["n"], bot, manual, self.cfg)  # heuristic fallback
+            else:  # no model yet, or not scored yet: heuristic
+                tier = scoring.tier_for(score, q["n"], bot, manual, self.cfg)
             self._c[k] = (score, tier, q["n"])
         return self._c[k]
+
+    def entity(self, wallet):
+        """Wallets of one model cluster (same funder etc.) are one buyer."""
+        c = (self.model_tiers.get(wallet) or (None, None, None))[2]
+        return f"cluster:{c}" if c else wallet
+
+
+TIER_RANK = {"ultra": 3, "smart": 2, "good": 1}
+last_cluster_stats = {"wallets": 0, "entities": 0}
 
 
 def token_metrics(conn, mint, qc, now=None, cfg=settings):
@@ -71,21 +80,31 @@ def token_metrics(conn, mint, qc, now=None, cfg=settings):
     buy_sol = sum(d["buy_sol"] for d in smart)
     net_sol = buy_sol - sum(d.get("sell_sol", 0.0) for d in smart)
     buyers = [d for d in per.values() if d["buy_usd"] - d["sell_usd"] > 0]
-    tiers = {t: sum(1 for d in buyers if d["tier"] == t) for t in ("ultra", "smart", "good")}
+    # one entity per model cluster: its best tier counts once (money still adds up)
+    ent = {}
+    for d in buyers:
+        d["entity"] = qc.entity(d["wallet"]) if hasattr(qc, "entity") else d["wallet"]
+        if TIER_RANK.get(d["tier"], 0) > TIER_RANK.get(ent.get(d["entity"]), 0):
+            ent[d["entity"]] = d["tier"]
+    tiers = {t: sum(1 for et in ent.values() if et == t) for t in ("ultra", "smart", "good")}
     sbuyers = [d for d in buyers if d["tier"] in ("ultra", "smart")]
+    n_smart_entities = len({d["entity"] for d in sbuyers})
+    last_cluster_stats["wallets"] += len(sbuyers)
+    last_cluster_stats["entities"] += n_smart_entities
     wsum = sum(d["buy_usd"] for d in sbuyers)
     avg_q = (sum(d["score"] * d["buy_usd"] for d in sbuyers) / wsum) if wsum else 0.0
     parts = {
         "inflow": (0.4, 1 - math.exp(-max(net, 0) / cfg.inflow_ref_usd), f"Netto-Inflow Smart ${net:,.0f}"),
-        "breadth": (0.3, 1 - math.exp(-len(sbuyers) / cfg.wallets_ref_count),
-                    f"{tiers['ultra']} Ultra + {tiers['smart']} Smart kaufen"),
+        "breadth": (0.3, 1 - math.exp(-n_smart_entities / cfg.wallets_ref_count),
+                    f"{tiers['ultra']} Ultra + {tiers['smart']} Smart kaufen"
+                    + (f" ({len(sbuyers)} Wallets)" if len(sbuyers) != n_smart_entities else "")),
         "quality": (0.3, avg_q / 100, f"Ø Wallet-Score {avg_q:.0f}"),
     }
     contributions = {k: dict(weight=w, value=round(v, 4), points=round(100 * w * v, 1), why=why)
                      for k, (w, v, why) in parts.items()}
     score = round(sum(c["points"] for c in contributions.values()), 1) if net > 0 and sbuyers else 0.0
     return dict(ts=now, mint=mint, window_min=cfg.signal_window_min, buy_usd=buy, sell_usd=sell, net_usd=net,
-                buy_sol=buy_sol, net_sol=net_sol, smart_buyers=len(sbuyers), avg_quality=avg_q, score=score,
+                buy_sol=buy_sol, net_sol=net_sol, smart_buyers=n_smart_entities, avg_quality=avg_q, score=score,
                 n_ultra=tiers["ultra"], n_smart=tiers["smart"], n_good=tiers["good"],
                 contributions=contributions, model_version="core-heuristic-v1",
                 wallets=sorted(buyers, key=lambda d: d["buy_usd"], reverse=True))

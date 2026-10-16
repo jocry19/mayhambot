@@ -142,45 +142,49 @@ def load_positions(conn):
 
 
 def model_tiers(conn):
-    """(active model version, {address: (tier, score, cluster_id, exit_capture)}) from model/, or (None, {})
-    while no model version is active. model_wallet_stats only ever holds the active version's wallets."""
+    """(active model version, {address: (tier, score, cluster_id, exit_capture)}) via model.tier_sync, or
+    (None, {}) without model/ or an active version. Contains every wallet the model scored (tier None =
+    scored but not good enough); wallets missing from it were not scored yet."""
     try:
-        v = conn.execute("SELECT id FROM model_versions WHERE active=1 ORDER BY id DESC LIMIT 1").fetchone()
-        if not v:
-            return None, {}
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(model_wallet_stats)")}
-        extra = [c if c in cols else "NULL" for c in ("cluster_id", "exit_capture")]
-        rows = conn.execute(f"SELECT address, tier, score, {extra[0]}, {extra[1]} FROM model_wallet_stats "
-                            "WHERE tier IS NOT NULL").fetchall()
-    except sqlite3.OperationalError:  # model/ tables not created yet
+        from model import tier_sync
+        ts = tier_sync(conn)
+    except Exception:  # noqa: BLE001 - model/ absent, tables not created yet, or broken: heuristic fallback
         return None, {}
-    return v[0], {r[0]: (r[1], r[2], r[3], r[4]) for r in rows}
+    if ts is None:
+        return None, {}
+    version = max((v.get("version") or 0 for v in ts.values()), default=0)
+    return version, {a: (v.get("tier"), v.get("score"), v.get("cluster_id"), v.get("exit_capture"))
+                     for a, v in ts.items()}
 
 
 last_tier_sync = {}
 
 
 def sync_model_tiers(conn):
-    """Once a model version is active, model_wallet_stats is the one truth for tiers: copy tier, model score,
-    cluster and exit capture into wallets (missing wallets are added). Manual wallets stay smart at least.
-    Without an active version the heuristic tiers from rescore_all stay. Caller commits."""
+    """Once a model version is active it is the truth for every wallet it scored: tier (also None), model score,
+    cluster and exit capture go into wallets (missing wallets are added, tier_source='model'). Wallets the
+    model has not scored yet keep their heuristic tier (tier_source='heuristic') until the next retrain.
+    Manual wallets stay smart at least. Returns the counts, or None without an active version. Caller commits."""
     version, tm = model_tiers(conn)
     if version is None:
         last_tier_sync.clear()
         return None
+    conn.execute("""UPDATE wallets SET tier_source='heuristic', tier_version=NULL, model_score=NULL,
+                        cluster_id=NULL, exit_capture=NULL""")
     conn.executemany("INSERT OR IGNORE INTO wallets(address, source) VALUES (?, 'model')", [(a,) for a in tm])
-    conn.execute("""UPDATE wallets SET tier=NULL, is_smart=0, tier_source='model', tier_version=?, model_score=NULL,
-                        cluster_id=NULL, exit_capture=NULL""", (version,))
     conn.executemany(
-        """UPDATE wallets SET tier=?, is_smart=?, model_score=?, cluster_id=?, exit_capture=? WHERE address=?""",
-        [(t, int(t in ("ultra", "smart")), s, c, e, a) for a, (t, s, c, e) in tm.items()])
+        """UPDATE wallets SET tier=?, is_smart=?, model_score=?, cluster_id=?, exit_capture=?, tier_source='model',
+               tier_version=? WHERE address=?""",
+        [(t, int(t in ("ultra", "smart")), s, c, e, version, a) for a, (t, s, c, e) in tm.items()])
     conn.execute("UPDATE wallets SET is_smart=1, tier=COALESCE(tier,'smart') WHERE manual=1 AND is_bot=0")
     counts = {k: 0 for k in ("ultra", "smart", "good")}
     for t, *_ in tm.values():
         if t in counts:
             counts[t] += 1
+    heur = conn.execute("SELECT COUNT(*) FROM wallets WHERE tier_source='heuristic' AND tier IS NOT NULL").fetchone()[0]
+    clusters = len({c for _, _, c, _ in tm.values() if c})
     last_tier_sync.clear()
-    last_tier_sync.update(version=version, **counts)
+    last_tier_sync.update(version=version, scored=len(tm), heuristic=heur, clusters=clusters, **counts)
     return last_tier_sync
 
 
