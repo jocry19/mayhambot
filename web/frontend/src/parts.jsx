@@ -2,6 +2,7 @@ import { useState } from "react";
 import { EChart, baseOption, catAxis, tierColor, timeAxis, tipRow, valueAxis } from "./chart.jsx";
 import { TIER_LABEL, dt, go, mc, n, pct, pctSigned, sign, usd, usdSigned, ago, short } from "./lib.js";
 import { Addr, Bars, Delta, Empty, Legend, Score, Table, Tier, TierCounts } from "./ui.jsx";
+import { BuyButton } from "./buy.jsx";
 
 export const CoinLink = ({ mint, symbol }) => (
   <a href={`#/coin/${mint}`} onClick={(e) => e.stopPropagation()} className="b">{symbol || short(mint)}</a>
@@ -127,7 +128,7 @@ export function SignalDetail({ s }) {
   );
 }
 
-export function SignalTable({ rows, showCoin = true, max = 300, initialSort }) {
+export function SignalTable({ rows, showCoin = true, max = 300, initialSort, paused, buy = true }) {
   const cols = [
     { k: "ts", l: "Zeit", fmt: (r) => <span title={ago(r.ts)}>{dt(r.ts)}</span> },
     ...(showCoin ? [{ k: "symbol", l: "Coin", fmt: (r) => <CoinLink mint={r.mint} symbol={r.symbol} /> }] : []),
@@ -140,6 +141,7 @@ export function SignalTable({ rows, showCoin = true, max = 300, initialSort }) {
     { k: "r1", l: "1 h", r: true, sort: (r) => r.outcome.ret_1h, fmt: (r) => <Delta v={r.outcome.ret_1h} d={0} arrow={false} /> },
     { k: "m1", l: "Max 1 h", r: true, sort: (r) => r.outcome.max_ret_1h, fmt: (r) => <Delta v={r.outcome.max_ret_1h} d={0} arrow={false} /> },
     { k: "m24", l: "Max 24 h", r: true, sort: (r) => r.outcome.max_ret_24h, fmt: (r) => <Delta v={r.outcome.max_ret_24h} d={0} arrow={false} /> },
+    ...(buy ? [{ k: "buy", l: "", sort: false, fmt: (r) => <BuyButton mint={r.mint} symbol={r.symbol} signal={r} heldId={r.open_position_id} pendingId={r.pending_buy_id} paused={paused} /> }] : []),
   ];
   return <Table rows={rows} cols={cols} max={max} rowKey={(r) => r.id} expand={(r) => <SignalDetail s={r} />} initialSort={initialSort}
     empty="Noch keine Signale. Sobald genug Smart Money in einen Coin fließt, erscheinen sie hier." />;

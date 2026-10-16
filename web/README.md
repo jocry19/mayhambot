@@ -26,7 +26,8 @@ Zur Laufzeit wird nur Python gebraucht; das Frontend liegt fertig gebaut in `web
 
 ```
 python -m cli                    Live-Oberfläche: 1 Übersicht · 2 Signale · 3 Positionen · 4 Wallets · 5 Hinweise
-                                 w/m = Modus 1/2 wechseln · p = Pause · v v = Position verkaufen · b = kaufen · q = Ende
+                                 w/m = Modus 1/2 wechseln · p = Pause · k k = Signal-Coin kaufen · v v = Position verkaufen
+                                 b = Mint kaufen · q = Ende
 python -m cli status             Kurzbericht (auch ohne TTY, z. B. per SSH oder für Claude)
 python -m cli signals -n 20      Signale mit Gewichtung der Eingänge
 python -m cli wallets --tier ultra
@@ -37,6 +38,20 @@ python -m cli preset whale aggressiv
 python -m cli sell 125
 python -m cli buy <MINT> --sol 0.3
 ```
+
+## Kaufen aus einem Signal
+
+Jedes Signal hat einen Kaufen-Knopf (Dashboard: Signale-Seite und Coin-Seite, Terminal: `k` zweimal). Er zeigt vorher
+Konto (Papier/Echtgeld), Preset von Modus 2, Betrag sowie Ziel und Stop und schickt dann einen Auftrag an den laufenden Bot
+(`control.request_buy`, Strategie `signal`). Der Dialog zeigt danach die eröffnete Position oder den Grund, warum nicht gekauft
+wurde. Gesperrt ist der Knopf, wenn die Notbremse an ist, der Coin schon gehalten wird oder ein Auftrag für ihn wartet.
+Echtgeld nur, wenn Echtgeld für Modus 2 an ist und der Hauptschalter in `.env` steht; sonst Papier.
+
+## Logs
+
+`python -m web` schreibt mit Zeitstempel zeilenweise nach stdout (unter dem Starter: `logs/web.log`): Start, Fehler,
+jede Änderung (POST) und jeder Fehler-Request. Das Abfragen der Daten durch das Dashboard selbst wird weggelassen;
+`WEB_ACCESS_LOG=all` loggt alles, `WEB_LOG_LEVEL=debug` mehr Details.
 
 ## Sicherheit
 
@@ -52,7 +67,7 @@ cd web/frontend && npm install && npm run dev     # Vite auf :5173, /api geht an
 npm run build                                      # schreibt web/static (wird mit committet)
 python -m web.devdata /tmp/demo.db                 # synthetische Demo-DB (nur zum Testen, nie die echte DB)
 MAYHAM_DB_PATH=/tmp/demo.db python -m web
-python -m pytest web/tests -q
+python -m pytest web/tests -q                      # braucht kein httpx/httpx2: die Tests rufen die ASGI-App direkt auf
 ```
 
 Aufbau: `db.py` (Lesezugriff, WAL, Cache), `queries.py` (alle Auswertungen, von API und Terminal genutzt),

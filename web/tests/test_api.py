@@ -111,3 +111,24 @@ def test_cli_reports(demo, capsys):
         assert main(cmd) == 0
     out = capsys.readouterr().out
     assert "mayhambot" in out and "Signale" in out
+
+
+def test_buy_button_flow(demo):
+    c = _client(demo)
+    sigs = c.get("/api/signals").json()
+    free = next(s for s in sigs if not s["open_position_id"])
+    pv = c.get(f"/api/buy/preview?mint={free['mint']}").json()
+    assert pv["account"] == "paper" and pv["preset"] and pv["size_sol"] and not pv["blocked"]
+    r = c.post("/api/buy", json={"mint": free["mint"], "strategy": "signal"})
+    assert r.status_code == 200, r.text
+    cid = r.json()["command_id"]
+    assert c.get(f"/api/commands/{cid}").json()["status"] == "pending"
+    # a second order for the same coin is refused while the first waits
+    assert c.post("/api/buy", json={"mint": free["mint"]}).status_code == 409
+    held = next((s for s in sigs if s["open_position_id"]), None)
+    if held:
+        assert c.post("/api/buy", json={"mint": held["mint"]}).status_code == 409
+    c.post("/api/control/pause", json={"on": True})
+    other = next(x for x in c.get("/api/coins").json() if x["mint"] != free["mint"])
+    assert c.post("/api/buy", json={"mint": other["mint"]}).status_code == 409
+    c.post("/api/control/pause", json={"on": False})

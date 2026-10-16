@@ -83,8 +83,71 @@ def overview():
 def signals(since_h: float = 72, min_score: float = 0, tier: str | None = None, min_wallets: int = 0,
             mint: str | None = None, limit: int = 300):
     since = int(time.time() - since_h * 3600) if since_h > 0 else 0
-    return ok(q.signals(read_conn(), since=since, mint=mint, min_score=min_score, tier=tier,
-                        min_wallets=min_wallets, limit=min(limit, 2000)))
+    conn = read_conn()
+    out = q.signals(conn, since=since, mint=mint, min_score=min_score, tier=tier,
+                    min_wallets=min_wallets, limit=min(limit, 2000))
+    held, pending = _buy_state(conn)
+    for sg in out:  # for the buy button: already in the coin / buy order waiting
+        sg["open_position_id"] = held.get(sg["mint"])
+        sg["pending_buy_id"] = pending.get(sg["mint"])
+    return ok(out)
+
+
+def _buy_state(conn):
+    held = {r["mint"]: r["id"] for r in q.rows(conn, "SELECT id, mint FROM ct_positions WHERE status='open'")} \
+        if q.has(conn, "ct_positions") else {}
+    pending = {r["mint"]: r["id"] for r in q.rows(conn, "SELECT id, mint FROM ct_commands WHERE status='pending' AND action='buy'")} \
+        if q.has(conn, "ct_commands") else {}
+    return held, pending
+
+
+def _buy_preview(conn, mint: str) -> dict:
+    """What a manual buy of `mint` would do right now: preset, size, paper/live, and why it is blocked."""
+    try:
+        from copytrade import control
+        from copytrade.config import load
+    except Exception as e:
+        return {"available": False, "blocked": f"copytrade fehlt: {e}"}
+    held, pending = _buy_state(conn)
+    ctl = q.control_state(conn)
+    strategy = "signal"
+    name = (ctl.get("active_presets") or {}).get(strategy) or "standard"
+    p = (ctl.get("presets") or {}).get(name) or {}
+    live = bool(ctl.get("live", {}).get(strategy)) and bool(load().live_ready)
+    tok = q.one(conn, "SELECT symbol, mcap_usd, liquidity_usd, price_usd FROM tokens WHERE mint=?", (mint,)) \
+        if q.has(conn, "tokens") else None
+    blocked = None
+    if ctl.get("paused"):
+        blocked = "Käufe sind pausiert (Notbremse unter Steuerung)"
+    elif mint in held:
+        blocked = f"Schon im Coin (Position #{held[mint]})"
+    elif mint in pending:
+        blocked = "Ein Kaufauftrag für diesen Coin wartet schon"
+    return {"available": True, "mint": mint, "symbol": (tok or {}).get("symbol"), "mcap_usd": (tok or {}).get("mcap_usd"),
+            "liquidity_usd": (tok or {}).get("liquidity_usd"), "strategy": strategy, "mode": (ctl.get("modes") or {}).get(strategy),
+            "preset": name, "size_sol": p.get("size_sol"), "take_profit": p.get("take_profit"), "stop_loss": p.get("stop_loss"),
+            "max_hold_min": p.get("max_hold_min"), "account": "live" if live else "paper",
+            "open_position_id": held.get(mint), "pending_buy_id": pending.get(mint), "blocked": blocked}
+
+
+@app.get("/api/buy/preview")
+def buy_preview(mint: str):
+    return ok(_buy_preview(read_conn(), mint.strip()))
+
+
+@app.get("/api/commands/{cid}")
+def command(cid: int):
+    conn = read_conn()
+    if not q.has(conn, "ct_commands"):
+        raise HTTPException(404, "Auftrag unbekannt")
+    c = q.one(conn, "SELECT * FROM ct_commands WHERE id=?", (cid,))
+    if not c:
+        raise HTTPException(404, "Auftrag unbekannt")
+    pos = None
+    if c["action"] == "buy" and c["status"] == "done" and str(c.get("result") or "").isdigit():
+        r = q.one(conn, "SELECT * FROM ct_positions WHERE id=?", (int(c["result"]),))
+        pos = q._pos(r) if r else None
+    return ok({**c, "position": pos})
 
 
 @app.get("/api/signals/performance")
@@ -284,8 +347,13 @@ async def buy(request: Request):
         raise HTTPException(400, "Größe ungültig")
     control, conn = _control()
     strategy = b.get("strategy") if b.get("strategy") in control.STRATEGIES else "signal"
+    pv = _buy_preview(conn, mint)
+    if pv.get("blocked"):
+        raise HTTPException(409, pv["blocked"])
     cid = control.request_buy(conn, mint, float(size) if size else None, strategy=strategy)
-    return _done("Kauf beauftragt (du verkaufst selbst oder per Verkaufen-Knopf)", command_id=cid)
+    acct = "Echtgeld" if pv.get("account") == "live" else "Papier"
+    return _done(f"Kauf beauftragt ({acct}, Preset {pv.get('preset')}); der Bot führt ihn in Sekunden aus", command_id=cid,
+                 account=pv.get("account"))
 
 
 @app.post("/api/commands/{cid}/cancel")

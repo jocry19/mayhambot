@@ -3,31 +3,7 @@ import { EChart, baseOption, tierColor, timeAxis, tipRow, valueAxis } from "../c
 import { EXIT_LABEL, STRAT_LABEL, TIER_LABEL, TIER_SOURCE, act, ago, dt, go, mc, n, pct, pctSigned, price, sol, solSigned, usd, usdSigned, usePoll } from "../lib.js";
 import { Breakdown, FlowChart, Outcome, SignalDetail, WalletLink } from "../parts.jsx";
 import { Addr, Callout, Card, Delta, Empty, Icon, Legend, Modal, Score, Seg, Switch, Table, Tier, TierCounts, Tile } from "../ui.jsx";
-
-function BuyModal({ coin, onClose }) {
-  const { data: ctl } = usePoll("/api/control", 0);
-  const [size, setSize] = useState("");
-  const [busy, setBusy] = useState(false);
-  const live = ctl?.live_ready && ctl?.live?.signal;
-  const submit = async () => {
-    setBusy(true);
-    try { await act("/api/buy", { mint: coin.mint, size_sol: size ? Number(size.replace(",", ".")) : null, strategy: "signal" }); onClose(); }
-    catch { /* toast shown */ } finally { setBusy(false); }
-  };
-  return (
-    <Modal title={`${coin.symbol} kaufen`} onClose={onClose} actions={<>
-      <button className="btn" onClick={onClose}>Abbrechen</button>
-      <button className={`btn ${live ? "danger" : "primary"}`} disabled={busy} onClick={submit}>{live ? "Mit Echtgeld kaufen" : "Auf Papier kaufen"}</button>
-    </>}>
-      <div className="t2">Der Bot kauft über Modus 2 mit deinem Preset{ctl?.active_presets?.signal ? ` „${ctl.active_presets.signal}“` : ""}. Verkaufen tust du selbst über den Verkaufen-Knopf (er zeigt dir Verkaufs-Hinweise).</div>
-      <label className="fld">Größe in SOL <small>leer = Größe aus dem Preset</small>
-        <input className="in" inputMode="decimal" value={size} onChange={(e) => setSize(e.target.value)} placeholder="z. B. 0,25" autoFocus />
-      </label>
-      {live ? <Callout kind="bad" icon="alert">Echtgeld ist für Modus 2 eingeschaltet. Dieser Kauf nutzt echtes SOL.</Callout>
-        : <Callout icon="info">Papiermodus: echte Preise, simulierte Ausführung.</Callout>}
-    </Modal>
-  );
-}
+import { BuyModal } from "../buy.jsx";
 
 function PriceChart({ d, showTrades, hl, onPick }) {
   const sigs = [...d.signals].sort((a, b) => a.ts - b.ts);
@@ -190,7 +166,7 @@ export default function Coin({ mint, hl }) {
           <button className="btn primary" onClick={() => setBuy(true)}>Kaufen …</button>
         </div>
       </div>
-      {buy && tok && <BuyModal coin={tok} onClose={() => setBuy(false)} />}
+      {buy && tok && <BuyModal mint={tok.mint} symbol={tok.symbol} signal={d.signals[0]} onClose={() => setBuy(false)} />}
 
       <div className="tiles">
         <Tile label="Tier-Wallets im Coin" value={<TierCounts tiers={st.tiers} />} sub={`${n(st.traders)} Trader insgesamt`} />

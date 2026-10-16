@@ -88,5 +88,9 @@ def buy(mint: str, size_sol: float | None = None) -> str:
     if not (32 <= len(mint) <= 48) or not mint.isalnum():
         raise ValueError("Das sieht nicht wie eine Mint-Adresse aus")
     control, conn = _control()
-    control.request_buy(conn, mint, size_sol)
+    if control.paused(conn):
+        raise ValueError("Käufe sind pausiert (p schaltet die Pause aus)")
+    if conn.execute("SELECT 1 FROM ct_positions WHERE mint=? AND status='open'", (mint,)).fetchone():
+        raise ValueError("Schon im Coin")
+    control.request_buy(conn, mint, size_sol, strategy="signal")
     return f"Kauf von {mint[:6]}… beauftragt" + (f" ({size_sol} SOL)" if size_sol else " (Preset-Größe)")

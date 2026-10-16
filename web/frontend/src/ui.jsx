@@ -25,6 +25,7 @@ const P = {
   x: "M6 6l12 12M18 6 6 18",
   star: "M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z",
   terminal: "M4 17l6-6-6-6M12 19h8",
+  check: "M20 6 9 17l-5-5",
 };
 export function Icon({ name, size }) {
   return (

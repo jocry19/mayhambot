@@ -2,7 +2,7 @@ import { useState } from "react";
 import { EChart, baseOption, catAxis, tipRow, valueAxis } from "../chart.jsx";
 import { mc, n, pct, pctSigned, usePoll } from "../lib.js";
 import { HistBars, SignalTable } from "../parts.jsx";
-import { Card, Empty, Seg, Tile } from "../ui.jsx";
+import { Callout, Card, Empty, Seg, Tile } from "../ui.jsx";
 
 function HitBars({ data, label, height = 200 }) {
   if (!data || !data.some((d) => d.n)) return <Empty>Noch keine ausgewerteten Signale</Empty>;
@@ -33,6 +33,7 @@ export default function Signals() {
   const [tier, setTier] = useState("");
   const { data: rows } = usePoll(`/api/signals?since_h=${since}&min_score=${minScore}&tier=${tier}&limit=1000`, 15000);
   const { data: perf } = usePoll("/api/signals/performance", 60000);
+  const { data: ctl } = usePoll("/api/control", 10000);
   return (
     <div className="col" style={{ gap: 16 }}>
       <div className="row" style={{ gap: 12 }}>
@@ -52,8 +53,9 @@ export default function Signals() {
         </div>
       )}
 
-      <Card title="Signal-Feed" sub="Klick auf eine Zeile zeigt Gewichtung, auslösende Wallets und Ergebnis" flush>
-        <SignalTable rows={rows} />
+      {ctl?.paused && <Callout kind="warn" icon="pause">Käufe sind pausiert. Die Kaufen-Knöpfe sind gesperrt, bis du die Notbremse unter Steuerung löst.</Callout>}
+      <Card title="Signal-Feed" sub={`Klick auf eine Zeile zeigt Gewichtung, Wallets und Ergebnis · Kaufen = Modus 2 mit Preset „${ctl?.active_presets?.signal || "standard"}“, ${ctl?.live_ready && ctl?.live?.signal ? "Echtgeld" : "Papier"}`} flush>
+        <SignalTable rows={rows} paused={!!ctl?.paused} />
       </Card>
 
       {perf && (

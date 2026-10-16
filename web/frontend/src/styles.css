@@ -275,7 +275,11 @@ label.fld small { color: var(--muted); }
 
 .callout { border: 1px solid var(--border-strong); background: var(--surface-2); border-radius: 10px; padding: 10px 12px; color: var(--text-2); font-size: 12.5px; display: flex; gap: 10px; align-items: flex-start; }
 .callout.warn { border-color: rgba(250, 178, 25, 0.35); background: rgba(250, 178, 25, 0.07); }
+.callout.good { border-color: rgba(46, 160, 67, 0.4); background: rgba(46, 160, 67, 0.08); }
+.buy-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 14px; }
+@media (max-width: 640px) { .buy-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .callout.bad { border-color: rgba(208, 59, 59, 0.4); background: rgba(208, 59, 59, 0.08); }
+.callout > div { min-width: 0; }
 .callout svg { width: 16px; height: 16px; flex: none; margin-top: 1px; }
 
 .feed { display: flex; flex-direction: column; }
@@ -297,6 +301,7 @@ label.fld small { color: var(--muted); }
 
 .modal-bg { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); display: grid; place-items: center; z-index: 100; padding: 16px; }
 .modal { background: var(--surface); border: 1px solid var(--border-strong); border-radius: 12px; width: min(460px, 100%); padding: 18px; display: flex; flex-direction: column; gap: 12px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5); }
+.modal:has(.buy-grid) { width: min(580px, 100%); }
 .modal h3 { margin: 0; font-size: 16px; }
 .toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 120; }
 .toast { background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: 10px; padding: 10px 14px; box-shadow: var(--shadow); max-width: 380px; }

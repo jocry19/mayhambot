@@ -76,6 +76,7 @@ class MayhamTUI(App):
         Binding("m", "cycle('signal')", "Modus 2 wechseln"),
         Binding("v", "sell", "Position verkaufen"),
         Binding("b", "buy", "Kaufen"),
+        Binding("k", "buy_signal", "Signal kaufen"),
         Binding("1", "tab('t-over')", "Übersicht", show=False),
         Binding("2", "tab('t-sig')", "Signale", show=False),
         Binding("3", "tab('t-pos')", "Positionen", show=False),
@@ -100,7 +101,7 @@ class MayhamTUI(App):
                 yield DataTable(id="coins", zebra_stripes=True, cursor_type="row")
             with TabPane("2 Signale", id="t-sig"):
                 yield DataTable(id="sigs", zebra_stripes=True, cursor_type="row")
-                yield Static("Zeile wählen: Gewichtung und Wallets des Signals", id="sigdetail")
+                yield Static("Zeile wählen: Gewichtung und Wallets des Signals · k = diesen Coin kaufen (zweimal drücken)", id="sigdetail")
             with TabPane("3 Positionen", id="t-pos"):
                 yield Label("Offene Positionen  (v = verkaufen, zweimal drücken)", classes="lbl")
                 yield DataTable(id="open", zebra_stripes=True, cursor_type="row", classes="half")
@@ -297,6 +298,29 @@ class MayhamTUI(App):
             self._sell_armed = (pid, now)
             sym = next((p.get("symbol") for p in self.snap["open"] if p["id"] == pid), f"#{pid}")
             self.notify(f"{sym} verkaufen? Zum Bestätigen innerhalb von 5 s nochmal v drücken.", severity="warning")
+
+    def action_buy_signal(self) -> None:
+        tbl = self.query_one("#sigs", DataTable)
+        if self.query_one(TabbedContent).active != "t-sig" or not tbl.row_count or not self.snap:
+            self.notify("Im Tab 2 Signale ein Signal wählen, dann k", severity="warning")
+            return
+        sid = tbl.coordinate_to_cell_key(tbl.cursor_coordinate).row_key.value
+        sig = next((x for x in self.snap["signals"] if str(x["id"]) == sid), None)
+        if not sig:
+            return
+        ctl = self.snap.get("control") or {}
+        name = (ctl.get("active_presets") or {}).get("signal") or "standard"
+        size = ((ctl.get("presets") or {}).get(name) or {}).get("size_sol")
+        acct = "ECHTGELD" if ctl.get("live_ready") and (ctl.get("live") or {}).get("signal") else "Papier"
+        key = ("buy", sig["mint"])
+        now = time.time()
+        if self._sell_armed and self._sell_armed[0] == key and now - self._sell_armed[1] < 5:
+            self._sell_armed = None
+            self._do(data.buy, sig["mint"], None)
+        else:
+            self._sell_armed = (key, now)
+            self.notify(f"{sig['symbol']} kaufen: {sol(size)} · Preset {name} · {acct}. Zum Bestätigen innerhalb von 5 s nochmal k.",
+                        severity="warning", timeout=6)
 
     def action_buy(self) -> None:
         def done(res):
