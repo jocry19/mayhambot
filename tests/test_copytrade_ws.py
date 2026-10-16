@@ -379,7 +379,7 @@ PMINT = chain._b58(_MINTB)
 
 def _trade_log(sol=2.0, tokens=50_000_000.0, buy=True, user=_USER, mint=_MINTB, ts=None):
     raw = (_hl.sha256(b"event:TradeEvent").digest()[:8] + mint + _st.pack("<QQ", int(sol * 1e9), int(tokens * 1e6))
-           + bytes([1 if buy else 0]) + user + _st.pack("<qQQ", ts or int(time.time()), 40 * 10**9, 800 * 10**15)
+           + bytes([1 if buy else 0]) + user + _st.pack("<qQQ", ts or int(time.time()), 40 * 10**9, 800 * 10**12)
            + bytes(100))  # newer program versions append fee/creator fields
     return "Program data: " + _b64.b64encode(raw).decode()
 
@@ -448,3 +448,85 @@ def test_watcher_copies_a_pump_buy_without_any_rpc_call_and_verifies_later(env, 
     w._verify.append((0, 0, sw))
     w._verify_one(conn)
     assert tracker.VERIFY["rejected"] >= 1
+
+
+def _fake_streams(n=2):
+    from copytrade import watch
+
+    w = watch.Watcher(Settings(ws_urls=[f"ws://n{i}" for i in range(n)], ws_parallel=n), None, {}, threading.Event())
+    for st in w.streams:
+        st.connected, st.connected_at = True, time.time() - 1000
+        st._subs = {W: 1}
+    return w
+
+
+def test_watchdog_reconnects_a_stream_that_went_silent():
+    w = _fake_streams()
+    a, b = w.streams
+    now = time.time()
+    for i in range(6):  # a got six transactions of a wallet both watch, b none of them
+        a.recent[f"s{i}"] = (now - 60 - i, W)
+    assert w.watchdog(now) == [b.name] and b._kick and not a._kick and b.stats["kicks"] == 1
+    assert "1 watchdog" in w.status()
+    # a stream that got (nearly) everything stays; very fresh transactions are not held against anyone yet
+    w2 = _fake_streams()
+    a2, b2 = w2.streams
+    for i in range(6):
+        a2.recent[f"s{i}"] = (now - 60, W)
+        if i:
+            b2.recent[f"s{i}"] = (now - 60, W)
+    a2.recent["fresh"] = (now - 2, W)
+    assert w2.watchdog(now) == []
+
+
+def test_watchdog_acts_on_gaps_polling_found_once_per_ten_minutes():
+    w = _fake_streams()
+    a, b = w.streams
+    a.last_notification, b.last_notification = time.time() - 30, time.time() - 900
+    now = time.time()
+    tracker.LAG.clear()
+    for _ in range(3):
+        tracker.LAG.append(("gap", "buy", 50.0, now - 60))
+    assert w.watchdog(now) == [b.name]  # the one silent longest
+    b._kick = None
+    assert w.watchdog(now + 60) == []
+    tracker.LAG.clear()
+
+
+def test_kicked_stream_moves_to_the_next_endpoint():
+    a, b = FakeNode(), FakeNode()
+    st = ws.WalletStream(Settings(), url=[f"ws://127.0.0.1:{a.port}", f"ws://127.0.0.1:{b.port}"])
+    st.set_wallets([W])
+    st.start()
+    try:
+        assert _wait(lambda: W in st.covered() and str(a.port) in st.url)
+        st.reconnect("test")
+        assert _wait(lambda: W in st.covered() and str(b.port) in st.url)
+        assert st.stats["connects"] == 2 and st.stats["kicks"] == 1
+        b.notify(W, "sigK")
+        assert st.events.get(timeout=5)[1] == "sigK" and st.saw("sigK")
+    finally:
+        st.stop()
+
+
+def test_detections_carry_value_venue_and_market_cap_at_the_time(env):
+    s, conn, ex, state = env
+    tracker._seen.clear()
+    sw = tracker.process_logs(conn, s, WHALE, "sigV", _logs(_trade_log(2.0, 40e6)), time.time())
+    assert sw.dex == "pump" and sw.mcap_sol == pytest.approx(40 / 800e6 * 1e9)
+    r = conn.execute("SELECT usd, price_usd, dex, mcap_usd FROM ct_detect WHERE sig='sigV'").fetchone()
+    assert r["usd"] == pytest.approx(200.0) and r["dex"] == "pump"  # SOL at $100 in the fixture
+    assert r["price_usd"] == pytest.approx(2.0 / 40e6 * 100) and r["mcap_usd"] == pytest.approx(5000.0)
+    from copytrade import stats
+
+    summ = stats.detection_summary(conn, 1)
+    assert list(summ["source"]) == ["wslog"] and summ["within_10s"].iloc[0] == 1.0
+
+
+def test_venue_is_read_from_the_programs_a_transaction_touches():
+    tx = parsed_tx(-3_000_000_000, 0, 1_000_000)
+    assert chain.extract_swap(tx, W).dex == ""
+    tx["transaction"]["message"]["accountKeys"].append({"pubkey": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"})
+    assert chain.extract_swap(tx, W).dex == "pumpswap"
+    tx["meta"]["innerInstructions"] = [{"instructions": [{"programId": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUJoi5QNyVTaV4"}]}]
+    assert chain.dex_of(tx) == "jupiter"  # routed through the aggregator

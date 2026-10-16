@@ -45,6 +45,8 @@ class Watcher:
         self.fast = 0  # swaps read straight from the notification logs (no getTransaction)
         self._verify: collections.deque = collections.deque(maxlen=500)  # (due_at, tries, swap)
         self._thread: threading.Thread | None = None
+        self._last_watchdog = 0.0
+        self._last_gap_kick = 0.0
 
     # ------------------------------------------------------------------ control
     def start(self, wallets) -> "Watcher":
@@ -73,7 +75,8 @@ class Watcher:
 
     def status(self) -> str:
         parts = [f"{st.url.split('?')[0].replace('wss://', '')} {'up' if st.connected else 'down'} "
-                 f"({len(st.covered())} wallets, {st.stats['connects']} connects)" for st in self.streams]
+                 f"({len(st.covered())} wallets, {st.stats['connects']} connects, {st.stats['kicks']} watchdog)"
+                 for st in self.streams]
         v = tracker.VERIFY
         return ("; ".join(parts) or "off") + (f"; {self.fast} read from logs, verified {v['checked']}"
                                               f" (corrected {v['corrected']}, rejected {v['rejected']})")
@@ -90,6 +93,9 @@ class Watcher:
             except queue.Empty:
                 self._pending(strat)
                 self._verify_one(conn)
+                if time.time() - self._last_watchdog > 30:
+                    self._last_watchdog = time.time()
+                    self.watchdog()
                 continue
             self.handle(conn, strat, wallet, sig, got, rest[0] if rest else None)
             self._pending(strat)
@@ -111,6 +117,34 @@ class Watcher:
         except Exception as e:
             log.debug("ws swap %s failed: %s", sig[:8], e)
         return sw
+
+    def watchdog(self, now: float | None = None) -> list[str]:
+        """Find sockets that are connected but no longer deliver (the node stopped sending, pings still pass) and
+        reconnect them on the next endpoint. Two checks: (1) a stream that missed at least half of the recent
+        transactions another stream got for wallets it had subscribed too; (2) polling found transactions all
+        streams missed (gaps): the stream that was silent longest is reconnected, at most every 10 minutes."""
+        now = now or time.time()
+        kicked = []
+        for a in self.streams:
+            if not a.connected or now - a.connected_at < 120:
+                continue
+            mine = a.covered()
+            cand = {sig for b in self.streams if b is not a for sig, (t, w) in list(b.recent.items())
+                    if w in mine and a.connected_at + 10 < t < now - 20 and t > now - 600}
+            missed = [sig for sig in cand if not a.saw(sig)]
+            if len(cand) >= 4 and len(missed) * 2 >= len(cand):
+                a.reconnect(f"missed {len(missed)} of {len(cand)}")
+                kicked.append(a.name)
+        gaps = sum(1 for src, _, _, t in list(tracker.LAG) if src == "gap" and t > now - 600)
+        live = [a for a in self.streams if a.connected and now - a.connected_at > 300 and a.name not in kicked]
+        if gaps >= 3 and live and now - self._last_gap_kick > 600:
+            a = min(live, key=lambda x: x.last_notification)
+            a.reconnect(f"{gaps} gaps found by polling")
+            kicked.append(a.name)
+            self._last_gap_kick = now
+        for name in kicked:
+            log.info("wallet websocket %s reconnected by the watchdog", name)
+        return kicked
 
     def _verify_one(self, conn) -> None:
         """When idle: check the oldest due log-read swap against its transaction (public RPC, never Helius)."""

@@ -181,6 +181,43 @@ class Swap:
     token_amount: float  # UI units, positive
     sol_amount: float  # SOL spent (buy) / received (sell), positive
     price_sol: float  # SOL per token
+    dex: str = ""  # where it traded: pump | pumpswap | raydium | meteora | orca | jupiter | ... ("" = unknown)
+    mcap_sol: float = 0.0  # market cap in SOL right after the trade, when the logs carry it (pump.fun curve)
+
+
+# program ids -> venue; an aggregator in the transaction wins (the whale routed through it)
+DEX_PROGRAMS = {
+    "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUJoi5QNyVTaV4": "jupiter",
+    "6EF8rrDYGrSquN2vUbW2kH7JMLtQFZyD3J4bLy1F2uY3": "pump",
+    "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA": "pumpswap",
+    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8": "raydium",
+    "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C": "raydium-cpmm",
+    "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK": "raydium-clmm",
+    "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj": "launchlab",
+    "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo": "meteora-dlmm",
+    "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB": "meteora",
+    "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN": "meteora-dbc",
+    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc": "orca",
+    "MoonCVVNZFSYkqNXP6bxHLPL6QQJiMagDL3qcqUQTrG": "moonshot",
+}
+
+
+def dex_of(tx: dict) -> str:
+    """Venue of a parsed transaction from the programs it touches (account keys + inner instructions)."""
+    try:
+        msg = tx["transaction"]["message"]
+        ids = {_acct_key(k) for k in msg.get("accountKeys") or []}
+        for ix in msg.get("instructions") or []:
+            ids.add(ix.get("programId") or "")
+        for inner in (tx.get("meta") or {}).get("innerInstructions") or []:
+            for ix in inner.get("instructions") or []:
+                ids.add(ix.get("programId") or "")
+    except Exception:
+        return ""
+    for pid, name in DEX_PROGRAMS.items():  # dict order: aggregator first
+        if pid in ids:
+            return name
+    return ""
 
 
 def _acct_key(k: Any) -> str:
@@ -242,6 +279,7 @@ def extract_swap(tx: dict, wallet: str, sol_usd: float = 0.0) -> Swap | None:
         token_amount=abs(tok),
         sol_amount=sol_amt,
         price_sol=sol_amt / abs(tok),
+        dex=dex_of(tx),
     )
 
 
@@ -292,9 +330,11 @@ def swap_from_logs(logs: list | None, wallet: str, signature: str) -> Swap | Non
     sol, tok = sum(e["sol"] for e in evs), sum(e["tokens"] for e in evs)
     if tok <= 0 or sol < 0.001:
         return None
-    return Swap(signature=signature, wallet=wallet, block_time=int(evs[-1]["ts"] or 0),
+    last = evs[-1]  # curve state after the wallet's last trade: price * 1e9 supply = market cap
+    mcap = last["v_sol"] / last["v_tok"] * 1e9 if last["v_tok"] else 0.0
+    return Swap(signature=signature, wallet=wallet, block_time=int(last["ts"] or 0),
                 side="buy" if evs[0]["is_buy"] else "sell", mint=evs[0]["mint"], token_amount=tok,
-                sol_amount=sol, price_sol=sol / tok)
+                sol_amount=sol, price_sol=sol / tok, dex="pump", mcap_sol=mcap)
 
 
 def wallet_swaps(rpc: Rpc, wallet: str, limit: int = 50, until: str | None = None,

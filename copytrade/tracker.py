@@ -59,14 +59,20 @@ def _claim(conn, sig: str, wallet: str) -> bool:
     return _mark(sig)
 
 
-def record_detection(conn, sw: chain.Swap, source: str, notified_at: float | None = None) -> float:
-    """Store how late we saw a swap (block time -> recognised), per source. Returns the lag in seconds."""
+def record_detection(conn, sw: chain.Swap, source: str, notified_at: float | None = None,
+                     sol_usd: float = 0.0) -> float:
+    """Store how late we saw a swap (block time -> recognised), per source, with its value at that moment (USD
+    amount, USD price, venue, market cap when known). Returns the lag in seconds."""
     now = time.time()
     lag = max(0.0, now - sw.block_time) if sw.block_time else float("nan")
     LAG.append((source, sw.side, lag, now))
     try:
-        conn.execute("INSERT OR IGNORE INTO ct_detect VALUES (?,?,?,?,?,?,?,?)",
-                     (sw.signature, sw.wallet, sw.side, source, sw.block_time, notified_at, now, sw.sol_amount))
+        usd = sol_usd or 0.0
+        conn.execute("INSERT OR IGNORE INTO ct_detect(sig, wallet, side, source, block_ts, notified_at, detected_at,"
+                     " sol, usd, price_usd, dex, mcap_usd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (sw.signature, sw.wallet, sw.side, source, sw.block_time, notified_at, now, sw.sol_amount,
+                      sw.sol_amount * usd or None, sw.price_sol * usd or None, getattr(sw, "dex", "") or None,
+                      getattr(sw, "mcap_sol", 0.0) * usd or None))
     except Exception as e:  # metrics never block trading
         log.debug("detect log failed: %s", e)
     return lag
@@ -315,7 +321,7 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk",
         src = "gap" if covered else "poll"
         DETECTED[src] += len(out)
         for sw in out:
-            record_detection(conn, sw, src)
+            record_detection(conn, sw, src, sol_usd=solusd)
     # advance the cursor only after the swaps are stored (a locked write is retried without losing them)
     conn.execute("UPDATE ct_wallets SET last_sig=?, last_polled=? WHERE address=?",
                  (cursor, int(time.time()), wallet))
@@ -348,7 +354,7 @@ def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, 
     if sw:
         store.save_swaps(conn, [sw], solusd)
         DETECTED["ws"] += 1
-        record_detection(conn, sw, "ws", received_at)
+        record_detection(conn, sw, "ws", received_at, solusd)
         if received_at:
             WS_LATENCY.append(time.time() - received_at)
     return sw
@@ -366,7 +372,7 @@ def process_logs(conn, s: Settings, wallet: str, sig: str, logs, received_at: fl
     solusd = market.sol_usd(s)
     store.save_swaps(conn, [sw], solusd)
     DETECTED["wslog"] += 1
-    record_detection(conn, sw, "wslog", received_at)
+    record_detection(conn, sw, "wslog", received_at, solusd)
     if received_at:
         WS_LATENCY.append(time.time() - received_at)
     return sw

@@ -8,6 +8,7 @@ on as the safety net for anything the socket misses (disconnects, dropped notifi
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import queue
@@ -45,7 +46,12 @@ class WalletStream:
         self.max_wallets = s.ws_max_wallets
         self.events: queue.Queue = events if events is not None else queue.Queue()
         self.connected = False
-        self.stats = {"notifications": 0, "connects": 0, "errors": 0}
+        self.stats = {"notifications": 0, "connects": 0, "errors": 0, "kicks": 0}
+        self.connected_at = 0.0
+        self.last_notification = 0.0
+        # signature -> (received_at, wallet) of recent notifications, so the watcher can compare streams
+        self.recent: "collections.OrderedDict[str, tuple[float, str]]" = collections.OrderedDict()
+        self._kick: str | None = None
         self._wanted: set[str] = set()
         self._subs: dict[str, int] = {}  # wallet -> subscription id
         self._lock = threading.Lock()
@@ -75,6 +81,15 @@ class WalletStream:
     def stop(self) -> None:
         self._stop.set()
 
+    def reconnect(self, reason: str) -> None:
+        """Drop the connection and move on to the next endpoint (a silent socket looks alive to pings)."""
+        if self.connected and not self._kick:
+            self._kick = reason
+            self.stats["kicks"] += 1
+
+    def saw(self, sig: str) -> bool:
+        return sig in self.recent
+
     # ------------------------------------------------------------------ internals
     @property
     def url(self) -> str:
@@ -85,10 +100,11 @@ class WalletStream:
         backoff = 1.0
         while not self._stop.is_set():
             url = self.url
+            self._kick = None
             try:
                 async with websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=2 ** 22,
                                               open_timeout=15) as sock:
-                    self.connected = True
+                    self.connected, self.connected_at = True, time.time()
                     self.stats["connects"] += 1
                     backoff = 1.0
                     log.info("wallet websocket connected (%s)", url.split("?")[0])
@@ -114,6 +130,8 @@ class WalletStream:
         sub_wallet: dict[int, str] = {}
         last_sync = 0.0
         while not self._stop.is_set():
+            if self._kick:
+                raise ConnectionError(f"stale stream: {self._kick}")
             if time.time() - last_sync > 5:
                 last_sync = time.time()
                 with self._lock:
@@ -156,5 +174,9 @@ class WalletStream:
         v = ((p.get("result") or {}).get("value")) or {}
         if w and v.get("signature") and not v.get("err"):
             self.stats["notifications"] += 1
+            now = self.last_notification = time.time()
+            self.recent[v["signature"]] = (now, w)
+            while len(self.recent) > 3000:
+                self.recent.popitem(last=False)
             # the logs ride along: pump.fun trades can be read from them without asking for the transaction
             self.events.put((w, v["signature"], time.time(), v.get("logs")))

@@ -112,15 +112,24 @@ WALLET_COLUMNS = {
 }
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
-    have_w = {r[1] for r in conn.execute("PRAGMA table_info(ct_wallets)")}
-    for col, typ in WALLET_COLUMNS.items():
-        if col not in have_w:
+DETECT_COLUMNS = {"usd": "REAL", "price_usd": "REAL", "dex": "TEXT", "mcap_usd": "REAL"}  # value at the time
+
+
+def _add_columns(conn: sqlite3.Connection, table: str, cols: dict) -> set:
+    have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    for col, typ in cols.items():
+        if col not in have:
             try:
-                conn.execute(f"ALTER TABLE ct_wallets ADD COLUMN {col} {typ}")
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
             except sqlite3.OperationalError as e:  # another service migrated at the same moment
                 if "duplicate column" not in str(e).lower():
                     raise
+    return have
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    _add_columns(conn, "ct_detect", DETECT_COLUMNS)
+    have_w = _add_columns(conn, "ct_wallets", WALLET_COLUMNS)
     if "backfilled_at" not in have_w:
         # existing wallets with real history count as done; the rest get their history loaded
         conn.execute("""UPDATE ct_wallets SET backfilled_at=? WHERE address IN
