@@ -197,6 +197,19 @@ def run_once(conn=None):
                 summary["coins_with_candles"] += 1
         if budget.n <= 0:
             break
+    # refresh candles of coins that had activity in the last 8 h, so their 15m/1h/6h outcomes can be labelled
+    last_c = dict(conn.execute("SELECT mint, MAX(ts) FROM research_candles GROUP BY mint").fetchall())
+    active = [r[0] for r in conn.execute(
+        """SELECT mint FROM trades WHERE ts > ? GROUP BY mint ORDER BY COUNT(DISTINCT wallet) DESC LIMIT 60""",
+        (now - 8 * 3600,))]
+    pools = dict(conn.execute("SELECT mint, pool FROM research_tokens WHERE pool IS NOT NULL").fetchall())
+    pools.update({r[0]: r[1] for r in conn.execute("SELECT mint, pool_address FROM tokens WHERE pool_address != ''")})
+    refresh = [m for m in active if m in pools and last_c.get(m, 0) < now - 1800 and _mine(m)]
+    for m in refresh[:max(0, min(15, budget.n))]:
+        created = conn.execute("SELECT pair_created_at FROM tokens WHERE mint=?", (m,)).fetchone()
+        age = now - (created[0] or now - 86400) if created else 86400
+        if _candles(conn, m, pools[m], min(age, 15 * 3600), budget):
+            summary["candles_refreshed"] += 1
     summary["gt_calls_left"] = budget.n
     log.info("discovery: %s", dict(summary))
     return dict(summary)

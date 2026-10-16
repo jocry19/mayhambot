@@ -78,9 +78,16 @@ def run_once(conn=None, now=None, write_files=True):
 
 def loop(every_hours=None, discover=False):
     every = (every_hours or msettings.retrain_hours) * 3600
-    last_train = 0.0
+    last_train = last_seed = 0.0
     from research.config import rsettings
     while True:
+        if discover and time.time() - last_seed >= rsettings.seed_every_hours * 3600:
+            try:
+                from research import public_seeds
+                log.info("public seeds: %s", public_seeds.run(connect()))
+            except Exception:  # noqa: BLE001
+                log.exception("public seeding failed")
+            last_seed = time.time()
         if discover:
             try:
                 from research import discovery

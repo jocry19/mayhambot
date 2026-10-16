@@ -24,6 +24,7 @@ class ResearchSettings:
     wallets_per_run: int = _i("RESEARCH_WALLETS_PER_RUN", 12)
     wallet_tx_limit: int = _i("RESEARCH_WALLET_TX_LIMIT", 100)
     pause_s: float = _f("RESEARCH_PAUSE_S", 3.0)  # pause between heavy RPC jobs so the live loop keeps up
+    seed_every_hours: float = _f("RESEARCH_SEED_EVERY_HOURS", 6)  # GMGN rank + pump.fun top coins in the service
     rebackfill_hours: float = _f("RESEARCH_REBACKFILL_HOURS", 24)
     discover_every_min: float = _f("RESEARCH_DISCOVER_EVERY_MIN", 20)
     # what counts as "pumped" when choosing tokens to mine early buyers from
