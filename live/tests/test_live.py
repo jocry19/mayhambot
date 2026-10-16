@@ -401,3 +401,12 @@ def test_open_real_positions_keep_a_real_seller(env, monkeypatch, tmp_path):
     monkeypatch.setenv("LIVE_DRY_RUN", "true")
     ex = lx.make_executor(s, rpc)
     assert ex.mode == "live" and "Dry-Run" in ex.exit_only
+
+
+def test_exit_value_from_quote(env):
+    s, conn, rpc, jup, make = env
+    ex = make()
+    v = ex.exit_value(MINT, 1000.0, 6)  # 1e9 raw -> 1e6 lamports in the fake
+    assert v and v[0] == pytest.approx(0.001)
+    jup.fail_quote = True
+    assert ex.exit_value(MINT, 1000.0, 6) is None
