@@ -27,9 +27,20 @@ CREATE TABLE IF NOT EXISTS safety_launch (
 """
 
 
+# columns added after the first release: (table, column, type)
+MIGRATIONS = [("safety_tokens", "deep_ts", "INTEGER")]
+
+
 def ensure_schema(conn):
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='safety_launch'").fetchone() is None:
         db.retry_locked(conn, lambda: conn.executescript(SCHEMA))
+    for table, col, typ in MIGRATIONS:
+        if col not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+            def add(table=table, col=col, typ=typ):
+                if col not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+                conn.commit()
+            db.retry_locked(conn, add)
     return conn
 
 
@@ -45,10 +56,10 @@ def save_assessment(conn, a):
     def write():
         conn.execute(
             """INSERT OR REPLACE INTO safety_tokens(mint, ts, score, level, blocked, coverage, hard_flags_json,
-                   reasons_json, positives_json, checks_json, creator, pair_created_at, version, calls, error)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   reasons_json, positives_json, checks_json, creator, pair_created_at, version, calls, error, deep_ts)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (a.mint, a.ts, a.score, a.level, int(a.blocked), a.coverage, _j(a.hard_flags), _j(a.reasons),
-             _j(a.positives), _j(a.checks), a.creator, a.pair_created_at, a.version, a.calls, a.error))
+             _j(a.positives), _j(a.checks), a.creator, a.pair_created_at, a.version, a.calls, a.error, a.deep_ts))
         conn.execute("INSERT OR REPLACE INTO safety_history VALUES (?,?,?,?)", (a.mint, a.ts, a.score, a.level))
         conn.commit()
     db.retry_locked(conn, write)

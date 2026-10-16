@@ -39,7 +39,7 @@ class SafetySettings:
     top10_crit_pct: float = field(default_factory=lambda: _f("SAFETY_TOP10_CRIT_PCT", 60))
     top1_warn_pct: float = field(default_factory=lambda: _f("SAFETY_TOP1_WARN_PCT", 8))
     top1_crit_pct: float = field(default_factory=lambda: _f("SAFETY_TOP1_CRIT_PCT", 20))
-    holders_profiled: int = field(default_factory=lambda: _i("SAFETY_HOLDERS_PROFILED", 10))
+    holders_profiled: int = field(default_factory=lambda: _i("SAFETY_HOLDERS_PROFILED", 6))
     fresh_wallet_days: float = field(default_factory=lambda: _f("SAFETY_FRESH_WALLET_DAYS", 3))
     fresh_wallet_max_txs: int = field(default_factory=lambda: _i("SAFETY_FRESH_WALLET_MAX_TXS", 25))
     insider_warn_pct: float = field(default_factory=lambda: _f("SAFETY_INSIDER_WARN_PCT", 10))
@@ -49,14 +49,14 @@ class SafetySettings:
     dev_hold_warn_pct: float = field(default_factory=lambda: _f("SAFETY_DEV_HOLD_WARN_PCT", 5))
     dev_hold_crit_pct: float = field(default_factory=lambda: _f("SAFETY_DEV_HOLD_CRIT_PCT", 15))
     dev_sold_warn_pct: float = field(default_factory=lambda: _f("SAFETY_DEV_SOLD_WARN_PCT", 80))
-    dev_txs_scanned: int = field(default_factory=lambda: _i("SAFETY_DEV_TXS_SCANNED", 8))
+    dev_txs_scanned: int = field(default_factory=lambda: _i("SAFETY_DEV_TXS_SCANNED", 4))
 
     # launch bundles (buys in the first slots after creation)
     bundle_slots: int = field(default_factory=lambda: _i("SAFETY_BUNDLE_SLOTS", 3))
     bundle_warn_pct: float = field(default_factory=lambda: _f("SAFETY_BUNDLE_WARN_PCT", 15))
     bundle_crit_pct: float = field(default_factory=lambda: _f("SAFETY_BUNDLE_CRIT_PCT", 35))
-    launch_max_pages: int = field(default_factory=lambda: _i("SAFETY_LAUNCH_MAX_PAGES", 15))
-    launch_max_txs: int = field(default_factory=lambda: _i("SAFETY_LAUNCH_MAX_TXS", 25))
+    launch_max_pages: int = field(default_factory=lambda: _i("SAFETY_LAUNCH_MAX_PAGES", 8))
+    launch_max_txs: int = field(default_factory=lambda: _i("SAFETY_LAUNCH_MAX_TXS", 12))
 
     # sell simulation (Jupiter round trip SOL -> token -> SOL)
     sim_size_sol: float = field(default_factory=lambda: _f("SAFETY_SIM_SIZE_SOL", 0.05))
@@ -82,13 +82,26 @@ class SafetySettings:
     use_rugcheck: bool = field(default_factory=lambda: _b("SAFETY_USE_RUGCHECK", True))
 
     # cost control
-    max_calls_per_token: int = field(default_factory=lambda: _i("SAFETY_MAX_CALLS_PER_TOKEN", 70))
+    max_calls_per_token: int = field(default_factory=lambda: _i("SAFETY_MAX_CALLS_PER_TOKEN", 30))
     ttl_young_sec: int = field(default_factory=lambda: _i("SAFETY_TTL_YOUNG_SEC", 900))     # pair < 6 h old
     ttl_old_sec: int = field(default_factory=lambda: _i("SAFETY_TTL_OLD_SEC", 7200))
     ttl_blocked_sec: int = field(default_factory=lambda: _i("SAFETY_TTL_BLOCKED_SEC", 21600))
     wallet_profile_ttl_sec: int = field(default_factory=lambda: _i("SAFETY_WALLET_PROFILE_TTL_SEC", 86400))
+    # fixed RPC budget shared by every process calling safety (token bucket in data/ratelimit/)
+    helius_per_min: float = field(default_factory=lambda: _f("SAFETY_HELIUS_PER_MIN", 15))
+    helius_spacing_sec: float = field(default_factory=lambda: _f("SAFETY_HELIUS_SPACING_SEC", 1.0))
+    helius_reserve: float = field(default_factory=lambda: _f("SAFETY_HELIUS_RESERVE", 4))   # kept for live buys/signals
+    public_rpc_url: str = field(default_factory=lambda: os.getenv("SAFETY_PUBLIC_RPC_URL") or "https://api.mainnet-beta.solana.com")
+    public_per_min: float = field(default_factory=lambda: _f("SAFETY_PUBLIC_PER_MIN", 20))  # 0 = no fallback
+    public_spacing_sec: float = field(default_factory=lambda: _f("SAFETY_PUBLIC_SPACING_SEC", 1.0))
+    priority_wait_sec: float = field(default_factory=lambda: _f("SAFETY_PRIORITY_WAIT_SEC", 10))
+    # deep checks (insiders, launch bundles, dev wallet) only for coins that matter right now
+    deep_every_sec: int = field(default_factory=lambda: _i("SAFETY_DEEP_EVERY_SEC", 1800))
+    deep_signal_window_sec: int = field(default_factory=lambda: _i("SAFETY_DEEP_SIGNAL_WINDOW_SEC", 7200))
+    deep_on_top10_change_pp: float = field(default_factory=lambda: _f("SAFETY_DEEP_ON_TOP10_CHANGE_PP", 10))
+    launch_max_age_h: float = field(default_factory=lambda: _f("SAFETY_LAUNCH_MAX_AGE_H", 6))
     refresh_budget_sec: int = field(default_factory=lambda: _i("SAFETY_REFRESH_BUDGET_SEC", 30))
-    refresh_every_sec: int = field(default_factory=lambda: _i("SAFETY_REFRESH_EVERY_SEC", 180))
+    refresh_every_sec: int = field(default_factory=lambda: _i("SAFETY_REFRESH_EVERY_SEC", 60))
     refresh_max_tokens: int = field(default_factory=lambda: _i("SAFETY_REFRESH_MAX_TOKENS", 8))
     exchanges_file: str = field(default_factory=lambda: os.getenv("SAFETY_EXCHANGES_FILE") or str(HERE / "exchanges.txt"))
 

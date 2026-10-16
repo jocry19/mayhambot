@@ -3,9 +3,12 @@ retries, key redaction). One Fetcher per assessment carries a call budget, so a 
 eat the RPC capacity the live loops need. Tests swap in a fixture Fetcher with the same methods."""
 import logging
 import time
+from collections import defaultdict
+from urllib.parse import urlparse
 
 from core import http
 from core.config import settings as core_settings
+from safety import budget
 
 log = logging.getLogger("mayhambot.safety")
 
@@ -30,26 +33,67 @@ def _space(host):
     _last_call[host] = time.monotonic()
 
 
+def _host(url):
+    return urlparse(url).netloc
+
+
 class Fetcher:
-    def __init__(self, cfg, max_calls=None, rpc_url=None):
+    """priority=True: a live path (signal about to fire, real-money buy) may wait for the shared RPC budget
+    and use its reserve; the background refresher (priority=False) never waits and never touches the reserve."""
+
+    def __init__(self, cfg, max_calls=None, rpc_url=None, priority=True):
         self.cfg = cfg
         self.max_calls = max_calls if max_calls is not None else cfg.max_calls_per_token
         self.calls = 0
+        self.rpc_calls = defaultdict(int)
         self.rpc_url = rpc_url or core_settings.rpc_url
+        self.priority = priority
 
     def _spend(self, n=1):
         if self.calls + n > self.max_calls:
             raise BudgetExceeded(f"call budget {self.max_calls} used up")
         self.calls += n
 
+    def _targets(self):
+        """RPC endpoints in order of preference, each with its own per-minute budget. The refresher goes to the
+        public RPC first and uses the configured (usually Helius) RPC only as overflow; live paths
+        (priority) prefer the faster configured RPC. Only standard 1-credit JSON-RPC methods are used."""
+        c = self.cfg
+        own = (self.rpc_url, _host(self.rpc_url))
+        pub = (c.public_rpc_url, _host(c.public_rpc_url))
+        if own[1] == pub[1] or c.public_per_min <= 0:
+            return [own]
+        return [own, pub] if self.priority else [pub, own]
+
+    def _take(self, host):
+        c = self.cfg
+        helius = "helius" in host
+        return budget.take(host, c.helius_per_min if helius else c.public_per_min,
+                           spacing=c.helius_spacing_sec if helius else c.public_spacing_sec,
+                           reserve=c.helius_reserve if helius and not self.priority else 0,
+                           wait=c.priority_wait_sec if self.priority else 0)
+
     # ---- Solana JSON-RPC ----
     def rpc(self, method, params):
         self._spend()
-        j = http.post_json(self.rpc_url, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
-                           retries=2)
-        if "error" in j:
-            raise RuntimeError(f"{method}: {j['error']}")
-        return j.get("result")
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        last = None
+        for url, host in self._targets():
+            if not self._take(host):
+                continue
+            self.rpc_calls[host] += 1
+            try:
+                j = http.post_json(url, payload, retries=2)
+            except Exception as e:  # noqa: BLE001 - e.g. public RPC refuses a heavy method: try the next one
+                last = e
+                continue
+            if "error" in j:
+                last = RuntimeError(f"{method}: {j['error']}")
+                continue
+            return j.get("result")
+        if last is not None:
+            raise last
+        raise BudgetExceeded(f"RPC budget used up for this minute ({method})")
 
     # ---- Jupiter quote (no key needed on lite-api; JUPITER_API_KEY used when set) ----
     def jupiter_quote(self, input_mint, output_mint, amount_raw, slippage_bps=300):

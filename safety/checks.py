@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from core.models import SOL_MINT
 
 from safety import store
+from safety.sources import BudgetExceeded
 
 log = logging.getLogger("mayhambot.safety")
 
@@ -167,7 +168,6 @@ class Context:
             try:
                 return self.f.rugcheck(self.mint)
             except Exception as e:  # noqa: BLE001 - optional source
-                from safety.sources import BudgetExceeded
                 if isinstance(e, BudgetExceeded):
                     raise
                 log.debug("rugcheck %s failed: %s", self.mint, e)
@@ -230,58 +230,76 @@ class Context:
                     and self.now - p["first_ts"] < self.cfg.fresh_wallet_days * 86400)
 
     def launch(self):
-        """Creator and every buyer of the first `bundle_slots` slots. Cached forever (launch never changes)."""
+        """Creator and every buyer of the first `bundle_slots` slots, cached forever (a launch never changes).
+        Resumable: paging back to the launch and reading its transactions continue across runs when the
+        RPC budget runs out, so a busy coin costs its calls once, spread over several cycles.
+        state: paging -> txs -> done | unreachable. Only `done` has creator and buyers."""
         def load():
-            cached = store.launch(self.conn, self.mint)
-            if cached is not None:
-                return cached
-            before, page, reached = None, [], False
-            for _ in range(self.cfg.launch_max_pages):
-                opts = {"limit": 1000}
-                if before:
-                    opts["before"] = before
-                p = self.f.rpc("getSignaturesForAddress", [self.mint, opts]) or []
-                if not p:
-                    reached = bool(page)
-                    break
-                page, before = p, p[-1]["signature"]
-                if len(p) < 1000:
-                    reached = True
-                    break
-            if not reached:
-                d = {"reachable": False}
-                store.save_launch(self.conn, self.mint, d)
+            d = store.launch(self.conn, self.mint)
+            if d is not None and "state" not in d:      # rows from before resumable launches
+                d["state"] = "done" if d.get("reachable") else "unreachable"
+            if d is None:
+                d = {"state": "paging", "pages": 0, "before": None, "tail": [], "reachable": None}
+                pair = self.pair() if "pair" in self._memo else None
+                created = int(float((pair or {}).get("pairCreatedAt") or 0) / 1000)
+                if created and self.now - created > self.cfg.launch_max_age_h * 3600:
+                    d.update(state="unreachable", reachable=False, why="too_old")
+                    store.save_launch(self.conn, self.mint, d)
+            if d["state"] in ("done", "unreachable"):
                 return d
-            # RPC lists newest first; reversed + stable sort = oldest first, creation tx at index 0
-            sigs = sorted((s for s in reversed(page) if not s.get("err")), key=lambda s: s["slot"])
-            if not sigs:
-                return {"reachable": False}
-            created_slot = sigs[0]["slot"]
-            in_launch = [s for s in sigs if s["slot"] < created_slot + self.cfg.bundle_slots]
-            buyers, creator = {}, None
-            for i, s in enumerate(in_launch[: self.cfg.launch_max_txs]):
-                tx = self.tx(s["signature"])
-                if not tx or not tx.get("meta"):
-                    continue
-                signer = _keys(tx)[0]
-                if i == 0:
-                    creator = signer
-                got = token_deltas(tx, self.mint).get(signer, 0.0)
-                if got > 0:
-                    b = buyers.setdefault(signer, {"wallet": signer, "tokens": 0.0, "sol": 0.0, "slot": s["slot"]})
-                    b["tokens"] += got
-                    b["sol"] += max(0.0, -sol_deltas(tx).get(signer, 0.0))
-            d = {"reachable": True, "creator": creator, "created_slot": created_slot,
-                 "created_ts": sigs[0].get("blockTime"), "n_launch_txs": len(in_launch),
-                 "truncated": len(in_launch) > self.cfg.launch_max_txs, "buyers": list(buyers.values())}
+            try:
+                self._launch_step(d)
+            except BudgetExceeded:
+                pass
             store.save_launch(self.conn, self.mint, d)
             return d
         return self._once("launch", load)
 
+    def _launch_step(self, d):
+        while d["state"] == "paging":
+            if d["pages"] >= self.cfg.launch_max_pages:
+                d.update(state="unreachable", reachable=False, why="too_many_txs")
+                return
+            opts = {"limit": 1000}
+            if d["before"]:
+                opts["before"] = d["before"]
+            p = self.f.rpc("getSignaturesForAddress", [self.mint, opts]) or []
+            d["pages"] += 1
+            if p:
+                d["before"] = p[-1]["signature"]
+                d["tail"] = [{"signature": x["signature"], "slot": x["slot"], "blockTime": x.get("blockTime"),
+                              "err": bool(x.get("err"))} for x in p[-300:]]
+            if p and len(p) == 1000:
+                continue
+            # RPC lists newest first; reversed + stable sort = oldest first, creation tx at index 0
+            sigs = sorted((x for x in reversed(d["tail"]) if not x.get("err")), key=lambda x: x["slot"])
+            if not sigs:
+                d.update(state="unreachable", reachable=False, why="no_signatures")
+                return
+            created = sigs[0]["slot"]
+            launch = [x for x in sigs if x["slot"] < created + self.cfg.bundle_slots]
+            d.update(state="txs", created_slot=created, created_ts=sigs[0].get("blockTime"), n_launch_txs=len(launch),
+                     truncated=len(launch) > self.cfg.launch_max_txs, pending=launch[: self.cfg.launch_max_txs],
+                     idx=0, buyers={}, creator=None, tail=[], before=None)
+        while d["idx"] < len(d["pending"]):
+            x = d["pending"][d["idx"]]
+            tx = self.tx(x["signature"])
+            if tx and tx.get("meta"):
+                signer = _keys(tx)[0]
+                if d["idx"] == 0:
+                    d["creator"] = signer
+                got = token_deltas(tx, self.mint).get(signer, 0.0)
+                if got > 0:
+                    b = d["buyers"].setdefault(signer, {"wallet": signer, "tokens": 0.0, "sol": 0.0, "slot": x["slot"]})
+                    b["tokens"] += got
+                    b["sol"] += max(0.0, -sol_deltas(tx).get(signer, 0.0))
+            d["idx"] += 1
+        d.update(state="done", reachable=True, buyers=list(d["buyers"].values()), pending=[])
+
     def creator(self):
         if self.deep:
             la = self.launch()
-            if la.get("creator"):
+            if la.get("state") == "done" and la.get("creator"):
                 return la["creator"]
         rc = self.rugcheck() or {}
         return rc.get("creator") or None
@@ -333,7 +351,7 @@ def check_authorities(ctx):
     return r.finish()
 
 
-def check_sell_simulation(ctx):
+def check_sell_sim(ctx):
     r = CheckResult("sell_sim", "Verkaufs-Simulation")
     lamports = int(ctx.cfg.sim_size_sol * 1e9)
     buy = ctx.f.jupiter_quote(SOL_MINT, ctx.mint, lamports)
@@ -390,7 +408,7 @@ def check_holders(ctx):
 
 def check_insiders(ctx):
     r = CheckResult("insiders", "Frische/verbundene Holder")
-    wallets = [h for h in ctx.holders() if h["kind"] == "wallet"][: ctx.cfg.holders_profiled]
+    wallets = [h for h in ctx.holders() if h["kind"] == "wallet" and h["pct"] >= 0.5][: ctx.cfg.holders_profiled]
     if not wallets:
         r.status = "unknown"
         return r.finish()
@@ -437,6 +455,8 @@ def check_insiders(ctx):
 def check_bundles(ctx):
     r = CheckResult("bundles", "Bundle-Käufe beim Launch")
     la = ctx.launch()
+    if la.get("state") in ("paging", "txs"):
+        raise BudgetExceeded("launch analysis continues next cycle")
     if not la.get("reachable"):
         r.status = "unknown"
         r.reasons.append((0, "Launch nicht mehr erreichbar (zu viele Transaktionen); Bundle-Prüfung entfällt."))
@@ -449,7 +469,7 @@ def check_bundles(ctx):
     creator = la.get("creator")
     same_block = [b for b in buyers if b["slot"] == la["created_slot"] and b["wallet"] != creator]
     total_pct = 100 * sum(b["tokens"] for b in buyers) / supply
-    others = sorted((b for b in buyers if b["wallet"] != creator), key=lambda b: -b["tokens"])[:8]
+    others = sorted((b for b in buyers if b["wallet"] != creator), key=lambda b: -b["tokens"])[:5]
     profiles = {b["wallet"]: ctx.profile(b["wallet"]) for b in others}
     groups = defaultdict(list)
     for w, p in profiles.items():
@@ -486,8 +506,13 @@ def check_dev(ctx):
         return r.finish()
     r.data["creator"] = creator
     held = {h["owner"]: h["amount"] for h in ctx.holders()}
+    smallest = min((h["pct"] for h in ctx.holders()), default=100.0)
     if creator in held:
         bal = held[creator]
+    elif ctx.holders() and smallest < ctx.cfg.dev_hold_warn_pct:
+        # not among the ~20 largest holders: holds at most the smallest of them, below the warn line (no call)
+        bal = smallest / 100 * supply
+        r.data["dev_below_top_holders"] = True
     else:
         res = ctx.f.rpc("getTokenAccountsByOwner", [creator, {"mint": ctx.mint}, {"encoding": "jsonParsed"}]) or {}
         bal = 0.0
@@ -495,8 +520,9 @@ def check_dev(ctx):
             ta = ((((a.get("account") or {}).get("data") or {}).get("parsed") or {}).get("info") or {}).get("tokenAmount") or {}
             bal += float(ta.get("uiAmountString") or ta.get("uiAmount") or 0)
     dev_pct = 100 * bal / supply
-    initial = next((b["tokens"] for b in (ctx.launch().get("buyers") or []) if b["wallet"] == creator), 0.0) \
-        if ctx.deep else 0.0
+    la = ctx.launch() if ctx.deep else {}
+    initial = next((b["tokens"] for b in la.get("buyers") or [] if b["wallet"] == creator), 0.0) \
+        if la.get("state") == "done" else 0.0
     c = ctx.cfg
     r.data.update(dev_pct=round(dev_pct, 3), dev_initial_pct=round(100 * initial / supply, 3))
     r.add(ramp(dev_pct, c.dev_hold_warn_pct, c.dev_hold_crit_pct, 25, 60),
@@ -687,6 +713,6 @@ def check_rugcheck(ctx):
     return r.finish(cap=45)
 
 
-QUICK = [check_authorities, check_sell_simulation, check_liquidity, check_lp, check_socials, check_wash,
+QUICK = [check_authorities, check_sell_sim, check_liquidity, check_lp, check_socials, check_wash,
          check_rugcheck, check_holders]
 DEEP = [check_dev, check_insiders, check_bundles]

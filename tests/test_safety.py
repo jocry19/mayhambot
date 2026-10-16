@@ -255,3 +255,86 @@ def test_liquidity_collapse_blocks():
     c.commit()
     a = safety.assess(MINT, c, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)  # live liquidity 60k = -91 %
     assert a.blocked and any("eingebrochen" in r["text"] for r in a.reasons)
+
+
+def _uniq(prefix):
+    import uuid
+    return f"{prefix}-{uuid.uuid4().hex[:8]}.invalid"
+
+
+def _cleanup(*hosts):
+    from core.http import _LOCK_DIR
+    for h in hosts:
+        try:
+            os.remove(os.path.join(_LOCK_DIR, f"safety_{h}.budget"))
+        except OSError:
+            pass
+
+
+def test_budget_bucket_and_reserve():
+    from safety import budget
+    h = _uniq("bucket")
+    try:
+        assert [budget.take(h, 3) for _ in range(4)] == [True, True, True, False]
+        h2 = _uniq("bucket")
+        assert [budget.take(h2, 5, reserve=3) for _ in range(3)] == [True, True, False]  # refresher leaves 3
+        assert budget.take(h2, 5)                                                        # a live path may use them
+        _cleanup(h2)
+    finally:
+        _cleanup(h)
+
+
+def test_fetcher_overflows_to_public_rpc_then_stops(monkeypatch):
+    from safety import sources
+    hel, pub = _uniq("helius"), _uniq("public")
+    cfg = SafetySettings()
+    cfg.helius_per_min, cfg.helius_spacing_sec, cfg.helius_reserve = 2, 0, 0
+    cfg.public_per_min, cfg.public_spacing_sec, cfg.public_rpc_url = 1, 0, f"https://{pub}"
+    seen = []
+    monkeypatch.setattr(sources.http, "post_json", lambda url, payload, **kw: seen.append(url) or {"result": 1})
+    f = sources.Fetcher(cfg, rpc_url=f"https://{hel}/?api-key=x", priority=False)
+    try:
+        assert [f.rpc("getSlot", []) for _ in range(3)] == [1, 1, 1]
+        assert sum(pub in u for u in seen) == 1 and dict(f.rpc_calls) == {hel: 2, pub: 1}
+        try:
+            f.rpc("getSlot", [])
+            raise AssertionError("budget not enforced")
+        except BudgetExceeded:
+            pass
+    finally:
+        _cleanup(hel, pub)
+
+
+def test_quick_recheck_keeps_deep_findings_and_escalates():
+    c = conn()
+    deep = safety.assess(MINT, c, fetcher=FakeFetcher(ruggy()), cfg=CFG, force=True)
+    f = FakeFetcher(ruggy())
+    quick = safety.assess(MINT, c, deep=False, fetcher=f, cfg=CFG, force=True)
+    assert quick.deep_ts == deep.deep_ts and f.calls < deep.calls
+    assert quick.checks["bundles"]["data"].get("carried_from") == deep.ts
+    assert any(r["check"] == "bundles" for r in quick.reasons) and quick.blocked
+    s = ruggy()
+    s["holders"] = [(POOL, 300_000_000)] + [(f"H{i}", 10_000_000) for i in range(15)]  # top 10 share fell a lot
+    esc = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(s), cfg=CFG, force=True)
+    assert "carried_from" not in esc.checks["insiders"]["data"]
+
+
+def test_refresh_deep_only_for_hot_coins():
+    c = conn()
+    c.execute("INSERT INTO tokens(mint, tracked, last_updated) VALUES (?, 1, ?)", (MINT, NOW))
+    c.commit()
+    a = safety.refresh(c, cfg=CFG, fetcher_factory=lambda cfg: FakeFetcher(ruggy()))[0]
+    assert "bundles" not in a.checks and not a.deep_ts
+    a = safety.refresh(c, extra=[MINT], cfg=CFG, fetcher_factory=lambda cfg: FakeFetcher(ruggy()))[0]
+    assert a.checks["bundles"]["status"] == "ok" and a.deep_ts
+
+
+def test_launch_analysis_resumes_across_runs():
+    c = conn()
+    from safety import store
+    store.ensure_schema(c)
+    ctx = checks.Context(c, MINT, FakeFetcher(ruggy(), max_calls=3), CFG)  # 1 page + 2 of 4 launch txs
+    part = ctx.launch()
+    assert part["state"] == "txs" and part["idx"] == 2
+    full = checks.Context(c, MINT, FakeFetcher(ruggy()), CFG).launch()
+    assert full["state"] == "done" and full["creator"] == DEV and len(full["buyers"]) == 4

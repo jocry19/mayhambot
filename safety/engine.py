@@ -17,6 +17,8 @@ from safety.sources import BudgetExceeded, Fetcher
 
 log = logging.getLogger("mayhambot.safety")
 VERSION = "safety-v1"
+QUICK_NAMES = [fn.__name__.replace("check_", "") for fn in checks.QUICK]
+DEEP_NAMES = [fn.__name__.replace("check_", "") for fn in checks.DEEP]
 LEVEL_DE = {"low": "niedrig", "caution": "erhöht", "high": "hoch", "critical": "kritisch", "unchecked": "ungeprüft"}
 
 
@@ -38,6 +40,7 @@ class Assessment:
     calls: int = 0
     error: str | None = None
     override: str | None = None
+    deep_ts: int | None = None                       # last time insiders/bundles/dev actually ran
 
     def to_dict(self):
         d = asdict(self)
@@ -74,8 +77,8 @@ def combine(mint, results, cfg, calls=0, override=None):
         mint=mint, ts=int(time.time()), score=score, level=level_for(score, cfg), blocked=blocked,
         coverage=round(len(done) / len(results), 2) if results else 0.0, hard_flags=hard, reasons=reasons,
         positives=[p for r in results for p in r.positives],
-        checks={r.name: {"label": r.label, "status": r.status, "risk": r.risk, "hard": r.hard, "data": r.data}
-                for r in results},
+        checks={r.name: {"label": r.label, "status": r.status, "risk": r.risk, "hard": r.hard, "data": r.data,
+                         "reasons": [list(x) for x in r.reasons], "positives": r.positives} for r in results},
         creator=creator, calls=calls, override=override)
 
 
@@ -86,38 +89,75 @@ def offline():
         or "PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules
 
 
-def assess(mint, conn=None, deep=True, force=False, fetcher=None, cfg=None):
-    """Full safety assessment of one token. Uses the stored result while it is fresh (see ttl), unless
-    force=True. Network calls are capped per token (SAFETY_MAX_CALLS_PER_TOKEN); checks that do not fit
-    in the budget are marked 'skipped' and re-tried on the next refresh."""
+def _run(ctx, fns, mint):
+    out = []
+    for fn in fns:
+        name = fn.__name__.replace("check_", "")
+        try:
+            out.append(fn(ctx))
+        except BudgetExceeded:
+            out.append(checks.CheckResult(name, name, status="skipped"))
+        except Exception as e:  # noqa: BLE001 - one broken source must not kill the assessment
+            log.warning("safety check %s for %s failed: %s", name, mint, e)
+            out.append(checks.CheckResult(name, name, status="error", data={"error": str(e)[:200]}))
+    return out
+
+
+def _carried(prev, name):
+    """The previous run's result of one check, so a quick re-check or a skipped check keeps its findings."""
+    c = (prev.checks or {}).get(name) if prev else None
+    if not c or c.get("status") not in ("ok", "unknown"):
+        return None
+    reasons = [tuple(x) for x in c["reasons"]] if "reasons" in c else \
+        [(x["risk"], x["text"]) for x in prev.reasons if x.get("check") == name]
+    return checks.CheckResult(name, c.get("label", name), status=c["status"], risk=c.get("risk", 0.0),
+                              hard=bool(c.get("hard")), reasons=reasons, positives=list(c.get("positives") or []),
+                              data=dict(c.get("data") or {}, carried_from=(c.get("data") or {}).get("carried_from", prev.ts)))
+
+
+def assess(mint, conn=None, deep=True, force=False, fetcher=None, cfg=None, priority=True):
+    """Safety assessment of one token. Uses the stored result while it is fresh (see ttl), unless force=True.
+    deep=False runs only the cheap checks (about 4 RPC calls) and keeps the last deep findings (insiders,
+    bundles, dev); it turns deep by itself when the top-10 share moved by SAFETY_DEEP_ON_TOP10_CHANGE_PP.
+    RPC calls come from a fixed per-minute budget shared by all processes (safety/budget.py); checks that do
+    not fit are 'skipped', keep their previous result and run again next cycle. priority=False (the
+    refresher) never waits for budget and leaves SAFETY_HELIUS_RESERVE calls to live buys and signals."""
     cfg = cfg or default_settings
     own = conn is None
     conn = store.connect() if own else store.ensure_schema(conn)
     try:
-        if not force:
-            cached = get(conn, mint, cfg=cfg)
-            if cached and not is_due(cached, cfg):
-                return cached
+        prev = get(conn, mint, cfg=cfg)
+        if not force and prev and not is_due(prev, cfg):
+            return prev
         if fetcher is None and offline():
-            cached = get(conn, mint, cfg=cfg)
-            return cached or Assessment(mint=mint, ts=int(time.time()), score=0.0, level="unchecked", blocked=False,
-                                        coverage=0.0, error="offline")
-        f = fetcher or Fetcher(cfg)
+            return prev or Assessment(mint=mint, ts=int(time.time()), score=0.0, level="unchecked", blocked=False,
+                                      coverage=0.0, error="offline")
+        f = fetcher or Fetcher(cfg, priority=priority)
         ctx = checks.Context(conn, mint, f, cfg, deep=deep)
-        results = []
-        for fn in checks.QUICK + (checks.DEEP if deep else []):
-            name = fn.__name__.replace("check_", "")
-            try:
-                results.append(fn(ctx))
-            except BudgetExceeded:
-                results.append(checks.CheckResult(name, name, status="skipped"))
-            except Exception as e:  # noqa: BLE001 - one broken source must not kill the assessment
-                log.warning("safety check %s for %s failed: %s", name, mint, e)
-                results.append(checks.CheckResult(name, name, status="error", data={"error": str(e)[:200]}))
+        results = _run(ctx, checks.QUICK, mint)
+        if not deep and prev and prev.deep_ts:
+            new = next((r.data.get("top10_pct") for r in results if r.name == "holders" and r.status == "ok"), None)
+            old = ((prev.checks.get("holders") or {}).get("data") or {}).get("top10_pct")
+            if new is not None and old is not None and abs(new - old) >= cfg.deep_on_top10_change_pp:
+                deep = ctx.deep = True
+        if deep:
+            results += _run(ctx, checks.DEEP, mint)
+        deep_ran = deep and any(r.status in ("ok", "unknown") for r in results if r.name in DEEP_NAMES)
+        by_name = {r.name: r for r in results}
+        for name in QUICK_NAMES + DEEP_NAMES:
+            r = by_name.get(name)
+            if r is None or r.status in ("skipped", "error"):
+                old_r = _carried(prev, name)
+                if old_r is not None:
+                    by_name[name] = old_r
+        results = [by_name[n] for n in QUICK_NAMES + DEEP_NAMES if n in by_name]
         a = combine(mint, results, cfg, calls=getattr(f, "calls", 0), override=store.override(conn, mint))
+        a.deep_ts = int(time.time()) if deep_ran else (prev.deep_ts if prev else None)
         pair = ctx._memo.get("pair") or {}
         if pair.get("pairCreatedAt"):
             a.pair_created_at = int(float(pair["pairCreatedAt"]) / 1000)
+        elif prev:
+            a.pair_created_at = prev.pair_created_at
         store.save_assessment(conn, a)
         return a
     finally:
@@ -132,7 +172,7 @@ def _from_row(row):
                    reasons=json.loads(row["reasons_json"] or "[]"), positives=json.loads(row["positives_json"] or "[]"),
                    checks=json.loads(row["checks_json"] or "{}"), creator=row["creator"],
                    pair_created_at=row["pair_created_at"], version=row["version"], calls=row["calls"] or 0,
-                   error=row["error"])
+                   error=row["error"], deep_ts=row["deep_ts"] if "deep_ts" in row.keys() else None)
     return a
 
 
@@ -220,22 +260,36 @@ def clear_override(conn, mint):
     store.set_override(conn, mint, None)
 
 
+def hot_mints(conn, extra=(), cfg=None):
+    """Coins that get deep checks: open copy-trading positions, signals of the last
+    SAFETY_DEEP_SIGNAL_WINDOW_SEC and `extra` (buy wishes). Everything else is checked in quick mode only."""
+    cfg = cfg or default_settings
+    since = int(time.time()) - cfg.deep_signal_window_sec
+    return list(dict.fromkeys(open_positions(conn) + list(extra) + [
+        r[0] for r in conn.execute("SELECT DISTINCT mint FROM signals WHERE ts>=? ORDER BY ts DESC", (since,))]))
+
+
+def deep_due(a, cfg=None):
+    cfg = cfg or default_settings
+    return a is None or not a.deep_ts or time.time() - a.deep_ts >= cfg.deep_every_sec
+
+
 def candidates(conn, extra=(), cfg=None):
-    """Coins worth checking, most urgent first: open copy-trading positions (re-checked every
-    SAFETY_TTL_YOUNG_SEC: dev cash-out or LP pull must show up while we hold), then never-checked coins,
-    then coins due by TTL. Sources: ct_positions, signals of the last 24 h, tracked coins, plus `extra`."""
+    """Coins worth checking, most urgent first: hot coins (open positions, recent signals, `extra`) that are
+    unchecked, past the young TTL or due for their deep check, then never-checked coins, then coins due by
+    TTL. Sources: ct_positions, signals of the last 24 h, tracked coins, plus `extra`."""
     cfg = cfg or default_settings
     store.ensure_schema(conn)
     since = int(time.time()) - 86400
-    held = open_positions(conn)
+    hot = hot_mints(conn, extra, cfg)
     mints = list(dict.fromkeys(
-        held + list(extra)
+        hot
         + [r[0] for r in conn.execute("SELECT DISTINCT mint FROM signals WHERE ts>=? ORDER BY ts DESC", (since,))]
         + [r[0] for r in conn.execute("SELECT mint FROM tokens WHERE tracked=1 ORDER BY last_updated DESC LIMIT 60")]))
     urgent, never, due = [], [], []
     for m in mints:
         a = get(conn, m, cfg)
-        if m in held and (a is None or time.time() - a.ts >= cfg.ttl_young_sec):
+        if m in hot and (a is None or time.time() - a.ts >= cfg.ttl_young_sec or deep_due(a, cfg)):
             urgent.append(m)
         elif a is None:
             never.append(m)
@@ -252,24 +306,47 @@ def open_positions(conn):
         return []
 
 
+QUICK_RPC_CALLS, DEEP_RPC_CALLS = 4, 12   # typical RPC cost of a re-check, for planning a pass
+
+
+def rpc_room(cfg):
+    """RPC calls the refresher may still spend this minute (primary budget above the reserve + public overflow)."""
+    from urllib.parse import urlparse
+    from core.config import settings as core_settings
+    from safety import budget
+    host, public = urlparse(core_settings.rpc_url).netloc, urlparse(cfg.public_rpc_url).netloc
+    per_min = cfg.helius_per_min if "helius" in host else cfg.public_per_min
+    room = budget.available(host, per_min) - cfg.helius_reserve
+    if host != public and cfg.public_per_min > 0:
+        room += budget.available(public, cfg.public_per_min)
+    return room
+
+
 def refresh(conn=None, extra=(), budget_sec=None, max_tokens=None, cfg=None, fetcher_factory=None):
-    """One scheduled pass: assess the most urgent coins within a time budget. Safe to call from any
-    service loop (research, signals) or run alone with `python -m safety run`."""
+    """One scheduled pass: deep checks for hot coins whose deep check is due, quick checks for the rest,
+    within a time budget and the shared per-minute RPC budget. When the budget cannot cover the next coin
+    the pass stops and the rest waits for the next cycle. Run alone with `python -m safety run`."""
     cfg = cfg or default_settings
     own = conn is None
     conn = store.connect() if own else store.ensure_schema(conn)
-    budget = cfg.refresh_budget_sec if budget_sec is None else budget_sec
+    budget_s = cfg.refresh_budget_sec if budget_sec is None else budget_sec
     limit = cfg.refresh_max_tokens if max_tokens is None else max_tokens
     t0, done = time.time(), []
     try:
+        if fetcher_factory is None and offline():
+            return done
+        hot = set(hot_mints(conn, extra, cfg))
         for m in candidates(conn, extra, cfg)[:limit]:
-            if time.time() - t0 > budget:
+            if time.time() - t0 > budget_s:
                 break
-            if fetcher_factory is None and offline():
+            deep = m in hot and deep_due(get(conn, m, cfg), cfg)
+            need = DEEP_RPC_CALLS if deep else QUICK_RPC_CALLS
+            if fetcher_factory is None and rpc_room(cfg) < need:
+                log.info("safety: RPC budget for this minute used, %s waits for the next pass", m[:6])
                 break
             try:
-                f = fetcher_factory(cfg) if fetcher_factory else None
-                done.append(assess(m, conn, force=True, fetcher=f, cfg=cfg))
+                f = fetcher_factory(cfg) if fetcher_factory else Fetcher(cfg, priority=False)
+                done.append(assess(m, conn, deep=deep, force=True, fetcher=f, cfg=cfg, priority=False))
             except Exception as e:  # noqa: BLE001
                 log.warning("safety assess %s failed: %s", m, e)
         return done
