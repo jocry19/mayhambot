@@ -12,6 +12,7 @@ Run from anywhere; paths are relative to the mayhambot folder (parent of deploy/
   python deploy/ops.py restore <archive>      # stops the app, restores, starts it again
   python deploy/ops.py rotate-logs
   python deploy/ops.py setup-telegram         # after /start to your bot: finds + saves TELEGRAM_CHAT_ID, sends test
+                                             # (chat id set: test only, no getUpdates; --neu searches again)
   python deploy/ops.py test-alert             # sends a Telegram test message
   python deploy/ops.py summary [--send]       # hourly status report (watchdog sends it every SUMMARY_EVERY_HOURS)
 
@@ -42,6 +43,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -315,6 +317,54 @@ def new_lock_errors(st: dict) -> int:
     return n
 
 
+def planned_restarts(since: float = 0.0) -> list[dict]:
+    """Restarts a service asked for itself (exit code 3, noted by the supervisor in mayham.py), newest last,
+    each with the reason from the service's own log ("restarting the ... service: <reason>")."""
+    f = ROOT / "data" / "planned_restarts.jsonl"
+    out = []
+    try:
+        lines = f.read_text().splitlines()[-50:]
+    except OSError:
+        return out
+    for ln in lines:
+        try:
+            e = json.loads(ln)
+        except ValueError:
+            continue
+        if e.get("ts", 0) > since:
+            e["reason"] = _restart_reason(e.get("service", ""))
+            out.append(e)
+    return out
+
+
+def _restart_reason(name: str) -> str:
+    try:
+        with open(ROOT / "logs" / f"{name}.log", "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 65536))
+            tail = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return ""
+    for ln in reversed(tail):
+        if "restarting the " in ln and ": " in ln.split("restarting the ", 1)[1]:
+            return ln.split("restarting the ", 1)[1].split(": ", 1)[1].strip()
+    return ""
+
+
+def planned_note(e: dict) -> str:
+    why = "nach Modellwechsel" if "model" in e.get("reason", "") else "auf eigenen Wunsch"
+    return f"{e.get('service', '?')}: geplanter Neustart {why}" + (f" ({e['reason']})" if e.get("reason") else "")
+
+
+def check_planned_restarts(st: dict):
+    """One info message per planned restart, so it never reads as a crash."""
+    last = st.get("planned_seen", 0.0)
+    for e in planned_restarts(last):
+        send_alert(f"🔄 {planned_note(e)}. Kein Fehler, der Dienst läuft mit dem neuen Code weiter.")
+        last = max(last, e["ts"])
+    st["planned_seen"] = last
+
+
 def watchdog(args) -> int:
     st = load_state()
     now = time.time()
@@ -360,6 +410,10 @@ def watchdog(args) -> int:
                 send_alert(f"🟢 Wieder OK (war: {seen[key].get('msg', key)})")
             del seen[key]
 
+    try:
+        check_planned_restarts(st)
+    except Exception as e:  # noqa: BLE001
+        print(f"planned restarts: {e}")
     try:
         check_credit_alerts(st)
         check_service_budgets(st)
@@ -610,12 +664,23 @@ def setup_telegram(args) -> int:
     if not token:
         print("TELEGRAM_BOT_TOKEN fehlt in .env (Token von @BotFather eintragen).")
         return 1
+    if cfg("TELEGRAM_CHAT_ID", "") and not getattr(args, "neu", False):
+        # the live service polls getUpdates for /notaus etc.; Telegram allows one poller per bot (409 Conflict),
+        # so with a chat id already set we only send the test and never call getUpdates
+        ok = send_alert("Telegram-Test ✅ Chat-ID ist eingetragen, Meldungen kommen hier an.")
+        print("Chat-ID ist schon eingetragen. " + ("Testnachricht gesendet." if ok else "Senden fehlgeschlagen.")
+              + " Neue Chat-ID suchen: setup-telegram --neu (vorher die App stoppen).")
+        return 0 if ok else 1
     api = f"https://api.telegram.org/bot{token}"
     try:
         with urllib.request.urlopen(f"{api}/getMe", timeout=15) as r:
             me = json.loads(r.read())["result"]
         with urllib.request.urlopen(f"{api}/getUpdates", timeout=15) as r:
             ups = json.loads(r.read()).get("result", [])
+    except urllib.error.HTTPError as e:  # noqa: BLE001 - never echo the URL (contains the token)
+        print("Ein anderer Prozess liest gerade die Bot-Nachrichten (der live-Dienst). Erst die App stoppen: "
+              ".venv/bin/python mayham.py stop" if e.code == 409 else f"Telegram-Fehler HTTP {e.code}.")
+        return 1
     except Exception as e:  # noqa: BLE001 - never echo the URL (contains the token)
         print(f"Telegram nicht erreichbar oder Token ungültig ({type(e).__name__}).")
         return 1
@@ -884,7 +949,7 @@ def main(argv=None) -> int:
     r.add_argument("--no-stop", action="store_true", help="App nicht stoppen/starten (z.B. auf neuem Server)")
     sub.add_parser("rotate-logs")
     sub.add_parser("test-alert")
-    sub.add_parser("setup-telegram")
+    sub.add_parser("setup-telegram").add_argument("--neu", action="store_true", help="Chat-ID neu suchen")
     sm = sub.add_parser("summary")
     sm.add_argument("--send", action="store_true", help="per Telegram senden")
     a = ap.parse_args(argv)

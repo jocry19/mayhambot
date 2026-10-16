@@ -9,6 +9,7 @@
   python mayham.py install-autostart # macOS: start at login and restart on crash (launchd)
   python mayham.py remove-autostart
 """
+import json
 import os
 import signal
 import subprocess
@@ -156,6 +157,15 @@ def status():
     print(f"Dashboard: http://localhost:{PORT}")
 
 
+PLANNED_EXIT = 3  # a service asks for a restart with the code on disk (e.g. signals after a model retrain)
+
+
+def _note_planned(name):
+    """deploy/ watchdog and auto-update read this, so a planned restart is no crash and no rollback reason."""
+    with open(ROOT / "data" / "planned_restarts.jsonl", "a") as f:
+        f.write(json.dumps({"ts": time.time(), "service": name}) + "\n")
+
+
 def run():
     """Foreground supervisor: restarts a crashed service after 10 s, stops all on Ctrl+C / SIGTERM."""
     _stop_detached(quiet=True)  # never run next to copies started with `start`
@@ -172,6 +182,8 @@ def run():
             for n, p in procs.items():
                 if p.poll() is not None:
                     print(f"{n} beendet (code {p.returncode}), Neustart in 10 s")
+                    if p.returncode == PLANNED_EXIT:
+                        _note_planned(n)
                     time.sleep(10)
                     procs[n] = _spawn(n, detach=False)
     except KeyboardInterrupt:

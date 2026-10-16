@@ -122,31 +122,48 @@ def _pids(names) -> dict:
     return out
 
 
+PLANNED_GRACE_S = 60  # the supervisor waits 10 s, then the service needs a moment
+
+
 def health_check(window=None, interval=15) -> tuple[bool, str]:
     """After a restart: every service must be up and keep the same pid (no crash loop) for the last part of
-    the window, and the dashboard must answer. Returns (ok, detail)."""
+    the window, and the dashboard must answer. One planned restart per service (exit code 3, e.g. signals
+    after a model retrain, see ops.planned_restarts) is no crash: it does not reset the stable time, and the
+    window grows once by PLANNED_GRACE_S so the new process can come up. Returns (ok, detail)."""
     window = window if window is not None else ops.cfg("AUTO_UPDATE_HEALTH_S", 180)
     names = _services_now()
-    end = time.time() + window
+    t0 = time.time()
+    end = t0 + window
     stable_since, last, detail = None, None, "noch nicht geprüft"
+    planned, extended = {}, False
     while True:
+        for e in ops.planned_restarts(t0 - 30):
+            planned.setdefault(e.get("service"), []).append(e)
+        if planned and not extended:
+            end, extended = max(end, time.time() + PLANNED_GRACE_S), True
+        once = {n for n, es in planned.items() if len({round(e["ts"]) for e in es}) == 1}
         cur = _pids(names)
         down = [n for n, p in cur.items() if not p]
         changed = [n for n in names if last and cur[n] and last[n] and cur[n] != last[n]]
-        if down or changed:
+        bad_down = [n for n in down if n not in once]
+        bad_changed = [n for n in changed if n not in once]
+        if bad_down or bad_changed:
             stable_since = None
-            detail = ", ".join([f"{n} läuft nicht" for n in down] + [f"{n} startet neu" for n in changed])
+            detail = ", ".join([f"{n} läuft nicht" for n in bad_down] + [f"{n} startet neu" for n in bad_changed])
         elif stable_since is None:
             stable_since = time.time()
         last = cur
         if time.time() >= end:
             break
         time.sleep(interval)
+    if any(not p for p in cur.values()):
+        return False, ", ".join(f"{n} läuft nicht" for n, p in cur.items() if not p)
     if stable_since is None or time.time() - stable_since < min(60, window / 2):
         return False, detail
     if not ops.check_dashboard():
         return False, "Dashboard antwortet nicht"
-    return True, f"{len(names)} von {len(names)} Dienste laufen stabil"
+    notes = "".join(f", {ops.planned_note(es[-1])}" for n, es in planned.items() if n in once)
+    return True, f"{len(names)} von {len(names)} Dienste laufen stabil{notes}"
 
 
 def _failing_tests(rev: str) -> list[str]:

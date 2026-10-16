@@ -1,4 +1,6 @@
 """deploy/autoupdate.py against a throwaway git origin + checkout (no network, no launchd)."""
+import json
+import time
 import sqlite3
 import subprocess
 import sys
@@ -283,3 +285,48 @@ def test_local_commit_blocks_and_alerts(repo):
     autoupdate.run_once(alerts.append, health=lambda: (True, "ok"))
     assert head() == before and len(alerts) == 1
     assert "blockiert" in autoupdate._load()["blocked"]
+
+
+def _plan(root, service, ts, reason="model v7 active since start (was v6), 5 fallbacks this cycle"):
+    (root / "data").mkdir(exist_ok=True)
+    with open(root / "data" / "planned_restarts.jsonl", "a") as f:
+        f.write(json.dumps({"ts": ts, "service": service}) + "\n")
+    (root / "logs").mkdir(exist_ok=True)
+    with open(root / "logs" / f"{service}.log", "a") as f:
+        f.write(f"2026-10-16 ERROR restarting the {service} service: {reason}\n")
+
+
+def test_planned_restart_is_no_crash(repo, monkeypatch):
+    work, push, head, alerts = repo
+    monkeypatch.setattr(autoupdate, "_services_now", lambda: ["a", "b"])
+    monkeypatch.setattr(ops, "check_dashboard", lambda: True)
+    monkeypatch.setattr(autoupdate, "PLANNED_GRACE_S", 0.03)
+    _plan(work, "b", time.time())
+    seq = iter([{"a": 1, "b": 2}, {"a": 1, "b": None}] + [{"a": 1, "b": 3}] * 50)
+    monkeypatch.setattr(autoupdate, "_pids", lambda names: next(seq))
+    ok, detail = autoupdate.health_check(window=0.02, interval=0.005)
+    assert ok and "b: geplanter Neustart nach Modellwechsel" in detail
+    _plan(work, "b", time.time() + 1)           # a second one in the same window is a restart loop
+    seq = iter([{"a": 1, "b": 3}, {"a": 1, "b": 4}, {"a": 1, "b": 5}] * 50)
+    assert not autoupdate.health_check(window=0.02, interval=0.005)[0]
+
+
+def test_watchdog_reports_planned_restart_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(ops, "ROOT", tmp_path)
+    sent = []
+    monkeypatch.setattr(ops, "send_alert", lambda m: sent.append(m) or True)
+    _plan(tmp_path, "signals", 1000.0)
+    st = {}
+    ops.check_planned_restarts(st)
+    ops.check_planned_restarts(st)
+    assert len(sent) == 1 and "signals: geplanter Neustart nach Modellwechsel" in sent[0]
+    assert "Kein Fehler" in sent[0]
+
+
+def test_setup_telegram_skips_get_updates_when_chat_id_set(monkeypatch):
+    import types
+    monkeypatch.setattr(ops, "ENV", {"TELEGRAM_BOT_TOKEN": "x", "TELEGRAM_CHAT_ID": "1"})
+    monkeypatch.setattr(ops.urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("polled")))
+    sent = []
+    monkeypatch.setattr(ops, "send_alert", lambda m: sent.append(m) or True)
+    assert ops.setup_telegram(types.SimpleNamespace(neu=False)) == 0 and len(sent) == 1

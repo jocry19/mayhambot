@@ -64,6 +64,18 @@ Telegram einrichten (einmalig, 2 Minuten):
    eine Testnachricht plus den ersten Bericht. Danach `.venv/bin/python mayham.py restart`, damit auch die
    Signale über Telegram kommen.
 
+Ist `TELEGRAM_CHAT_ID` schon gesetzt, schickt `setup-telegram` nur eine Testnachricht und ruft `getUpdates`
+nicht mehr auf: der Dienst `live` liest die Bot-Nachrichten dauerhaft (für `/notaus`, `/alles_verkaufen`,
+`/weiter`, `/live`), und Telegram erlaubt nur einen Leser je Bot (sonst 409 Conflict). Eine neue Chat-ID
+sucht `setup-telegram --neu`, vorher die App mit `.venv/bin/python mayham.py stop` anhalten.
+
+Geplante Neustarts: Beendet sich ein Dienst absichtlich mit Exit-Code 3 (z. B. `signals`, wenn nach einem
+Modell-Retrain der Code im Speicher nicht mehr zum neuen Modell passt), startet ihn der Supervisor nach 10 s
+neu und notiert das in `data/planned_restarts.jsonl`. Der Watchdog meldet das einmal als
+"🔄 signals: geplanter Neustart nach Modellwechsel", nicht als Fehler. Der Health-Check nach einem Auto-Update
+wertet einen solchen Neustart je Dienst nicht als Absturz (kein Rollback) und wartet dafür bis zu 60 s länger;
+ein zweiter im selben Fenster gilt als Neustart-Schleife.
+
 ## Helius-Credits und neuer Key
 
 Der Bot nutzt den kostenlosen Helius-Plan (1.000.000 Credits pro Monat). Der stündliche Bericht zeigt
