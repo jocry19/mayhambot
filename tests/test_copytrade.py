@@ -686,3 +686,17 @@ def test_failed_paper_fill_leaves_no_row_and_old_buy_clicks_expire(env):
     conn.execute("UPDATE ct_commands SET ts=ts-600 WHERE id=?", (cid,))
     assert control.pending_commands(conn) == []
     assert conn.execute("SELECT status FROM ct_commands WHERE id=?", (cid,)).fetchone()[0] == "expired"
+
+
+def test_second_strategy_does_not_buy_a_coin_already_held_or_being_bought(env):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    from copytrade import control
+    pre = control.preset(conn, "signal")
+    conn.execute("INSERT INTO ct_positions(mode, strategy, mint, status, opened_at, tokens, entry_cost_sol) "
+                 "VALUES ('paper','whale',?,'opening',?,0,0)", (MINT, int(time.time())))
+    assert st.open("signal", "auto", MINT, 0.1, state["snap"], pre, tp=0.5, hold=60, reason="t", intent="signal:9") is None
+    conn.execute("UPDATE ct_positions SET status='open'")
+    assert st.open("signal", "auto", MINT, 0.1, state["snap"], pre, tp=0.5, hold=60, reason="t", intent="signal:9") is None
+    msgs = [r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'")]
+    assert any("Kauf läuft schon" in m for m in msgs) and any("schon gehalten" in m for m in msgs)

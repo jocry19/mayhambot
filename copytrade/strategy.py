@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 
 from . import control, learn, market, ranking, store
@@ -397,16 +398,24 @@ class Strategy:
         intent = intent or (f"signal:{signal_id}" if signal_id else f"whale:{whale.signature}" if whale else None)
         # the intent row is committed BEFORE the swap: if a later write fails (database locked) and the caller
         # is retried, the same intent finds this row and never sends a second swap
-        if intent:
-            r = self.conn.execute("SELECT id, status FROM ct_positions WHERE intent=?", (intent,)).fetchone()
-            if r:
-                return r[0] if r[1] != "failed" else None
-        pid = self.conn.execute(
-            """INSERT INTO ct_positions(mode, strategy, managed, wallet, mint, symbol, signal_id, opened_at, size_sol,
-                 tokens, entry_cost_sol, status, intent) VALUES (?,?,?,?,?,?,?,?,?,0,0,'opening',?)""",
-            (ex.mode, strategy, managed, wallet, mint, snap.symbol, signal_id, int(time.time()), size, intent),
-        ).lastrowid
-        self.conn.commit()
+        with INTENT_LOCK:  # decision + intent row only, never the swap: whale copies, signals, launches and
+            # dashboard buys run in different threads and must not buy the same coin at the same moment
+            if intent:
+                r = self.conn.execute("SELECT id, status FROM ct_positions WHERE intent=?", (intent,)).fetchone()
+                if r:
+                    return r[0] if r[1] != "failed" else None
+            busy = self.conn.execute("SELECT strategy, status FROM ct_positions WHERE mint=? AND status IN "
+                                     "('opening','open')", (mint,)).fetchall()
+            if any(b[1] == "opening" for b in busy) or (strategy != "whale" and busy):
+                why = "Kauf läuft schon" if any(b[1] == "opening" for b in busy) else f"schon gehalten ({busy[0][0]})"
+                self._skip(strategy, mint, f"Coin {why}", snap)
+                return None
+            pid = self.conn.execute(
+                """INSERT INTO ct_positions(mode, strategy, managed, wallet, mint, symbol, signal_id, opened_at,
+                     size_sol, tokens, entry_cost_sol, status, intent) VALUES (?,?,?,?,?,?,?,?,?,0,0,'opening',?)""",
+                (ex.mode, strategy, managed, wallet, mint, snap.symbol, signal_id, int(time.time()), size, intent),
+            ).lastrowid
+            self.conn.commit()
         try:
             fill = ex.buy(mint, size, snap)
         except Exception as e:  # unknown outcome of a live swap stays 'opening' for a manual look; paper: failed
@@ -650,6 +659,9 @@ def sniper_exits() -> dict:
 
 
 # ---------------------------------------------------------------------- wash trading (safety/ check)
+INTENT_LOCK = threading.Lock()  # process-wide; taken inside watch.ENTRY_LOCK by the whale path (same order always)
+
+
 def _write_hard(conn, sql: str, args: tuple, tries: int = 15) -> None:
     """A write that must land (it records a swap that already happened): retried while the database is locked."""
     for i in range(tries):
