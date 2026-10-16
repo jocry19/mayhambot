@@ -1,0 +1,5 @@
+# web dashboard + terminal (python -m web, python -m cli)
+fastapi>=0.110
+uvicorn>=0.29
+textual>=0.80
+rich>=13
