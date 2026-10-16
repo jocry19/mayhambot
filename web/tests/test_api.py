@@ -427,6 +427,11 @@ def test_system_health_backup_and_errors(demo, empty, tmp_path, monkeypatch):
     assert {"signals", "copytrade", "sniper", "web"} <= set(names)
     assert all(r["state"] in ("ok", "langsam", "steht", "neu") for r in s["health"])
     assert names["web"]["state"] == "ok" and "backup" in s
+    # copy-trading is alive when its price loop writes equity, even with no wallet polled (only Modus 2 on)
+    import sqlite3
+
+    eq = sqlite3.connect(demo).execute("SELECT MAX(ts) FROM ct_equity").fetchone()[0]
+    assert eq and names["copytrade"]["last_ts"] >= eq
     e = _client(empty).get("/api/system").json()
     assert all(r["state"] in ("neu", "ok") for r in e["health"])
     # backups: newest archive by name, never opened; watchdog problems passed through

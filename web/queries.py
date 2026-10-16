@@ -2065,7 +2065,9 @@ def system(conn):
 # service -> (German label, what it does, SQL for its newest activity ts, expected max gap in s)
 SERVICE_INFO = {
     "signals": ("Signale", "Trades sammeln, Smart-Money-Signale", "SELECT MAX(ts) FROM trades", 15 * 60),
-    "copytrade": ("Copy-Trading", "Wallets pollen, Papier- und Echtkäufe", "SELECT MAX(last_polled) FROM ct_wallets WHERE active=1", 15 * 60),
+    # wallet polling, or the price loop's minute equity snapshot when no wallet is followed (only Modus 2)
+    "copytrade": ("Copy-Trading", "Wallets pollen, Papier- und Echtkäufe",
+                  ("SELECT MAX(last_polled) FROM ct_wallets WHERE active=1", "SELECT MAX(ts) FROM ct_equity"), 15 * 60),
     "safety": ("Rug-Schutz", "Coins auf Rug, Honeypot, Insider prüfen", "SELECT MAX(ts) FROM safety_tokens", 30 * 60),
     "sniper": ("Launch-Sniper", "neue Launches prüfen, Papierkäufe", None, SNIPER_HB_STALE_S),
     "market": ("Markt", "Marktphase, Sektoren, Narrative", "SELECT MAX(ts) FROM market_snapshots", 30 * 60),
@@ -2150,12 +2152,14 @@ def services_health(conn, now=None):
         elif name == "signals":
             last = last_trade_ts(conn)
         elif sql:
-            tbl = re.search(r"FROM (\w+)", sql).group(1)
-            if has(conn, tbl):
-                try:
-                    last = scalar(conn, sql)
-                except Exception:
-                    last = None
+            seen = []
+            for q in (sql if isinstance(sql, tuple) else (sql,)):
+                if has(conn, re.search(r"FROM (\w+)", q).group(1)):
+                    try:
+                        seen.append(scalar(conn, q))
+                    except Exception:
+                        pass
+            last = max((x for x in seen if x), default=None)
         elif name == "web":
             last = now
         logm = _log_mtime(name)

@@ -146,7 +146,11 @@ function App() {
   const route = useRoute();
   const theme = useThemeName();
   const first = "/" + (route.parts[0] || "");
-  useEffect(() => { window.scrollTo(0, 0); }, [route.path]);
+  useEffect(() => {
+    window.scrollTo(0, 0);
+    // phone layout: the nav is one scrolling icon row, keep the current page's icon in view
+    document.querySelector(".nav a.on")?.scrollIntoView({ inline: "center", block: "nearest" });
+  }, [route.path]);
   useEffect(() => { document.title = `${TITLES[route.parts[0] || ""] || "mayhambot"} · mayhambot`; }, [route.parts]);
   return (
     <div className="shell">
@@ -157,7 +161,7 @@ function App() {
         </div>
         <nav className="nav">
           {NAV.map(([to, icon, label], i) => to === "sep" ? <div key={i} className="nav-sep" /> : (
-            <a key={to} href={`#${to}`} className={(to === "/" ? route.parts.length === 0 : first === to || (to === "/coins" && first === "/coin") || (to === "/wallets" && first === "/wallet")) ? "on" : ""}>
+            <a key={to} href={`#${to}`} title={label} aria-label={label} className={(to === "/" ? route.parts.length === 0 : first === to || (to === "/coins" && first === "/coin") || (to === "/wallets" && first === "/wallet")) ? "on" : ""}>
               <Icon name={icon} /><span>{label}</span>
             </a>
           ))}
