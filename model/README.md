@@ -134,7 +134,8 @@ All timestamps unix seconds UTC. Amounts in SOL are converted with the SOL price
 
 Bulk research goes through `research.rpc`: public Solana RPC first (`RESEARCH_RPC_URL`, no Helius credits,
 spaced by core.http), Helius RPC (1 credit per call) only as a fallback, Helius Enhanced API (100 credits,
-up to 100 parsed swaps) only for backfills of tiered and user wallets. All Helius use by research is booked in
-`research.credits` (data/research_credits.json, per UTC day) and stops at `RESEARCH_HELIUS_CREDITS_PER_DAY`
-(25,000 = at most 750k per month), so the event-driven services always keep the rest of the plan.
+up to 100 parsed swaps) only for backfills of tiered and user wallets. Every Helius call is booked by core.http in its shared ledger
+(see core/README.md, "Helius monthly credits"; research share 35 % of the month). Once today's research budget
+is used, standard RPC goes to the public RPC and an Enhanced backfill falls back to RPC for that wallet
+(`CreditsExhausted`, no traceback). `RESEARCH_HELIUS_CREDITS_PER_DAY` > 0 adds a lower own cap (default 0).
 Wallets in the `wallets` table that the model has not scored yet are backfilled before new candidates.

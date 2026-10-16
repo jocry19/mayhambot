@@ -141,15 +141,17 @@ def test_tier_sync_none_before_first_model():
     assert tier_sync(conn) is None
 
 
-def test_research_credit_cap_and_cheap_rpc(monkeypatch):
+def test_research_credits_and_cheap_rpc(monkeypatch):
+    from core import http
     from research import credits, rpc
     from research.config import rsettings
-    monkeypatch.setattr(credits, "PATH", os.path.join(tempfile.mkdtemp(), "c.json"))
-    monkeypatch.setattr(rsettings, "helius_credits_per_day", 150)
-    assert credits.take("enhanced") and not credits.take("enhanced")
-    assert credits.take("rpc", 50) and not credits.take("rpc")
-    assert credits.report()["today"] == {"enhanced": 100, "rpc": 50}
-    monkeypatch.setattr(credits, "PATH", os.path.join(tempfile.mkdtemp(), "c.json"))
+    monkeypatch.setattr(http, "credits_left_today", lambda service=None: 150.0)
+    monkeypatch.setattr(credits, "used_today", lambda: 0)
+    monkeypatch.setattr(rsettings, "helius_credits_per_day", 0)
+    assert credits.can("enhanced") and not credits.can("rpc", 151)
+    monkeypatch.setattr(rsettings, "helius_credits_per_day", 50)  # optional own cap below core's budget
+    assert not credits.can("enhanced") and credits.can("rpc", 50)
+    monkeypatch.setattr(rsettings, "helius_credits_per_day", 0)
     seen = []
 
     def post(url, method, params):
@@ -161,4 +163,11 @@ def test_research_credit_cap_and_cheap_rpc(monkeypatch):
     monkeypatch.setattr(rpc, "_helius_rpc_url", lambda: "https://mainnet.helius-rpc.com/?api-key=x")
     monkeypatch.setattr(rsettings, "rpc_url", "https://api.mainnet-beta.solana.com")
     assert rpc.call("getSlot", []) == "ok" and len(seen) == 2  # public first, then 1-credit Helius
-    assert credits.used_today() == 1
+
+    def exhausted(w, limit):
+        raise http.CreditsExhausted("used up")
+    from core.sources import wallet_history
+    monkeypatch.setattr(wallet_history, "_helius_wallet_trades", exhausted)
+    monkeypatch.setattr(rpc.settings, "helius_api_key", "x", raising=False)
+    monkeypatch.setattr(rpc, "call", lambda m, p: [])
+    assert rpc.wallet_trades("W", enhanced=True) == []  # no traceback, falls back to RPC

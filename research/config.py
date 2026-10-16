@@ -38,7 +38,7 @@ class ResearchSettings:
     funding_hub_min: int = _i("RESEARCH_FUNDING_HUB_MIN", 12)  # funders of more wallets are exchanges/hubs
     # chain access: public RPC first (no Helius credits), Helius only within a daily research cap
     rpc_url: str = os.getenv("RESEARCH_RPC_URL", "https://api.mainnet-beta.solana.com")
-    helius_credits_per_day: int = _i("RESEARCH_HELIUS_CREDITS_PER_DAY", 25000)
+    helius_credits_per_day: int = _i("RESEARCH_HELIUS_CREDITS_PER_DAY", 0)  # 0 = core.http daily budget only
     enhanced_backfill: int = _i("RESEARCH_ENHANCED_BACKFILL", 1)  # tiered/user wallets via Helius Enhanced (100 cr)
     default_supply: float = _f("RESEARCH_DEFAULT_SUPPLY", 1e9)  # pump.fun standard supply when unknown
 

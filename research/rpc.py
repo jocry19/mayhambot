@@ -1,13 +1,14 @@
 """Cheapest-source chain access for research bulk jobs.
 
 Order: public Solana RPC (RESEARCH_RPC_URL, costs no Helius credits, rate-limited in core.http) ->
-Helius RPC at 1 credit per call, only while research.credits has budget left today. The Helius Enhanced API
-(100 credits per call, 100 parsed swaps) is used only for wallets that matter (tiered / user wallets).
+Helius RPC at 1 credit per call while research has credits left today. The Helius Enhanced API (100 credits per
+call, 100 parsed swaps) is used only for wallets that matter (tiered / user wallets). core.http books every
+Helius call in its shared ledger and raises CreditsExhausted for Enhanced calls once the research share is used.
 """
 import logging
 
 from core.config import settings
-from core.http import post_json
+from core.http import CreditsExhausted, post_json
 from core.sources import wallet_history as core_wh
 from research import credits
 from research.config import rsettings
@@ -40,7 +41,7 @@ def call(method, params):
     else:
         err = None
     url = _helius_rpc_url()
-    if url and credits.take("rpc"):
+    if url and credits.can("rpc"):
         return _post(url, method, params)
     if err:
         raise err
@@ -55,9 +56,14 @@ def wallet_trades(wallet, limit=None, enhanced=False):
     """Swaps of a wallet. enhanced=True uses the Helius Enhanced API (100 credits, up to 100 swaps) if the
     daily cap allows; otherwise getSignaturesForAddress + getTransaction (public RPC first)."""
     limit = limit or rsettings.wallet_tx_limit
-    try:
-        if enhanced and settings.helius_api_key and credits.take("enhanced"):
+    if enhanced and settings.helius_api_key and credits.can("enhanced"):
+        try:
             return core_wh._helius_wallet_trades(wallet, 100)
+        except CreditsExhausted:
+            log.info("helius credits for research used up today, %s via public RPC instead", wallet[:6])
+        except Exception as e:  # noqa: BLE001
+            log.warning("enhanced history %s failed (%s), via RPC instead", wallet[:6], e)
+    try:
         sigs = call("getSignaturesForAddress", [wallet, {"limit": limit}]) or []
         out = []
         for s in sigs:
