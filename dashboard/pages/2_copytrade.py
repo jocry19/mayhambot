@@ -8,7 +8,7 @@ import streamlit as st
 
 from common import AQUA, BLUE, GRAY, ORANGE, VIOLET, pct, short, sidebar, style, usd
 
-from copytrade import control, stats, store
+from copytrade import control, learn, stats, store
 from copytrade import strategy as strategy_mod
 from copytrade.config import load
 
@@ -141,8 +141,8 @@ st.caption(f"{active} Wale beobachtet · {ranked} bewertet · {len(outc)} Wal-K�
 if not active and not len(pos):
     st.info("Noch keine Daten. Der Copy-Trader startet mit der App (`python mayham.py start`) und findet Wale selbst.")
 
-tab_open, tab_alerts, tab_perf, tab_wal, tab_timing, tab_trades, tab_log = st.tabs(
-    ["📂 Offen", "🔔 Einstiege", "📈 Performance", "🐋 Wal-Ranking", "⏱ Timing", "📋 Trades", "🧾 Protokoll"])
+tab_open, tab_alerts, tab_perf, tab_learn, tab_wal, tab_timing, tab_trades, tab_log = st.tabs(
+    ["📂 Offen", "🔔 Einstiege", "📈 Performance", "🧠 Lernen", "🐋 Wal-Ranking", "⏱ Timing", "📋 Trades", "🧾 Protokoll"])
 
 # ---------------------------------------------------------------- open positions (sell buttons)
 with tab_open:
@@ -346,6 +346,75 @@ with tab_timing:
         f.add_hline(y=0, line_color=GRAY, line_width=1)
         st.plotly_chart(style(f.update_layout(title="Je früher die Masse kommt, desto weniger bleibt für uns?",
                                               hovermode="closest"), 300), width="stretch")
+
+# ---------------------------------------------------------------- self-learning
+with tab_learn:
+    lst = learn.status(conn)
+    cols = st.columns(2)
+    for col, strat in zip(cols, control.STRATEGIES):
+        info = lst[strat]
+        with col.container(border=True):
+            st.markdown(f"**{control.STRATEGY_LABELS.get(strat, strat)}**")
+            on = st.toggle("Selbstlernen", value=info["autotune"], key=f"autotune_{strat}")
+            if on != info["autotune"]:
+                control.set_value(conn, f"autotune:{strat}", "1" if on else "0")
+                st.rerun()
+            st.caption(f"{info['total']} Einstiege ausgewertet {info['evaluated']}"
+                       + (f", noch {info['needed_for_tuning']} bis zum ersten Tuning" if info["needed_for_tuning"] else ""))
+            act = info["active_version"]
+            if act:
+                st.success(f"Version {act['version']}: Ziel +{act['take_profit']:.0%}, Stop {act['stop_loss']:.0%}, "
+                           f"Trailing {act['trail_activate']:.0%}→{act['trail_drawdown']:.0%}, "
+                           f"Haltezeit {act['max_hold_min']:.0f} min, Copy-Ansturm-Ausstieg "
+                           f"{'ja' if act.get('inflow_exit') else 'nein'}"
+                           + (f", Einstieg {act['delay_s']} s nach dem Wal" if strat == "whale" else "")
+                           + (f"; Filter: {act['block']}" if act.get("block") else ""))
+            else:
+                st.info("Noch keine gelernte Version aktiv: dein Preset gilt.")
+            if info["wallet_versions"]:
+                st.caption(f"{info['wallet_versions']} Wale haben eigene gelernte Ausstiege.")
+    lstrat = st.radio("Modus", control.STRATEGIES, horizontal=True, key="learn_strat",
+                      format_func=lambda x: control.STRATEGY_LABELS.get(x, x))
+    vers = learn.versions(conn, lstrat)
+    if len(vers):
+        st.subheader("Entwicklung der Parameter")
+        f = go.Figure()
+        f.add_scatter(x=vers.dt, y=vers.test_gain, mode="markers+lines", name="gelernt (Test)",
+                      marker=dict(color=[AQUA if a else GRAY for a in vers.accepted], size=10), line=dict(color=AQUA))
+        f.add_scatter(x=vers.dt, y=vers.baseline_test_gain, mode="lines", name="bisher (Test)", line=dict(color=ORANGE, dash="dot"))
+        f.add_hline(y=0, line_color=GRAY, line_width=1)
+        st.plotly_chart(style(f.update_layout(title="Ø Netto pro Trade auf ungesehenen Daten (farbig = übernommen)",
+                                              yaxis_tickformat=".0%"), 300), width="stretch")
+        st.dataframe(vers.assign(Zeit=vers.dt, Bereich=vers.scope.map(lambda x: "Modus" if x == "mode" else short(x)),
+                                 Übernommen=vers.accepted.astype(bool), Aktiv=vers.active.astype(bool),
+                                 Test=vers.test_gain.map(pct), Bisher=vers.baseline_test_gain.map(pct),
+                                 Parameter=vers.params, Trades=vers.trades, PnL=vers.pnl_sol.round(4))
+                     [["Zeit", "Bereich", "Übernommen", "Aktiv", "Test", "Bisher", "n_train", "n_test", "Trades", "PnL",
+                       "Parameter"]], hide_index=True, width="stretch")
+    c1, c2 = st.columns(2)
+    surf = learn.variant_surface(conn, lstrat)
+    if len(surf):
+        hm = surf.pivot(index="stop_loss", columns="take_profit", values="gain")
+        c1.plotly_chart(style(px.imshow(hm, text_auto=".1%", color_continuous_scale="RdYlGn", aspect="auto",
+                                        labels=dict(x="Kursziel", y="Stop-Loss", color="Ø Netto"))
+                              .update_layout(title=f"Was hätte sich gelohnt? ({int(surf.n.iloc[0])} Einstiege)"), 320),
+                        width="stretch")
+    cmp = learn.exit_rule_comparison(conn, lstrat)
+    if len(cmp):
+        c2.plotly_chart(style(px.bar(cmp, x="style", y="avg_gain", hover_data=["best_variant"],
+                                     color_discrete_sequence=[VIOLET])
+                              .update_layout(title="Eigene Trades: Ausstiegsregeln im Vergleich", yaxis_tickformat=".0%",
+                                             xaxis_title=""), 320), width="stretch")
+    att = learn.attribution(conn, lstrat)
+    if len(att):
+        st.subheader("Was bringt Gewinn? (mit den aktuellen Einstellungen)")
+        st.plotly_chart(style(px.bar(att, x="bucket", y="avg_gain", color="feature", facet_col="feature",
+                                     hover_data=["n", "win_rate"], facet_col_wrap=4)
+                              .update_xaxes(matches=None).update_layout(yaxis_tickformat=".0%", showlegend=False), 420),
+                        width="stretch")
+    if not len(vers) and not len(surf):
+        st.caption("Das Lernen braucht 4,5 h alte Einstiege mit Kursdaten. Es läuft alle 10 min in der App "
+                   "oder von Hand: `python -m copytrade learn`.")
 
 # ---------------------------------------------------------------- trades
 with tab_trades:

@@ -90,6 +90,18 @@ stats.backtest(conn, settings)                     # Modus 1 walk-forward
 stats.signal_backtest(conn, preset)                # Modus 2 mit Preset auf vergangenen Signalen
 stats.events(conn, limit)                          # Protokoll
 strategy.EXIT_NAMES                                # deutsche Namen der Ausstiegsgründe
+
+# Selbstlernen (copytrade/learn.py, siehe Abschnitt „Selbstlernen“)
+learn.status(conn)                                 # je Modus: an/aus, ausgewertete Einstiege je Art, fehlende bis zum Tuning,
+                                                   # aktive Version (dict mit take_profit, stop_loss, ..., version), Wal-Versionen
+learn.versions(conn, strategy=None, scope=None)    # Parameter-Historie + Papier/Live-PnL der Trades je Version
+                                                   # (id, dt, scope 'mode'|Wallet, params JSON, n_train, n_test, train_gain,
+                                                   #  test_gain, baseline_test_gain, accepted, active, trades, pnl_sol, win_rate)
+learn.variant_surface(conn, "whale", "take_profit", "stop_loss")   # Heatmap: Ø Netto-Gewinn je Parameterpaar
+learn.attribution(conn, "signal")                  # Ø Gewinn je Merkmal-Bucket (tier, grade, mcap, liq, score, buyers, size)
+learn.exit_rule_comparison(conn, "whale")          # eigene Trades: tatsächlich vs. bester Ziel/Trailing/Copy-Ansturm/kurz/lang
+learn.params_for(conn, "whale", wallet=None)       # was der Bot gerade für neue Positionen nimmt (None = Preset)
+control.set_value(conn, "autotune:whale", "0")     # Selbstlernen je Modus aus ("1" = an, Standard)
 ```
 
 `Preset`-Felder: `size_sol, max_open, max_daily_loss_sol, take_profit, learned_tp, stop_loss, trail_activate,
@@ -107,7 +119,12 @@ slippage_bps` (Anteile: 0.2 = 20 %; `min_score`, `min_smart_buyers`, `max_signal
 | `ct_commands` | id, ts, action (buy/sell), position_id, mint, size_sol, strategy, status (pending/done/failed), result |
 | `ct_equity` | ts, mode, balance_sol, open_value_sol, equity_sol (jede Minute) |
 | `ct_wallets`, `ct_swaps`, `ct_buy_outcomes`, `ct_wallet_rank` | Wal-Tracking, Wal-Käufe, Pump/Timing-Messung je Kauf, Wal-Ranking |
-| `ct_events` | ts, level, kind (buy/sell/hint/skip/error/discover/start/stop), message, data |
+| `ct_events` | ts, level, kind (buy/sell/hint/skip/wait/learn/error/discover/start/stop), message, data |
+| `ct_evals` | kind (trade/whale_buy/signal), ref, strategy, wallet, mint, ts, gains (JSON: Netto-Gewinn je Gitter-Variante), actual_gain, sim_actual, features (JSON) |
+| `ct_param_versions` | id, ts, strategy, scope ('mode' oder Wallet), params (JSON inkl. gelernter Filter `block`), n_train, n_test, train_gain, test_gain, baseline_test_gain, accepted, active, notes |
+| `ct_candles` | 1-Minuten-Kerzen, die das Lernen selbst geholt hat (sonst `research_candles`) |
+
+`ct_positions` hat zusätzlich `param_version` (welche gelernte Version die Ausstiege gesetzt hat, NULL = Preset) und `use_inflow_exit`.
 
 ## So entscheidet der Bot (Modus 1)
 
@@ -134,6 +151,26 @@ Die Note A–E skaliert die Größe (A 1,5×, B 1,2×, C 1×, D 0,6×, E 0,4×).
 `max_signal_age_s`, Liquidität/Market Cap im Preset-Rahmen, Preis seit dem Signal nicht schon +50 %.
 Ausstieg: Ziel, Stop, Trailing, Zeit, oder „Smart Money steigt aus“ (die Wallets des Signals haben ≥ 50 % verkauft).
 Ultra- und Smart-Wallets des Modells werden außerdem als Wale für Modus 1 beobachtet.
+
+## Selbstlernen (`learn.py`, `sim.py`)
+
+Läuft in der Wartungsschleife (alle 10 min) oder von Hand mit `python -m copytrade learn`.
+
+1. **Auswerten:** Jeder abgeschlossene Trade, jeder gemessene Wal-Kauf und jedes vergangene Smart-Money-Signal wird
+   auf 1-Minuten-Kerzen gegen ein Gitter aus 1296 Varianten nachgespielt: Einstieg 15/60/180 s nach dem Wal,
+   Ziel +15…+150 %, Stop 10/20/30 %, Trailing aus/15→8 %/30→15 %, Haltezeit 15–240 min, Verkauf am Ende des
+   Copy-Ansturms ja/nein, Wal-Verkauf als Zwangsausstieg. Kosten (3 %) sind abgezogen; im selben Kerzen-Minute wird
+   der Stop vor dem Ziel geprüft (vorsichtig). Erst nach 4,5 h ist ein Einstieg auswertbar.
+2. **Tunen:** je Modus (ab 40 Einstiegen) und je Wal (ab 20) gewinnt die Variante, die auf den älteren 70 % am meisten
+   bringt. Übernommen wird sie nur, wenn sie auf den neueren 30 % (nie gesehen) mindestens 1 %-Punkt pro Trade besser
+   ist als die aktuellen Einstellungen und dort im Plus liegt. Jede Prüfung landet in `ct_param_versions`.
+   Eigene Trades zählen doppelt; `notes.calibration_gap` zeigt, wie weit Papier-Ergebnis und Simulation auseinanderliegen.
+3. **Filter:** Merkmal-Gruppen (Wal-Tier, Modell-Note, Market Cap, Liquidität, Signal-Score, Anzahl Smart Wallets,
+   Wal-Größe), die mit der gewählten Variante in Training **und** Test verlieren (≥15/≥8 Fälle), werden übersprungen.
+
+Nie angefasst: Positionsgröße, max. offene Positionen, Tagesverlust-Limit, Live-Schalter. Gelernter Stop nie weiter
+als der Stop deines Presets, Haltezeit nie länger als dein Maximum (auch wenn du das Preset später verschärfst).
+Im manuellen Modus wird nur das gelernte Kursziel im Hinweis gezeigt.
 
 ## Papier-Fills
 
