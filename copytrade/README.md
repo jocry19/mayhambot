@@ -139,9 +139,16 @@ slippage_bps` (Anteile: 0.2 = 20 %; `min_score`, `min_smart_buyers`, `max_signal
   das Lernen tunt Ausstiege pro Cluster. `exit_capture` (wie viel vom Pump der Wal mitnimmt) ist ein Lern-Merkmal.
 - Abfrage-Takt pro Wallet: letzter Swap < 6 h alle `CT_WALLET_POLL_SECONDS`, < 48 h alle `CT_POLL_WARM_SECONDS` (60),
   sonst alle `CT_POLL_COLD_SECONDS` (300); manuelle Wallets immer schnell.
-- Die Frage „gibt es Neues?“ (`getSignaturesForAddress`) geht an `CT_POLL_RPC_URL` (Standard: öffentliches Mainnet-RPC,
-  wenn `SOLANA_RPC_URL` Helius ist; `off` = alles über Helius). Helius-Credits kosten nur echte Transaktionen
-  (`getTransaction`). Fällt das öffentliche RPC aus, wird automatisch Helius genommen.
+- **Websocket:** Für die heißen Wallets (letzter Swap < 6 h, manuelle) hält der Bot eine `logsSubscribe`-Subscription
+  je Wallet auf `CT_WS_URL` (Standard: öffentlicher Mainnet-Websocket, `off` = nur Polling, max. `CT_WS_MAX_WALLETS`=40).
+  Ein Wal-Kauf ist damit nach ~1 s bekannt statt beim nächsten Poll. Abbrüche: Neuverbindung mit Backoff 1→60 s.
+  Abgedeckte Wallets werden nur noch als Netz im 60-s-Takt gepollt; jede Transaktion wird nur einmal gehandelt.
+  Einmal pro Stunde eine Logzeile: Swaps per Websocket vs. per Polling, RPC-Aufrufe öffentlich vs. Helius.
+- **RPC:** Lesen (`getSignaturesForAddress`, `getTransaction`, `getTokenSupply`) für Polls, Websocket-Treffer,
+  Wal-Suche und Backfill geht zuerst an `CT_POLL_RPC_URL` (Standard: öffentliches Mainnet-RPC, wenn `SOLANA_RPC_URL`
+  Helius ist; `off` = alles über Helius), Helius nur als Fallback. Helius bleibt für Live-Pfade (`getBalance`,
+  `sendTransaction`, `getSignatureStatuses`, eigene Swap-Bestätigung). Ist copytrades Helius-Tagesanteil
+  (core.http, 15 %) verbraucht, leitet core auch diese Standard-Aufrufe an das öffentliche RPC.
 - Wal-Suche auf Trend-Coins höchstens alle `CT_DISCOVER_EVERY_SECONDS` (1800).
 
 ## So entscheidet der Bot (Modus 1)
@@ -231,6 +238,8 @@ CT_POLL_WARM_SECONDS=60
 CT_POLL_COLD_SECONDS=300
 CT_POLL_RPC_URL=                      # leer = öffentliches RPC für Polls, wenn Helius das Haupt-RPC ist; off = Helius
 CT_DISCOVER_EVERY_SECONDS=1800
+CT_WS_URL=wss://api.mainnet-beta.solana.com   # off = nur Polling
+CT_WS_MAX_WALLETS=40
 CT_MIN_WHALE_BUY_SOL=2
 
 # Bewertung

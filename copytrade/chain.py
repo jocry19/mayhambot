@@ -17,39 +17,71 @@ log = logging.getLogger("copytrade.chain")
 
 
 PUBLIC_RPC = "https://api.mainnet-beta.solana.com"
+READ_METHODS = {"getSignaturesForAddress", "getTransaction", "getTokenSupply"}
+
+try:  # Helius credit ledger shared by all mayhambot processes (core/README.md "Helius monthly credits")
+    from core.http import CreditsExhausted, rpc_url as _core_rpc_url  # type: ignore
+except Exception:  # copytrade without core
+    _core_rpc_url = None
+
+    class CreditsExhausted(Exception):  # type: ignore[no-redef]
+        pass
 
 
 class Rpc:
+    """JSON-RPC client. Bulk reads (signatures, transactions, token supply) go to the free public RPC first and
+    use the main RPC (Helius, paid in credits) only as fallback; live paths (balance, send, status) use the
+    main RPC. Once copytrade's Helius credits for today are used up, core routes standard calls to public."""
+
     def __init__(self, settings: Settings, url: str | None = None):
         self.url = url or settings.rpc_url
         self.lim = http.limiter("rpc:" + self.url, settings.rpc_max_rps)
         self.shared = http.throttle is not None and (urlparse(self.url).hostname or "") in http.SHARED_HOSTS
         self._id = 0
-        self.poller: Rpc | None = None
+        self.public: Rpc | None = None
         if url is None:
             pu = settings.poll_rpc_url or (PUBLIC_RPC if "helius" in self.url else "")
             if pu and pu != "off" and pu != self.url:
-                self.poller = Rpc(settings, url=pu)
-        self.poll_fallbacks = 0
+                self.public = Rpc(settings, url=pu)
+        self.poller = self.public  # old name
+        self.fallbacks = 0
+        self.counts: dict[str, int] = {}  # "public:getTransaction" -> n (hourly usage log)
 
-    def poll_signatures(self, address: str, limit: int = 15, until: str | None = None) -> list[dict]:
-        """Cheap "anything new?" check on the free poll RPC; falls back to the main RPC on errors."""
-        if self.poller:
-            try:
-                return self.poller.signatures(address, limit=limit, until=until)
-            except Exception as e:
-                self.poll_fallbacks += 1
-                log.debug("poll rpc failed, using main rpc: %s", e)
-        return self.signatures(address, limit=limit, until=until)
+    @property
+    def poll_fallbacks(self) -> int:
+        return self.fallbacks
 
     def call(self, method: str, params: list[Any]) -> Any:
         self._id += 1
+        url = _core_rpc_url(method, self.url) if _core_rpc_url and "helius" in self.url else self.url
         if not self.shared:  # Helius / public RPC: core.http.throttle() spaces calls across all processes
             self.lim.wait()
-        d = http.post_json(self.url, {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params})
+        kind = "public" if url != self.url or "helius" not in url else "helius"
+        self.counts[f"{kind}:{method}"] = self.counts.get(f"{kind}:{method}", 0) + 1
+        d = http.post_json(url, {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params})
         if "error" in d:
             raise RuntimeError(f"rpc {method}: {d['error']}")
         return d.get("result")
+
+    def read(self, method: str, params: list[Any], main_if_empty: bool = False) -> Any:
+        """Public RPC first, main RPC on errors (or on an empty answer when main_if_empty)."""
+        if self.public:
+            try:
+                r = self.public.call(method, params)
+                if r is not None or not main_if_empty:
+                    return r
+            except CreditsExhausted:
+                raise
+            except Exception as e:
+                log.debug("public rpc %s failed, using main rpc: %s", method, e)
+            self.fallbacks += 1
+        return self.call(method, params)
+
+    def usage(self) -> dict[str, int]:
+        out = dict(self.counts)
+        for k, v in (self.public.counts if self.public else {}).items():
+            out[k] = out.get(k, 0) + v
+        return out
 
     def signatures(self, address: str, limit: int = 50, until: str | None = None,
                    before: str | None = None) -> list[dict]:
@@ -58,13 +90,15 @@ class Rpc:
             opts["until"] = until
         if before:
             opts["before"] = before
-        return self.call("getSignaturesForAddress", [address, opts]) or []
+        return self.read("getSignaturesForAddress", [address, opts]) or []
 
-    def transaction(self, sig: str) -> dict | None:
-        return self.call(
-            "getTransaction",
-            [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}],
-        )
+    def poll_signatures(self, address: str, limit: int = 15, until: str | None = None) -> list[dict]:
+        return self.signatures(address, limit=limit, until=until)
+
+    def transaction(self, sig: str, main: bool = False) -> dict | None:
+        """main=True: our own live swap (straight to the main RPC, it sees fresh transactions first)."""
+        params = [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}]
+        return self.call("getTransaction", params) if main else self.read("getTransaction", params)
 
     def balance_sol(self, address: str) -> float:
         r = self.call("getBalance", [address, {"commitment": "confirmed"}])
@@ -86,7 +120,7 @@ def token_decimals(rpc: Rpc, mint: str) -> int:
         return _decimals_cache[mint]
     dec = 6
     try:
-        r = rpc.call("getTokenSupply", [mint])
+        r = rpc.read("getTokenSupply", [mint]) if hasattr(rpc, "read") else rpc.call("getTokenSupply", [mint])
         dec = int(r["value"]["decimals"])
     except Exception as e:
         log.debug("decimals %s failed: %s", mint, e)

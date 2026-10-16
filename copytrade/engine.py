@@ -6,7 +6,7 @@ import signal
 import threading
 import time
 
-from . import chain, learn, ranking, store, tracker
+from . import chain, learn, ranking, store, tracker, ws
 from .config import Settings
 from .execution import make_executors
 from .strategy import Strategy
@@ -22,7 +22,8 @@ class Engine:
         self.exs = make_executors(s, self.rpc)
         self.strategy = Strategy(self.conn, s, self.exs)
         self._stop = stop_event or threading.Event()
-        self._rr = 0
+        self.stream: ws.WalletStream | None = None
+        self._last_usage = time.time()
 
     # ------------------------------------------------------------------ maintenance
     def maintain(self, discover: bool = True) -> None:
@@ -65,19 +66,65 @@ class Engine:
     def poll_round(self) -> int:
         """Poll the wallets that are due (hot ones every few seconds, quiet ones every 1-5 min), within the RPC budget."""
         budget = max(1, int(self.s.rpc_max_rps * self.s.wallet_poll_seconds * 0.5))
-        batch = tracker.due_wallets(self.conn, self.s)[:budget]
+        covered = self.stream.covered() if self.stream else set()
+        batch = tracker.due_wallets(self.conn, self.s, covered=covered)[:budget]
         seen = 0
         for w in batch:
             try:
                 for sw in store.retry_locked(tracker.poll, self.conn, self.s, self.rpc, w):
                     seen += 1
-                    if sw.side == "buy":
-                        self.strategy.on_whale_buy(sw)
-                    else:
-                        self.strategy.on_whale_sell(sw)
+                    self._on_swap(sw)
             except Exception as e:
                 log.debug("poll %s failed: %s", w["address"][:6], e)
+        if self.stream:
+            self.stream.set_wallets(tracker.hot_wallets(self.conn, self.s))
         return seen
+
+    def _on_swap(self, sw) -> None:
+        if sw.side == "buy":
+            self.strategy.on_whale_buy(sw)
+        else:
+            self.strategy.on_whale_sell(sw)
+
+    def drain_stream(self, until: float) -> int:
+        """Handle websocket notifications until `until` (returns at once without a stream)."""
+        n = 0
+        while self.stream and not self._stop.is_set():
+            left = until - time.time()
+            if left <= 0:
+                break
+            try:
+                wallet, sig, _ = self.stream.events.get(timeout=min(0.5, left))
+            except Exception:  # queue.Empty
+                continue
+            try:
+                sw = store.retry_locked(tracker.process_signature, self.conn, self.s, self.rpc, wallet, sig)
+                if sw:
+                    n += 1
+                    self._on_swap(sw)
+            except Exception as e:
+                log.debug("ws swap %s failed: %s", sig[:8], e)
+        return n
+
+    def usage_line(self, force: bool = False) -> str | None:
+        """Once an hour: swaps found by websocket vs. polling, and RPC calls public vs. Helius."""
+        if not force and time.time() - self._last_usage < 3600:
+            return None
+        self._last_usage = time.time()
+        u = self.rpc.usage()
+        pub = sum(v for k, v in u.items() if k.startswith("public:"))
+        hel = sum(v for k, v in u.items() if k.startswith("helius:"))
+        st = self.stream
+        line = (f"detection last hour: {tracker.DETECTED['ws']} swaps via websocket, {tracker.DETECTED['poll']} via "
+                f"polling; websocket {'connected' if st and st.connected else 'off/disconnected'}"
+                + (f" ({len(st.covered())} wallets, {st.stats['connects']} connects)" if st else "")
+                + f"; rpc calls public {pub}, helius {hel}, fallbacks {self.rpc.fallbacks}")
+        tracker.DETECTED.update(ws=0, poll=0)
+        self.rpc.counts.clear()
+        if self.rpc.public:
+            self.rpc.public.counts.clear()
+        log.info(line)
+        return line
 
     def run(self, maintain_every_s: float = 600) -> None:
         if threading.current_thread() is threading.main_thread():
@@ -120,14 +167,24 @@ class Engine:
         tracker.load_manual(self.conn, self.s)
         threading.Thread(target=price_loop, name="positions", daemon=True).start()
         threading.Thread(target=maint_loop, name="maintenance", daemon=True).start()
+        if self.s.ws_url and self.s.ws_url != "off" and ws.available():
+            self.stream = ws.WalletStream(self.s).start()
+            self.stream.set_wallets(tracker.hot_wallets(self.conn, self.s))
         while not self._stop.is_set():
             t0 = time.time()
             try:
                 self.poll_round()
                 self.strategy.process_pending()
+                self.usage_line()
             except Exception as e:
                 log.warning("poll round failed: %s", e)
-            self._stop.wait(max(0.5, self.s.wallet_poll_seconds - (time.time() - t0)))
+            until = t0 + max(0.5, self.s.wallet_poll_seconds)
+            if self.stream:
+                self.drain_stream(until)
+            else:
+                self._stop.wait(max(0.0, until - time.time()))
+        if self.stream:
+            self.stream.stop()
         store.event(self.conn, "stop", "Copy-Trader gestoppt")
 
 

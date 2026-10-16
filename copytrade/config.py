@@ -69,6 +69,9 @@ class Settings:
     # "is there anything new?" polls (getSignaturesForAddress) go to a free RPC so a paid/credit RPC (Helius)
     # is only used for real transactions. Default: public mainnet when SOLANA_RPC_URL is Helius; "off" = same RPC.
     poll_rpc_url: str = field(default_factory=lambda: os.getenv("CT_POLL_RPC_URL", ""))
+    # real-time detection: logsSubscribe per hot wallet on this websocket ("off" = polling only)
+    ws_url: str = field(default_factory=lambda: os.getenv("CT_WS_URL", "wss://api.mainnet-beta.solana.com"))
+    ws_max_wallets: int = field(default_factory=lambda: _i("CT_WS_MAX_WALLETS", 40))
     discover_every_s: float = field(default_factory=lambda: _f("CT_DISCOVER_EVERY_SECONDS", 1800))
     poll_warm_seconds: float = field(default_factory=lambda: _f("CT_POLL_WARM_SECONDS", 60))
     poll_cold_seconds: float = field(default_factory=lambda: _f("CT_POLL_COLD_SECONDS", 300))

@@ -37,6 +37,13 @@ try:  # cross-process limiter shared with signals/ and research/ (GeckoTerminal'
     from core.http import SHARED_HOSTS, penalize, throttle  # type: ignore
 except Exception:
     SHARED_HOSTS, penalize, throttle = set(), None, None
+try:  # Helius credits per request (1 for standard RPC, 100 for the Enhanced API) and the "used up" signal
+    from core.http import CreditsExhausted, credit_cost  # type: ignore
+except Exception:
+    credit_cost = None
+
+    class CreditsExhausted(requests.RequestException):  # type: ignore[no-redef]
+        pass
 
 _session = requests.Session()
 _session.headers["User-Agent"] = "mayhambot-copytrade/1.0"
@@ -84,7 +91,9 @@ def request_json(
     shared = throttle is not None and host in SHARED_HOSTS
     for attempt in range(retries):
         if shared:
-            throttle(host)  # one budget for all mayhambot processes
+            # one budget for all mayhambot processes; raises CreditsExhausted when today's Helius share is gone
+            # (not retried: the caller falls back to the public RPC)
+            throttle(host, cost=credit_cost(url, kw) if credit_cost else None)
         elif limiter_name:
             limiter(limiter_name).wait()
         try:

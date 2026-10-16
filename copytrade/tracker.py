@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 from . import chain, market, store
@@ -17,6 +18,25 @@ from .config import Settings
 
 log = logging.getLogger("copytrade.tracker")
 WALLETS_FILE = Path(__file__).with_name("wallets.txt")
+
+# signatures already handled (websocket and polling both see the same transaction: act once)
+_seen: OrderedDict[str, None] = OrderedDict()
+DETECTED = {"ws": 0, "poll": 0}  # swaps found per source since the last hourly log line
+
+
+def _mark(sig: str) -> bool:
+    """True the first time a signature is seen."""
+    if sig in _seen:
+        return False
+    _seen[sig] = None
+    if len(_seen) > 20000:
+        _seen.popitem(last=False)
+    return True
+
+
+def _known(conn, sig: str, wallet: str) -> bool:
+    return sig in _seen or conn.execute("SELECT 1 FROM ct_swaps WHERE sig=? AND wallet=? LIMIT 1",
+                                        (sig, wallet)).fetchone() is not None
 
 
 def load_manual(conn, s: Settings) -> int:
@@ -110,16 +130,32 @@ def poll_interval(s: Settings, last_swap: int | None, now: float, manual: bool =
     return s.poll_cold_seconds
 
 
-def due_wallets(conn, s: Settings, now: float | None = None) -> list:
-    """Active wallets (max CT_MAX_TRACKED_WALLETS, best ranked) whose poll interval has passed, longest waiting first."""
+def hot_wallets(conn, s: Settings, now: float | None = None) -> list[str]:
+    """Wallets polled at the fast rate (recent swaps, manual): these get a websocket subscription."""
     now = now or time.time()
-    rows = conn.execute(
+    return [r["address"] for r in _tracked(conn, s)
+            if poll_interval(s, r["last_swap"], now, r["source"] == "manual") <= s.wallet_poll_seconds]
+
+
+def _tracked(conn, s: Settings) -> list:
+    return conn.execute(
         """SELECT w.*, r.score, r.samples, (SELECT MAX(ts) FROM ct_swaps x WHERE x.wallet=w.address) AS last_swap
            FROM ct_wallets w LEFT JOIN ct_wallet_rank r ON r.address = w.address
            WHERE w.active = 1 ORDER BY (w.source='manual') DESC, COALESCE(r.score, -0.001) DESC LIMIT ?""",
         (s.max_tracked_wallets,)).fetchall()
-    due = [r for r in rows if now - (r["last_polled"] or 0)
-           >= poll_interval(s, r["last_swap"], now, r["source"] == "manual") - 0.5]
+
+
+def due_wallets(conn, s: Settings, now: float | None = None, covered: set | frozenset = frozenset()) -> list:
+    """Active wallets (max CT_MAX_TRACKED_WALLETS, best ranked) whose poll interval has passed, longest waiting first.
+    covered: wallets the websocket watches live; they are only polled as a safety net (warm interval)."""
+    now = now or time.time()
+    rows = _tracked(conn, s)
+
+    def interval(r) -> float:
+        iv = poll_interval(s, r["last_swap"], now, r["source"] == "manual")
+        return max(iv, s.poll_warm_seconds) if r["address"] in covered else iv
+
+    due = [r for r in rows if now - (r["last_polled"] or 0) >= interval(r) - 0.5]
     return sorted(due, key=lambda r: r["last_polled"] or 0)
 
 
@@ -169,8 +205,9 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row) -> list[chain.Swap]:
     solusd = market.sol_usd(s)
     out = []
     for sg in reversed(sigs):
-        if sg.get("err"):
-            continue
+        if sg.get("err") or _known(conn, sg["signature"], wallet):
+            continue  # failed, or already handled from the websocket
+        _mark(sg["signature"])
         try:
             sw = chain.extract_swap(rpc.transaction(sg["signature"]), wallet, solusd)
         except Exception as e:
@@ -180,11 +217,38 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row) -> list[chain.Swap]:
             out.append(sw)
     if out:
         store.save_swaps(conn, out, solusd)
+        DETECTED["poll"] += len(out)
     # advance the cursor only after the swaps are stored (a locked write is retried without losing them)
     conn.execute("UPDATE ct_wallets SET last_sig=?, last_polled=? WHERE address=?",
                  (sigs[0]["signature"], int(time.time()), wallet))
     conn.commit()
     return out
+
+
+def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, tries: int = 3) -> chain.Swap | None:
+    """A transaction the websocket reported for a watched wallet -> stored swap (or None). Public RPC first; a
+    brand-new transaction can be missing there for a moment, so retry and ask the main RPC on the last try."""
+    if _known(conn, sig, wallet):
+        return None
+    tx = None
+    for i in range(tries):
+        try:
+            tx = rpc.read("getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
+                                                    "commitment": "confirmed"}], main_if_empty=i == tries - 1)
+        except Exception as e:
+            log.debug("ws tx %s failed: %s", sig[:8], e)
+        if tx:
+            break
+        time.sleep(0.7)
+    if not tx:
+        return None  # the polling net picks it up later
+    _mark(sig)
+    solusd = market.sol_usd(s)
+    sw = chain.extract_swap(tx, wallet, solusd)
+    if sw:
+        store.save_swaps(conn, [sw], solusd)
+        DETECTED["ws"] += 1
+    return sw
 
 
 def prune(conn, s: Settings) -> int:

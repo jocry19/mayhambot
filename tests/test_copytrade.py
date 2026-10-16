@@ -291,7 +291,7 @@ def test_geckoterminal_uses_shared_limiter(monkeypatch):
     from copytrade import http as cthttp
 
     calls = []
-    monkeypatch.setattr(cthttp, "throttle", lambda host: calls.append(("throttle", host)))
+    monkeypatch.setattr(cthttp, "throttle", lambda host, **k: calls.append(("throttle", host)))
     monkeypatch.setattr(cthttp, "penalize", lambda host, s: calls.append(("penalize", host, s)))
     monkeypatch.setattr(cthttp.time, "sleep", lambda s: calls.append(("sleep", s)))
 
@@ -350,7 +350,7 @@ def test_helius_rpc_uses_shared_limiter(monkeypatch):
     from copytrade import http as cthttp
 
     hosts = []
-    monkeypatch.setattr(cthttp, "throttle", lambda host: hosts.append(host))
+    monkeypatch.setattr(cthttp, "throttle", lambda host, **k: hosts.append(host))
 
     class R:
         status_code, text, headers = 200, "", {}

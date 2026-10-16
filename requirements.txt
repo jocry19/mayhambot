@@ -12,6 +12,8 @@ rich>=13
 streamlit>=1.50
 plotly>=5.20
 pandas>=2.0
+# copytrade: real-time whale detection (logsSubscribe); without it the copy trader only polls
+websockets>=12
 # copytrade (live trading only)
 # solders>=0.21
 # tests (mayham.py update runs them before every restart)

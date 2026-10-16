@@ -139,7 +139,7 @@ class LiveExecutor(PaperExecutor):
 
     def _actual(self, sig: str) -> chain.Swap | None:
         for _ in range(5):
-            tx = self.rpc.transaction(sig)
+            tx = self.rpc.transaction(sig, main=True)
             if tx:
                 return chain.extract_swap(tx, self.pubkey, market.sol_usd(self.s))
             time.sleep(2)
