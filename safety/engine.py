@@ -208,23 +208,35 @@ def clear_override(conn, mint):
 
 
 def candidates(conn, extra=(), cfg=None):
-    """Coins worth checking, most urgent first: never checked, then due by TTL. Sources: tracked coins,
-    signals of the last 24 h, plus `extra` (e.g. the copy trader's open positions or a fresh buy)."""
+    """Coins worth checking, most urgent first: open copy-trading positions (re-checked every
+    SAFETY_TTL_YOUNG_SEC: dev cash-out or LP pull must show up while we hold), then never-checked coins,
+    then coins due by TTL. Sources: ct_positions, signals of the last 24 h, tracked coins, plus `extra`."""
     cfg = cfg or default_settings
     store.ensure_schema(conn)
     since = int(time.time()) - 86400
+    held = open_positions(conn)
     mints = list(dict.fromkeys(
-        list(extra)
+        held + list(extra)
         + [r[0] for r in conn.execute("SELECT DISTINCT mint FROM signals WHERE ts>=? ORDER BY ts DESC", (since,))]
         + [r[0] for r in conn.execute("SELECT mint FROM tokens WHERE tracked=1 ORDER BY last_updated DESC LIMIT 60")]))
-    never, due = [], []
+    urgent, never, due = [], [], []
     for m in mints:
         a = get(conn, m, cfg)
-        if a is None:
+        if m in held and (a is None or time.time() - a.ts >= cfg.ttl_young_sec):
+            urgent.append(m)
+        elif a is None:
             never.append(m)
         elif is_due(a, cfg):
             due.append((a.ts, m))
-    return never + [m for _, m in sorted(due)]
+    return urgent + never + [m for _, m in sorted(due)]
+
+
+def open_positions(conn):
+    """Mints of open copy-trading positions (paper and live). Read-only; [] if copytrade never ran."""
+    try:
+        return [r[0] for r in conn.execute("SELECT DISTINCT mint FROM ct_positions WHERE status='open' AND mint IS NOT NULL")]
+    except Exception:  # noqa: BLE001 - table missing
+        return []
 
 
 def refresh(conn=None, extra=(), budget_sec=None, max_tokens=None, cfg=None, fetcher_factory=None):

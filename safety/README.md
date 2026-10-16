@@ -29,9 +29,10 @@ Suggested wiring (done by the owners of those packages):
   optionally call `safety.refresh(conn, extra=[mint])` right before a signal fires.
 - **copytrade/**: before every buy `if safety.is_blocked(conn, mint): skip`. For real money a stricter rule is
   available: `a = safety.assess(mint, conn, deep=False)` (about 8 calls, a few seconds) and skip if `a.blocked`.
-  Pass open positions as `extra` to `refresh` so they keep being watched (dev cash-out, LP pulled).
-- **research/ or the launcher**: call `safety.refresh(conn)` once per cycle, or run `python -m safety run` as its
-  own process (every `SAFETY_REFRESH_EVERY_SEC`, at most `SAFETY_REFRESH_BUDGET_SEC` per pass).
+  `refresh` reads open positions from `ct_positions` itself and re-checks them every `SAFETY_TTL_YOUNG_SEC`
+  (dev cash-out, LP pulled), nothing to pass in.
+- **launcher**: runs `python -m safety run` as its own service "safety" (log `logs/safety.log`): every
+  `SAFETY_REFRESH_EVERY_SEC`, at most `SAFETY_REFRESH_BUDGET_SEC` per pass.
 - **web/ cli/**: risk badge from `safety_tokens.score/level/blocked`, detail list from `reasons_json`
   (`[{check, risk, text}]`, worst first) and `positives_json`, history from `safety_history`.
 

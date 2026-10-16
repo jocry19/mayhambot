@@ -226,3 +226,17 @@ def test_penalty_curve():
     store.save_assessment(c, engine.combine(MINT, res, cfg))
     f = safety.signal_penalty(c, MINT, cfg)["factor"]
     assert abs(f - (1 - (1 - cfg.min_penalty_factor) / 2)) < 0.01
+
+
+def test_open_copytrade_positions_are_watched():
+    c = conn()
+    c.execute("CREATE TABLE ct_positions (id INTEGER PRIMARY KEY, mint TEXT, status TEXT)")
+    c.execute("INSERT INTO ct_positions(mint, status) VALUES (?, 'open'), ('CLOSEDxx', 'closed')", (MINT,))
+    c.commit()
+    assert safety.candidates(c, cfg=CFG) == [MINT]
+    a = safety.assess(MINT, c, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
+    assert safety.candidates(c, cfg=CFG) == []
+    c.execute("UPDATE safety_tokens SET ts=? WHERE mint=?", (a.ts - CFG.ttl_young_sec, MINT))
+    c.execute("UPDATE safety_tokens SET pair_created_at=0")  # old coin: normal TTL would be 2 h
+    c.commit()
+    assert safety.candidates(c, cfg=CFG) == [MINT]
