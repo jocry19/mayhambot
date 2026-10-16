@@ -53,9 +53,16 @@ class Strategy:
         try:  # a sell that never finished (crash mid-close): back to open so the exits can retry
             conn.execute("UPDATE ct_positions SET status='open', closed_at=NULL WHERE status='closing' AND closed_at<?",
                          (int(time.time()) - 300,))
+            # a buy that never got its fill booked: paper simply failed; live needs a look at the wallet
+            conn.execute("DELETE FROM ct_positions WHERE status='opening' AND mode='paper' AND opened_at<?",
+                         (int(time.time()) - 600,))
+            for r in conn.execute("SELECT id, symbol FROM ct_positions WHERE status='opening' AND mode='live' "
+                                  "AND opened_at<?", (int(time.time()) - 600,)).fetchall():
+                store.event(conn, "error", f"Live-Kauf {r[1]} (Position {r[0]}) ohne gebuchte Füllung: bitte im "
+                                           "Wallet prüfen", "error")
             conn.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("position recovery at start failed: %s", e)
 
     # ------------------------------------------------------------------ helpers
     def executor(self, strategy: str):
@@ -373,6 +380,7 @@ class Strategy:
         if block:
             return self._skip("launch", mint, block, snap)
         return self.open("launch", m, mint, p.size_sol, snap, p, reason=reason, meta=info, score=row["score"] or 0,
+                         intent=f"launch:{mint}",
                          tp=ex["take_profit"], hold=min(ex["max_hold_min"], p.max_hold_min), sl=ex["stop_loss"],
                          trail=(ex["trail_activate"], ex["trail_drawdown"]), inflow=0)
 
@@ -381,15 +389,49 @@ class Strategy:
              hold: float, reason: str, wallet: str = "", whale: Swap | None = None, meta: dict | None = None,
              signal_id: int | None = None, score: float = 0, sl: float | None = None,
              trail: tuple[float, float] | None = None, inflow: int | None = None,
-             version: int | None = None) -> int | None:
+             version: int | None = None, intent: str | None = None) -> int | None:
         sl = p.stop_loss if sl is None else min(sl, p.stop_loss)  # never wider than your preset
         trail = trail or (p.trail_activate, p.trail_drawdown)
         inflow = (1 if strategy == "whale" else 0) if inflow is None else inflow
         ex = self.executor(strategy) if strategy in control.STRATEGIES else self.exs.get("paper")
-        fill = ex.buy(mint, size, snap)
-        if not fill.ok:
+        intent = intent or (f"signal:{signal_id}" if signal_id else f"whale:{whale.signature}" if whale else None)
+        # the intent row is committed BEFORE the swap: if a later write fails (database locked) and the caller
+        # is retried, the same intent finds this row and never sends a second swap
+        if intent:
+            r = self.conn.execute("SELECT id, status FROM ct_positions WHERE intent=?", (intent,)).fetchone()
+            if r:
+                return r[0] if r[1] != "failed" else None
+        pid = self.conn.execute(
+            """INSERT INTO ct_positions(mode, strategy, managed, wallet, mint, symbol, signal_id, opened_at, size_sol,
+                 tokens, entry_cost_sol, status, intent) VALUES (?,?,?,?,?,?,?,?,?,0,0,'opening',?)""",
+            (ex.mode, strategy, managed, wallet, mint, snap.symbol, signal_id, int(time.time()), size, intent),
+        ).lastrowid
+        self.conn.commit()
+        try:
+            fill = ex.buy(mint, size, snap)
+        except Exception as e:  # unknown outcome of a live swap stays 'opening' for a manual look; paper: failed
+            fill = None
+            store.event(self.conn, "error", f"Kauf {snap.symbol} abgebrochen: {e}", "error")
+            if ex.mode == "paper":
+                _write_hard(self.conn, "DELETE FROM ct_positions WHERE id=?", (pid,))
+            return None
+        if not fill.ok:  # nothing was bought: paper rows go, a live row stays as 'failed' for the record
+            if ex.mode == "paper":
+                _write_hard(self.conn, "DELETE FROM ct_positions WHERE id=?", (pid,))
+            else:
+                _write_hard(self.conn, "UPDATE ct_positions SET status='failed', exit_reason=? WHERE id=?",
+                            (fill.error[:200], pid))
             store.event(self.conn, "error", f"Kauf {snap.symbol} fehlgeschlagen: {fill.error}", "error")
             return None
+        try:
+            return self._booked(pid, ex, fill, strategy, managed, mint, size, snap, tp, sl, trail, hold, reason,
+                                wallet, whale, meta, score, inflow, version)
+        except Exception as e:  # swap is done: the position must not be lost, so write it with retries
+            log.error("booking position %s after a filled buy failed: %s", pid, e)
+            raise
+
+    def _booked(self, pid, ex, fill, strategy, managed, mint, size, snap, tp, sl, trail, hold, reason, wallet,
+                whale, meta, score, inflow, version) -> int:
         ex.adjust_balance(self.conn, -fill.sol)
         safe = (meta or {}).get("safety") or {}
         meta = {**(meta or {}), "fill_source": fill.source, "impact": fill.price_impact,
@@ -398,22 +440,20 @@ class Strategy:
             from .execution import paper_adverse
 
             meta["adverse"] = paper_adverse()  # lets learn.extra_cost compare fills made under different settings
-        cur = self.conn.execute(
-            """INSERT INTO ct_positions(mode, strategy, managed, wallet, mint, symbol, whale_sig, whale_ts,
-                 whale_price_sol, signal_id, opened_at, entry_price_sol, entry_price_usd, entry_mcap_usd, size_sol,
-                 tokens, token_decimals, entry_cost_sol, take_profit, stop_loss, trail_activate, trail_drawdown,
-                 max_hold_min, high_price_sol, last_price_sol, last_buys_m5, peak_buys_m5, entry_tx, meta,
-                 param_version, use_inflow_exit, safety_level, safety_score, safety_reasons)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (ex.mode, strategy, managed, wallet, mint, snap.symbol, whale.signature if whale else None,
-             whale.block_time if whale else None, whale.price_sol if whale else None, signal_id, int(time.time()),
-             fill.price_sol, snap.price_usd, snap.fdv, size, fill.tokens, _decimals_cache.get(mint, 6), fill.sol,
+        _write_hard(
+            self.conn,
+            """UPDATE ct_positions SET status='open', whale_sig=?, whale_ts=?, whale_price_sol=?, opened_at=?,
+                 entry_price_sol=?, entry_price_usd=?, entry_mcap_usd=?, tokens=?, token_decimals=?, entry_cost_sol=?,
+                 take_profit=?, stop_loss=?, trail_activate=?, trail_drawdown=?, max_hold_min=?, high_price_sol=?,
+                 last_price_sol=?, last_buys_m5=?, peak_buys_m5=?, entry_tx=?, meta=?, param_version=?,
+                 use_inflow_exit=?, safety_level=?, safety_score=?, safety_reasons=? WHERE id=?""",
+            (whale.signature if whale else None, whale.block_time if whale else None,
+             whale.price_sol if whale else None, int(time.time()),
+             fill.price_sol, snap.price_usd, snap.fdv, fill.tokens, _decimals_cache.get(mint, 6), fill.sol,
              tp, sl, trail[0], trail[1], hold, snap.price_sol, snap.price_sol,
              snap.buys_m5, snap.buys_m5, fill.tx, json.dumps(meta), version, inflow,
-             safe.get("level"), safe.get("score"), json.dumps(safe.get("reasons") or [], ensure_ascii=False)),
+             safe.get("level"), safe.get("score"), json.dumps(safe.get("reasons") or [], ensure_ascii=False), pid),
         )
-        self.conn.commit()
-        pid = cur.lastrowid
         control.alert(self.conn, strategy, mint, snap.symbol, "bought", reason, wallet=wallet,
                       price_sol=fill.price_sol, price_usd=snap.price_usd, mcap_usd=snap.fdv, score=score,
                       data=meta, position_id=pid)
@@ -573,7 +613,7 @@ class Strategy:
                         continue
                     pid = self.open(strat, "semi", c["mint"], size, snap, p, tp=p.take_profit,
                                     hold=p.max_hold_min, reason="von dir gekauft",
-                                    meta={"manual_buy": True, "safety": safe})
+                                    meta={"manual_buy": True, "safety": safe}, intent=f"cmd:{c['id']}")
                     control.finish_command(self.conn, c["id"], "done" if pid else "failed", str(pid or ""))
             except Exception as e:  # never let one command kill the loop
                 control.finish_command(self.conn, c["id"], "failed", str(e)[:200])
@@ -610,6 +650,19 @@ def sniper_exits() -> dict:
 
 
 # ---------------------------------------------------------------------- wash trading (safety/ check)
+def _write_hard(conn, sql: str, args: tuple, tries: int = 15) -> None:
+    """A write that must land (it records a swap that already happened): retried while the database is locked."""
+    for i in range(tries):
+        try:
+            conn.execute(sql, args)
+            conn.commit()
+            return
+        except Exception as e:
+            if not store.is_locked(e) or i == tries - 1:
+                raise
+            time.sleep(min(4.0, 0.5 * (i + 1)))
+
+
 LAUNCH_BOT_S, LAUNCH_BOT_SHARE, LAUNCH_BOT_MIN_N = 3, 0.5, 3  # same rule as model.tiers.uncopyable
 _lb_cache: dict[str, tuple[float, tuple[int, int]]] = {}
 _CREATED_Q = ("SELECT pair_created_at FROM tokens WHERE mint=?", "SELECT pair_created_at FROM safety_tokens WHERE mint=?",

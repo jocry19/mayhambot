@@ -657,3 +657,32 @@ def test_model_view_base_rate_model_carries_no_signal(monkeypatch):
     out["horizons"]["1h"].update(algo="gbm", p_win_net=0.4)
     v = strategy.model_view({"mint": MINT})
     assert v["informative"] and v["size_factor"] == strategy.GRADE_SIZE["A"] and v["p_win_net_1h"] == 0.4
+
+
+def test_retried_entry_never_buys_twice(env):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    calls = []
+    real = ex.buy
+    ex.buy = lambda *a, **k: calls.append(1) or real(*a, **k)
+    sw = whale_buy()
+    pid = st.on_whale_buy(sw)
+    assert pid and len(calls) == 1
+    # e.g. 'database is locked' after the swap and the caller runs again: same intent, no second swap
+    st._coin_copies = lambda mint: 0
+    assert st.on_whale_buy(sw) in (pid, None) and len(calls) == 1
+    assert conn.execute("SELECT COUNT(*) FROM ct_positions WHERE intent=?", (f"whale:{sw.signature}",)).fetchone()[0] == 1
+
+
+def test_failed_paper_fill_leaves_no_row_and_old_buy_clicks_expire(env):
+    from copytrade import control
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    from copytrade.execution import Fill
+    ex.buy = lambda *a, **k: Fill(False, error="no price")
+    assert st.on_whale_buy(whale_buy()) is None
+    assert conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0] == 0
+    cid = control.request_buy(conn, MINT)
+    conn.execute("UPDATE ct_commands SET ts=ts-600 WHERE id=?", (cid,))
+    assert control.pending_commands(conn) == []
+    assert conn.execute("SELECT status FROM ct_commands WHERE id=?", (cid,)).fetchone()[0] == "expired"

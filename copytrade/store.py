@@ -103,6 +103,7 @@ POSITION_COLUMNS = {
     "use_inflow_exit": "INTEGER",  # sell when the copy-trader rush peaks (learned per mode/whale)
     "safety_level": "TEXT",  # safety/ at entry: low | caution | high | critical | unchecked
     "safety_score": "REAL", "safety_reasons": "TEXT",  # risk 0-100, JSON list of German reasons
+    "intent": "TEXT",  # what asked for the buy (whale:<sig>, signal:<id>, launch:<mint>, cmd:<id>): never bought twice
 }
 
 
@@ -139,6 +140,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if col not in have:
             conn.execute(f"ALTER TABLE ct_positions ADD COLUMN {col} {typ}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ct_positions_strategy ON ct_positions(strategy, status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ct_positions_intent ON ct_positions(intent)")
     conn.commit()
 
 

@@ -120,16 +120,27 @@ class Engine:
         store.event(self.conn, "start", f"Copy-Trader gestartet ({live})")
         log.info("executors=%s rpc=%s", live, self.s.rpc_url.split("?")[0])
 
-        def price_loop():
-            # exits must not wait for wallet polling: own thread, own sqlite connection
+        def entry_loop():
+            # buys (dashboard commands, signals, launches) may wait up to a minute on a live swap: own thread,
+            # so stop-losses in price_loop keep running meanwhile
             conn = store.connect(self.s)
             strat = Strategy(conn, self.s, self.exs)
-            last_eq = 0.0
             while not self._stop.is_set():
                 try:
                     store.retry_locked(strat.process_commands)
                     store.retry_locked(follow_signals, conn, strat)
                     store.retry_locked(follow_launches, conn, strat)
+                except Exception as e:
+                    log.warning("entries failed: %s", e)
+                self._stop.wait(self.s.price_poll_seconds)
+
+        def price_loop():
+            # exits must not wait for wallet polling or buys: own thread, own sqlite connection
+            conn = store.connect(self.s)
+            strat = Strategy(conn, self.s, self.exs)
+            last_eq = 0.0
+            while not self._stop.is_set():
+                try:
                     store.retry_locked(strat.update)
                     if time.time() - last_eq > 60:
                         store.retry_locked(strat.equity_snapshot)
@@ -153,6 +164,7 @@ class Engine:
 
         tracker.load_manual(self.conn, self.s)
         threading.Thread(target=price_loop, name="positions", daemon=True).start()
+        threading.Thread(target=entry_loop, name="entries", daemon=True).start()
         threading.Thread(target=maint_loop, name="maintenance", daemon=True).start()
         if self.s.ws_url != "off" and ws.available():
             # websocket notifications get their own thread: a slow polling round never delays a copy
@@ -176,6 +188,7 @@ class Engine:
 
 SIGNAL_TRIES = 3
 _signal_tries: dict[int, int] = {}
+_launch_tries: dict[str, int] = {}
 
 
 def follow_signals(conn, strat: Strategy) -> int:
@@ -225,8 +238,12 @@ def follow_launches(conn, strat: Strategy) -> int:
     for row in rows:
         try:
             strat.on_launch(row)
-        except Exception as e:
-            log.warning("launch %s failed: %s", row["mint"][:6], e)
+        except Exception as e:  # retried (the intent row prevents a second buy), given up after SIGNAL_TRIES
+            n = _launch_tries[row["mint"]] = _launch_tries.get(row["mint"], 0) + 1
+            log.warning("launch %s failed (%d/%d): %s", row["mint"][:6], n, SIGNAL_TRIES, e)
+            if n < SIGNAL_TRIES:
+                break
+        _launch_tries.pop(row["mint"], None)
         store.set_state(conn, "last_launch_entry_ts", str(row["entered_ts"]))
     return len(rows)
 

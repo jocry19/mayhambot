@@ -695,6 +695,25 @@ def calibrate_fills(conn) -> dict:
     return d
 
 
+EVENTS_KEEP_D, TRADE_EVENTS_KEEP_D, EQUITY_KEEP_D = 7, 90, 90
+
+
+def prune(conn, now: float | None = None) -> int:
+    """Retention, at most hourly: skip/info events 7 days, buy/sell/error events and equity points 90 days."""
+    from . import store
+
+    now = now or time.time()
+    if float(store.get_state(conn, "pruned_at") or 0) > now - 3600:
+        return 0
+    n = conn.execute("DELETE FROM ct_events WHERE ts<? AND kind NOT IN ('buy','sell','error','start','stop')",
+                     (int(now - EVENTS_KEEP_D * 86400),)).rowcount
+    n += conn.execute("DELETE FROM ct_events WHERE ts<?", (int(now - TRADE_EVENTS_KEEP_D * 86400),)).rowcount
+    n += conn.execute("DELETE FROM ct_equity WHERE ts<?", (int(now - EQUITY_KEEP_D * 86400),)).rowcount
+    store.set_state(conn, "pruned_at", str(int(now)))
+    conn.commit()
+    return n
+
+
 def run(conn, s: Settings) -> dict:
     """One learning round (called by the maintenance loop): evaluate new entries, then tune."""
     init(conn)
@@ -702,6 +721,10 @@ def run(conn, s: Settings) -> dict:
          "signals": evaluate_signals(conn, s)}
     n["rolled_back"] = rollback(conn)
     n["tuned"] = tune(conn, s)
+    try:
+        n["pruned"] = prune(conn)
+    except Exception as e:
+        log.warning("prune failed: %s", e)
     try:
         n["fills"] = calibrate_fills(conn)
     except Exception as e:

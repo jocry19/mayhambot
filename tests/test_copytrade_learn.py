@@ -388,3 +388,18 @@ def test_wallet_features_point_in_time():
     assert learn.wallet_features(conn, "W", 6000) == learn.wallet_features(conn, "W")  # newer than the model: today
     assert learn.wallet_features(conn, "W", 2000) == {"tier": "smart", "capture": "?"}  # version 1 was active
     assert learn.wallet_features(conn, "W", 500) == {"tier": "?", "capture": "?"}  # before any model
+
+
+def test_prune_keeps_trades_longer_than_skips():
+    import sqlite3
+    from copytrade import learn, store
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(store.SCHEMA)
+    now = 100 * 86400
+    for kind in ("skip", "buy"):
+        conn.execute("INSERT INTO ct_events VALUES (?,?,?,?,?)", (now - 10 * 86400, "info", kind, "x", None))
+    conn.execute("INSERT INTO ct_equity VALUES (?,?,?,?,?)", (now - 95 * 86400, "paper", 1, 0, 1))
+    assert learn.prune(conn, now) == 2
+    assert [r[0] for r in conn.execute("SELECT kind FROM ct_events")] == ["buy"]
+    assert learn.prune(conn, now + 60) == 0  # at most hourly

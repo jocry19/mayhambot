@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS ct_commands (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, action TEXT, position_id INTEGER, mint TEXT,
     size_sol REAL, strategy TEXT, status TEXT DEFAULT 'pending', result TEXT, done_at INTEGER
 );
+CREATE INDEX IF NOT EXISTS idx_ct_commands_status ON ct_commands(status);
 CREATE TABLE IF NOT EXISTS ct_alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, strategy TEXT, mint TEXT, symbol TEXT, wallet TEXT,
     price_sol REAL, price_usd REAL, mcap_usd REAL, score REAL, action TEXT, reason TEXT, data TEXT,
@@ -178,7 +179,16 @@ def request_buy(conn, mint: str, size_sol: float | None = None, strategy: str = 
     return cur.lastrowid
 
 
+COMMAND_TTL_S = {"buy": 120, "sell": 900}  # a buy click is about that moment's price; a sell stays wanted longer
+
+
 def pending_commands(conn) -> list:
+    """Pending commands; ones older than their TTL expire (a buy clicked 10 min ago must not fill at today's price)."""
+    now = int(time.time())
+    for action, ttl in COMMAND_TTL_S.items():
+        conn.execute("UPDATE ct_commands SET status='expired', result='abgelaufen', done_at=? "
+                     "WHERE status='pending' AND action=? AND ts<?", (now, action, now - ttl))
+    conn.commit()
     return conn.execute("SELECT * FROM ct_commands WHERE status='pending' ORDER BY id").fetchall()
 
 
