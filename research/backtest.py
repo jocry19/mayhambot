@@ -66,7 +66,7 @@ def _coin_events(ds, tmap, a, b, ms):
             continue
         f, wallets = ev.features_at(t.mint, t.ts, ds.window(t.mint, t.ts - W, t.ts), tmap, ds.pidx,
                                     ds.created.get(t.mint), ds.to_sol, ms.window_min,
-                                    history=ds.window(t.mint, 0, t.ts))
+                                    history=ds.window(t.mint, 0, t.ts), intel=getattr(ds, "intel", None))
         if f is None:
             continue
         last[t.mint] = t.ts
@@ -86,7 +86,7 @@ def run(ds, ms=msettings, max_points=24):
     bounds = cps + [ds.end + 1]
     for k, c in enumerate(cps):
         nxt = bounds[k + 1]
-        st, _ = wallet_stats.compute(ds, c)
+        st, _ = wallet_stats.compute(ds, c, use_flags=False)
         known = [(we["comps"], we["y"]) for we in res["wallet_events"] if we["ts"] + we["sec"] <= c]
         weights, winfo = learn.learn_wallet_weights(known)
         tiers = tier_all(st, weights)

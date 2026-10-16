@@ -139,3 +139,17 @@ up to 100 parsed swaps) only for backfills of tiered and user wallets. Every Hel
 is used, standard RPC goes to the public RPC and an Enhanced backfill falls back to RPC for that wallet
 (`CreditsExhausted`, no traceback). `RESEARCH_HELIUS_CREDITS_PER_DAY` > 0 adds a lower own cap (default 0).
 Wallets in the `wallets` table that the model has not scored yet are backfilled before new candidates.
+
+## After costs, intel features, uncopyable wallets (2026-10-16)
+
+- Labels per horizon also carry `net` (sell at the pump threshold if reached, else at the horizon end, minus
+  `MODEL_COST_ROUNDTRIP` 0.06) and `win` (net > 0). A second model per horizon learns `win`; `score_token` adds
+  `horizons[h]["p_win_net"]` and `["exp_net_ret"]` once it is trained (stored as `<h>_net` in `token_model_json`).
+- Walk-forward metrics per horizon: `calibration` (5 bins, ECE) and `net` (mean net of all, of the top fifth by
+  pump score and by the net model, AUC of the net model). The report shows them as "Nach Kosten".
+- 22 point-in-time coin features from `intel.features_at` (prefix `i_`, group `intel`, neutral when unknown,
+  `i_coverage` = share known). intel's smart-money features are not used (today's tiers before the first model).
+  Every candidate is also tested without the intel group, so they only stay if they help out of sample.
+- Tiers need net PnL > 0. Launch/dev bots (≥ 50 % of buys within 3 s of pool creation, or always the first buyer)
+  and second-flippers (median hold < 15 s) get no tier (`model.tiers.uncopyable`).
+- Walk-forward checkpoints ignore today's `is_bot` flags and use only trades before the cutoff.

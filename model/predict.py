@@ -45,7 +45,7 @@ def score_token(mint, now=None, conn=None, store=False, tiers=None):
     tok = conn.execute("SELECT symbol, pair_created_at, price_usd, mcap_usd FROM tokens WHERE mint=?", (mint,)).fetchone()
     created = ds.created.get(mint) or (tok["pair_created_at"] if tok else None)
     f, wallets = ev.features_at(mint, now, ds.window(mint, now - W, now), tiers, ds.pidx, created, ds.to_sol,
-                                msettings.window_min, history=ds.window(mint, 0, now))
+                                msettings.window_min, history=ds.window(mint, 0, now), intel=ds.intel)
     if f is None:
         return None
     x = ev.vector(f)

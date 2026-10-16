@@ -56,14 +56,25 @@ ADDED_COLUMNS = {"model_wallet_stats": [("cluster_id", "TEXT"), ("exit_capture",
                  "research_tokens": [("candles_fetched_at", "INTEGER")]}
 
 
+_migrated = set()  # database files whose schema this process already ensured
+
+
 def ensure_schema(conn):
-    conn.execute("PRAGMA busy_timeout=120000")  # the live app writes concurrently: wait instead of failing
+    """Create/extend research and model tables once per database file and process. Never lowers another
+    package's busy_timeout; only raises the SQLite default (0 = fail at once) to 120 s."""
+    if conn.execute("PRAGMA busy_timeout").fetchone()[0] == 0:
+        conn.execute("PRAGMA busy_timeout=120000")  # the live app writes concurrently: wait instead of failing
+    path = next((r[2] for r in conn.execute("PRAGMA database_list") if r[1] == "main"), "") or ""
+    if path and path in _migrated:
+        return conn
     retry(lambda: conn.executescript(SCHEMA))
     for table, cols in ADDED_COLUMNS.items():
         have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         for name, typ in cols:
             if name not in have:
                 retry(lambda: conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}"))
+    if path:
+        _migrated.add(path)
     return conn
 
 

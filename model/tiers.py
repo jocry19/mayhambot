@@ -13,7 +13,22 @@ def wallet_score(stats, weights=None):
     return round(100 * raw * math.sqrt(1 - math.exp(-stats["n_tokens"] / 4)), 1)
 
 
+def uncopyable(stats):
+    """Wallets nobody can follow: launch/dev bots (buy within 3 s of the pool's creation, or first buyer every
+    time) and second-flippers (median hold under 15 s). They can show great PnL but are not a signal."""
+    n = stats.get("n_tokens", 0)
+    if n >= 3 and (stats.get("launch_share") or 0) >= 0.5:
+        return "launch_bot"
+    if n >= 3 and stats.get("median_entry_rank") == 0 and (stats.get("influence_samples") or 0) >= 3:
+        return "launch_bot"
+    if (stats.get("n_exits") or 0) >= 3 and stats.get("median_hold_min") is not None and stats["median_hold_min"] < 0.25:
+        return "flipper"
+    return None
+
+
 def assign_tier(stats, score, rules=None, skip=()):
+    if uncopyable(stats):
+        return None
     rules = rules or msettings.rules
     for tier in TIERS:
         if tier in skip:

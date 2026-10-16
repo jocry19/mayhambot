@@ -33,6 +33,7 @@ class Dataset:
         self.manual = manual
         self.sol_usd = sol_usd
         self.funding = {}  # wallet -> (funder, ts) from research.funding
+        self.intel = None  # research.intel_features.Source, set by load()
         self.by_mint = defaultdict(list)
         for t in self.trades:
             self.by_mint[t.mint].append(t)
@@ -56,11 +57,14 @@ class Dataset:
         lst = self.by_mint.get(mint, [])
         return lst[bisect.bisect_right(tss, a):bisect.bisect_right(tss, b)]
 
-    def pool_covered(self, mint, a, b, max_gap):
-        """True if pool-wide trades exist on both sides of [a, b] with no hole > max_gap inside."""
+    def pool_covered(self, mint, a, b, max_gap, cutoff=None):
+        """True if pool-wide trades exist on both sides of [a, b] with no hole > max_gap inside.
+        cutoff: only trades before it may be used (point-in-time)."""
         tss = self.pool_ts.get(mint)
         if not tss:
             return False
+        if cutoff is not None:
+            tss = tss[:bisect.bisect_left(tss, cutoff)]
         i = bisect.bisect_right(tss, a) - 1
         j = bisect.bisect_left(tss, b)
         if i < 0 or j >= len(tss) or a - tss[i] > max_gap or tss[j] - b > max_gap:
@@ -94,6 +98,8 @@ def load(conn, since_ts=0, mints=None):
     bots = {r[0] for r in conn.execute("SELECT address FROM wallets WHERE is_bot=1")}
     manual = {r[0] for r in conn.execute("SELECT address FROM wallets WHERE manual=1")}
     ds = Dataset(trades, pidx, created, bots, manual, median(ratios) or 150.0)
+    from research.intel_features import Source
+    ds.intel = Source(conn)  # point-in-time coin features from intel/ (neutral when unavailable)
     try:
         ds.funding = {r[0]: (r[1], int(r[2] or 0)) for r in conn.execute(
             "SELECT wallet, funder, ts FROM research_funding WHERE funder IS NOT NULL")}

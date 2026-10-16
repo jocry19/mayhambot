@@ -34,7 +34,11 @@ FEATURES = (
     ("early_sell", "Verkäufe der frühesten Käufer"),
     ("first_tier_age", "Coin-Alter beim ersten Smart-Kauf (log10 min)"),
 )
+from research import intel_features as _intel  # noqa: E402
+
+FEATURES = FEATURES + tuple((n, _intel.LABELS[n]) for n in _intel.NAMES)
 FEATURE_GROUPS = {
+    "intel": list(_intel.NAMES),
     "tiers": ["n_ultra", "n_smart", "n_good", "net_sol_ultra", "net_sol_smart", "net_sol_good", "n_tiered_5m",
               "wq_mean", "influence", "sell_ratio", "entry_span", "hhi", "n_clusters", "smart_rank", "exit_quality"],
     "crowd": ["crowd_buyers", "crowd_net", "buyer_accel", "top10_share", "bundle_share", "early_sell"],
@@ -51,10 +55,11 @@ def slog(x):
     return math.copysign(math.log1p(abs(x)), x)
 
 
-def features_at(mint, t, window_trades, tiers, pidx, created_at, to_sol, window_min, history=None):
+def features_at(mint, t, window_trades, tiers, pidx, created_at, to_sol, window_min, history=None, intel=None):
     """window_trades: trades of this coin with t - window < ts <= t (objects with wallet, side, ts, usd, sol).
     history: all known trades of the coin up to t (for order-flow structure), defaults to window_trades.
     tiers: wallet -> (tier, score, influence_usd[, cluster_id, exit_capture]).
+    intel: optional research.intel_features.Source; without it the intel features are neutral.
     Returns (features dict, per-wallet list) or (None, None)."""
     px = pidx.price_at(mint, t)
     if not px:
@@ -108,6 +113,7 @@ def features_at(mint, t, window_trades, tiers, pidx, created_at, to_sol, window_
     wallets = sorted(({"address": d["address"], "tier": d["tier"], "score": d["score"],
                        "net_sol": round(d["buy_sol"] - d["sell_sol"], 4), "first_ts": d["first_ts"]}
                       for d in per.values()), key=lambda d: (-d["net_sol"]))
+    f.update(intel(mint, t) if intel is not None else _intel.neutral())
     return f, wallets
 
 

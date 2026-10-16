@@ -124,8 +124,8 @@ def predict_one(m, x):
         p, c = gbm.predict(m, xs), gbm.contributions(m, xs)
     else:
         p, c = stats.logistic_predict(m, xs), stats.contributions(m, xs)
-    if cols is None:
-        return p, c
+    if cols is None:  # older models know fewer features: the new ones contribute nothing
+        return p, list(c) + [0.0] * (len(FEATURE_NAMES) - len(c))
     full = [0.0] * len(FEATURE_NAMES)
     for i, ci in zip(cols, c):
         full[i] = ci
@@ -137,7 +137,7 @@ def weights_full(m):
     vals = m.get("importance") if m.get("kind") == "gbm" else m.get("coef")
     cols = m.get("cols")
     if cols is None:
-        return list(vals)
+        return list(vals) + [0.0] * (len(FEATURE_NAMES) - len(vals))
     full = [0.0] * len(FEATURE_NAMES)
     for i, v in zip(cols, vals):
         full[i] = v
@@ -149,7 +149,7 @@ def _logloss(ps, ys):
     return -sum(y * math.log(max(p, e)) + (1 - y) * math.log(max(1 - p, e)) for p, y in zip(ps, ys)) / max(1, len(ys))
 
 
-CANDIDATES = [{"algo": a, "drop": d} for a in ("logistic", "gbm") for d in (None, "tiers", "crowd", "price_time")]
+CANDIDATES = [{"algo": a, "drop": d} for a in ("logistic", "gbm") for d in (None, "tiers", "crowd", "price_time", "intel")]
 
 
 def select_models(events, champion=None, horizons=None, l2=None, now=None, min_gain=0.005, target="pumped"):

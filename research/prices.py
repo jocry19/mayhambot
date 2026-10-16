@@ -82,10 +82,11 @@ class PriceIndex:
     def _add(self, mint, pts, highs=(), lows=()):
         pts = sorted(pts)
         prices = [p for _, p in pts]
-        # a print only counts as a high if a neighbour confirms it within 3x (filters single bad prints)
+        # a print only counts as a high if the previous print confirms it within 3x (filters single bad prints;
+        # only the earlier neighbour, so a high at t never depends on a later price)
         conf = []
         for i, pr in enumerate(prices):
-            nb = [prices[j] for j in (i - 1, i + 1) if 0 <= j < len(prices)]
+            nb = [prices[i - 1]] if i > 0 else []
             conf.append(pr if not nb or any(pr <= 3 * x for x in nb) else min(nb))
         hp = sorted([(t, c) for (t, _), c in zip(pts, conf)] + list(highs))
         lp = sorted([(t, p) for t, p in pts] + list(lows))

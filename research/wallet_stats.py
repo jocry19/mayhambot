@@ -44,7 +44,7 @@ def _positions(trades, cutoff):
     return agg
 
 
-def _influence(ds, cutoff, win_s):
+def _influence(ds, cutoff, win_s, bots=None):
     """(wallet, mint) -> (followers, follow_usd, lift_usd, entry_rank) for first buys whose window closed
     before cutoff and where pool-wide data covers the window. entry_rank: 0 = first buyer of the coin seen,
     1 = last one (share of known buyers that came before this wallet)."""
@@ -59,13 +59,14 @@ def _influence(ds, cutoff, win_s):
         first = {}
         for t in pool:
             first.setdefault(t.wallet, t.ts)
-        firsts = sorted((ts, w) for w, ts in first.items() if w not in ds.bots)
+        bots = ds.bots if bots is None else bots
+        firsts = sorted((ts, w) for w, ts in first.items() if w not in bots)
         fts = [x[0] for x in firsts]
         nfirst = max(1, len(firsts) - 1)
         for w, t0 in first.items():
-            if t0 + win_s >= cutoff or w in ds.bots:
+            if t0 + win_s >= cutoff or w in bots:
                 continue
-            if not ds.pool_covered(mint, t0, t0 + win_s, max_gap=win_s):
+            if not ds.pool_covered(mint, t0, t0 + win_s, max_gap=win_s, cutoff=cutoff):
                 continue
             i, j = bisect.bisect_right(fts, t0), bisect.bisect_right(fts, t0 + win_s)
             followers = sum(1 for k in range(i, j) if firsts[k][1] != w)
@@ -81,13 +82,16 @@ def _influence(ds, cutoff, win_s):
     return out
 
 
-def compute(ds, cutoff, min_position_usd=None):
-    """wallet -> stats dict (raw numbers + components 0..1). Bots and wallets without positions are skipped."""
+def compute(ds, cutoff, min_position_usd=None, use_flags=True):
+    """wallet -> stats dict (raw numbers + components 0..1). Bots and wallets without positions are skipped.
+    use_flags=False (walk-forward checkpoints): ignore today's is_bot flags, which were set later and would
+    leak the future; bots are then only detected from trades before the cutoff."""
     min_pos = settings.min_position_usd if min_position_usd is None else min_position_usd
     agg = _positions(ds.trades, cutoff)
-    infl = _influence(ds, cutoff, rsettings.influence_window_min * 60)
+    flags = set(ds.bots) if use_flags else set()
+    infl = _influence(ds, cutoff, rsettings.influence_window_min * 60, bots=flags)
     pidx = ds.pidx
-    bots = set(ds.bots)
+    bots = set(flags)
     per = defaultdict(list)
     for (w, m), a in agg.items():
         if a[6] > settings.bot_max_trades_per_token:
@@ -118,7 +122,8 @@ def compute(ds, cutoff, min_position_usd=None):
             mint=m, buy_usd=buy_usd, pnl=pnl, realized=realized, roi=pnl / buy_usd, ts=fts,
             peak=peak_mult, min_to_2x=(t2x - fts) / 60 if t2x else None,
             entry_mcap=pidx.mcap(m, fpx), rug=crashed and sell_usd < 0.5 * buy_usd,
-            infl=infl.get((w, m)), capture=capture, hold=hold))
+            infl=infl.get((w, m)), capture=capture, hold=hold,
+            launch_s=(fts - ds.created[m]) if fts and ds.created.get(m) else None))
     out = {}
     for w, P in per.items():
         if w in bots:
@@ -169,6 +174,9 @@ def summarize(P):
         median_entry_mcap=mc, median_min_to_2x=median([p["min_to_2x"] for p in P]),
         influence_followers=med_f, influence_usd=med_usd, inflow_lift_usd=med_lift, influence_samples=k, median_entry_rank=med_rank,
         exit_capture=median(caps) if caps else None, median_hold_min=median([p["hold"] for p in P]),
+        n_exits=sum(1 for p in P if p["hold"] is not None),
+        launch_share=(sum(1 for p in P if p.get("launch_s") is not None and 0 <= p["launch_s"] <= 3)
+                      / max(1, sum(1 for p in P if p.get("launch_s") is not None))),
         consistency=consistency, rug_rate=rugs / n, components=comps,
         last_ts=max(p["ts"] for p in P))
 

@@ -194,3 +194,22 @@ def test_backtest_calibration_bins():
     from research.backtest import calibration
     c = calibration([0.1, 0.1, 0.9, 0.9], [0, 0, 1, 1], bins=2)
     assert c["ece"] < 0.11 and [b["rate"] for b in c["bins"]] == [0.0, 1.0]
+
+
+def test_uncopyable_wallets_get_no_tier():
+    from model.tiers import assign_tier, uncopyable
+    good = dict(n_tokens=8, win_rate=0.7, rug_rate=0.0, total_pnl_usd=5000, net_pnl_usd=4000, launch_share=0.0,
+                median_entry_rank=0.2, influence_samples=5, n_exits=6, median_hold_min=12.0)
+    assert uncopyable(good) is None and assign_tier(good, 90) == "ultra"
+    assert uncopyable(dict(good, launch_share=0.8)) == "launch_bot" and assign_tier(dict(good, launch_share=0.8), 90) is None
+    assert uncopyable(dict(good, median_entry_rank=0)) == "launch_bot"
+    assert uncopyable(dict(good, median_hold_min=0.1)) == "flipper"
+    assert assign_tier(dict(good, net_pnl_usd=-10), 90) is None  # profitable before costs only
+
+
+def test_ensure_schema_keeps_callers_busy_timeout():
+    from research.store import ensure_schema
+    conn = db.connect(os.path.join(tempfile.mkdtemp(), "b.db"))
+    conn.execute("PRAGMA busy_timeout=5000")
+    ensure_schema(conn)
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
