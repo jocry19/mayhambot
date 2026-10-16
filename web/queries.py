@@ -15,6 +15,7 @@ import bisect
 import json
 import math
 import os
+import re
 import statistics
 import time
 from collections import defaultdict
@@ -1295,6 +1296,7 @@ def _pid_running(name):
         return None  # unknown (no pid file: launchd, other machine, tests)
 
 
+SNIPER_RPC_WS_MAX_SUBS = 150  # logsSubscribe per websocket (sniper/README.md)
 SNIPER_HB_STALE_S = 30      # the service writes every 10 s; older means it is stopped
 _SNIPER_HIST = []           # (ts, counters) samples of the heartbeat, for per-hour rates (counters are totals since start)
 
@@ -1348,7 +1350,9 @@ def sniper_stream(conn, now=None):
         out.update(source="heartbeat", connected=bool(hb.get("connected")), ws_msgs=hb.get("ws_msgs"),
                    subscribed=hb.get("subscribed"), in_memory=hb.get("in_memory"), queue=hb.get("queue"),
                    open_positions=hb.get("open_positions"), pump_api_ok=hb.get("pump_api_ok"),
-                   counters=hb.get("counters") or {}, budget=budget)
+                   counters=hb.get("counters") or {}, budget=budget, trade_source=hb.get("trade_source"),
+                   rpc_ws_connected=hb.get("rpc_ws_connected"), rpc_ws_subs=hb.get("rpc_ws_subs"),
+                   rpc_ws_msgs=hb.get("rpc_ws_msgs"), rpc_ws_max_subs=getattr(cfg, "ws_max_subs", None) or SNIPER_RPC_WS_MAX_SUBS)
         rates = _sniper_rates(hb["ts"], hb.get("counters"))
         if rates:
             out.update(rate_source="counters", rate_span_s=rates["span_s"], migrations_1h=rates.get("migrations"),
@@ -1357,6 +1361,30 @@ def sniper_stream(conn, now=None):
     deep = (out.get("budget") or {}).get("deep")
     out["load_deep"] = deep["load"] if deep and deep.get("load") is not None else (_f(out["deep_1h"] / cap, 3) if cap else None)
     out["api"] = [r for r in api_usage().get("rows", []) if r["service"] == "sniper"]
+    return out
+
+
+def _redact(text):
+    """Strip API keys and tokens from free text (error messages can carry request URLs)."""
+    try:
+        from core.http import redact  # type: ignore
+        text = redact(text)
+    except Exception:
+        text = re.sub(r"((?:api[-_]?key|apikey|token)=)[^&\s'\"]+", r"\1***", str(text), flags=re.I)
+    return re.sub(r"(https?://[^/\s?]+)[^\s'\"]*", r"\1", str(text))  # keep the host, drop paths and queries
+
+
+def sniper_check_errors(conn, mints):
+    """Errors of the deep check per launch (features_json.errors, sniper/analyze.py), redacted, at most 6 each."""
+    out = {}
+    mints = list(dict.fromkeys(m for m in mints if m))
+    for i in range(0, len(mints), 500):
+        part = mints[i:i + 500]
+        for r in rows(conn, f"SELECT mint, features_json FROM sniper_launches WHERE mint IN ({','.join('?' * len(part))}) "
+                            "AND features_json LIKE '%\"errors\"%'", part):
+            e = (_j(r["features_json"], {}) or {}).get("errors") or []
+            if isinstance(e, list) and e:
+                out[r["mint"]] = [_redact(x)[:160] for x in e[:6]]
     return out
 
 
@@ -1396,6 +1424,9 @@ def sniper_view(conn, hours=24, limit=300):
         x["source_label"] = SNIPER_SOURCE.get(x.get("source"), x.get("source") or "–")
         if x.get("migrated") and x.get("source") == "pumpportal":
             x["source_label"] = "pump.fun → migriert"
+    errs = sniper_check_errors(conn, [x["mint"] for x in launches])
+    for x in launches:
+        x["check_errors"] = errs.get(x["mint"], [])
     reasons_by_mint = {x["mint"]: x for x in launches}
     pos = rows(conn, "SELECT * FROM sniper_positions ORDER BY COALESCE(closed_ts, opened_ts) DESC LIMIT 300")
     missing = [p["mint"] for p in pos if p["mint"] not in reasons_by_mint]

@@ -292,6 +292,7 @@ def sniper_launch(mint: str):
     if not d:
         raise HTTPException(404, "Launch unbekannt")
     d.pop("features", None)
+    d["check_errors"] = q.sniper_check_errors(conn, [d.get("mint") or mint.strip()]).get(d.get("mint") or mint.strip(), [])
     return ok(d)
 
 

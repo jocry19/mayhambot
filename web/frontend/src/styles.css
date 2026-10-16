@@ -389,3 +389,5 @@ button.badge.linkish:hover { background: var(--accent-wash); color: var(--accent
 .credits-hist table { margin-top: 6px; max-width: 640px; }
 .clip { display: inline-block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 .tiles.dense { grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); }
+.check-err { display: inline-flex; cursor: help; }
+.tiles.wrap-sub .tile-s { white-space: normal; }

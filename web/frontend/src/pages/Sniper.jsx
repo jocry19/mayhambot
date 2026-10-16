@@ -2,7 +2,7 @@ import { useState } from "react";
 import { LoadBar } from "./System.jsx";
 import { EChart, baseOption, timeAxis, tipRow, valueAxis } from "../chart.jsx";
 import { ago, dt, dur, n, pct, pctSigned, sign, sol, solSigned, usd, usePoll } from "../lib.js";
-import { Callout, Card, Delta, Empty, Seg, Table, Tabs, Tile } from "../ui.jsx";
+import { Callout, Card, Delta, Empty, Icon, Seg, Table, Tabs, Tile } from "../ui.jsx";
 
 const GROUPS = [["entered", "Gekauft"], ["skipped_deep", "Tief geprüft, übersprungen"], ["skipped_stage1", "Sofort übersprungen"], ["all", "Alle"]];
 
@@ -14,10 +14,18 @@ const CoinCell = ({ r }) => (
   </span>
 );
 
+/** Deep check incomplete: some lookups failed (features.errors), so the score rests on less data. */
+function CheckErrors({ e }) {
+  if (!e?.length) return null;
+  const title = `Prüfung unvollständig, ${e.length} ${e.length === 1 ? "Abfrage" : "Abfragen"} fehlgeschlagen:\n${e.map((x) => `• ${x}`).join("\n")}`;
+  return <span className="warn-ink check-err" title={title} aria-label={title}><Icon name="alert" size={14} /></span>;
+}
+
 function Decision({ r }) {
-  if (r.decision === "enter") return <span className="badge good">gekauft</span>;
-  if (r.decision === "skip") return <span className="t2" title={r.skip_reason}>{r.skip_label || r.skip_reason}</span>;
-  return <span className="badge">{r.decision || "offen"}</span>;
+  const err = <CheckErrors e={r.check_errors} />;
+  if (r.decision === "enter") return <span className="row" style={{ gap: 6 }}><span className="badge good">gekauft</span>{err}</span>;
+  if (r.decision === "skip") return <span className="row" style={{ gap: 6 }}><span className="t2" title={r.skip_reason}>{r.skip_label || r.skip_reason}</span>{err}</span>;
+  return <span className="row" style={{ gap: 6 }}><span className="badge">{r.decision || "offen"}</span>{err}</span>;
 }
 
 function Bundle({ r }) {
@@ -42,6 +50,9 @@ function LaunchDetail({ r }) {
             <li key={i}><span className={`badge ${x.risk >= 60 ? "bad" : x.risk >= 30 ? "warn" : ""}`}>{n(x.risk)}</span><span>{x.text}</span></li>
           ))}</ul>
         ) : <div className="dim">Keine gefunden{r.stage === 1 ? " (nur Datenstrom geprüft)" : ""}.</div>}
+        {r.check_errors?.length > 0 && (
+          <Callout kind="warn" icon="alert">Prüfung unvollständig: {r.check_errors.join(" · ")}</Callout>
+        )}
       </div>
       <div>
         <div className="b" style={{ marginBottom: 6 }}>Was dafür sprach</div>
@@ -95,16 +106,35 @@ function Stream({ s }) {
   const fromCounters = s.rate_source === "counters";
   const rateSub = fromCounters ? `aus den Zählern des Dienstes, gemessen über ${dur(s.rate_span_s / 60)}` : "aus den gespeicherten Launches der letzten Stunde";
   return (
-    <div className="tiles">
+    <div className="tiles wrap-sub">
       <Tile label="Datenstrom (PumpPortal)" value={<span className={cls}>{label}</span>}
         sub={s.source === "heartbeat" ? `Meldung ${ago(s.heartbeat_ts)} · ${n(s.subscribed)} Coins im Trade-Abo · Warteschlange ${n(s.queue)}`
           : s.heartbeat_ts ? `letzte Meldung ${ago(s.heartbeat_ts)} (meldet sonst alle 10 s)` : "noch keine Meldung vom Dienst sniper"} />
+      <TradeSource s={s} />
       <Tile label="Launches pro Stunde" value={n(s.launches_1h)} sub={rateSub} />
       <Tile label="Tief geprüft pro Stunde" value={n(s.deep_1h)}
         sub={s.deep_per_hour_cap ? `höchstens ${n(s.deep_per_hour_cap)} pro Stunde` : "–"} />
       <Tile label="Käufe pro Stunde (Papier)" value={n(s.entered_1h)}
         sub={s.source === "heartbeat" ? `${n(s.open_positions)} offen · pump.fun-API ${s.pump_api_ok ? "erreichbar" : "nicht erreichbar"}` : ""} />
     </div>
+  );
+}
+
+const TRADE_SRC = { rpc: "Solana-RPC (Logs)", pumpportal: "PumpPortal" };
+
+/** Where per-coin trades come from; with the RPC source a second websocket carries up to 150 log subscriptions. */
+function TradeSource({ s }) {
+  if (s.source !== "heartbeat" || !s.trade_source) {
+    return <Tile label="Trade-Quelle" value={<span className="dim">–</span>} sub={s.source === "heartbeat" ? "der Dienst meldet keine Trade-Quelle" : "kommt aus der Meldung des Dienstes"} />;
+  }
+  const rpc = s.trade_source === "rpc";
+  const max = s.rpc_ws_max_subs || 150;
+  const full = rpc && (s.rpc_ws_subs || 0) >= max;
+  return (
+    <Tile label="Trade-Quelle" value={<span style={{ fontSize: 17 }}>{TRADE_SRC[s.trade_source] || s.trade_source}</span>}
+      sub={rpc
+        ? <>2. Websocket <span className={s.rpc_ws_connected ? "up" : "down"}>{s.rpc_ws_connected ? "verbunden" : "getrennt"}</span> · <span className={full ? "warn-ink" : ""}>{n(s.rpc_ws_subs)} von {n(max)} Abos</span></>
+        : "Trades kommen mit über den PumpPortal-Websocket"} />
   );
 }
 

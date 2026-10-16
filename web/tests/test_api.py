@@ -367,3 +367,26 @@ def test_rpc_pool(demo, tmp_path, monkeypatch, capsys):
     assert line.startswith("RPC-Pool: 2 von 3 Endpunkten aktiv") and "1.100 ms" in line and "pausiert: b.example" in line
     s = _client(demo).get("/api/system").json()
     assert "rpc_pool" in s
+
+
+def test_sniper_check_errors_and_trade_source(demo):
+    from web import queries as Q
+
+    d = _client(demo).get("/api/sniper?limit=2000").json()
+    errs = [x for x in d["launches"] if x["check_errors"]]
+    assert errs and all(isinstance(x["check_errors"], list) for x in d["launches"])
+    flat = " ".join(e for x in errs for e in x["check_errors"])
+    assert "api-key=demo" not in flat and "/coins/x" not in flat
+    det = _client(demo).get(f"/api/sniper/{errs[0]['mint']}").json()
+    assert det["check_errors"] == errs[0]["check_errors"]
+    assert Q._redact("x https://h.example/?api-key=SECRET&b=1 y") == "x https://h.example y"
+    import json
+
+    conn = sqlite3.connect(demo)
+    conn.row_factory = sqlite3.Row
+    ts = json.loads(conn.execute("SELECT value FROM sniper_state WHERE key='service_status'").fetchone()[0])["ts"]
+    Q._SNIPER_HIST.clear()
+    st = Q.sniper_stream(conn, now=ts + 5)
+    Q._SNIPER_HIST.clear()
+    assert st["source"] == "heartbeat"
+    assert st["trade_source"] == "rpc" and st["rpc_ws_connected"] is True and st["rpc_ws_subs"] == 112 and st["rpc_ws_max_subs"] == 150

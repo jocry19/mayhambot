@@ -252,6 +252,11 @@ def _sniper_demo(conn, r, now):
             row.update(ret_1m=round(r.uniform(-.3, .4), 3), ret_5m=round(r.uniform(-.5, mx), 3), ret_15m=round(r.uniform(-.7, mx), 3),
                        ret_60m=round(end, 3), max_ret_60m=round(max(mx, end), 3), min_ret_60m=round(min(end, -.1), 3),
                        rugged=int(end <= -.8), done=1)
+        if deep and r.random() < .12:  # enrichment errors as sniper/analyze.py keeps them (features.errors)
+            row["features_json"] = json.dumps({"errors": r.sample([
+                "429 Too Many Requests for url: https://frontend-api-v3.pump.fun/coins/x?api-key=demo",
+                "rpc early: getSignaturesForAddress timed out", "funder 7xKXtg: getTransaction returned null",
+                "pump.fun holders: 503 Service Unavailable"], r.randint(1, 2))})
         sst.save_launch(conn, row)
         if dec == "enter":
             pos.append((t, mint, sym, row, mx, end))
@@ -290,6 +295,7 @@ def _sniper_demo(conn, r, now):
         "ts": int(now), "connected": True, "ws_msgs": 412_877, "subscribed": 38, "in_memory": 640, "queue": 2, "open_positions": 3,
         "budget": {"rpc": {"used_last_min": 41, "per_min": 120, "total": 58_210}, "api": {"used_last_min": 22, "per_min": 30, "total": 21_904},
                    "deep": {"used_last_min": 3, "per_min": 4, "total": 3_310}},
+        "trade_source": "rpc", "rpc_ws_connected": True, "rpc_ws_subs": 112, "rpc_ws_msgs": 88_410,
         "counters": {"creates": 27_480, "trades": 391_200, "migrations": 212, "stage1": 9_870, "stage2": 3_310, "entries": 604},
         "pump_api_ok": True}),))
     conn.commit()
