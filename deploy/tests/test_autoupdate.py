@@ -51,7 +51,7 @@ def repo(tmp_path, monkeypatch):
     sh(tmp_path, "git", "clone", "-q", str(origin), str(work))
     for m in (autoupdate, ops):
         monkeypatch.setattr(m, "ROOT", work)
-    monkeypatch.setattr(ops, "ENV", {"AUTO_UPDATE_SETTLE_S": "0"})
+    monkeypatch.setattr(ops, "ENV", {"AUTO_UPDATE_SETTLE_S": "0", "BACKUP_DIR": str(tmp_path / "backups")})
     monkeypatch.setattr(ops, "db_path", lambda: work / "data" / "mayhambot.db")
     monkeypatch.setattr(ops, "check_processes", lambda: {"signals": True, "web": True})
     alerts = []
@@ -421,3 +421,13 @@ def test_prune_backups_caps_total_size(tmp_path, monkeypatch):
     assert ops.prune_backups(tmp_path) == 3
     assert sorted(p.name for p in tmp_path.iterdir())[-1] == "mayhambot-20261016-200000.tar.gz"
     assert len(list(tmp_path.iterdir())) == 3
+
+
+def test_recent_hourly_backup_is_reused(repo, tmp_path):
+    work, push, head, alerts = repo
+    (tmp_path / "backups").mkdir()
+    (tmp_path / "backups" / "mayhambot-20261016-190000.tar.gz").write_bytes(b"x")
+    (work / "BACKUP_FAILS").write_text("")          # the updater's own backup would fail: it must not run
+    push("feature")
+    assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil")).startswith("eingespielt")
+    assert "reused" in (work / "logs" / "update.log").read_text()

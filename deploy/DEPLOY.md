@@ -101,7 +101,10 @@ sein, sonst geht es automatisch zurück auf die laufende Version. Danach `mayham
 - Telegram: "⬆️ Update eingespielt: <hash>, Tests grün, 9 von 9 Dienste laufen" bzw. bei roten Tests einmal "↩️ Update nicht eingespielt" (weitere rote Runden nur im Log, nach 3 Runden einmal "🔴 Auto-Update hängt" mit den Testnamen).
   Alles steht auch in `logs/update.log`.
 - Höchstens ein Deploy pro 10 min; Commits dazwischen kommen gebündelt. Vorher ein Backup mit Integritätsprüfung,
-  schlägt es fehl, wartet das Update.
+  schlägt es fehl, wartet das Update. Ist das stündliche Backup jünger als `AUTO_UPDATE_BACKUP_MAX_AGE_MIN`
+  (60 min), wird es genommen (ein Backup der großen Datenbank dauert auf dem Mac ~10 min).
+- Die Tests laufen in einer frischen Kopie des Codes (git worktree) ohne `data/`, `logs/` und `.env` des Bots
+  und ohne Zugangsdaten in der Umgebung: der Mac prüft also dieselbe Welt wie eine frische Kopie in der Cloud.
 - Nach dem Neustart müssen alle Dienste 3 min stabil laufen (gleiche Prozess-ID, kein Neustart-Kreislauf) und das
   Dashboard antworten, sonst geht es automatisch zurück auf den alten Stand ("↩️ Update zurückgerollt: … Grund").
   Die Meldung nennt auch, wie oft 'database is locked' kam.

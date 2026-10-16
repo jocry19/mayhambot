@@ -264,6 +264,17 @@ def _gate_env() -> dict:
 SECRET_PREFIXES = ("TELEGRAM_", "LIVE_", "SOLANA_", "HELIUS_", "WALLET_", "KEYPAIR")
 
 
+def _recent_backup(max_age_s: float):
+    """Newest finished backup archive if it is younger than max_age_s (written atomically by ops.backup)."""
+    try:
+        files = sorted(ops.backup_dir().glob("mayhambot-*.tar.gz"), key=lambda f: f.stat().st_mtime)
+    except OSError:
+        return None
+    if files and time.time() - files[-1].stat().st_mtime < max_age_s:
+        return files[-1]
+    return None
+
+
 def run_once(alert=ops.send_alert, now=None, health=None) -> str:
     env = ops.load_env()
     now = now or time.time()
@@ -309,14 +320,20 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
     if now - st.get("last_deploy", 0) < gap:
         return "warte (höchstens ein Deploy pro 10 min)"
 
-    # no deploy without a fresh, verified backup (integrity_check in ops.backup); mayham.py update ignores its failure
-    log(f"backup before deploy of {subject} ...")
+    # no deploy without a fresh, verified backup (integrity_check in ops.backup; a damaged copy is never written).
+    # The hourly backup job counts when it is young enough: a backup of the grown DB takes ~10 min on the Mac.
     t_b = time.time()
-    b = subprocess.run([_python(), "deploy/ops.py", "backup"], cwd=ROOT, capture_output=True, text=True, timeout=900)
-    if b.returncode != 0:
-        log(f"backup failed, update pending: {(b.stdout + b.stderr).strip()[-500:]}")
-        return _once(st, alert, f"backup:{target}", f"⏸ Update {subject} wartet: Backup vor dem Update ist "
-                     "fehlgeschlagen. Details: logs/update.log")
+    recent = _recent_backup(ops.cfg("AUTO_UPDATE_BACKUP_MAX_AGE_MIN", 60) * 60)
+    if recent:
+        log(f"backup before deploy of {subject}: {recent.name} is {(time.time() - recent.stat().st_mtime) / 60:.0f} min old, reused")
+    else:
+        log(f"backup before deploy of {subject} ...")
+        b = subprocess.run([_python(), "deploy/ops.py", "backup"], cwd=ROOT, capture_output=True, text=True,
+                           timeout=1800)
+        if b.returncode != 0:
+            log(f"backup failed, update pending: {(b.stdout + b.stderr).strip()[-500:]}")
+            return _once(st, alert, f"backup:{target}", f"⏸ Update {subject} wartet: Backup vor dem Update ist "
+                         "fehlgeschlagen. Details: logs/update.log")
     log(f"deploy {head[:7]} -> {subject} (backup {time.time() - t_b:.0f} s)")
     st["last_deploy"] = now
     st["deploying"] = {"head": head, "target": target, "at": now}
