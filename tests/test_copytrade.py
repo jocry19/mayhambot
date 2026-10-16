@@ -775,10 +775,18 @@ def test_exploration_only_for_chosen_tiers_and_beside_strict_copies(env, monkeyp
     assert not conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0]
 
 
-def test_exploration_can_be_turned_off(env):
+def test_exploration_can_be_turned_off_and_its_positions_still_sell_on_their_own_account(env, monkeypatch):
     s, conn, ex, state = env
-    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore=False), ex)
-    assert "explore" not in st.exs
+    monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": "smart"})
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path), ex)
+    pid = st.on_whale_buy(whale_buy(sol=1.0))
+    off = strategy.Strategy(conn, Settings(db_path=s.db_path, explore=False), ex)
+    assert off.on_whale_buy(chain.Swap("sigZ", W, int(time.time()) - 5, "buy", "OTHER", 1e6, 1.0, 3e-6)) is None
+    paper_before = ex.balance(conn)
+    p = conn.execute("SELECT * FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    assert off.close(p, state["snap"], "manual")
+    assert ex.balance(conn) == pytest.approx(paper_before)  # proceeds went to the exploration balance
+    assert off.exs["explore"].balance(conn) > s.explore_start_balance_sol - 0.1
 
 
 def test_exploration_buys_signals_the_strict_gates_turn_down(env):
@@ -843,3 +851,100 @@ def test_paper_target_needs_a_sellable_price_and_slippage_survives_a_restart(env
     st.update()
     p = conn.execute("SELECT * FROM ct_positions WHERE id=?", (pid,)).fetchone()
     assert p["status"] == "closed" and p["exit_reason"] == "target" and p["pnl_sol"] > 0
+
+
+def test_rug_without_route_books_zero_and_liquidity_pull_exits(env):
+    import dataclasses
+
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    pid = st.on_whale_buy(whale_buy())
+    snap0 = state["snap"]
+    state["snap"] = dataclasses.replace(snap0, liquidity_usd=snap0.liquidity_usd * 0.1)  # LP pulled, price unchanged
+    st.update()
+    p = conn.execute("SELECT * FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    assert p["status"] == "closed" and p["exit_reason"] == "rug"
+    # no Jupiter route and no market left: the tokens are worth nothing, not last price x 0.9
+    fill = ex.sell(MINT, 1000.0, 6, None, 3e-6)
+    assert fill.ok and fill.sol == 0 and fill.source == "no_route"
+    thin = dataclasses.replace(snap0, liquidity_usd=200)
+    assert ex.sell(MINT, 1000.0, 6, thin, 3e-6).sol == 0
+
+
+def test_sale_is_credited_once_even_if_booking_fails_midway(env, monkeypatch):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    pid = st.on_whale_buy(whale_buy())
+    bal = ex.balance(conn)
+    p = conn.execute("SELECT * FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    real = ex.adjust_balance
+
+    def boom(conn_, delta, commit=True):
+        real(conn_, delta, commit=False)
+        raise RuntimeError("killed between credit and close")
+
+    monkeypatch.setattr(ex, "adjust_balance", boom)
+    with pytest.raises(RuntimeError):
+        st.close(p, state["snap"], "manual")
+    assert ex.balance(conn) == pytest.approx(bal)  # rolled back with the status change: nothing credited
+    assert conn.execute("SELECT status FROM ct_positions WHERE id=?", (pid,)).fetchone()[0] == "closing"
+    monkeypatch.setattr(ex, "adjust_balance", real)
+    conn.execute("UPDATE ct_positions SET status='open' WHERE id=?", (pid,))  # what the start-up recovery does
+    p = conn.execute("SELECT * FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    assert st.close(p, state["snap"], "manual")
+    sold = conn.execute("SELECT proceeds_sol FROM ct_positions WHERE id=?", (pid,)).fetchone()[0]
+    assert ex.balance(conn) == pytest.approx(bal + sold)  # credited exactly once
+
+
+def test_buys_in_flight_reserve_their_size(env):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    store.set_state(conn, "paper_balance_sol", 0.6)
+    conn.execute("INSERT INTO ct_positions(mode, strategy, managed, mint, symbol, opened_at, size_sol, tokens, "
+                 "entry_cost_sol, status) VALUES ('paper','signal','auto','OTHER','X',?,0.5,0,0,'opening')",
+                 (int(time.time()),))
+    p = control.preset(conn, "whale")
+    assert st.open("whale", "auto", MINT, 0.5, state["snap"], p, tp=0.5, hold=60, reason="t") is None
+    assert any("andere Käufe" in r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'"))
+
+
+def test_metrics_count_rugs_drawdowns_and_each_whale_buy_once(env):
+    import pandas as pd
+
+    from copytrade import learn
+    s, conn, ex, state = env
+    # drawdown from the start: -1, -1, +0.5 is a 2 SOL drawdown, not 1
+    df = pd.DataFrame({"status": ["closed"] * 3, "pnl_sol": [-1.0, -1.0, 0.5], "pnl_pct": [-0.5, -0.5, 0.25],
+                       "closed_at": [1, 2, 3], "hold_min": [1, 1, 1], "entry_delay_s": [1, 1, 1]})
+    assert stats.summary(df)["max_drawdown_sol"] == pytest.approx(-2.0)
+    # a rug replays at -100 %, not at the old -60 % floor
+    assert learn.GAIN_CLIP[0] == -1.0
+    # the same whale buy as whale_buy replay and as a trade row of two accounts counts once
+    _rank(conn)
+    _evals(conn, 0.12, n=10)
+    one = learn.wallet_edge(conn, W)
+    for kind in ("trade",):
+        for i in range(10):
+            row = conn.execute("SELECT * FROM ct_evals WHERE ref=?", (f"e0.12{i}",)).fetchone()
+            for acc in ("p", "x"):
+                conn.execute("INSERT INTO ct_evals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                             (kind, f"{acc}{i}", "whale", W, MINT, row["ts"], row["grid_version"], row["gains"],
+                              None, None, "{}", int(time.time())))
+    assert learn.wallet_edge(conn, W)["n"] == one["n"] == 10
+
+
+def test_signal_backtest_books_the_stop_when_the_dip_came_first(env):
+    s, conn, ex, state = env
+    for col in ("dd_before_peak_1h REAL", "outcome_flag TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE signals ADD COLUMN {col}")
+        except Exception:
+            pass
+    p = control.preset(conn, "signal")
+    sig = _signal(conn, score=90)
+    conn.execute("UPDATE signals SET ret_1h=-0.1, max_ret_1h=1.0, dd_before_peak_1h=-0.4 WHERE id=?", (sig["id"],))
+    sig2 = _signal(conn, score=90)
+    conn.execute("UPDATE signals SET ret_1h=-0.95, max_ret_1h=0.02, outcome_flag='dead' WHERE id=?", (sig2["id"],))
+    bt = stats.signal_backtest(conn, p)
+    gains = sorted(bt["gain"].round(3))
+    assert gains == sorted([round(-0.95 - stats.ROUNDTRIP_COST, 3), round(-p.stop_loss - stats.ROUNDTRIP_COST, 3)])

@@ -37,7 +37,8 @@ LAUNCH_MAX_RUN = 0.3  # mode 3: market cap up more than this since the sniper de
 LAUNCH_MAX_AGE_S = 60  # mode 3: a sniper decision older than this is not bought (launch prices move in seconds)
 EXIT_NAMES = {"target": "Ziel erreicht", "inflow_peak": "Copy-Ansturm vorbei", "trail": "Trailing-Stop",
               "stop": "Stop-Loss", "time": "Zeit abgelaufen", "whale": "Wal verkauft", "no_market": "kein Markt",
-              "smart_exit": "Smart Money steigt aus", "manual": "von dir verkauft"}
+              "smart_exit": "Smart Money steigt aus", "manual": "von dir verkauft", "rug": "Liquidität abgezogen"}
+RUG_LIQ_DROP = 0.8  # liquidity this far under its value at entry: the pool was pulled, exit at once
 PAPER_MODES = ("paper", "explore")  # simulated accounts: strict paper (the live rules) and exploration
 
 
@@ -62,10 +63,13 @@ class ExploreExecutor:
             return self.s.explore_start_balance_sol
         return float(v)
 
-    def adjust_balance(self, conn, delta: float) -> None:
-        self.balance(conn)
+    def adjust_balance(self, conn, delta: float, commit: bool = True) -> None:
+        if store.get_state(conn, "explore_balance_sol") is None:
+            conn.execute("INSERT OR IGNORE INTO ct_state(key, value) VALUES ('explore_balance_sol', ?)",
+                         (str(self.s.explore_start_balance_sol),))
         conn.execute("UPDATE ct_state SET value = CAST(value AS REAL) + ? WHERE key='explore_balance_sol'", (delta,))
-        conn.commit()
+        if commit:
+            conn.commit()
 
 
 class Strategy:
@@ -77,7 +81,8 @@ class Strategy:
             executors = {executors.mode: executors}
         from .execution import PaperExecutor
 
-        if s.explore and isinstance(executors.get("paper"), PaperExecutor) and "explore" not in executors:
+        # built even with CT_EXPLORE off: open exploration positions must still sell on their own account
+        if isinstance(executors.get("paper"), PaperExecutor) and "explore" not in executors:
             executors = {**executors, "explore": ExploreExecutor(executors["paper"], s)}
         self.exs = executors
         self._missing: dict[int, int] = {}
@@ -115,7 +120,9 @@ class Strategy:
         return self.exs.get("paper") or next(iter(self.exs.values()))
 
     def _ex_for_position(self, p):
-        return self.exs.get(p["mode"]) or self.executor(p["strategy"] or "whale")
+        """The executor of the position's own account. Never another one: an exploration or dry-run position sold
+        through the strict or the live executor would credit the wrong balance or sell tokens the wallet never bought."""
+        return self.exs.get(p["mode"])
 
     def open_positions(self, strategy: str | None = None, mode: str | None = None) -> list:
         q, args = "SELECT * FROM ct_positions WHERE status='open'", []
@@ -183,7 +190,7 @@ class Strategy:
     def _explore_ok(self, swap: Swap) -> bool:
         """The exploration account copies this buy: account on, whale buy big enough, wallet tier in CT_EXPLORE_TIERS."""
         s = self.s
-        if "explore" not in self.exs or swap.sol_amount < s.explore_min_sol:
+        if not s.explore or "explore" not in self.exs or swap.sol_amount < s.explore_min_sol:
             return False
         tiers = {t.strip() for t in s.explore_tiers.split(",") if t.strip()}
         return (store.wallet_info(self.conn, swap.wallet).get("tier") or "none") in tiers
@@ -393,7 +400,7 @@ class Strategy:
         age = time.time() - sig["ts"]
         if age > p.max_signal_age_s:
             return self._skip("signal", mint, f"Signal zu alt ({age:.0f}s)")
-        expl = m == "auto" and "explore" in self.exs
+        expl = m == "auto" and self.s.explore and "explore" in self.exs
         why = None
         model = model_view(sig, self.conn)
         if model and model["informative"]:  # trained research model: its score is P(pump within 1 h) x 100
@@ -539,6 +546,13 @@ class Strategy:
                 why = "Kauf läuft schon" if any(b[1] == "opening" for b in busy) else f"schon gehalten ({busy[0][0]})"
                 self._skip(strategy, mint, f"Coin {why}", snap)
                 return None
+            # buys in flight on other threads hold their size too: two buys must not both pass a balance check
+            # that only one of them fits (10/2026 audit: 0.6 SOL balance, two 0.5 SOL buys, -0.4 left)
+            reserved = self.conn.execute("SELECT COALESCE(SUM(size_sol), 0) FROM ct_positions WHERE status='opening' "
+                                         "AND mode=?", (ex.mode,)).fetchone()[0]
+            if ex.mode in PAPER_MODES and ex.balance(self.conn) - reserved < size + 0.01:
+                self._skip(strategy, mint, "Guthaben zu klein (andere Käufe laufen)", snap)
+                return None
             pid = self.conn.execute(
                 """INSERT INTO ct_positions(mode, strategy, managed, wallet, mint, symbol, signal_id, opened_at,
                      size_sol, tokens, entry_cost_sol, status, intent) VALUES (?,?,?,?,?,?,?,?,?,0,0,'opening',?)""",
@@ -553,6 +567,11 @@ class Strategy:
             if ex.mode in PAPER_MODES:
                 _write_hard(self.conn, "DELETE FROM ct_positions WHERE id=?", (pid,))
             return None
+        if fill.ok and ex.mode in PAPER_MODES and snap.price_sol and not 0.1 < fill.price_sol / snap.price_sol < 10:
+            # a fill 10x off the market price: wrong token decimals (an RPC fallback guessed 6), not a real price
+            from .execution import Fill
+
+            fill = Fill(False, error=f"Füllpreis unplausibel ({fill.price_sol / snap.price_sol:.3g}× Marktpreis)")
         if not fill.ok:  # nothing was bought: paper rows go, a live row stays as 'failed' for the record
             if ex.mode in PAPER_MODES:
                 _write_hard(self.conn, "DELETE FROM ct_positions WHERE id=?", (pid,))
@@ -570,7 +589,6 @@ class Strategy:
 
     def _booked(self, pid, ex, fill, strategy, managed, mint, size, snap, tp, sl, trail, hold, reason, wallet,
                 whale, meta, score, inflow, version) -> int:
-        ex.adjust_balance(self.conn, -fill.sol)
         safe = (meta or {}).get("safety") or {}
         meta = {**(meta or {}), "fill_source": fill.source, "impact": fill.price_impact,
                 "liq_usd": snap.liquidity_usd, "fdv": snap.fdv, "dex": snap.dex_id}
@@ -578,8 +596,8 @@ class Strategy:
             from .execution import paper_adverse
 
             meta["adverse"] = paper_adverse()  # lets learn.extra_cost compare fills made under different settings
-        _write_hard(
-            self.conn,
+        _book_hard(
+            self.conn, ex, -fill.sol,
             """UPDATE ct_positions SET status='open', whale_sig=?, whale_ts=?, whale_price_sol=?, opened_at=?,
                  entry_price_sol=?, entry_price_usd=?, entry_mcap_usd=?, tokens=?, token_decimals=?, entry_cost_sol=?,
                  take_profit=?, stop_loss=?, trail_activate=?, trail_drawdown=?, max_hold_min=?, high_price_sol=?,
@@ -587,11 +605,12 @@ class Strategy:
                  use_inflow_exit=?, safety_level=?, safety_score=?, safety_reasons=? WHERE id=?""",
             (whale.signature if whale else None, whale.block_time if whale else None,
              whale.price_sol if whale else None, int(time.time()),
-             fill.price_sol, snap.price_usd, snap.fdv, fill.tokens, _decimals_cache.get(mint, 6), fill.sol,
+             fill.price_sol, snap.price_usd, snap.fdv, fill.tokens,
+             getattr(fill, "decimals", None) or _decimals_cache.get(mint, 6), fill.sol,
              tp, sl, trail[0], trail[1], hold, snap.price_sol, snap.price_sol,
              snap.buys_m5, snap.buys_m5, fill.tx, json.dumps(meta), version, inflow,
              safe.get("level"), safe.get("score"), json.dumps(safe.get("reasons") or [], ensure_ascii=False), pid),
-        )
+        )  # cost and 'open' in one commit (see _sell_claimed)
         control.alert(self.conn, strategy, mint, snap.symbol, "bought", reason, wallet=wallet,
                       price_sol=fill.price_sol, price_usd=snap.price_usd, mcap_usd=snap.fdv, score=score,
                       data=meta, position_id=pid)
@@ -604,6 +623,12 @@ class Strategy:
     def close(self, p, snap, reason: str, wait: bool = True) -> bool:
         """Sell a position. wait=False (real-money swaps, up to LIVE_CONFIRM_TIMEOUT_S): claim it here and sell in a
         worker thread with its own connection, so the price loop keeps checking the other stops meanwhile."""
+        if self._ex_for_position(p) is None:  # its account's executor is not loaded (e.g. live/ switched off)
+            if time.time() - self._noroute.get(-p["id"], 0) > 600:
+                self._noroute[-p["id"]] = time.time()
+                store.event(self.conn, "error", f"{p['symbol']}: Konto '{p['mode']}' nicht geladen, Position {p['id']} "
+                                                "bleibt offen", "error")
+            return False
         # claim it first: the whale-sell path and the price loop (other threads) may try to close the same position
         if self.conn.execute("UPDATE ct_positions SET status='closing', closed_at=? WHERE id=? AND status='open'",
                              (int(time.time()), p["id"])).rowcount != 1:
@@ -650,16 +675,18 @@ class Strategy:
                 store.event(self.conn, "error", f"Verkauf {p['symbol']} fehlgeschlagen: {fill.error if fill else err}",
                             "error")
             return False
-        ex.adjust_balance(self.conn, fill.sol)
         pnl = fill.sol - p["entry_cost_sol"]
         pct = pnl / p["entry_cost_sol"] if p["entry_cost_sol"] else 0
-        self.conn.execute(
-            """UPDATE ct_positions SET status='closed', closed_at=?, exit_price_sol=?, proceeds_sol=?,
-                 pnl_sol=?, pnl_pct=?, exit_reason=?, exit_tx=?, exit_mcap_usd=? WHERE id=?""",
-            (int(time.time()), fill.price_sol, fill.sol, pnl, pct, reason, fill.tx, snap.fdv if snap else None,
-             p["id"]),
-        )
-        self.conn.commit()
+        # proceeds and 'closed' in one commit: a crash or lock in between must not credit a sale that the start-up
+        # recovery then reopens and sells again (10/2026 audit: reproduced as a double credit)
+        if not _book_hard(self.conn, ex, fill.sol,
+                          """UPDATE ct_positions SET status='closed', closed_at=?, exit_price_sol=?, proceeds_sol=?,
+                               pnl_sol=?, pnl_pct=?, exit_reason=?, exit_tx=?, exit_mcap_usd=? WHERE id=?
+                               AND status='closing'""",
+                          (int(time.time()), fill.price_sol, fill.sol, pnl, pct, reason, fill.tx,
+                           snap.fdv if snap else None, p["id"])):
+            log.error("position %s was no longer 'closing' when its sale was booked", p["id"])
+            return False
         store.event(self.conn, "sell", f"VERKAUF [{p['strategy']}/{p['mode']}] {p['symbol']} {pct:+.1%} "
                                        f"({pnl:+.3f} SOL), Grund: {EXIT_NAMES.get(reason, reason)}",
                     data={"position": p["id"], "reason": reason})
@@ -744,7 +771,13 @@ class Strategy:
             trail_dd = p["trail_drawdown"] if p["trail_drawdown"] is not None else self.s.trail_drawdown
             inflow = p["use_inflow_exit"] if p["use_inflow_exit"] is not None else p["strategy"] == "whale"
             reason = None
-            if gain <= -p["stop_loss"]:
+            try:
+                liq0 = float(json.loads(p["meta"] or "{}").get("liq_usd") or 0)
+            except (ValueError, TypeError):
+                liq0 = 0
+            if liq0 > 0 and snap.liquidity_usd < liq0 * (1 - RUG_LIQ_DROP):
+                reason = "rug"  # LP pulled: the screener price often stays at the pre-rug level, so no stop fires
+            elif gain <= -p["stop_loss"]:
                 reason = "stop"
             elif gain >= p["take_profit"]:
                 reason = "target"
@@ -842,6 +875,36 @@ def sniper_exits() -> dict:
 
 # ---------------------------------------------------------------------- wash trading (safety/ check)
 INTENT_LOCK = threading.Lock()  # process-wide; taken inside watch.ENTRY_LOCK by the whale path (same order always)
+
+
+def _book_hard(conn, ex, delta: float, sql: str, args: tuple, tries: int = 15) -> bool:
+    """A position update and its paper balance change in one transaction (the connection is in autocommit mode,
+    so it is opened explicitly), retried while the database is locked. False, with nothing written, when the update
+    matched no row. Live and dry-run balances are not in this database file's transaction (the wallet, or the dry run's
+    own connection), so there the position is written first and the balance after."""
+    paper = ex.mode in PAPER_MODES
+    for i in range(tries):
+        try:
+            if paper:
+                conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(sql, args).rowcount != 1:
+                if conn.in_transaction:
+                    conn.rollback()
+                return False
+            if paper:
+                ex.adjust_balance(conn, delta, commit=False)
+                conn.commit()
+            else:
+                conn.commit()
+                ex.adjust_balance(conn, delta)
+            return True
+        except Exception as e:
+            if conn.in_transaction:
+                conn.rollback()
+            if not store.is_locked(e) or i == tries - 1:
+                raise
+            time.sleep(min(4.0, 0.5 * (i + 1)))
+    return False
 
 
 def _write_hard(conn, sql: str, args: tuple, tries: int = 15) -> None:

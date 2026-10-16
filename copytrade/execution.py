@@ -33,6 +33,7 @@ def set_paper_adverse(x: float) -> None:
     global _adverse
     if "CT_PAPER_ADVERSE_SLIPPAGE" not in os.environ:
         _adverse = x
+NO_ROUTE_MIN_LIQ_USD = 1000  # paper sell without a Jupiter quote: below this liquidity the sale books 0
 DEX_FEE_FALLBACK = 0.0035  # Raydium/Meteora ~0.25%, pump.fun 1% -> blended guess when no quote
 
 
@@ -116,12 +117,14 @@ class PaperExecutor:
             gross = int(q["outAmount"]) / 1e9
             impact = float(q.get("priceImpactPct") or 0)
             src = "jupiter_quote"
-        else:
-            price = snap.price_sol if snap and snap.price_sol else last_price_sol
-            value = tokens * price
-            impact = _cp_impact(value, snap, market.sol_usd(self.s)) if snap else 0.1
+        elif snap and snap.price_sol and snap.liquidity_usd >= NO_ROUTE_MIN_LIQ_USD:
+            value = tokens * snap.price_sol
+            impact = _cp_impact(value, snap, market.sol_usd(self.s))
             gross = value * (1 - impact) * (1 - DEX_FEE_FALLBACK)
             src = "liquidity_estimate"
+        else:  # no route and no market with liquidity (pulled LP, delisted pair): the tokens sell for nothing.
+            # 10/2026 audit: booking last_price x 0.9 here turned rugs into -12 % instead of about -100 %
+            impact, gross, src = 1.0, 0.0, "no_route"
         gross *= 1 - _adverse
         net = max(0.0, gross - fees)
         return Fill(True, tokens=tokens, sol=net, price_sol=net / tokens if tokens else 0, price_impact=impact,
@@ -136,10 +139,16 @@ class PaperExecutor:
             return self.s.paper_start_balance_sol
         return float(v)
 
-    def adjust_balance(self, conn, delta: float) -> None:
-        self.balance(conn)  # make sure the row exists
+    def adjust_balance(self, conn, delta: float, commit: bool = True) -> None:
+        """commit=False: part of the caller's transaction (the position row changes in the same commit)."""
+        from . import store
+
+        if store.get_state(conn, "paper_balance_sol") is None:
+            conn.execute("INSERT OR IGNORE INTO ct_state(key, value) VALUES ('paper_balance_sol', ?)",
+                         (str(self.s.paper_start_balance_sol),))
         conn.execute("UPDATE ct_state SET value = CAST(value AS REAL) + ? WHERE key='paper_balance_sol'", (delta,))
-        conn.commit()
+        if commit:
+            conn.commit()
 
 
 def _live(settings: Settings, rpc: chain.Rpc):

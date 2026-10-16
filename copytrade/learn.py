@@ -51,7 +51,9 @@ MIN_MODE_N, MIN_MODE_TEST = 40, 12
 MIN_WALLET_N, MIN_WALLET_TEST = 20, 6
 MIN_IMPROVEMENT = 0.01  # +1 %-point net per trade out of sample
 TRAIN_SHARE = 0.7
-GAIN_CLIP = (-0.6, 2.0)
+# no floor above a total loss: a -0.6 floor turned every rug into -60 % and lifted wallet edges (10/2026 audit);
+# the cap keeps one moonshot from carrying a whole wallet
+GAIN_CLIP = (-1.0, 2.0)
 RETRY_S = 2 * 86400  # entries without candles are retried this long, then recorded as unevaluable
 TRADE_WEIGHT = 2  # our own trades count double vs. hypothetical whale buys / signals
 HALF_LIFE_H = 72.0  # older entries count less: weight halves every 3 days (markets and whales change)
@@ -391,8 +393,20 @@ def _rows(conn, strategy: str, wallet: str | list[str] | None = None,
                 pass
         out.append({"kind": r["kind"], "ts": r["ts"], "gains": json.loads(r["gains"]), "features": f,
                     "w": (TRADE_WEIGHT if r["kind"] == "trade" else 1) * decay(r["ts"]), "actual": r["actual_gain"],
-                    "sim_actual": r["sim_actual"]})
-    return out
+                    "sim_actual": r["sim_actual"], "key": (r["wallet"], r["mint"], int(r["ts"]))})
+    # one row per whale buy: our trade row (it carries the real fill) replaces the whale_buy replay of the same buy,
+    # and a buy copied by both paper accounts counts once (10/2026 audit: the same buy counted about 3x)
+    traded = {o["key"] for o in out if o["kind"] == "trade" and o["key"][0]}
+    seen: set = set()
+    keep = []
+    for o in out:
+        k = o.pop("key")
+        if k[0] and o["kind"] in ("whale_buy", "trade"):
+            if (o["kind"] == "whale_buy" and k in traded) or (o["kind"] == "trade" and k in seen):
+                continue
+            seen.add(k)
+        keep.append(o)
+    return keep
 
 
 def _means(rows: Sequence[dict], n_var: int, extra_cost: float = 0.0) -> list[float]:
@@ -468,8 +482,16 @@ def wallet_edge(conn, wallet: str) -> dict:
     q = ",".join("?" * len(ws))
     vals, wts = [], []
     now = time.time()
-    for r in conn.execute(f"SELECT gains, ts FROM ct_evals WHERE strategy='whale' AND grid_version=? AND gains!='[]' "
-                          f"AND kind IN ('whale_buy','trade') AND wallet IN ({q})", (sim.GRID_VERSION, *ws)):
+    seen: set = set()
+    # one row per whale buy: a copied buy has its whale_buy replay plus a 'trade' row per account that copied it, all
+    # starting at the whale's time with the same gains, and counting them 2-4 times shrank the error bar too much
+    for r in conn.execute(f"SELECT gains, ts, wallet, mint FROM ct_evals WHERE strategy='whale' AND grid_version=? "
+                          f"AND gains!='[]' AND kind IN ('whale_buy','trade') AND wallet IN ({q}) "
+                          f"ORDER BY kind='trade'", (sim.GRID_VERSION, *ws)):
+        key = (r[2], r[3], int(r[1]))
+        if key in seen:
+            continue
+        seen.add(key)
         g = json.loads(r[0])
         if len(g) == len(variants) and g[idx] is not None:
             vals.append(max(GAIN_CLIP[0], min(GAIN_CLIP[1], g[idx])))
@@ -493,8 +515,9 @@ def rollback(conn) -> list[int]:
     """Deactivate learned versions whose own trades fall clearly short of what the test promised."""
     out = []
     for v in conn.execute("SELECT id, strategy, scope, test_gain FROM ct_param_versions WHERE active=1").fetchall():
-        r = conn.execute("SELECT COUNT(*), AVG(pnl_pct) FROM ct_positions WHERE param_version=? AND status='closed'",
-                         (v["id"],)).fetchone()
+        # strict accounts only: the exploration account trades wider on purpose and must not trigger or mask this
+        r = conn.execute("SELECT COUNT(*), AVG(pnl_pct) FROM ct_positions WHERE param_version=? AND status='closed' "
+                         "AND mode!='explore'", (v["id"],)).fetchone()
         n, avg = r[0] or 0, r[1]
         if n >= ROLLBACK_MIN_TRADES and avg is not None and avg < 0 and avg < (v["test_gain"] or 0) - ROLLBACK_MARGIN:
             conn.execute("UPDATE ct_param_versions SET active=0 WHERE id=?", (v["id"],))

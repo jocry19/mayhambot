@@ -40,7 +40,7 @@ def summary(df: pd.DataFrame) -> dict:
     gross_win = wins["pnl_sol"].sum()
     gross_loss = -losses["pnl_sol"].sum()
     eq = closed.sort_values("closed_at")["pnl_sol"].cumsum()
-    dd = (eq - eq.cummax()).min()
+    dd = (eq - eq.cummax().clip(lower=0)).min()  # the peak starts at 0: losses from the first trade on count
     return {
         "trades": len(closed),
         "open": int((df["status"] == "open").sum()),
@@ -59,10 +59,12 @@ def summary(df: pd.DataFrame) -> dict:
 
 
 def by_strategy(conn, mode: str | None = None) -> pd.DataFrame:
-    """One row per strategy (whale / signal / manual) with summary() columns."""
+    """One row per strategy (whale / signal / launch / manual) with summary() columns."""
+    from .control import STRATEGIES
+
     df = positions(conn, mode)
     rows = []
-    for strat in ("whale", "signal", "manual"):
+    for strat in (*STRATEGIES, "manual"):
         sub = df[df["strategy"] == strat] if len(df) else df
         rows.append({"strategy": strat, **summary(sub)})
     return pd.DataFrame(rows)
@@ -109,8 +111,17 @@ def signal_backtest(conn, preset, size_sol: float | None = None) -> pd.DataFrame
     if df.empty:
         return df
     size = size_sol or preset.size_sol
-    hit = df["max_ret_1h"] >= preset.take_profit
-    df["gain"] = (hit * preset.take_profit + (~hit) * df["ret_1h"].fillna(0).clip(lower=-preset.stop_loss)) - ROUNDTRIP_COST
+    sl = preset.stop_loss
+    dead = df["outcome_flag"].eq("dead") if "outcome_flag" in df else pd.Series(False, index=df.index)
+    # stopped out first when the dip before the 1 h high went through the stop (no target booked on that path)
+    stopped = df["dd_before_peak_1h"].le(-sl) if "dd_before_peak_1h" in df else pd.Series(False, index=df.index)
+    hit = (df["max_ret_1h"] >= preset.take_profit) & ~stopped & ~dead
+    df = df[hit | stopped | dead | df["ret_1h"].notna()].copy()  # a signal without a 1 h price is not a 0 % trade
+    hit, stopped, dead = hit[df.index], stopped[df.index], dead[df.index]
+    rest = df["ret_1h"].fillna(-1.0).clip(lower=-sl)
+    df["gain"] = (hit * preset.take_profit + (~hit & stopped & ~dead) * -sl
+                  + dead * df["ret_1h"].fillna(-1.0).clip(lower=-1.0)  # a dead coin is not saved by the stop
+                  + (~hit & ~stopped & ~dead) * rest) - ROUNDTRIP_COST
     df["pnl_sol"] = df["gain"] * size
     df["equity_sol"] = df["pnl_sol"].cumsum()
     df["dt"] = pd.to_datetime(df["ts"], unit="s", utc=True)
@@ -123,7 +134,7 @@ def equity(conn, mode: str) -> pd.DataFrame:
     return df
 
 
-def wallet_table(conn) -> pd.DataFrame:
+def wallet_table(conn, mode: str = "paper") -> pd.DataFrame:
     """Whale ranking + tier/model_score/cluster_id/exit_capture from core's `wallets` (synced from the model).
     `entity` = cluster_id or address: wallets of one cluster are one whale (count once)."""
     try:
@@ -136,12 +147,14 @@ def wallet_table(conn) -> pd.DataFrame:
         f"""SELECT w.address, w.label, w.source, w.active, {extra[0]}, r.samples, r.hit_rate, r.median_first_pump,
                   r.median_pump_min, r.median_lead_min, r.median_achievable, r.avg_loss, r.expected_value,
                   r.score, r.take_profit, r.max_hold_min,
-                  (SELECT COUNT(*) FROM ct_positions p WHERE p.wallet=w.address AND p.status='closed') AS copied,
-                  (SELECT SUM(pnl_sol) FROM ct_positions p WHERE p.wallet=w.address AND p.status='closed') AS copy_pnl_sol,
+                  (SELECT COUNT(*) FROM ct_positions p WHERE p.wallet=w.address AND p.status='closed'
+                     AND p.mode=:mode) AS copied,
+                  (SELECT SUM(pnl_sol) FROM ct_positions p WHERE p.wallet=w.address AND p.status='closed'
+                     AND p.mode=:mode) AS copy_pnl_sol,
                   (SELECT MAX(ts) FROM ct_swaps s WHERE s.wallet=w.address) AS last_swap
            FROM ct_wallets w LEFT JOIN ct_wallet_rank r ON r.address=w.address {extra[1]}
            ORDER BY COALESCE(r.score, -1) DESC""",
-        conn,
+        conn, params={"mode": mode},
     )
     df["last_swap_dt"] = pd.to_datetime(df["last_swap"], unit="s", utc=True)
     df["entity"] = [f"cluster:{c}" if c not in (None, "") and c == c else a for a, c in zip(df.address, df.cluster_id)]

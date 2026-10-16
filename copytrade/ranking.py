@@ -185,7 +185,7 @@ def rank_wallets(conn, s: Settings) -> int:
         n = len(rs)
         hits = [r for r in rs if r["pumped"]]
         hit_rate = (len(hits) + 1) / (n + 3)  # shrunk towards ~33%
-        ach = [max(-s.stop_loss - 0.05, min(r["achievable_gain"], s.tp_max)) for r in rs]
+        ach = [max(-1.0, min(r["achievable_gain"], s.tp_max)) for r in rs]  # a rug costs everything, not stop + 5 %
         losses = [a for a in ach if a < 0]
         ev = sum(ach) / n
         confidence = n / (n + 5)
