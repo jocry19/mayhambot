@@ -54,7 +54,8 @@ def get_tx(sig):
 
 def wallet_trades(wallet, limit=None, enhanced=False):
     """Swaps of a wallet. enhanced=True uses the Helius Enhanced API (100 credits, up to 100 swaps) if the
-    daily cap allows; otherwise getSignaturesForAddress + getTransaction (public RPC first)."""
+    daily cap allows; otherwise getSignaturesForAddress + getTransaction (public RPC first).
+    None = not fetched or incomplete (the caller retries the wallet later instead of marking it done)."""
     limit = limit or rsettings.wallet_tx_limit
     if enhanced and settings.helius_api_key and credits.can("enhanced"):
         try:
@@ -66,6 +67,7 @@ def wallet_trades(wallet, limit=None, enhanced=False):
     try:
         sigs = call("getSignaturesForAddress", [wallet, {"limit": limit}]) or []
         out = []
+        failed = 0
         for s in sigs:
             if s.get("err"):
                 continue
@@ -73,12 +75,17 @@ def wallet_trades(wallet, limit=None, enhanced=False):
                 tx = get_tx(s["signature"])
             except Exception as e:  # noqa: BLE001
                 log.debug("getTransaction %s failed: %s", s["signature"][:8], e)
+                failed += 1
                 continue
             out.extend(core_wh.parse_rpc_tx(tx, wallet, s["signature"]))
+        if core_wh.too_many_failed(failed, len(sigs)):
+            log.info("wallet history %s incomplete (%d/%d getTransaction failed), retried later",
+                     wallet[:6], failed, len(sigs))
+            return None
         return out
     except Exception as e:  # noqa: BLE001
         log.warning("wallet history %s failed: %s", wallet[:6], e)
-        return []
+        return None
 
 
 def early_buyers(mint, max_pages=8, n_tx=120):

@@ -188,12 +188,15 @@ def run_once(conn=None):
     for w in due:
         time.sleep(rsettings.pause_s)
         tr = rpc.wallet_trades(w, enhanced=bool(rsettings.enhanced_backfill) and w in vip)
+        if tr is None:  # failed or incomplete: not marked, so the next run tries again
+            summary["wallets_backfill_failed"] = summary.get("wallets_backfill_failed", 0) + 1
+            continue
         summary["wallet_trades_added"] += retry(lambda: db.insert_trades(conn, tr))
         for t in tr:
             new_mints[t.mint] += 1
         retry(lambda: (conn.execute("UPDATE research_wallets SET backfilled_at=?, n_backfills=n_backfills+1 WHERE address=?",
                                     (now, w)), conn.commit()))
-    summary["wallets_backfilled"] = len(due)
+    summary["wallets_backfilled"] = len(due) - summary.get("wallets_backfill_failed", 0)
     # funding source of the best wallets (same funder = same person, counted as one group)
     try:
         summary["funders_found"] = funding.run_once(conn, mine=_mine)
