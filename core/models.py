@@ -37,4 +37,6 @@ class Token:
     price_change_h1: float = 0.0
     price_change_h24: float = 0.0
     volume_h1: float = 0.0
+    txns_m5: int = 0      # buys + sells in the last 5 min / hour (DexScreener), drives how often trades are fetched
+    txns_h1: int = 0
     extra: dict = field(default_factory=dict)

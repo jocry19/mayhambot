@@ -31,7 +31,7 @@ Tables (stable column names; columns are only added via `db.MIGRATIONS`, never r
 
 | table | columns |
 |---|---|
-| `tokens` | mint PK, symbol, name, pool_address, dex, price_usd, mcap_usd, liquidity_usd, pair_created_at, price_change_m5/h1/h24, volume_h1, first_seen, last_updated, tracked |
+| `tokens` | mint PK, symbol, name, pool_address, dex, price_usd, mcap_usd, liquidity_usd, pair_created_at, price_change_m5/h1/h24, volume_h1, txns_m5, txns_h1 (DexScreener buys+sells), first_seen, last_updated, tracked, last_trades_fetch |
 | `token_prices` | mint, ts, price_usd, mcap_usd, liquidity_usd (DexScreener snapshot each cycle) |
 | `trades` | sig, wallet, mint, side ('buy'/'sell'), ts, token_amount, sol_amount, usd_amount, price_usd, source ('geckoterminal' / 'rpc' / 'helius' / 'rpc_early') |
 | `wallets` | address PK, label, source, manual, score (0-100), **tier** ('ultra'/'smart'/'good'/NULL), is_smart (=tier in ultra,smart), is_bot, tokens_traded, win_rate, early_rate, realized_pnl_usd, total_pnl_usd, roi, median_peak_multiple, consistency, last_trade_ts, backfilled_at, updated_at |

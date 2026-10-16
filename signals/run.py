@@ -50,13 +50,44 @@ def _row_token(r):
     return Token(mint=r["mint"], symbol=r["symbol"] or "", pool_address=r["pool_address"] or "")
 
 
+# GeckoTerminal returns the last 300 swaps of a pool. Refetch when about this many new ones can have
+# happened (from DexScreener's txn counts), so quiet coins cost no calls and busy ones lose no trades.
+REFETCH_AFTER_TRADES = 150
+REFETCH_MAX_SECONDS = 900
+
+
+def refetch_interval(r, cycle_seconds):
+    """Seconds until a token's pool trades are worth fetching again."""
+    keys = r.keys() if hasattr(r, "keys") else r
+    m5 = (r["txns_m5"] if "txns_m5" in keys else 0) or 0
+    h1 = (r["txns_h1"] if "txns_h1" in keys else 0) or 0
+    per_s = max(m5 / 300, h1 / 3600)
+    if per_s <= 0:
+        return REFETCH_MAX_SECONDS
+    return min(REFETCH_MAX_SECONDS, max(cycle_seconds, REFETCH_AFTER_TRADES / per_s))
+
+
+def due_for_trades(watch, now, cycle_seconds):
+    """Tokens whose trades are due, most overdue first (never-fetched tokens first of all)."""
+    due = []
+    for r in watch:
+        last = r["last_trades_fetch"] or 0
+        over = now - last - refetch_interval(r, cycle_seconds)
+        if not last or over >= 0:
+            due.append((-(1e12 if not last else over), r))
+    return [r for _, r in sorted(due, key=lambda x: x[0])]
+
+
 def fetch_trades(conn, watch):
-    """Fetch pool trades, least recently fetched first, within TRADES_BUDGET_SECONDS per cycle,
-    so a rate-limited API never blocks the cycle (the rest is fetched next cycle)."""
+    """Fetch pool trades of the tokens that are due (see refetch_interval), most overdue first, within
+    TRADES_BUDGET_SECONDS per cycle, so a rate-limited API never blocks the cycle."""
     total, t0, done = 0, time.time(), 0
-    for r in sorted(watch, key=lambda r: r["last_trades_fetch"] or 0):
+    due = due_for_trades(watch, int(t0), settings.cycle_seconds)
+    if len(due) < len(watch):
+        log.info("trades: %d/%d tokens due, rest quiet since last fetch", len(due), len(watch))
+    for r in due:
         if time.time() - t0 > settings.trades_budget_seconds:
-            log.info("trades budget used after %d/%d tokens, rest next cycle", done, len(watch))
+            log.info("trades budget used after %d/%d due tokens, rest next cycle", done, len(due))
             break
         done += 1
         conn.execute("UPDATE tokens SET last_trades_fetch=? WHERE mint=?", (int(time.time()), r["mint"]))

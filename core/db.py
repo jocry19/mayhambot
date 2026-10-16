@@ -52,6 +52,8 @@ CREATE INDEX IF NOT EXISTS idx_signals_mint ON signals(mint, ts);
 
 # columns added after the first release: (table, column, type). Applied on connect, idempotent.
 MIGRATIONS = [
+    ("tokens", "txns_m5", "INTEGER"),               # DexScreener buys+sells, last 5 min
+    ("tokens", "txns_h1", "INTEGER"),
     ("wallets", "tier", "TEXT"),                    # 'ultra' | 'smart' | 'good' | NULL
     ("signal_metrics", "buy_sol", "REAL"),
     ("signal_metrics", "net_sol", "REAL"),
@@ -144,8 +146,8 @@ def upsert_tokens(conn, tokens, tracked=None):
         conn.execute(
             """INSERT INTO tokens(mint, symbol, name, pool_address, dex, price_usd, mcap_usd, liquidity_usd,
                    pair_created_at, price_change_m5, price_change_h1, price_change_h24, volume_h1,
-                   first_seen, last_updated, tracked)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   txns_m5, txns_h1, first_seen, last_updated, tracked)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(mint) DO UPDATE SET
                    symbol=COALESCE(NULLIF(excluded.symbol,''), symbol),
                    name=COALESCE(NULLIF(excluded.name,''), name),
@@ -156,11 +158,12 @@ def upsert_tokens(conn, tokens, tracked=None):
                    pair_created_at=COALESCE(NULLIF(excluded.pair_created_at,0), pair_created_at),
                    price_change_m5=excluded.price_change_m5, price_change_h1=excluded.price_change_h1,
                    price_change_h24=excluded.price_change_h24, volume_h1=excluded.volume_h1,
+                   txns_m5=excluded.txns_m5, txns_h1=excluded.txns_h1,
                    last_updated=excluded.last_updated,
                    tracked=MAX(COALESCE(tracked,0), ?)""",
             (t.mint, t.symbol, t.name, t.pool_address, t.dex, t.price_usd, t.mcap_usd, t.liquidity_usd,
              t.pair_created_at, t.price_change_m5, t.price_change_h1, t.price_change_h24, t.volume_h1,
-             now, now, 1 if tracked is None else int(tracked), 1 if tracked is None else int(tracked)),
+             t.txns_m5, t.txns_h1, now, now, 1 if tracked is None else int(tracked), 1 if tracked is None else int(tracked)),
         )
         if t.price_usd:
             conn.execute("INSERT OR REPLACE INTO token_prices VALUES (?,?,?,?,?)",

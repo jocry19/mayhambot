@@ -33,6 +33,11 @@ def _iso_ts(s):
 
 # ---------------- DexScreener ----------------
 
+def _txns(p, window):
+    t = (p.get("txns") or {}).get(window) or {}
+    return int(_f(t.get("buys")) + _f(t.get("sells")))
+
+
 def _ds_pair_to_token(p) -> Token:
     base = p.get("baseToken") or {}
     pc = p.get("priceChange") or {}
@@ -50,6 +55,8 @@ def _ds_pair_to_token(p) -> Token:
         price_change_h1=_f(pc.get("h1")),
         price_change_h24=_f(pc.get("h24")),
         volume_h1=_f((p.get("volume") or {}).get("h1")),
+        txns_m5=_txns(p, "m5"),
+        txns_h1=_txns(p, "h1"),
         extra={"price_native": _f(p.get("priceNative")),
                "quote": (p.get("quoteToken") or {}).get("address", "")},
     )
