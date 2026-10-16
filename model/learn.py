@@ -45,15 +45,16 @@ def learn_wallet_weights(wallet_events, prior_n=None):
     return {k: v / s for k, v in w.items()}, dict(info, learned=learned, coef=coef, lam=lam)
 
 
-def fit_token_models(events, horizons=None, l2=None, now=None):
+def fit_token_models(events, horizons=None, l2=None, now=None, target="pumped"):
     """events: dicts with 'x' (feature vector), 'ts' and 'labels' {h: {...} | None}.
-    Returns {h: model} using only events whose label is known (and that ended before `now`)."""
+    Returns {h: model} using only events whose label is known (and that ended before `now`).
+    target "pumped" (move >= threshold) or "win" (profit after round-trip costs, see events.labels_at)."""
     horizons = horizons or msettings.horizons
     l2 = msettings.l2 if l2 is None else l2
     out = {}
     for name, sec, _ in horizons:
         rows = [e for e in events if e["labels"].get(name) is not None and (now is None or e["ts"] + sec <= now)]
-        y = [e["labels"][name]["pumped"] for e in rows]
+        y = [e["labels"][name][target] for e in rows]
         pos = sum(y)
         if len(rows) < msettings.min_train_events or pos < msettings.min_train_pos or pos == len(rows):
             m = prior_model(name)
@@ -62,10 +63,16 @@ def fit_token_models(events, horizons=None, l2=None, now=None):
             X = [e["x"] for e in rows]
             m = stats.logistic_fit(X, y, l2=l2)
             m.update(kind="logistic", n=len(rows), pos=pos)
-            size = stats.ridge_fit(X, [math.log1p(max(-0.99, e["labels"][name]["max_ret"])) for e in rows], l2=l2 * 4)
-            m["size"] = size
+            m["size"], m["size_kind"] = _size_fit(X, rows, name, target, l2)
         out[name] = m
     return out
+
+
+def _size_fit(X, rows, name, target, l2):
+    """Ridge for the size of the outcome: log(1 + max move) for the pump target, net return for the win target."""
+    if target == "win":
+        return stats.ridge_fit(X, [e["labels"][name]["net"] for e in rows], l2=l2 * 4), "net"
+    return stats.ridge_fit(X, [math.log1p(max(-0.99, e["labels"][name]["max_ret"])) for e in rows], l2=l2 * 4), "log_max"
 
 
 def predict(models, x):
@@ -76,7 +83,12 @@ def predict(models, x):
         size = m.get("size")
         cols = m.get("cols")
         xs = [x[i] for i in cols] if cols is not None else x
-        exp = math.expm1(stats.ridge_predict(size, xs)) if size else None
+        if not size:
+            exp = None
+        elif m.get("size_kind") == "net":
+            exp = stats.ridge_predict(size, xs)
+        else:
+            exp = math.expm1(stats.ridge_predict(size, xs))
         out[name] = (p, exp, con)
     return out
 
@@ -140,7 +152,7 @@ def _logloss(ps, ys):
 CANDIDATES = [{"algo": a, "drop": d} for a in ("logistic", "gbm") for d in (None, "tiers", "crowd", "price_time")]
 
 
-def select_models(events, champion=None, horizons=None, l2=None, now=None, min_gain=0.005):
+def select_models(events, champion=None, horizons=None, l2=None, now=None, min_gain=0.005, target="pumped"):
     """For each horizon: time-split the labelled events (first 70 % train, purged; last 30 % holdout), evaluate
     every candidate (algorithm x feature set) out of sample, keep the current champion unless a candidate
     beats it by more than `min_gain` relative log-loss, then refit the winner on all labelled events.
@@ -152,7 +164,7 @@ def select_models(events, champion=None, horizons=None, l2=None, now=None, min_g
     for name, sec, _ in horizons:
         rows = sorted((e for e in events if e["labels"].get(name) is not None and (now is None or e["ts"] + sec <= now)),
                       key=lambda e: e["ts"])
-        y_all = [e["labels"][name]["pumped"] for e in rows]
+        y_all = [e["labels"][name][target] for e in rows]
         pos = sum(y_all)
         if len(rows) < 2 * msettings.min_train_events or pos < 2 * msettings.min_train_pos or pos == len(rows):
             m = prior_model(name)
@@ -164,8 +176,8 @@ def select_models(events, champion=None, horizons=None, l2=None, now=None, min_g
         cut = rows[int(len(rows) * 0.7)]["ts"]
         train = [e for e in rows if e["ts"] + sec <= cut]
         test = [e for e in rows if e["ts"] > cut]
-        yt = [e["labels"][name]["pumped"] for e in test]
-        ytr = [e["labels"][name]["pumped"] for e in train]
+        yt = [e["labels"][name][target] for e in test]
+        ytr = [e["labels"][name][target] for e in train]
         res = []
         base_p = sum(ytr) / max(1, len(ytr))
         base_ll = _logloss([base_p] * len(yt), yt)
@@ -191,9 +203,9 @@ def select_models(events, champion=None, horizons=None, l2=None, now=None, min_g
         else:
             chosen, why = champ_cfg, "Champion bleibt (kein Kandidat klar besser)"
         m = _fit_cfg(chosen, [e["x"] for e in rows], y_all, l2)
-        if chosen["algo"] == "logistic":
-            m["size"] = stats.ridge_fit([[e["x"][i] for i in m["cols"]] for e in rows],
-                                        [math.log1p(max(-0.99, e["labels"][name]["max_ret"])) for e in rows], l2=l2 * 4)
+        if chosen["algo"] == "logistic" or target == "win":
+            m["size"], m["size_kind"] = _size_fit([[e["x"][i] for i in m["cols"]] for e in rows], rows, name, target, l2)
+        m["target"] = target
         m.update(n=len(rows), pos=pos)
         models[name] = m
         report[name] = dict(status="selected", chosen=chosen, why=why, n=len(rows), pos=pos, n_train=len(train),

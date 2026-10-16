@@ -171,3 +171,26 @@ def test_research_credits_and_cheap_rpc(monkeypatch):
     monkeypatch.setattr(rpc.settings, "helius_api_key", "x", raising=False)
     monkeypatch.setattr(rpc, "call", lambda m, p: [])
     assert rpc.wallet_trades("W", enhanced=True) == []  # no traceback, falls back to RPC
+
+
+def test_labels_after_costs_and_dead_coin_coverage():
+    from research import events as ev
+    from research.prices import PriceIndex
+    idx = PriceIndex()
+    idx._add("UP", [(0, 1.0), (600, 1.6), (3000, 1.1)])        # touched +60 % then faded
+    idx._add("DEAD", [(0, 1.0), (300, 0.9)])                    # stopped trading after 5 min
+    hz = [("1h", 3600, 0.5)]
+    up = ev.labels_at("UP", 0, idx, hz)["1h"]
+    assert up is None  # prices only reach t=3000, the hour is not covered yet
+    idx.fetched["UP"] = 4000
+    up = ev.labels_at("UP", 0, idx, hz)["1h"]
+    assert up["pumped"] == 1 and abs(up["net"] - (0.5 - 0.06)) < 1e-9 and up["win"] == 1
+    idx.fetched["DEAD"] = 5000  # candles fetched after the hour: no candle = no trade, last price holds
+    dead = ev.labels_at("DEAD", 0, idx, hz)["1h"]
+    assert dead["pumped"] == 0 and abs(dead["net"] - (-0.1 - 0.06)) < 1e-9 and dead["win"] == 0
+
+
+def test_backtest_calibration_bins():
+    from research.backtest import calibration
+    c = calibration([0.1, 0.1, 0.9, 0.9], [0, 0, 1, 1], bins=2)
+    assert c["ece"] < 0.11 and [b["rate"] for b in c["bins"]] == [0.0, 1.0]

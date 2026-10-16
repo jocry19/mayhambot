@@ -58,6 +58,9 @@ def score_token(mint, now=None, conn=None, store=False, tiers=None):
                               exp_max_ret=round(exp, 4) if exp is not None else round(p * thr * 1.5, 4),
                               model=models[name].get("kind", "logistic"),
                               algo=(models[name].get("cfg") or {}).get("algo", models[name].get("kind")))
+        if f"{name}_net" in preds:  # P(profit after costs) and expected net return, see events.labels_at
+            pn, en, _ = preds[f"{name}_net"]
+            horizons[name].update(p_win_net=round(pn, 4), exp_net_ret=round(en, 4) if en is not None else None)
         tot = sum(abs(c) for c in con) or 1.0
         contribs[name] = sorted(({"feature": fn, "label": ev.FEATURE_LABELS[fn], "value": round(f[fn], 4),
                                   "weight": round(wfull[name][i], 4), "contribution": round(con[i], 4),

@@ -128,13 +128,18 @@ def compute(ds, cutoff, min_position_usd=None):
 
 
 def summarize(P):
+    """Everything after costs where it decides: a win is a position whose return beats the round-trip cost,
+    ROI and the tier PnL rule use net PnL (PnL minus cost x invested)."""
     n = len(P)
-    wins = sum(1 for p in P if p["roi"] > 0.05)
+    cost = rsettings.cost_roundtrip
+    wins = sum(1 for p in P if p["roi"] > cost)
     early = sum(1 for p in P if (p["peak"] or 0) >= 2)
     rugs = sum(1 for p in P if p["rug"])
     total_buy = sum(p["buy_usd"] for p in P)
     total_pnl = sum(p["pnl"] for p in P)
     roi = total_pnl / total_buy if total_buy else 0.0
+    net_pnl = total_pnl - cost * total_buy
+    net_roi = net_pnl / total_buy if total_buy else 0.0
     pos = [p["pnl"] for p in P if p["pnl"] > 0]
     conc = 1 - max(pos) / sum(pos) if pos and total_pnl > 0 else 0.0
     srt = sorted(P, key=lambda p: p["ts"])
@@ -155,11 +160,12 @@ def summarize(P):
     mc = median([p["entry_mcap"] for p in P if p["entry_mcap"]])
     timing = min(1.0, max(0.0, 1 - (math.log10(mc) - 4) / 3)) if mc else 0.5
     comps = dict(
-        win=(wins + 1) / (n + 2), early=(early + 0.5) / (n + 2), roi=0.5 + 0.5 * math.tanh(roi),
+        win=(wins + 1) / (n + 2), early=(early + 0.5) / (n + 2), roi=0.5 + 0.5 * math.tanh(net_roi),
         consistency=consistency, timing=timing, lead=lead, influence=infl_c, exit=exit_c, rug_avoid=1 - (rugs + 0.5) / (n + 2))
     return dict(
         n_tokens=n, win_rate=wins / n, early_rate=early / n, roi=roi,
         realized_pnl_usd=sum(p["realized"] for p in P), total_pnl_usd=total_pnl,
+        net_pnl_usd=net_pnl, net_roi=net_roi,
         median_entry_mcap=mc, median_min_to_2x=median([p["min_to_2x"] for p in P]),
         influence_followers=med_f, influence_usd=med_usd, inflow_lift_usd=med_lift, influence_samples=k, median_entry_rank=med_rank,
         exit_capture=median(caps) if caps else None, median_hold_min=median([p["hold"] for p in P]),

@@ -22,7 +22,8 @@ def assign_tier(stats, score, rules=None, skip=()):
         if isinstance(r, dict):
             r = type("R", (), r)
         if (score >= r.min_score and stats["n_tokens"] >= r.min_tokens and stats["win_rate"] >= r.min_win_rate
-                and stats["rug_rate"] <= r.max_rug_rate and stats["total_pnl_usd"] > r.min_pnl_usd):
+                and stats["rug_rate"] <= r.max_rug_rate
+                and stats.get("net_pnl_usd", stats["total_pnl_usd"]) > r.min_pnl_usd):  # profit after costs
             return tier
     return None
 
@@ -53,7 +54,8 @@ def _row(r):
                                         "influence_followers", "influence_usd", "inflow_lift_usd",
                                         "consistency", "rug_rate")},
             "cluster_id": d.get("cluster_id"), "exit_capture": d.get("exit_capture"),
-            "median_hold_min": d.get("median_hold_min")}
+            "median_hold_min": d.get("median_hold_min"),
+            "net_pnl_usd": d.get("net_pnl_usd"), "net_roi": d.get("net_roi")}
 
 
 def _conn(conn):
@@ -87,13 +89,15 @@ def wallet_tiers(conn=None, tier=None, limit=None):
 def tier_sync(conn=None):
     """Source of truth for every other package once a model version exists.
     -> None before the first successful retrain (callers fall back to their own heuristic), else
-    {address: {"tier", "score", "cluster_id", "exit_capture", "version"}} for every wallet the active model scored
+    {address: {"tier", "score", "cluster_id", "exit_capture", "version", "net_pnl_usd", "net_roi"}} for every wallet the active model scored
     (tier None = scored but not good enough). Wallets missing from the dict were not scored by the model."""
     conn = _conn(conn)
     if not conn.execute("SELECT 1 FROM model_versions WHERE active=1 LIMIT 1").fetchone():
         return None
-    return {r[0]: {"tier": r[1], "score": r[2], "cluster_id": r[3], "exit_capture": r[4], "version": r[5]}
-            for r in conn.execute("SELECT address, tier, score, cluster_id, exit_capture, version FROM model_wallet_stats")}
+    return {r[0]: {"tier": r[1], "score": r[2], "cluster_id": r[3], "exit_capture": r[4], "version": r[5],
+                   "net_pnl_usd": r[6], "net_roi": r[7]}
+            for r in conn.execute("""SELECT address, tier, score, cluster_id, exit_capture, version, net_pnl_usd, net_roi
+                                     FROM model_wallet_stats""")}
 
 
 def tier_map(conn):

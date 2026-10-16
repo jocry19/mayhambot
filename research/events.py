@@ -4,6 +4,8 @@ features_at() is shared by the backtest and the live predictor, so both see exac
 """
 import math
 
+from research.config import rsettings
+
 FEATURES = (
     ("n_ultra", "Ultra-Smart-Käufer"),
     ("n_smart", "Smart-Käufer"),
@@ -172,7 +174,11 @@ def labels_at(mint, t, pidx, horizons):
         mx = pidx.max_between(mint, t, t + sec)
         end = pidx.price_at(mint, t + sec)
         mr = min(MAX_RET, (mx / p0 - 1)) if mx else 0.0
-        out[name] = dict(max_ret=mr, ret=(end / p0 - 1) if end else None, pumped=int(mr >= thr))
+        ret = (end / p0 - 1) if end else None
+        # tradeable outcome: sell at the pump threshold if it was reached, else at the horizon end, minus costs
+        gross = thr if mr >= thr else (ret if ret is not None else 0.0)
+        net = min(MAX_RET, gross) - rsettings.cost_roundtrip
+        out[name] = dict(max_ret=mr, ret=ret, pumped=int(mr >= thr), net=net, win=int(net > 0))
     return out
 
 

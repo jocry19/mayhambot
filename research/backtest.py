@@ -114,19 +114,61 @@ def run(ds, ms=msettings, max_points=24):
         cev = _coin_events(ds, tmap, c, nxt, ms)
         train = res["events"]
         for name, sec, _ in ms.horizons:
-            models = learn.fit_token_models(train, [h for h in ms.horizons if h[0] == name], now=c)
-            m = models[name]
+            hz = [h for h in ms.horizons if h[0] == name]
+            m = learn.fit_token_models(train, hz, now=c)[name]
+            mn = learn.fit_token_models(train, hz, now=c, target="win")[name]
             for e in cev:
                 lab = e["labels"].get(name)
                 if lab is None:
                     continue
                 p = stats.logistic_predict(m, e["x"])
+                p_net = stats.logistic_predict(mn, e["x"]) if mn["kind"] != "prior" else None
                 res["preds"][name].append(dict(ts=e["ts"], p=p, y=lab["pumped"], max_ret=lab["max_ret"],
+                                               net=lab.get("net"), win=lab.get("win"), p_net=p_net,
                                                baseline=e["baseline"], model=m["kind"]))
         res["events"].extend(cev)
         log.info("checkpoint %d/%d: %d wallets, tiers %s, %d coin events", k + 1, len(cps), len(st), counts, len(cev))
     res["metrics"] = metrics(res, ms)
     return res
+
+
+def calibration(ps, ys, bins=5):
+    """Equal-count bins of the predicted probability: mean prediction vs observed rate, plus the expected
+    calibration error (weighted mean gap). A well calibrated model has mean_p close to rate in every bin."""
+    pairs = sorted(zip(ps, ys))
+    out, ece = [], 0.0
+    for i in range(bins):
+        part = pairs[i * len(pairs) // bins:(i + 1) * len(pairs) // bins]
+        if not part:
+            continue
+        mp = sum(p for p, _ in part) / len(part)
+        rate = sum(y for _, y in part) / len(part)
+        ece += len(part) / len(pairs) * abs(mp - rate)
+        out.append(dict(bin=i + 1, n=len(part), mean_p=mp, rate=rate))
+    return dict(bins=out, ece=ece)
+
+
+def net_metrics(P):
+    """After-cost view: mean net return of all events, of the top fifth by pump score, and (once trained) of the
+    top fifth by the after-cost model, with that model's AUC on 'profit after costs'."""
+    rows = [p for p in P if p.get("net") is not None]
+    if not rows:
+        return {}
+
+    def mean(xs):
+        return sum(xs) / len(xs) if xs else None
+    k = max(1, len(rows) // 5)
+    out = dict(n=len(rows), mean_net_all=mean([p["net"] for p in rows]),
+               win_rate_all=mean([float(p["net"] > 0) for p in rows]),
+               mean_net_top_pump=mean([p["net"] for p in sorted(rows, key=lambda p: -p["p"])[:k]]))
+    nm = [p for p in rows if p.get("p_net") is not None]
+    if len(nm) >= 20 and 0 < sum(p["win"] for p in nm) < len(nm):
+        kk = max(1, len(nm) // 5)
+        top = sorted(nm, key=lambda p: -p["p_net"])[:kk]
+        out.update(n_net_model=len(nm), auc_net=stats.auc([p["p_net"] for p in nm], [p["win"] for p in nm]),
+                   mean_net_top_net=mean([p["net"] for p in top]), win_rate_top_net=mean([float(p["net"] > 0) for p in top]),
+                   calibration_net=calibration([p["p_net"] for p in nm], [p["win"] for p in nm]))
+    return out
 
 
 def metrics(res, ms):
@@ -145,8 +187,11 @@ def metrics(res, ms):
         for i in range(5):
             part = srt[i * len(srt) // 5:(i + 1) * len(srt) // 5]
             if part:
+                nets = [p["net"] for p in part if p.get("net") is not None]
                 q.append(dict(quintile=i + 1, n=len(part), pump_rate=sum(p["y"] for p in part) / len(part),
-                              median_max_ret=stats.median([p["max_ret"] for p in part])))
+                              median_max_ret=stats.median([p["max_ret"] for p in part]),
+                              mean_net=sum(nets) / len(nets) if nets else None, median_net=stats.median(nets),
+                              win_rate=sum(1 for x in nets if x > 0) / len(nets) if nets else None))
         out[name] = dict(
             n=len(P), base_rate=base, auc=stats.auc(ps, y), auc_baseline=stats.auc([p["baseline"] for p in P], y),
             brier=sum((a - b) ** 2 for a, b in zip(ps, y)) / len(P),
@@ -154,7 +199,8 @@ def metrics(res, ms):
             top10_median_max_ret=stats.median([p["max_ret"] for p in top]),
             precision_p50=(lambda s: (sum(p["y"] for p in s) / len(s), len(s)) if s else (None, 0))(
                 [p for p in P if p["p"] >= 0.5]),
-            quintiles=q, learned_share=sum(1 for p in P if p["model"] != "prior") / len(P))
+            quintiles=q, learned_share=sum(1 for p in P if p["model"] != "prior") / len(P),
+            calibration=calibration(ps, y), net=net_metrics(P))
     tf = {}
     for tier, (n, k, mr) in res["tier_forward"].items():
         r, lo, hi = stats.wilson(k, n)

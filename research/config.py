@@ -40,6 +40,8 @@ class ResearchSettings:
     rpc_url: str = os.getenv("RESEARCH_RPC_URL", "https://api.mainnet-beta.solana.com")
     helius_credits_per_day: int = _i("RESEARCH_HELIUS_CREDITS_PER_DAY", 0)  # 0 = core.http daily budget only
     enhanced_backfill: int = _i("RESEARCH_ENHANCED_BACKFILL", 1)  # tiered/user wallets via Helius Enhanced (100 cr)
+    # measured cost of one round trip (fees, slippage, priority) used for every "after costs" number
+    cost_roundtrip: float = _f("MODEL_COST_ROUNDTRIP", 0.06)
     default_supply: float = _f("RESEARCH_DEFAULT_SUPPLY", 1e9)  # pump.fun standard supply when unknown
 
 

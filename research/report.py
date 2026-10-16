@@ -6,6 +6,7 @@ from collections import defaultdict
 
 from model.config import TIER_LABELS, msettings
 from research import stats
+from research.config import rsettings
 from model.learn import weights_full
 from research.events import FEATURE_LABELS, FEATURE_NAMES
 from research.wallet_stats import COMPONENT_LABELS, COMPONENTS
@@ -292,6 +293,22 @@ def render(d):
                          f"{v['auc_baseline'] if v['auc_baseline'] is None else round(v['auc_baseline'], 2)} | "
                          f"{_pct(v['top10_pump_rate'])} | {_pct(v['top10_median_max_ret'])} |")
         L.append("")
+        L.append(f"**Nach Kosten** (Verkauf an der Pump-Schwelle, sonst am Horizont-Ende, minus {100 * rsettings.cost_roundtrip:.0f} % je Umlauf):\n")
+        L.append("| Horizont | Fälle | Ø netto alle | Gewinnquote alle | Ø netto oberstes Fünftel (Pump-Score) | "
+                 "AUC Netto-Modell | Ø netto oberstes Fünftel (Netto-Modell) | Kalibrierfehler Pump |")
+        L.append("|---|---|---|---|---|---|---|---|")
+        for h, v in bt.items():
+            nm = v.get("net") or {}
+            if v.get("n") and nm:
+                L.append(f"| {h} | {nm['n']} | {_pct(nm['mean_net_all'])} | {_pct(nm['win_rate_all'])} | "
+                         f"{_pct(nm['mean_net_top_pump'])} | {'–' if nm.get('auc_net') is None else round(nm['auc_net'], 2)} | "
+                         f"{_pct(nm.get('mean_net_top_net'))} | {_pct((v.get('calibration') or {}).get('ece'))} |")
+        L.append("")
+        for h, v in bt.items():
+            qs = v.get("quintiles") if v.get("n") else None
+            if qs and qs[0].get("mean_net") is not None:
+                L.append(f"Score-Fünftel {h} (1 = höchster Score), Ø netto: " +
+                         " · ".join(f"{q['quintile']}: {_pct(q['mean_net'])} (n {q['n']})" for q in qs) + "\n")
     else:
         L.append(f"_Backtest: noch zu wenig Historie ({d['checkpoints']} Prüfpunkte). Er läuft automatisch, sobald mehr Daten da sind._\n")
     if d["top_wallets"]:
