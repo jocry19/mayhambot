@@ -111,8 +111,8 @@ def simulate(candles: Sequence, entry_ts: float, v: Variant, exit_events: Sequen
         mins = (ts - t0) / 60
         trail_on = v.trail_activate > 0 and high / entry - 1 >= v.trail_activate
         stop_px = max(entry * (1 - v.stop_loss), high * (1 - v.trail_drawdown) if trail_on else 0)
-        if l <= stop_px:
-            return stop_px / entry - 1 - cost, mins, "trail" if trail_on and stop_px > entry * (1 - v.stop_loss) else "stop"
+        if l <= stop_px:  # a candle that opens below the stop (rug, gap down) fills at the open, not at the stop
+            return min(o, stop_px) / entry - 1 - cost, mins, "trail" if trail_on and stop_px > entry * (1 - v.stop_loss) else "stop"
         if h >= entry * (1 + v.take_profit):
             return v.take_profit - cost, mins, "target"
         high = max(high, h)

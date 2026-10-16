@@ -61,7 +61,9 @@ EDGE_SIZE_UNIT = 0.03  # size factor = lower edge bound / this, clamped to 0.5..
 BOOTSTRAP_RUNS = 500  # Monte-Carlo resamples of the test part before a variant is accepted
 BOOTSTRAP_MIN_WIN = 0.8  # share of resamples in which the variant must be in the black and beat the current one
 CALIB_MIN_TRADES = 10  # own trades needed before the paper/sim cost gap is applied
-CALIB_MAX_EXTRA = 0.10  # never add more than 10 %-points of extra cost per round trip
+CALIB_MAX_EXTRA = 0.10
+CALIB_DEFAULT_EXTRA = 0.015  # before CALIB_MIN_TRADES own trades: measured paper round trip ~4.5 % vs 3 % in the grid
+CALIB_TRIM = 0.1  # never add more than 10 %-points of extra cost per round trip
 
 
 def init(conn) -> None:
@@ -374,10 +376,11 @@ def _means(rows: Sequence[dict], n_var: int, extra_cost: float = 0.0) -> list[fl
 
 
 def extra_cost(conn, strategy: str) -> float:
-    """Cost the 1-minute simulation misses, measured on our own closed trades: median(simulated - actual).
+    """Cost the 1-minute simulation misses, measured on our own closed trades: trimmed mean(simulated - actual).
 
     The grid assumes sim.ROUNDTRIP_COST (3 %); real paper fills (Jupiter quote, adverse slippage both ways,
-    priority fees) cost more (10/2026: 6.8 % for a buy sold one second later). 0 until CALIB_MIN_TRADES.
+    priority fees) cost more (10/2026: 6.8 % for a buy sold one second later). CALIB_DEFAULT_EXTRA until
+    CALIB_MIN_TRADES.
     Paper fills made with another adverse slippage than today's (see landing_drift) are put on today's footing.
     """
     from .execution import paper_adverse
@@ -398,10 +401,10 @@ def extra_cost(conn, strategy: str) -> float:
 
     gaps = sorted(r[0] - 2 * (used(r[1]) - now_adv) for r in rows)
     if len(gaps) < CALIB_MIN_TRADES:
-        return 0.0
-    mid = len(gaps) // 2
-    med = gaps[mid] if len(gaps) % 2 else (gaps[mid - 1] + gaps[mid]) / 2
-    return max(0.0, min(CALIB_MAX_EXTRA, med))
+        return CALIB_DEFAULT_EXTRA
+    k = int(len(gaps) * CALIB_TRIM)  # trimmed mean: a few rugs move it (a median would not), single freaks do not
+    core = gaps[k:len(gaps) - k] or gaps
+    return max(0.0, min(CALIB_MAX_EXTRA, sum(core) / len(core)))
 
 
 def decay(ts, now: float | None = None, half_life_h: float = HALF_LIFE_H) -> float:

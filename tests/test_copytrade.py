@@ -84,6 +84,7 @@ def env(tmp_path, monkeypatch):
     state = {"snap": snap}
     monkeypatch.setattr(market, "snapshot", lambda m, s=None: state["snap"])
     monkeypatch.setattr(market, "snapshots", lambda ms, s=None: {MINT: state["snap"]})
+    monkeypatch.setattr(market, "snapshots_checked", lambda ms, s=None: ({MINT: state["snap"]}, state.get("failed", set())))
     monkeypatch.setattr(market, "jupiter_quote", lambda *a, **k: None)
     monkeypatch.setattr(market, "sol_usd", lambda s=None: 100.0)
     monkeypatch.setattr(chain, "token_decimals", lambda rpc, m: 6)
@@ -500,7 +501,7 @@ def test_noisy_wallet_edge_needs_lower_bound(env):
 
     from copytrade import learn, sim
     s, conn, ex, state = env
-    for i, g in enumerate([0.6, -0.3, -0.3, 0.5, -0.3, -0.3, 0.4, -0.2]):  # mean +1 %, but pure noise
+    for i, g in enumerate([0.6, -0.3, -0.3, 0.5, -0.3, -0.3, 0.4, 0.0]):  # mean +3.8 %, but pure noise
         conn.execute("INSERT INTO ct_evals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                      ("whale_buy", f"n{i}", "whale", W, MINT, int(time.time()) - 100 + i, sim.GRID_VERSION,
                       _json.dumps([g] * len(sim.GRID)), None, None, "{}", 0))
@@ -584,3 +585,29 @@ def test_launch_mode_skips_old_or_run_up_launches(env):
     assert st.on_launch(_launch(conn, mcap_usd=0.5e6)) is None  # snapshot fdv 1e6 = +100 % since the decision
     msgs = [r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'")]
     assert any("zu alt" in m for m in msgs) and any("Sniper-Entscheidung schon" in m for m in msgs)
+
+
+def test_dexscreener_outage_does_not_close_as_no_market(env):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    assert st.on_whale_buy(whale_buy())
+    state["failed"], state["snap"] = {MINT}, None
+    for _ in range(15):
+        st.update()
+    assert conn.execute("SELECT status FROM ct_positions").fetchone()[0] == "open"
+    state["failed"] = set()  # the coin is really gone: closes after 12 rounds
+    for _ in range(12):
+        st.update()
+    assert conn.execute("SELECT exit_reason FROM ct_positions").fetchone()[0] == "no_market"
+
+
+def test_close_twice_sells_once(env):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    assert st.on_whale_buy(whale_buy())
+    p = conn.execute("SELECT * FROM ct_positions").fetchone()
+    bal = ex.balance(conn)
+    assert st.close(p, state["snap"], "whale") is True
+    assert st.close(p, state["snap"], "stop") is False  # second thread holding the same stale row
+    assert conn.execute("SELECT COUNT(*) FROM ct_positions WHERE status='closed'").fetchone()[0] == 1
+    assert ex.balance(conn) > bal and conn.execute("SELECT exit_reason FROM ct_positions").fetchone()[0] == "whale"

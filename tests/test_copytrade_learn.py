@@ -38,7 +38,10 @@ def test_simulate_target_stop_time():
     assert why == "target" and g == pytest.approx(0.4 - 0.03)
     down = with_path([1.0, 1.0] + [1.0 - 0.03 * i for i in range(1, 20)])
     g, _, why = sim.simulate(down, T0, V, cost=0.03)
-    assert why == "stop" and g == pytest.approx(-0.2 - 0.03)
+    assert why == "stop" and g == pytest.approx(-0.21 - 0.03)  # the candle opens at 0.79, below the 0.80 stop
+    rug = with_path([1.0, 1.0, 0.95, 0.06, 0.05])
+    g, _, why = sim.simulate(rug, T0, V, cost=0.03)
+    assert why == "stop" and g == pytest.approx(-0.94 - 0.03)  # a rug is booked at its real loss, not at -20 %
     g, mins, why = sim.simulate(flat(200), T0, V, cost=0)
     assert why == "time" and mins == pytest.approx(120) and g == pytest.approx(0)
     assert sim.simulate(flat(1), T0, V) is None  # nothing after the entry

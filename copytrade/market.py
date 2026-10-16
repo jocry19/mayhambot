@@ -111,10 +111,17 @@ def _snapshot(p: dict, solusd: float) -> PairSnapshot:
 
 def snapshots(mints: Iterable[str], settings: Settings | None = None) -> dict[str, PairSnapshot]:
     """Best (most liquid) Solana pair per token mint, batched 30 per call."""
+    return snapshots_checked(mints, settings)[0]
+
+
+def snapshots_checked(mints: Iterable[str], settings: Settings | None = None
+                      ) -> tuple[dict[str, PairSnapshot], set[str]]:
+    """(snapshots, mints whose batch failed). A failed batch says nothing about the coin, a missing pair does."""
     mints = [m for m in dict.fromkeys(mints) if m]
     out: dict[str, PairSnapshot] = {}
+    failed: set[str] = set()
     if not mints:
-        return out
+        return out, failed
     solusd = sol_usd(settings)
     for i in range(0, len(mints), 30):
         chunk = mints[i : i + 30]
@@ -122,6 +129,7 @@ def snapshots(mints: Iterable[str], settings: Settings | None = None) -> dict[st
             pairs = http.get_json(f"{DS}/tokens/v1/solana/{','.join(chunk)}", limiter_name="dexscreener")
         except Exception as e:
             log.warning("dexscreener batch failed: %s", e)
+            failed.update(chunk)
             continue
         for p in pairs or []:
             mint = p.get("baseToken", {}).get("address")
@@ -130,7 +138,7 @@ def snapshots(mints: Iterable[str], settings: Settings | None = None) -> dict[st
             liq = (p.get("liquidity") or {}).get("usd") or 0
             if mint not in out or liq > out[mint].liquidity_usd:
                 out[mint] = _snapshot(p, solusd)
-    return out
+    return out, failed
 
 
 def snapshot(mint: str, settings: Settings | None = None) -> PairSnapshot | None:

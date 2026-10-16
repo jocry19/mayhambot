@@ -50,6 +50,12 @@ class Strategy:
         self._missing: dict[int, int] = {}
         self._pending: list[tuple[float, Swap]] = []  # whale buys waiting for the learned entry delay
         control.init(conn)
+        try:  # a sell that never finished (crash mid-close): back to open so the exits can retry
+            conn.execute("UPDATE ct_positions SET status='open', closed_at=NULL WHERE status='closing' AND closed_at<?",
+                         (int(time.time()) - 300,))
+            conn.commit()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ helpers
     def executor(self, strategy: str):
@@ -416,10 +422,23 @@ class Strategy:
         return pid
 
     def close(self, p, snap, reason: str) -> bool:
+        # claim it first: the whale-sell path and the price loop (other threads) may try to close the same position
+        if self.conn.execute("UPDATE ct_positions SET status='closing', closed_at=? WHERE id=? AND status='open'",
+                             (int(time.time()), p["id"])).rowcount != 1:
+            return False
+        self.conn.commit()
         ex = self._ex_for_position(p)
-        fill = ex.sell(p["mint"], p["tokens"], p["token_decimals"] or 6, snap, p["last_price_sol"] or 0)
-        if not fill.ok:
-            store.event(self.conn, "error", f"Verkauf {p['symbol']} fehlgeschlagen: {fill.error}", "error")
+        try:
+            fill = ex.sell(p["mint"], p["tokens"], p["token_decimals"] or 6, snap, p["last_price_sol"] or 0)
+        except Exception as e:
+            fill = None
+            err = str(e)
+        if fill is None or not fill.ok:
+            self.conn.execute("UPDATE ct_positions SET status='open', closed_at=NULL WHERE id=? AND status='closing'",
+                              (p["id"],))
+            self.conn.commit()
+            store.event(self.conn, "error", f"Verkauf {p['symbol']} fehlgeschlagen: {fill.error if fill else err}",
+                        "error")
             return False
         ex.adjust_balance(self.conn, fill.sol)
         pnl = fill.sol - p["entry_cost_sol"]
@@ -480,10 +499,12 @@ class Strategy:
         pos = self.open_positions()
         if not pos:
             return
-        snaps = market.snapshots([p["mint"] for p in pos], self.s)
+        snaps, failed = market.snapshots_checked([p["mint"] for p in pos], self.s)
         now = time.time()
         for p in pos:
             snap = snaps.get(p["mint"])
+            if p["mint"] in failed:
+                continue  # DexScreener down: no news about this coin, so no 'no market' count either
             if not snap or snap.price_sol <= 0:
                 self._missing[p["id"]] = self._missing.get(p["id"], 0) + 1
                 if self._missing[p["id"]] >= 12:

@@ -25,7 +25,7 @@ from .config import Settings
 log = logging.getLogger("copytrade.ranking")
 
 Candle = tuple  # (ts, o, h, l, c, v)
-ROUNDTRIP_COST = 0.03  # DEX fees + slippage both ways, conservative for memecoins
+ROUNDTRIP_COST = 0.045  # measured on paper fills 10/2026: Jupiter quote both ways + 0.75 % landing drift each way + fees
 
 
 def _at(candles: Sequence[Candle], ts: float) -> int:
@@ -49,8 +49,8 @@ def simulate_exit(candles: Sequence[Candle], entry: float, take_profit: float, s
         mins = (ts - t0) / 60 + 1
         trail_on = high / entry - 1 >= trail_activate
         stop_px = max(entry * (1 - stop_loss), high * (1 - trail_drawdown) if trail_on else 0)
-        if l <= stop_px:
-            return stop_px / entry - 1, mins, "trail" if trail_on else "stop"
+        if l <= stop_px:  # gap below the stop (rug): filled at the open
+            return min(o, stop_px) / entry - 1, mins, "trail" if trail_on else "stop"
         if take_profit and h >= entry * (1 + take_profit):
             return take_profit, mins, "target"
         high = max(high, h)
