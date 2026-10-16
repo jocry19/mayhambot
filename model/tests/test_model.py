@@ -1,6 +1,7 @@
 """Model/research tests on a synthetic market with known truth (no network).
 Run: python -m pytest model/tests -q"""
 import os
+import time
 import sys
 import tempfile
 
@@ -98,3 +99,21 @@ def test_funding_detection_and_clusters():
     ds.funding.update({"A": ("HUB", 1), "B": ("HUB", 1)})
     cl = wallet_stats.clusters(ds, ["A", "B"], cutoff=1000)
     assert cl["A"] != cl["B"]  # exchanges fund everyone: no link
+
+
+def test_retrain_if_due_keeps_last_success_on_failure(monkeypatch):
+    from model import train
+    conn = db.connect(os.path.join(tempfile.mkdtemp(), "r.db"))
+    from research.store import ensure_schema
+    ensure_schema(conn)
+    assert train.last_success(conn) == 0.0
+    calls = []
+
+    def boom(c):
+        calls.append(1)
+        raise RuntimeError("database is locked?")
+    monkeypatch.setattr(train, "run_once", boom)
+    assert train.retrain_if_due(conn, 3600, 0.0) == 0.0  # failed: still due next cycle
+    assert calls
+    monkeypatch.setattr(train, "run_once", lambda c: None)
+    assert train.retrain_if_due(conn, 3600, time.time() - 60) > 0  # not due: untouched, no call

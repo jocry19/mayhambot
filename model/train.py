@@ -87,33 +87,71 @@ def run_once(conn=None, now=None, write_files=True):
     return vid
 
 
+def last_success(conn):
+    """Unix time of the active model version (only a fully successful retrain activates its version)."""
+    try:
+        r = conn.execute("SELECT MAX(ts) FROM model_versions WHERE active=1").fetchone()
+    except Exception:  # noqa: BLE001  (fresh DB without the table)
+        return 0.0
+    return float(r[0] or 0)
+
+
+def _utc(ts):
+    return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ts))
+
+
+def _champions(conn, vid):
+    v = conn.execute("SELECT token_model_json FROM model_versions WHERE id=?", (vid,)).fetchone()
+    models = json.loads(v[0] or "{}") if v else {}
+    return " ".join(f"{h}={(m.get('cfg') or {}).get('algo', m.get('kind'))}" for h, m in models.items())
+
+
+def retrain_if_due(conn, every, last_ok):
+    """Retrain when the last successful one is older than `every` seconds (or there never was one).
+    Returns the new last-success time; a failure keeps the old one so the next cycle tries again."""
+    if time.time() - last_ok < every:
+        return last_ok
+    from core.db import retry_locked
+    t0 = time.time()
+    try:
+        vid = retry_locked(conn, lambda: run_once(conn), attempts=2)
+    except Exception:  # noqa: BLE001
+        conn.rollback()
+        log.exception("retrain failed after %.0f s, retrying next cycle", time.time() - t0)
+        return last_ok
+    if vid:
+        log.info("retrain finished in %.0f s, model v%d, champion %s", time.time() - t0, vid, _champions(conn, vid))
+        last_ok = time.time()
+        log.info("next retrain at %s", _utc(last_ok + every))
+    return last_ok
+
+
 def loop(every_hours=None, discover=False):
     every = (every_hours or msettings.retrain_hours) * 3600
-    last_train = last_seed = 0.0
+    last_seed = 0.0
     from research.config import rsettings
+    conn = connect()
+    last_ok = last_success(conn)
+    log.info("service start: last successful retrain %s, next retrain at %s",
+             _utc(last_ok) if last_ok else "never", _utc(max(time.time(), last_ok + every)))
     while True:
+        last_ok = retrain_if_due(conn, every, last_ok)  # first, so a due retrain is not held back by discovery
         if discover and time.time() - last_seed >= rsettings.seed_every_hours * 3600:
             try:
                 from research import public_seeds
-                log.info("public seeds: %s", public_seeds.run(connect()))
+                log.info("public seeds: %s", public_seeds.run(conn))
             except Exception:  # noqa: BLE001
                 log.exception("public seeding failed")
             last_seed = time.time()
         if discover:
             try:
                 from research import discovery
-                discovery.run_once()
+                discovery.run_once(conn)
             except Exception:  # noqa: BLE001
                 log.exception("discovery failed")
-        if time.time() - last_train >= every:
-            try:
-                run_once()
-            except Exception:  # noqa: BLE001
-                log.exception("retrain failed")
-            last_train = time.time()
         try:
             from model.predict import update_outcomes
-            update_outcomes()
+            update_outcomes(conn)
         except Exception:  # noqa: BLE001
             log.exception("outcome update failed")
         time.sleep(rsettings.discover_every_min * 60 if discover else min(every, 1800))
