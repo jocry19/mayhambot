@@ -196,8 +196,10 @@ def _checks_ok():
                               if p.is_dir() and not p.parent.name.startswith(".") and p.parent.name != "node_modules")
     print("Tests: " + ", ".join(dirs))
     for cmd in ([PY, "tests/test_logic.py"], [PY, "-m", "pytest", *dirs, "-q", "-x"]):
-        if subprocess.call(cmd, cwd=ROOT, stdout=subprocess.DEVNULL) != 0:
+        r = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        if r.returncode != 0:
             print("Tests rot:", " ".join(cmd[1:]))
+            print("\n".join((r.stdout or "").splitlines()[-30:]))  # the failing test lands in update.log
             return False
     return True
 

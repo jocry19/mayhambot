@@ -100,3 +100,12 @@ def test_failed_pip_rolls_back(monkeypatch, tmp_path):
     monkeypatch.setattr(mayham, "_checks_ok", lambda: pytest.fail("no tests on a failed install"))
     assert mayham.update() is False
     assert ["git", "reset", "-q", "--hard", "oldsha"] in calls
+
+
+def test_red_gate_prints_the_failing_test(monkeypatch, capsys):
+    class R:
+        returncode, stdout = 1, "\n".join(f"line {i}" for i in range(50)) + "\nFAILED tests/x.py::test_y"
+    monkeypatch.setattr(mayham.subprocess, "run", lambda *a, **k: R())
+    assert mayham._checks_ok() is False
+    out = capsys.readouterr().out
+    assert "FAILED tests/x.py::test_y" in out and "line 5\n" not in out
