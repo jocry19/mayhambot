@@ -494,3 +494,12 @@ def test_cache_swr_bg_and_last_ts(tmp_path, monkeypatch):
     conn.execute("CREATE INDEX ix ON trades(ts)")
     Q.cache.clear()
     assert Q._has_index(conn, "trades", "ts") and Q.last_trade_ts(conn) == 1499
+
+
+def test_safety_quality(demo, empty):
+    s = _client(demo).get("/api/system").json()["safety_quality"]
+    assert s and s["backtest"]["best"] == "learned" and [x["key"] for x in s["backtest"]["scores"]] == ["learned", "rules", "sniper"]
+    lr = s["backtest"]["scores"][0]
+    assert lr["recall"] == round(208 / 351, 3) and lr["auc"] == 0.81 and lr["doublers_flagged"] == 4
+    assert {x["level"] for x in s["levels"]} == {"low", "caution", "high", "critical"}
+    assert _client(empty).get("/api/system").json()["safety_quality"] is None

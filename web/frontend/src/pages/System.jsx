@@ -1,5 +1,6 @@
 import { TIER_SOURCE, ago, compact, dt, dur, n, pct, usePoll } from "../lib.js";
 import { Callout, Card, Empty, Table, Tile } from "../ui.jsx";
+import { SafetyQuality } from "../safety.jsx";
 
 const GROUP = { helius: "Helius (RPC)", geckoterminal: "GeckoTerminal" };
 
@@ -207,6 +208,7 @@ export default function System() {
       </div>
       <Health rows={d.health} />
       <Ops b={d.backup} />
+      <SafetyQuality q={d.safety_quality} />
       <CreditsTotal t={d.api_usage?.credits} />
       <ApiUsage u={d.api_usage} />
       <RpcPool p={d.rpc_pool} />

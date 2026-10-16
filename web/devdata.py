@@ -176,6 +176,19 @@ def _safety_demo(conn, r, tokens, now):
         tok = next(t for t in tokens if t["mint"] == m)
         conn.execute(_named(conn, "INSERT INTO ct_events VALUES (?,?,?,?,?)"),
                      (now - r.randint(300, 7000), "info", "skip", f"[whale] {tok['symbol']}: Rug-Schutz blockiert ({info[m][2][0]})", None))
+    # last learning run (safety/learn.py) with the walk-forward launch backtest (safety/backtest.summary)
+    def op(caught, rugs, prec, dbl, dbl_n, thr):
+        return {"fa_target": 0.1, "threshold": thr, "recall": round(caught / rugs, 3), "rugs_caught": caught, "rugs_total": rugs,
+                "precision": prec, "doublers_flagged": dbl, "doublers_total": dbl_n}
+    sstore.cache_put(conn, "learn_report", {
+        "ts": now - 1800, "n_labelled": 412, "base_rug_rate": 0.31, "horizon_h": 24, "rug_drop_pct": 90,
+        "levels": {"low": {"n": 220, "rugged": 31, "rug_rate": 0.141}, "caution": {"n": 104, "rugged": 38, "rug_rate": 0.365},
+                   "high": {"n": 61, "rugged": 41, "rug_rate": 0.672}, "critical": {"n": 27, "rugged": 24, "rug_rate": 0.889}},
+        "thresholds": {}, "launches": None,
+        "launch_backtest": {"n": 1840, "rugs": 702, "doublers": 96, "test_n": 920, "scores": {
+            "learned": {"auc": 0.81, "at_10pct_fa": op(208, 351, 0.86, 4, 48, 0.62)},
+            "rules": {"auc": 0.72, "at_10pct_fa": op(141, 351, 0.79, 4, 48, 55)},
+            "sniper": {"auc": 0.66, "at_10pct_fa": op(98, 351, 0.74, 5, 48, 40)}}}})
     conn.commit()
 
 

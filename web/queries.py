@@ -528,6 +528,39 @@ def safety_detail(conn, mint):
             "history": hist}
 
 
+SAFETY_SCORE_DE = {"learned": "gelernt", "rules": "Regeln", "sniper": "Sniper-Risiko"}
+
+
+def safety_quality(conn):
+    """How well the rug protection really works, from its last learning run (safety/learn.py, safety_cache
+    'learn_report'): walk-forward launch backtest per score (AUC, rugs caught at <=10 % doubler false alarms),
+    rug rate per level, and the threshold sweep on tracked coins."""
+    if not has(conn, "safety_cache"):
+        return None
+    r = one(conn, "SELECT ts, json FROM safety_cache WHERE key='learn_report'")
+    rep = _j(r["json"], None) if r else None
+    if not isinstance(rep, dict):
+        return None
+    bt = rep.get("launch_backtest") or {}
+    scores = []
+    for k, v in (bt.get("scores") or {}).items():
+        op = (v or {}).get("at_10pct_fa") or {}
+        scores.append({"key": k, "label": SAFETY_SCORE_DE.get(k, k), "auc": _f(v.get("auc"), 3),
+                       "recall": _f(op.get("recall"), 3), "precision": _f(op.get("precision"), 3),
+                       "rugs_caught": op.get("rugs_caught"), "rugs_total": op.get("rugs_total"),
+                       "doublers_flagged": op.get("doublers_flagged"), "doublers_total": op.get("doublers_total"),
+                       "threshold": op.get("threshold")})
+    order = {"learned": 0, "rules": 1, "sniper": 2}
+    scores.sort(key=lambda x: order.get(x["key"], 9))
+    levels = [{"level": k, "level_de": SAFETY_LEVEL_DE.get(k, k), **(v or {})} for k, v in (rep.get("levels") or {}).items()]
+    best = max((x for x in scores if x["auc"] is not None), key=lambda x: x["auc"], default=None)
+    return {"ts": r["ts"], "learned_ts": rep.get("ts") or r["ts"], "n_labelled": rep.get("n_labelled"),
+            "base_rug_rate": rep.get("base_rug_rate"), "horizon_h": rep.get("horizon_h"), "rug_drop_pct": rep.get("rug_drop_pct"),
+            "backtest": {"n": bt.get("n"), "rugs": bt.get("rugs"), "doublers": bt.get("doublers"), "test_n": bt.get("test_n"),
+                         "scores": scores, "best": best["key"] if best else None} if bt else None,
+            "levels": levels, "thresholds": rep.get("thresholds") or {}, "launches": rep.get("launches")}
+
+
 def safety_list(conn):
     """Blocked coins and manual decisions for the control page."""
     ovs = _overrides(conn)
@@ -1664,6 +1697,7 @@ def system(conn):
     return {"db_path": path, "db_size": size, "tables": counts, "last": last, "services": services,
             "tier_source": tier_source(conn), "now": now_ts(), "sol_usd": _f(sol_usd(conn), 2),
             "health": cache.get(("health", path), 10, lambda: services_health(conn)),
+            "safety_quality": cache.get(("safety_quality",), 60, lambda: safety_quality(conn)),
             "backup": cache.get(("backup",), 60, backup_status),
             "api_usage": cache.get(("api_usage",), 10, api_usage),
             "rpc_pool": cache.get(("rpc_pool",), 10, lambda: rpc_pool(usage=cache.get(("api_usage",), 10, api_usage)))}

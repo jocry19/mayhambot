@@ -184,3 +184,47 @@ export function SafetyCard({ mint, symbol, s }) {
 export const PosRisk = ({ r }) => (r.safety_level
   ? <RiskBadge s={{ level: r.safety_level, score: r.safety_score, reasons: r.safety_reasons, blocked: false }} />
   : <span className="dim">–</span>);
+
+/** How well the rug protection really works (safety learn run): walk-forward launch backtest and rug rate per level. */
+export function SafetyQuality({ q }) {
+  if (!q) return null;
+  const bt = q.backtest;
+  const best = bt?.scores?.find((x) => x.key === bt.best);
+  return (
+    <Card title="Rug-Schutz-Trefferquote"
+      sub={`Letzter Lernlauf ${ago(q.learned_ts)} (${dt(q.learned_ts)}) · ${n(q.n_labelled)} Coins mit bekanntem Ausgang · Rug = −${n(q.rug_drop_pct)} % in ${n(q.horizon_h)} h`}>
+      <div className="col" style={{ gap: 14 }}>
+        {bt && best && (
+          <div className="tiles wrap-sub">
+            <Tile label="Rugs erkannt" value={pct(best.recall)} sub={`${n(best.rugs_caught)} von ${n(best.rugs_total)} bei höchstens 10 % Fehlalarm`} />
+            <Tile label="Treffsicherheit" value={pct(best.precision)} sub="der markierten Launches waren wirklich Rugs" />
+            <Tile label="Verdoppler fälschlich markiert" value={`${n(best.doublers_flagged)} von ${n(best.doublers_total)}`} sub="Launches mit +100 %, die gesperrt worden wären" />
+            <Tile label="Trennschärfe (AUC)" value={n(best.auc, 2)} sub={`0,5 = Zufall, 1 = perfekt · Bewertung „${best.label}“`} />
+          </div>
+        )}
+        {bt?.scores?.length > 0 && (
+          <Table rows={bt.scores} rowKey={(r) => r.key} cols={[
+            { k: "label", l: "Bewertung", fmt: (r) => <span>{r.label}{r.key === bt.best ? <span className="badge good" style={{ marginLeft: 6 }}>beste</span> : null}</span> },
+            { k: "auc", l: "AUC", r: true, fmt: (r) => n(r.auc, 2) },
+            { k: "recall", l: "Rugs erkannt", r: true, fmt: (r) => (r.recall != null ? `${pct(r.recall)} (${n(r.rugs_caught)}/${n(r.rugs_total)})` : "–") },
+            { k: "precision", l: "davon echt", r: true, fmt: (r) => pct(r.precision) },
+            { k: "doublers_flagged", l: "Verdoppler markiert", r: true, fmt: (r) => (r.doublers_total != null ? `${n(r.doublers_flagged)}/${n(r.doublers_total)}` : "–") },
+          ]} />
+        )}
+        {bt && <div className="help">Rückrechnung auf {n(bt.n)} Sniper-Launches: an der älteren Hälfte gelernt, an den {n(bt.test_n)} neueren geprüft.
+          Die Schwelle ist so gewählt, dass höchstens jeder zehnte spätere Verdoppler gesperrt worden wäre.</div>}
+        {q.levels?.length > 0 && (
+          <Table rows={q.levels} rowKey={(r) => r.level} cols={[
+            { k: "level", l: "Stufe bei der Prüfung", sort: (r) => ["low", "caution", "high", "critical", "unchecked"].indexOf(r.level),
+              fmt: (r) => <span className={`badge risk ${(RISK[r.level] || RISK.unchecked).cls}`}>{(RISK[r.level] || RISK.unchecked).l}</span> },
+            { k: "n", l: "Coins", r: true, fmt: (r) => n(r.n) },
+            { k: "rugged", l: "später Rug", r: true, fmt: (r) => n(r.rugged) },
+            { k: "rug_rate", l: "Rug-Quote", r: true, fmt: (r) => (r.rug_rate != null
+              ? <span className={r.rug_rate > (q.base_rug_rate || 0) * 1.5 ? "down" : r.rug_rate < (q.base_rug_rate || 0) * 0.7 ? "up" : ""}>{pct(r.rug_rate)}</span> : "–") },
+          ]} />
+        )}
+        {q.base_rug_rate != null && <div className="help">Im Schnitt endeten {pct(q.base_rug_rate)} der geprüften Coins als Rug. Je höher die Stufe, desto höher sollte die Quote sein.</div>}
+      </div>
+    </Card>
+  );
+}
