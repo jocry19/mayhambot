@@ -49,7 +49,7 @@ HOST_INTERVAL = {
     "api.geckoterminal.com": 4.0,      # documented 30 req/min, in practice 429s at 20/min across our processes
     "api.dexscreener.com": 0.25,       # 300 req/min on pair endpoints, 60 on profiles
     "api.mainnet-beta.solana.com": 0.25,
-    "api.helius.xyz": 0.15,             # shared by all processes, see SHARED_HOSTS
+    "api.helius.xyz": 0.6,              # free plan: DAS + Enhanced API together 2 req/s
     "mainnet.helius-rpc.com": 0.12,
     "beta.helius-rpc.com": 0.12,
     "api.telegram.org": 0.05,
@@ -173,7 +173,7 @@ def budget(host_or_group):
 def _count(group, key, n=1):
     with _budget_lock:
         for d in (_usage, _usage_window):
-            d.setdefault(group, {"calls": 0, "429": 0, "waited_s": 0.0})[key] += n
+            d.setdefault(group, {"calls": 0, "429": 0, "waited_s": 0.0, "credits": 0, "refused": 0})[key] += n
 
 
 def _take_budget(host):
@@ -215,9 +215,24 @@ def usage(all_services=False):
         return out
     with _budget_lock:
         now = time.time()
-        return {g: dict(v, budget_per_min=budget(g),
-                        last_min=sum(1 for t in _recent.get(g, ()) if t > now - 60))
-                for g, v in _usage.items()}
+        out = {g: dict(v, budget_per_min=budget(g),
+                       last_min=sum(1 for t in _recent.get(g, ()) if t > now - 60))
+               for g, v in _usage.items()}
+    if CREDIT_GROUP in out and _service:
+        st = credits(_service) or {}
+        out[CREDIT_GROUP].update({k: st.get(k) for k in ("credits_today", "credits_month", "credits_cap",
+                                                         "credits_day_budget", "share_pct")})
+    return out
+
+
+def _credit_line():
+    if not _service:
+        return ""
+    st = credits(_service)
+    if not st or st["credits_cap"] is None:
+        return ""
+    return (f", credits today {st['credits_today']:.0f}/{st['credits_day_budget']:.0f}, month "
+            f"{st['credits_month']:.0f}/{st['credits_cap']:.0f} ({st['share_pct']:.0f}% share)")
 
 
 def _maybe_log_usage(force=False):
@@ -231,9 +246,9 @@ def _maybe_log_usage(force=False):
         _last_usage_log[0] = time.time()
     for g, v in sorted(window.items()):
         b = budget(g)
-        log.info("usage %s: %d calls, %d 429, budget %s/min%s (last %d min, service %s)", g, v["calls"], v["429"],
+        log.info("usage %s: %d calls, %d 429, budget %s/min%s%s (last %d min, service %s)", g, v["calls"], v["429"],
                  f"{b:.0f}" if b else "-", f", waited {v['waited_s']:.0f}s" if v["waited_s"] else "",
-                 USAGE_LOG_EVERY // 60, _service or "?")
+                 _credit_line() if g == CREDIT_GROUP else "", USAGE_LOG_EVERY // 60, _service or "?")
     _write_usage_file()
 
 
@@ -253,9 +268,187 @@ def _write_usage_file():
         pass
 
 
-def throttle(host, interval=None):
-    """Block until this process may call `host`: first its own per-minute budget (see budget()), then the
-    shared cross-process spacing for SHARED_HOSTS (fcntl lock file)."""
+# ---------------- Helius monthly credits ----------------
+# helius.dev/docs/billing (checked 2026-10-16): free plan 1,000,000 credits per calendar month; standard RPC 1
+# credit (incl. getTransaction, getSignaturesForAddress), getProgramAccounts 10, DAS 10, Enhanced
+# Transactions / Wallet API (api.helius.xyz) 100, getTransactionsForAddress 10+.
+CREDIT_GROUP = "helius"
+DAS_METHODS = {"getAsset", "getAssetProof", "getAssetProofBatch", "getNftEditions", "getAssetsByOwner",
+               "getAssetsByAuthority", "getAssetsByCreator", "getAssetsByGroup", "searchAssets", "getAssetBatch",
+               "getSignaturesForAsset", "getTokenAccounts"}
+RPC_10_CREDITS = {"getProgramAccounts", "getTransactionsForAddress", "getTransfersByAddress"}
+# Share of the usable month (after the reserve) per service, percent. Override: HELIUS_SHARE_<SERVICE>.
+DEFAULT_CREDIT_SHARES = {"research": 35, "sniper": 20, "signals": 15, "copytrade": 15, "safety": 15}
+# Services that react to events may run ahead of their even daily share (still never past their month share).
+CREDIT_BURST = {"safety": 1.5, "sniper": 1.5}
+PUBLIC_RPC = "https://api.mainnet-beta.solana.com"
+
+
+class CreditsExhausted(requests.RequestException):
+    """This service's Helius credits for today are used up (callers treat it like any failed request)."""
+
+
+def credit_cost(url, kw=None):
+    """Helius credits one request costs (0 for other hosts). JSON-RPC batches cost the sum of their items."""
+    host = urlparse(url).netloc
+    if group_of(host) != CREDIT_GROUP:
+        return 0
+    if host == "api.helius.xyz":
+        return 100
+    payload = (kw or {}).get("json")
+    items = payload if isinstance(payload, list) else [payload or {}]
+    total = 0
+    for it in items:
+        m = it.get("method") if isinstance(it, dict) else None
+        total += 10 if (m in DAS_METHODS or m in RPC_10_CREDITS) else 1
+    return total
+
+
+def _credit_cfg():
+    def num(name, default):
+        try:
+            return float(os.getenv(name) or default)
+        except ValueError:
+            return float(default)
+    shares = {svc: num(f"HELIUS_SHARE_{svc.upper()}", pct) for svc, pct in DEFAULT_CREDIT_SHARES.items()}
+    if _service and _service not in shares:
+        shares[_service] = num(f"HELIUS_SHARE_{_service.upper()}", 0)
+    return num("HELIUS_CREDITS_MONTH", 1_000_000), num("HELIUS_CREDITS_RESERVE_PCT", 10), shares
+
+
+def _ledger_path():
+    return os.path.join(_LOCK_DIR, f"credits-{CREDIT_GROUP}.json")
+
+
+def _now_parts(now=None):
+    import calendar
+    t = time.gmtime(now if now is not None else time.time())
+    return f"{t.tm_year:04d}-{t.tm_mon:02d}", f"{t.tm_mday:02d}", calendar.monthrange(t.tm_year, t.tm_mon)[1], t.tm_mday
+
+
+def _ledger_update(fn):
+    """Read-modify-write the shared credit ledger under an exclusive lock. fn(ledger) -> result."""
+    import json
+    os.makedirs(_LOCK_DIR, exist_ok=True)
+    with open(_ledger_path(), "a+") as f:
+        try:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX)
+        except ImportError:
+            pass
+        f.seek(0)
+        try:
+            led = json.loads(f.read() or "{}")
+        except ValueError:
+            led = {}
+        month = _now_parts()[0]
+        if led.get("month") != month:  # new UTC calendar month: start from zero
+            led = {"month": month, "services": {}}
+        res = fn(led)
+        f.seek(0)
+        f.truncate()
+        json.dump(led, f)
+        f.flush()
+        return res
+
+
+def _svc_stats(led, svc):
+    month, day, days_in_month, mday = _now_parts()
+    d = led.get("services", {}).get(svc, {})
+    used_month = d.get("month", 0)
+    used_today = (d.get("days") or {}).get(day, 0)
+    total_month = sum(v.get("month", 0) for v in led.get("services", {}).values())
+    credits_month_total, reserve_pct, shares = _credit_cfg()
+    usable = credits_month_total * (1 - reserve_pct / 100)
+    share = shares.get(svc)
+    cap = usable * share / 100 if share is not None else None
+    day_budget = None
+    if cap is not None:
+        days_left = days_in_month - mday + 1  # leftovers of earlier days spread over the rest of the month
+        day_budget = max(0.0, (cap - (used_month - used_today)) / days_left)
+    return dict(credits_today=used_today, credits_month=used_month, credits_cap=cap, credits_day_budget=day_budget,
+                share_pct=share, credits_month_all=total_month, credits_month_limit=credits_month_total)
+
+
+def credits(service=None):
+    """Helius credit ledger: {service: {credits_today, credits_month, credits_cap, credits_day_budget, share_pct,
+    ...}} for every service (or one dict for `service`). Shared by all processes, survives restarts."""
+    def read(led):
+        svcs = set(led.get("services", {})) | set(_credit_cfg()[2])
+        return {s: _svc_stats(led, s) for s in sorted(svcs)}
+    try:
+        allc = _ledger_update(read)
+    except OSError:
+        return {} if service is None else None
+    return allc.get(service) if service else allc
+
+
+def credits_left_today(service=None):
+    """Credits this service may still spend today (None = no limit, e.g. a process without a service name)."""
+    svc = service if service is not None else _service
+    if not svc:
+        return None
+    st = credits(svc)
+    if not st or st["credits_day_budget"] is None:
+        return None
+    day_left = st["credits_day_budget"] * CREDIT_BURST.get(svc, 1.0) - st["credits_today"]
+    month_left = st["credits_cap"] - st["credits_month"]
+    return max(0.0, min(day_left, month_left))
+
+
+_credit_warned = set()
+
+
+def _charge(cost):
+    """Book `cost` credits for this service; raise CreditsExhausted when today's share is used up."""
+    if cost <= 0:
+        return
+    svc = _service or "other"
+
+    def book(led):
+        st = _svc_stats(led, svc)
+        if _service and st["credits_day_budget"] is not None:
+            day_left = st["credits_day_budget"] * CREDIT_BURST.get(svc, 1.0) - st["credits_today"]
+            if cost > min(day_left, st["credits_cap"] - st["credits_month"]):
+                return st, False
+        day = _now_parts()[1]
+        d = led.setdefault("services", {}).setdefault(svc, {"month": 0, "days": {}})
+        d["month"] = d.get("month", 0) + cost
+        d.setdefault("days", {})[day] = d["days"].get(day, 0) + cost
+        st["credits_month_all"] += cost
+        return st, True
+    try:
+        st, ok = _ledger_update(book)
+    except OSError:
+        return
+    _count(CREDIT_GROUP, "credits", cost) if ok else _count(CREDIT_GROUP, "refused", 1)
+    month = _now_parts()[0]
+    if st["credits_month_all"] >= 0.8 * st["credits_month_limit"] and month not in _credit_warned:
+        _credit_warned.add(month)
+        log.warning("Helius credits: %.0f of %.0f this month used (>= 80%%)", st["credits_month_all"],
+                    st["credits_month_limit"])
+    if not ok:
+        raise CreditsExhausted(f"Helius credits for {svc} used up today ({st['credits_today']:.0f} of "
+                               f"{(st['credits_day_budget'] or 0):.0f}); retry tomorrow or use the public RPC")
+
+
+def rpc_url(method="", helius_url=None):
+    """RPC endpoint for a JSON-RPC `method`: the Helius URL while this service has credits left today,
+    else the public RPC for standard methods (DAS / Helius-only methods keep Helius and may raise)."""
+    url = helius_url or os.getenv("SOLANA_RPC_URL") or ""
+    if group_of(urlparse(url).netloc) != CREDIT_GROUP:
+        return url or PUBLIC_RPC
+    cost = credit_cost(url, {"json": {"method": method}})
+    left = credits_left_today()
+    if left is not None and left < cost and cost == 1:
+        return PUBLIC_RPC
+    return url
+
+
+def throttle(host, interval=None, cost=None):
+    """Block until this process may call `host`: Helius credits (cost, default = the host's base cost),
+    then its own per-minute budget (see budget()), then the shared cross-process spacing for SHARED_HOSTS."""
+    _charge(credit_cost(f"https://{host}/") if cost is None else cost)
     _take_budget(host)
     iv = interval if interval is not None else HOST_INTERVAL.get(host, DEFAULT_INTERVAL)
     if host not in SHARED_HOSTS:
@@ -338,8 +531,14 @@ def _wait_local(host, iv):
 
 def _request(method, url, retries=4, timeout=20, **kw):
     host = urlparse(url).netloc
+    cost = credit_cost(url, kw)
+    if cost == 1 and method == "POST" and kw.get("public_fallback", True):
+        left = credits_left_today()
+        if left is not None and left < cost:  # today's Helius share used up: standard RPC goes to the public node
+            url, host, cost = PUBLIC_RPC, urlparse(PUBLIC_RPC).netloc, 0
+    kw.pop("public_fallback", None)
     for attempt in range(retries + 1):
-        _wait(host)
+        throttle(host, cost=cost)
         try:
             r = _session.request(method, url, timeout=timeout, **kw)
         except requests.RequestException as e:

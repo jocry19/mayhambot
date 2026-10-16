@@ -99,3 +99,75 @@ def test_usage_counts_429_and_is_shared(monkeypatch, tmp_path):
     allu = http.usage(all_services=True)
     assert allu["research"]["groups"]["geckoterminal"] == {**allu["research"]["groups"]["geckoterminal"],
                                                             "calls": 1, "429": 1}
+
+
+def test_credit_costs():
+    rpc = "https://beta.helius-rpc.com/?api-key=x"
+    assert http.credit_cost(rpc, {"json": {"method": "getTransaction"}}) == 1
+    assert http.credit_cost(rpc, {"json": {"method": "getAsset"}}) == 10
+    assert http.credit_cost(rpc, {"json": [{"method": "getAsset"}, {"method": "getSlot"}]}) == 11
+    assert http.credit_cost("https://api.helius.xyz/v0/addresses/A/transactions", {}) == 100
+    assert http.credit_cost("https://api.geckoterminal.com/api/v2/x", {}) == 0
+
+
+def _credit_env(monkeypatch, tmp_path, service, day=16, month_credits=31_000):
+    import calendar
+    _fresh(monkeypatch, tmp_path, service)
+    ts = calendar.timegm((2026, 10, day, 12, 0, 0))
+    monkeypatch.setattr(http.time, "time", lambda: ts)
+    monkeypatch.setenv("HELIUS_CREDITS_MONTH", str(month_credits))
+    monkeypatch.setenv("HELIUS_CREDITS_RESERVE_PCT", "0")
+    return ts
+
+
+def test_daily_share_spreads_over_rest_of_month(monkeypatch, tmp_path):
+    _credit_env(monkeypatch, tmp_path, "signals", day=1)  # 31 days, signals 15% of 31,000 = 4,650 -> 150/day
+    st = http.credits("signals")
+    assert st["credits_cap"] == 4650 and abs(st["credits_day_budget"] - 150) < 1e-6
+    for _ in range(150):
+        http._charge(1)
+    try:
+        http._charge(1)
+    except http.CreditsExhausted:
+        pass
+    else:
+        raise AssertionError("expected CreditsExhausted")
+    assert http.credits("signals")["credits_today"] == 150
+    assert http.usage()["helius"]["refused"] == 1
+
+
+def test_unused_credits_carry_over(monkeypatch, tmp_path):
+    _credit_env(monkeypatch, tmp_path, "signals", day=16)  # nothing used in 15 days: 4,650 over 16 days
+    assert abs(http.credits("signals")["credits_day_budget"] - 4650 / 16) < 1e-6
+
+
+def test_public_rpc_fallback_when_used_up(monkeypatch, tmp_path):
+    _credit_env(monkeypatch, tmp_path, "copytrade", day=31, month_credits=100)  # 15 credits, all today
+    for _ in range(15):
+        http._charge(1)
+    calls = []
+
+    class R:
+        status_code = 200
+        headers = {}
+
+        def json(self):
+            return {"result": 1}
+    monkeypatch.setattr(http._session, "request", lambda m, url, **kw: calls.append(url) or R())
+    monkeypatch.setattr(http.time, "sleep", lambda s: None)
+    http.post_json("https://beta.helius-rpc.com/?api-key=k", {"method": "getSlot"})
+    assert calls == [http.PUBLIC_RPC]
+    assert http.rpc_url("getSlot", "https://beta.helius-rpc.com/?api-key=k") == http.PUBLIC_RPC
+    try:
+        http.post_json("https://beta.helius-rpc.com/?api-key=k", {"method": "getAsset"})
+    except http.CreditsExhausted:
+        pass
+    else:
+        raise AssertionError("DAS has no public fallback")
+
+
+def test_unnamed_process_is_counted_not_limited(monkeypatch, tmp_path):
+    _credit_env(monkeypatch, tmp_path, "", month_credits=10)
+    for _ in range(50):
+        http._charge(1)
+    assert http.credits("other")["credits_month"] == 50

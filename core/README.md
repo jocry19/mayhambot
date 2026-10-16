@@ -95,8 +95,34 @@ Three layers, in this order on every call:
 3. **Adaptive slowdown**: every 429 stretches that shared interval x1.5 (max x4) and pauses the host for all
    processes (GeckoTerminal at least 20 s); successful calls relax it x0.98.
 
-Every 10 minutes each process logs `usage helius: N calls, M 429, budget X/min (...)`, and every 429 is logged
-as `429 GET host/path [rpc method]`.
+Every 10 minutes each process logs `usage helius: N calls, M 429, budget X/min, credits today a/b, month c/d
+(e% share) (...)`, and every 429 is logged as `429 GET host/path [rpc method]`.
+
+### Helius monthly credits
+
+Checked in the Helius docs on 2026-10-16 (docs.helius.xyz/docs/billing/credits.md, helius.dev/docs/billing/plans-and-rate-limits):
+free plan **1,000,000 credits per calendar month**, 10 RPC req/s, **DAS + Enhanced API together 2 req/s**.
+Cost per call: standard RPC 1 (incl. getTransaction, getSignaturesForAddress, getAccountInfo), getProgramAccounts 10,
+DAS methods 10, Enhanced Transactions / Wallet API on api.helius.xyz 100, getTransactionsForAddress 10+.
+
+```python
+http.credit_cost(url, {"json": payload})   # credits of one request (0 for non-Helius hosts)
+http.credits()                    # {service: {credits_today, credits_month, credits_cap, credits_day_budget, share_pct, ...}}
+http.credits_left_today()         # this service, None = unlimited (process without a service name)
+http.rpc_url(method, helius_url)  # Helius URL, or the public RPC once today's share is used up (standard methods only)
+http.throttle(host, cost=n)       # own HTTP clients: pass the request's credit cost (default: host base cost)
+http.CreditsExhausted             # raised instead of calling when today's share is used up (a RequestException)
+```
+
+- Ledger `data/ratelimit/credits-helius.json`, shared by all processes, survives restarts, resets with the UTC month.
+- Month budget `HELIUS_CREDITS_MONTH` (1,000,000) minus reserve `HELIUS_CREDITS_RESERVE_PCT` (10 %), split into shares
+  per service (`HELIUS_SHARE_<SERVICE>`, percent): research 35, sniper 20, signals 15, copytrade 15, safety 15.
+- Daily budget = (share − used before today) / days left in the month incl. today, so unused credits carry over.
+  safety and sniper may use 1.5x their day budget for events, never more than their month share.
+- Used up today: `post_json` sends standard RPC methods (1 credit) to the public RPC instead; DAS / Enhanced calls
+  raise `CreditsExhausted` (callers already treat it as a failed request) instead of emptying the month early.
+- Warning in the log once the whole month reaches 80 %. A process without a service name is counted as `other`
+  but not limited.
 
 ## Wallets and scoring — `core.wallets`, `core.scoring`
 
