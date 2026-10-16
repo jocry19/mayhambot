@@ -455,7 +455,7 @@ def test_pid_states(tmp_path, monkeypatch):
     assert Q._pid_running("gibtsnicht-xyz") is None
 
 
-def test_cache_swr_bg_and_last_ts(tmp_path):
+def test_cache_swr_bg_and_last_ts(tmp_path, monkeypatch):
     import threading
     import time as _t
 
@@ -481,6 +481,10 @@ def test_cache_swr_bg_and_last_ts(tmp_path):
         _t.sleep(0.01)
     assert c.get_bg(("b",), 10, lambda: 6) == 5
     # newest trade without an index on ts: from the newest inserts
+    from web import db as wdb
+
+    monkeypatch.setenv("MAYHAM_DB_PATH", str(tmp_path / "t.db"))
+    wdb._schema_cache["ts"] = 0  # has() reads the schema of this DB, not the previous test's
     conn = sqlite3.connect(str(tmp_path / "t.db"))
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE trades(sig TEXT, wallet TEXT, mint TEXT, side TEXT, ts INTEGER, PRIMARY KEY(sig, wallet, mint, side))")
