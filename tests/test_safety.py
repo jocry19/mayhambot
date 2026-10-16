@@ -498,3 +498,78 @@ def test_owner_without_sol_account_counts_as_wallet():
     f.rpc = rpc
     a = safety.assess(MINT, conn(), deep=False, fetcher=f, cfg=CFG, force=True)
     assert a.checks["holders"]["data"]["top1_pct"] == 20.0
+
+
+class _DeadFetcher(FakeFetcher):
+    """Every RPC and API call fails (endpoint down)."""
+
+    def rpc(self, method, params):
+        raise RuntimeError("rpc down")
+
+    def jupiter_quote(self, *a, **k):
+        raise RuntimeError("jupiter down")
+
+    def dexscreener_pairs(self, *a, **k):
+        raise RuntimeError("dexscreener down")
+
+    def rugcheck(self, *a, **k):
+        raise RuntimeError("rugcheck down")
+
+
+def test_coin_the_checks_could_not_see_is_unchecked_not_safe():
+    c = conn()
+    a = safety.assess(MINT, c, fetcher=_DeadFetcher(clean()), cfg=CFG, force=True)
+    assert a.level == "unchecked" and a.blocked and a.reasons[0]["check"] == "coverage"
+    assert safety.is_blocked(c, MINT)
+    p = safety.signal_penalty(c, MINT, CFG)
+    assert p["checked"] is False and p["factor"] == CFG.unchecked_penalty_factor
+    a.ts -= CFG.ttl_young_sec // 3 + 1
+    assert engine.is_due(a, CFG)                       # retried soon, not after the 6 h blocked TTL
+    # once the checks get through, the coin is judged on its findings
+    ok = safety.assess(MINT, c, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
+    assert ok.level == "low" and not ok.blocked and "coverage" not in ok.checks
+    # an outage right after a good run keeps the fresh findings; stale ones no longer count
+    a = safety.assess(MINT, c, fetcher=_DeadFetcher(clean()), cfg=CFG, force=True)
+    assert a.level == "low" and not a.blocked and a.checks["sell_sim"]["data"]["carried_from"]
+    c.execute("UPDATE safety_tokens SET checks_json=replace(checks_json, ?, ?)",
+              (f'"carried_from":{a.checks["sell_sim"]["data"]["carried_from"]}', f'"carried_from":{NOW - 3 * 86400}'))
+    c.commit()
+    assert safety.assess(MINT, c, fetcher=_DeadFetcher(clean()), cfg=CFG, force=True).level == "unchecked"
+    # manual allow still wins
+    other = "MiNTyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy2"
+    safety.allow(c, other)
+    a = safety.assess(other, c, fetcher=_DeadFetcher(clean()), cfg=CFG, force=True)
+    assert a.level == "unchecked" and not safety.is_blocked(c, other)
+
+
+def test_launch_backtest_walk_forward():
+    import random
+    from safety import backtest, learn
+    rnd = random.Random(7)
+    c = conn()
+    c.execute("CREATE TABLE sniper_launches (mint TEXT, decided_ts INTEGER, done INTEGER, rugged INTEGER, "
+              "max_ret_60m REAL, risk REAL, bundle_pct REAL, top10_pct REAL, unseen_pct REAL, dev_buy_pct REAL)")
+    rows = []
+    for i in range(1200):
+        bundle = rnd.choice([0, 0, 0, 0, 10, 60])
+        unseen = rnd.choice([0, 0, 0, 20, 60])
+        p = 0.02 + (0.7 if bundle >= 50 else 0) + (0.2 if unseen >= 50 else 0)
+        rug = int(rnd.random() < min(p, 0.95))
+        ret = -0.95 if rug else rnd.choice([0.1, 0.3, 1.5])
+        rows.append((f"m{i}", NOW - 86400 + i * 60, 1, rug, ret, rnd.random() * 100, bundle, rnd.random() * 40,
+                     unseen, rnd.random() * 10))
+    c.executemany("INSERT INTO sniper_launches VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+    c.commit()
+    rep = backtest.run(c, CFG)
+    assert rep["train"]["to"] < rep["test"]["from"]                       # judged only on newer launches
+    learned, sniper = rep["scores"]["learned"], rep["scores"]["sniper"]
+    assert learned["auc"] > 0.85 and learned["auc"] > sniper["auc"]       # random sniper risk ~ 0.5
+    assert learned["brier"] < learned["brier_base"]
+    top = learned["calibration"][-1]
+    assert top["actual"] > 0.5                                           # high predicted risk really rugs
+    assert backtest.rug_probability(c, {"bundle_pct": 70, "unseen_pct": 60}) > 0.7
+    assert backtest.rug_probability(c, {"bundle_pct": 0, "unseen_pct": 0}) < 0.1
+    assert "Rückrechnung auf 1200 Sniper-Launches" in backtest.report_text(rep)
+    rep2 = learn.learn(c, CFG)
+    assert rep2["launch_backtest"]["scores"]["learned"]["auc"] == learned["auc"]
+    assert "Rückrechnung Sniper-Launches" in learn.report_text(rep2)

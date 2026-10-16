@@ -33,6 +33,11 @@ class SafetySettings:
     block_score: float = field(default_factory=lambda: _f("SAFETY_BLOCK_SCORE", 75))       # copy trader skips
     hard_flag_floor: float = field(default_factory=lambda: _f("SAFETY_HARD_FLAG_FLOOR", 90))
     min_penalty_factor: float = field(default_factory=lambda: _f("SAFETY_MIN_PENALTY_FACTOR", 0.2))
+    # coverage gate: essential checks (authorities, sell sim) and this share of core checks must answer
+    min_coverage: float = field(default_factory=lambda: _f("SAFETY_MIN_COVERAGE", 0.6))
+    block_unchecked: bool = field(default_factory=lambda: _b("SAFETY_BLOCK_UNCHECKED", True))
+    carry_max_age_sec: int = field(default_factory=lambda: _i("SAFETY_CARRY_MAX_AGE_SEC", 7200))
+    unchecked_penalty_factor: float = field(default_factory=lambda: _f("SAFETY_UNCHECKED_PENALTY_FACTOR", 0.5))
 
     # holders (percent of supply, pools/curves/burn excluded)
     top10_warn_pct: float = field(default_factory=lambda: _f("SAFETY_TOP10_WARN_PCT", 30))

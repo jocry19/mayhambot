@@ -11,7 +11,7 @@ from core import db
 conn = db.connect()
 
 # no network, cheap enough for every live-loop iteration
-safety.is_blocked(conn, mint) -> bool          # copy trader / auto-buy: skip when True (unchecked coins: False)
+safety.is_blocked(conn, mint) -> bool          # copy trader / auto-buy: skip when True (never-checked coins: False; checked but no answer: True)
 safety.blocked_mints(conn) -> set[str]         # whole block list (auto + manual, minus manual allows)
 safety.signal_penalty(conn, mint) -> dict      # {factor 0..1, risk, level, blocked, checked, reasons[:3], ts}
 safety.get(conn, mint) -> Assessment | None    # stored result incl. all checks (dashboard detail view)
@@ -36,8 +36,8 @@ Suggested wiring (done by the owners of those packages):
 - **web/ cli/**: risk badge from `safety_tokens.score/level/blocked`, detail list from `reasons_json`
   (`[{check, risk, text}]`, worst first) and `positives_json`, history from `safety_history`.
 
-`Assessment.to_dict()` gives JSON for the API; `level` is `low | caution | high | critical`, German label in
-`level_de` (`niedrig | erhöht | hoch | kritisch`).
+`Assessment.to_dict()` gives JSON for the API; `level` is `low | caution | high | critical | unchecked`, German label in
+`level_de` (`niedrig | erhöht | hoch | kritisch | ungeprüft`).
 
 ## How the risk score is defined
 
@@ -57,6 +57,14 @@ normal TTL.
 | 25–49 | erhöht | signal score × 1.0 → 0.2 (linear up to 75) |
 | 50–74 | hoch | same, stronger |
 | ≥ 75 or hard flag | kritisch | `blocked`: copy trader skips, signal penalty factor 0 |
+| checks got no answer | ungeprüft | `blocked` (`SAFETY_BLOCK_UNCHECKED`), signal factor `SAFETY_UNCHECKED_PENALTY_FACTOR`=0.5, retried after 5 min |
+
+**Coverage gate**: a coin is only "niedrig" if the checks actually saw it. When an essential check
+(`authorities`, `sell_sim`) has no answer, or fewer than `SAFETY_MIN_COVERAGE`=60 % of the core checks (authorities,
+sell_sim, holders, liquidity, lp) answered, a coin without findings gets level `unchecked` with the reason
+"Nur teilweise geprüft (...)" and is blocked until a check gets through. Results carried over from an earlier run
+count for `SAFETY_CARRY_MAX_AGE_SEC`=2 h. Findings that were made keep their level; a manual allow still wins.
+`signal_penalty` returns `checked: False` for such coins.
 
 ## Checks
 
@@ -70,11 +78,31 @@ normal TTL.
 | `dev` (deep) | creator from launch/RugCheck, balance, last `DEV_TXS_SCANNED` txs | – | dev holding, share of dev buy already gone, SOL sent to exchanges (`exchanges.txt`), tokens spread to other wallets without a sale |
 | `liquidity` | DexScreener, our `token_prices` | liquidity fell ≥ `LIQ_DROP_PCT` (90 %) below its 7-day peak | liquidity below `MIN_LIQUIDITY_USD`, liquidity/mcap below `MIN_LIQ_MCAP_RATIO` |
 | `lp` | RugCheck markets, DEX type | – | LP locked/burned below `LP_LOCKED_OK_PCT`; CLMM/DLMM pools; pump.fun curve = safe |
-| `wash` | our own `trades` table (no network) | – | round-trip volume of the same wallets, top-3 volume share |
+| `wash` | our own `trades` table (no network) | round-trip share ≥ `SAFETY_WASH_BLOCK_ROUNDTRIP` (0.5) | round-trip volume of the same wallets (from `SAFETY_WASH_ROUNDTRIP_WARN` 0.25), top-3 volume share (from `SAFETY_WASH_TOP3_WARN` 0.4) |
 | `socials` | DexScreener info, RugCheck metadata | – | no website/socials, mutable metadata |
+| `exit` | intel features (`intel.latest`, no network) | – | liquidity leaving in the last 60 min, insider sells relative to liquidity, share of smart money exiting, liquidity that appeared and vanished (flash) |
 | `rugcheck` | api.rugcheck.xyz report (keyless, optional) | RugCheck says rugged | its other danger/warn items (max 45; items our own checks measure are skipped) |
 
 Funding from an exchange hot wallet never links wallets (one exchange funds thousands of strangers).
+
+Young coins (pair younger than `SAFETY_DEEP_YOUNG_H`=3 h) get one deep check even when nobody trades them yet:
+the real rugs of the first weeks all came from young pump-swap coins within 0.5–5 h. A top holder whose owner has
+no SOL account (an emptied wallet) counts as a person, not as a program.
+
+## Learning and backtest (no network)
+
+- `python -m safety learn` (also hourly from `refresh`): labels every checked coin after
+  `SAFETY_OUTCOME_HORIZON_H`=24 h from `token_prices` (rugged = price or liquidity −90 %), measures per check how
+  often its warnings came true (lift) and turns that into a weight 0.5–1.5 (shrunk toward 1 while the sample is
+  small). Also: rug rate per level, hit rate/false alarms per threshold (false alarm = a coin that doubled),
+  minutes from the first check to the rug. Report in `safety_cache` key `learn_report` (dashboard).
+- `python -m safety backtest` (`safety/backtest.py`, also part of `learn`): walk-forward on the sniper's recorded
+  launches (`sniper_launches`, read-only). Learns per-feature rug rates (bundle share, top-10, holders never seen,
+  dev buy/sold, fast buyers, buyers, bundle wallets, dev launches, wallets of earlier rugs) on the older half,
+  recalibrates on the newest 30 % of that half, and judges on the newer half only: AUC, Brier, calibration table
+  and the hit rate when at most 5/10/20 % of doublers may be flagged, next to safety's own ramps and the sniper's
+  `risk`. The full-history model is in `safety_cache` key `launch_model`;
+  `safety.backtest.rug_probability(conn, feats)` gives a launch's rug probability within 60 min.
 
 ## Cost (RPC budget)
 
@@ -117,12 +145,18 @@ Enhanced API. Jupiter, DexScreener and RugCheck are keyless and not Helius.
 | `safety_overrides` | mint, action (`block`/`allow`), reason, ts |
 | `safety_wallets` | wallet profile cache: n_txs, complete, first_ts, last_ts, funder, funded_sol |
 | `safety_launch` | creator, created_slot, created_ts, launch buyers |
+| `safety_risks` | mint, ts, per-check risks of each assessment (learning input) |
+| `safety_outcomes` | labelled outcome per coin: price/liquidity at the check, min/max return, rugged, minutes to rug |
+| `safety_weights` | learned weight per check with its rug rates and lift |
+| `safety_cache` | holder snapshots, `learn_report`, `launch_backtest`, `launch_model` |
 
 ## CLI
 
 ```bash
 .venv/bin/python -m safety assess <MINT>          # full check with reasons (add --quick for no deep checks)
 .venv/bin/python -m safety refresh                 # one pass over tracked coins and recent signals
+.venv/bin/python -m safety learn                   # label outcomes, re-weight checks, report
+.venv/bin/python -m safety backtest                # walk-forward on the sniper's launches
 .venv/bin/python -m safety run                     # endless loop (own process)
 .venv/bin/python -m safety list
 .venv/bin/python -m safety block <MINT> "grund"    # allow <MINT> / clear <MINT>

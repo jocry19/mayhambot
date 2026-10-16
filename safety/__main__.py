@@ -1,4 +1,4 @@
-"""python -m safety assess <MINT> [--quick] | refresh | learn | run | list | block <MINT> [grund] | allow <MINT> | clear <MINT>"""
+"""python -m safety assess <MINT> [--quick] | refresh | learn | backtest | run | list | block <MINT> [grund] | allow <MINT> | clear <MINT>"""
 import argparse
 import logging
 import time
@@ -28,6 +28,7 @@ def main(argv=None):
     p.add_argument("--quick", action="store_true", help="ohne Launch-, Dev- und Insider-Analyse")
     sub.add_parser("refresh")
     sub.add_parser("learn", help="Ausgänge auswerten und Gewichte der Checks neu lernen (ohne Netz)")
+    sub.add_parser("backtest", help="Schwellen an den Sniper-Launches nachrechnen (ältere Hälfte lernen, neuere prüfen)")
     sub.add_parser("run", help="Dauerschleife: alle SAFETY_REFRESH_EVERY_SEC Sekunden ein Refresh")
     p = sub.add_parser("list")
     p.add_argument("-n", type=int, default=30)
@@ -44,6 +45,9 @@ def main(argv=None):
     elif a.cmd == "learn":
         from safety import learn
         print(learn.report_text(learn.learn(conn)))
+    elif a.cmd == "backtest":
+        from safety import backtest
+        print(backtest.report_text(backtest.run(conn)))
     elif a.cmd == "refresh":
         for x in engine.refresh(conn):
             _print(x)

@@ -168,6 +168,15 @@ def learn(conn, cfg=None):
     added = label_outcomes(conn, cfg)
     report = fit_weights(conn, cfg)
     report["new_labels"] = added
+    try:
+        from safety import backtest
+        bt = backtest.run(conn, cfg)
+    except Exception:  # noqa: BLE001 - the backtest must never stop learning
+        log.exception("safety launch backtest failed")
+        bt = None
+    if bt:
+        report["launch_backtest"] = backtest.summary(bt)
+        store.cache_put(conn, "learn_report", report)
     log.info("safety learn: %d new outcomes, %d labelled, base rug rate %.0f %%", added, report["n_labelled"],
              100 * report["base_rug_rate"])
     return report
@@ -204,6 +213,8 @@ def report_text(report):
     if report.get("launches"):
         sweep(f"Sniper-Launches ({report['launches']['n']}, davon {report['launches']['rugs']} Rugs):",
               report["launches"]["thresholds"])
+    if report.get("launch_backtest"):
+        out.append(report["launch_backtest"]["text"])
     if report.get("rug_after_min"):
         q = report["rug_after_min"]
         out.append(f"Zeit von der ersten Prüfung bis zum Rug: Median {q['median']:g} min (25–75 %: {q['p25']:g}–{q['p75']:g} min, n={q['n']})")

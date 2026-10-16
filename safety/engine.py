@@ -27,7 +27,7 @@ class Assessment:
     mint: str
     ts: int
     score: float
-    level: str                       # low | caution | high | critical
+    level: str                       # low | caution | high | critical | unchecked (checks got no answer)
     blocked: bool
     coverage: float                  # share of checks that produced an answer
     hard_flags: list = field(default_factory=list)
@@ -84,6 +84,36 @@ def combine(mint, results, cfg, calls=0, override=None, weights=None):
                          "weight": round(weights.get(r.name, 1.0), 3),
                          "reasons": [list(x) for x in r.reasons], "positives": r.positives} for r in results},
         creator=creator, calls=calls, override=override)
+
+
+ESSENTIAL = ("authorities", "sell_sim")              # without these a honeypot cannot be ruled out
+CORE = ("authorities", "sell_sim", "holders", "liquidity", "lp")
+
+
+def gate_coverage(a, cfg):
+    """A coin the checks could not really look at is not 'safe': when an essential check (authorities, sell
+    simulation) has no answer or fewer than SAFETY_MIN_COVERAGE of the core checks answered, a coin without
+    findings gets level 'unchecked', and with SAFETY_BLOCK_UNCHECKED it is blocked until a check gets through
+    (re-checked after a third of the young TTL). A result carried over from an earlier run counts for
+    SAFETY_CARRY_MAX_AGE_SEC. Real findings keep their level. Manual allow still wins."""
+    now = time.time()
+    ok = {n for n, c in a.checks.items() if c.get("status") == "ok"
+          and now - ((c.get("data") or {}).get("carried_from") or now) <= cfg.carry_max_age_sec}
+    missing = [n for n in ESSENTIAL if n not in ok]
+    cov = sum(1 for n in CORE if n in ok) / len(CORE)
+    if not missing and cov >= cfg.min_coverage:
+        return a
+    labels = {n: (a.checks.get(n) or {}).get("label", n) for n in CORE}
+    gaps = ", ".join(labels[n] for n in CORE if n not in ok)
+    a.reasons.insert(0, {"check": "coverage", "risk": 0.0,
+                         "text": f"Nur teilweise geprüft ({gaps} ohne Antwort): gilt als ungeprüft, nicht als sicher."})
+    if a.level == "low":
+        a.level = "unchecked"
+    if cfg.block_unchecked and a.override != "allow":
+        a.blocked = True
+    a.checks["coverage"] = {"label": "Abdeckung", "status": "gap", "risk": 0.0, "hard": False,
+                            "data": {"core_coverage": round(cov, 2), "missing_essential": missing}}
+    return a
 
 
 def offline():
@@ -155,8 +185,8 @@ def assess(mint, conn=None, deep=True, force=False, fetcher=None, cfg=None, prio
                 if old_r is not None:
                     by_name[name] = old_r
         results = [by_name[n] for n in QUICK_NAMES + DEEP_NAMES if n in by_name]
-        a = combine(mint, results, cfg, calls=getattr(f, "calls", 0), override=store.override(conn, mint),
-                    weights=store.weights(conn))
+        a = gate_coverage(combine(mint, results, cfg, calls=getattr(f, "calls", 0),
+                                  override=store.override(conn, mint), weights=store.weights(conn)), cfg)
         a.deep_ts = int(time.time()) if deep_ran else (prev.deep_ts if prev else None)
         pair = ctx._memo.get("pair") or {}
         if pair.get("pairCreatedAt"):
@@ -198,6 +228,8 @@ def get(conn, mint, cfg=None):
 
 
 def ttl_for(a, cfg):
+    if a.level == "unchecked" or "coverage" in (a.checks or {}):
+        return cfg.ttl_young_sec  # is_due re-checks after a third of it
     if a.blocked and a.override != "allow":
         return cfg.ttl_blocked_sec
     if a.pair_created_at and time.time() - a.pair_created_at < 6 * 3600:
@@ -207,7 +239,7 @@ def ttl_for(a, cfg):
 
 def is_due(a, cfg=None):
     cfg = cfg or default_settings
-    incomplete = any(c.get("status") in ("skipped", "error") for c in a.checks.values())
+    incomplete = any(c.get("status") in ("skipped", "error", "gap") for c in a.checks.values())
     ttl = ttl_for(a, cfg)
     return time.time() - a.ts >= (ttl / 3 if incomplete else ttl)
 
@@ -239,14 +271,18 @@ def signal_penalty(conn, mint, cfg=None):
     a = get(conn, mint, cfg)
     if not a:
         return {"factor": 1.0, "risk": None, "level": "unchecked", "blocked": False, "checked": False, "reasons": []}
-    if a.blocked:
+    unchecked = a.level == "unchecked" and a.override != "block"
+    if unchecked:
+        factor = cfg.unchecked_penalty_factor  # no findings, but nothing proven either
+    elif a.blocked:
         factor = 0.0
     elif a.score <= cfg.caution_score:
         factor = 1.0
     else:
         span = max(1.0, cfg.block_score - cfg.caution_score)
         factor = 1.0 - (1.0 - cfg.min_penalty_factor) * min(1.0, (a.score - cfg.caution_score) / span)
-    return {"factor": round(factor, 3), "risk": a.score, "level": a.level, "blocked": a.blocked, "checked": True,
+    return {"factor": round(factor, 3), "risk": a.score, "level": a.level, "blocked": a.blocked,
+            "checked": not unchecked,
             "reasons": [r["text"] for r in a.reasons[:3]], "ts": a.ts}
 
 
