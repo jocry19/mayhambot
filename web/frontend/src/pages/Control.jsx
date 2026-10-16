@@ -4,6 +4,7 @@ import { Callout, Card, Icon, Modal, Switch, Table } from "../ui.jsx";
 import { CMD_STATUS, CoinLink, StatusBadge } from "../parts.jsx";
 import { RISK, RiskBadge, SafetyButtons } from "../safety.jsx";
 import { LiveCard } from "../live.jsx";
+import { BuyModal } from "../buy.jsx";
 
 function SafetyList() {
   const { data: d } = usePoll("/api/safety", 15000);
@@ -202,9 +203,10 @@ export default function Control() {
         <Card title="Selbst kaufen" sub="Auftrag an den laufenden Bot (Modus 2, du verkaufst). Mint-Adresse vom Coin.">
           <div className="row" style={{ gap: 10, alignItems: "flex-end" }}>
             <label className="fld" style={{ flex: 1, minWidth: 220 }}>Mint<input className="in mono" value={mint} onChange={(e) => setMint(e.target.value.trim())} placeholder="…pump" /></label>
-            <label className="fld" style={{ width: 120 }}>SOL<input className="in" value={size} onChange={(e) => setSize(e.target.value)} placeholder="Preset" /></label>
-            <button className="btn primary" disabled={mint.length < 32} onClick={() => act("/api/buy", { mint, size_sol: size ? Number(size.replace(",", ".")) : null, strategy: "signal" }).then(() => setMint(""))}>Kaufen</button>
+            <button className="btn primary" disabled={mint.length < 32} onClick={() => setSize("open")}>Kaufen …</button>
           </div>
+          <div className="dim" style={{ fontSize: 12, marginTop: 6 }}>Öffnet die Bestätigung mit Betrag, Konto und dem Ergebnis der Rug-Prüfung.</div>
+          {size === "open" && <BuyModal mint={mint} onClose={() => { setSize(""); setMint(""); }} />}
         </Card>
         <Card title="Aufträge" sub="Kauf- und Verkaufsaufträge an den Bot" flush>
           <Table rows={cmds} rowKey={(r) => r.id} empty="Keine Aufträge" cols={[

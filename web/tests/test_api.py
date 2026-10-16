@@ -120,7 +120,10 @@ def test_buy_button_flow(demo):
     free = next(s for s in sigs if not s["open_position_id"])
     pv = c.get(f"/api/buy/preview?mint={free['mint']}").json()
     assert pv["account"] == "paper" and pv["preset"] and pv["size_sol"] and not pv["blocked"]
-    r = c.post("/api/buy", json={"mint": free["mint"], "strategy": "signal"})
+    if (pv.get("safety") or {}).get("level") != "low":  # rug warning must be acknowledged explicitly
+        r = c.post("/api/buy", json={"mint": free["mint"], "strategy": "signal"})
+        assert r.status_code == 409 and "Rug-Warnung" in r.json()["detail"]
+    r = c.post("/api/buy", json={"mint": free["mint"], "strategy": "signal", "risk_ack": True})
     assert r.status_code == 200, r.text
     cid = r.json()["command_id"]
     assert c.get(f"/api/commands/{cid}").json()["status"] == "pending"
@@ -589,7 +592,7 @@ def test_live_buy_capped(demo, monkeypatch):
     free = next(s for s in c.get("/api/signals").json() if not s["open_position_id"])
     monkeypatch.setattr(server, "_buy_preview", lambda conn, mint: {"account": "live", "size_sol": 0.5, "preset": "x"})
     monkeypatch.setenv("LIVE_MAX_TRADE_SOL", "1")
-    r = c.post("/api/buy", json={"mint": free["mint"], "size_sol": 5})
+    r = c.post("/api/buy", json={"mint": free["mint"], "size_sol": 5, "risk_ack": True})
     assert r.status_code == 409 and "LIVE_MAX_TRADE_SOL" in r.json()["detail"]
 
 
@@ -633,3 +636,17 @@ def test_explore_account_separate(demo):
     assert all(p["mode"] == "paper" for p in strict["closed"]) and strict["balance_sol"] != d["balance_sol"]
     ov = c.get("/api/overview").json()["copytrade"]
     assert ov["explore"]["trades"] == len(d["closed"]) and ov["paper"]["pnl_sol"] != ov["explore"]["pnl_sol"]
+
+
+def test_buy_needs_rug_ack(demo, monkeypatch):
+    from web import server
+    c = _client(demo)
+    free = next(s for s in c.get("/api/signals").json() if not s["open_position_id"])
+    flags = {"level": "high", "score": 71, "reasons": ["Versteckte Verkaufssteuer 11 %", "Wash-Volumen 37 %"]}
+    monkeypatch.setattr(server, "_buy_preview", lambda conn, mint: {"account": "paper", "size_sol": 0.5, "preset": "x", "safety": flags})
+    r = c.post("/api/buy", json={"mint": free["mint"]})
+    assert r.status_code == 409 and "hoch" in r.json()["detail"] and "Verkaufssteuer" in r.json()["detail"]
+    monkeypatch.setattr(server, "_buy_preview", lambda conn, mint: {"account": "paper", "size_sol": 0.5, "preset": "x", "safety": None})
+    assert "ungeprüft" in c.post("/api/buy", json={"mint": free["mint"]}).json()["detail"]
+    monkeypatch.setattr(server, "_buy_preview", lambda conn, mint: {"account": "paper", "size_sol": 0.5, "preset": "x", "safety": {"level": "low"}})
+    assert c.post("/api/buy", json={"mint": free["mint"]}).status_code == 200

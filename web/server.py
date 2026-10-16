@@ -179,6 +179,9 @@ def _buy_preview(conn, mint: str) -> dict:
             "open_position_id": held.get(mint), "pending_buy_id": pending.get(mint), "blocked": blocked, "safety": safety}
 
 
+RISK_DE = {"low": "niedrig", "caution": "erhöht", "high": "hoch", "critical": "kritisch", "unchecked": "ungeprüft"}
+
+
 def _live_dry_run() -> bool:
     """live/ rehearses (signs and simulates, sends nothing) while LIVE_DRY_RUN is not false."""
     try:
@@ -539,6 +542,11 @@ async def buy(request: Request):
     pv = _buy_preview(conn, mint)
     if pv.get("blocked"):
         raise HTTPException(409, pv["blocked"])
+    # a manual buy of a coin the rug check did not rate low (or never checked) needs an explicit acknowledgement
+    sf = pv.get("safety") or {}
+    if sf.get("level") != "low" and b.get("risk_ack") is not True:
+        why = "; ".join((sf.get("reasons") or [])[:3])
+        raise HTTPException(409, f"Rug-Warnung nicht bestätigt ({RISK_DE.get(sf.get('level'), 'ungeprüft')}{': ' + why if why else ''})")
     cap = _live_max_trade_sol()
     eff = float(size) if size else float(pv.get("size_sol") or 0)
     if pv.get("account") == "live" and eff > cap:

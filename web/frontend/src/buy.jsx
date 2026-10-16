@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, mc, n, pct, refreshAll, sol, usd } from "./lib.js";
-import { RiskBadge } from "./safety.jsx";
+import { RISK, RiskBadge } from "./safety.jsx";
 import { Callout, Modal } from "./ui.jsx";
 
 const MODE_TXT = { off: "Aus", manual: "Manuell", semi: "Halbautomatisch", auto: "Automatisch" };
@@ -33,6 +33,7 @@ export function BuyModal({ mint, symbol, signal, onClose }) {
   const [busy, setBusy] = useState(false);
   const [cmd, setCmd] = useState(null); // {id, status, result, position}
   const [waited, setWaited] = useState(0);
+  const [ack, setAck] = useState(false);
 
   useEffect(() => {
     api(`/api/buy/preview?mint=${encodeURIComponent(mint)}`).then(setPv).catch((e) => setErr(e.message));
@@ -53,10 +54,12 @@ export function BuyModal({ mint, symbol, signal, onClose }) {
   const dry = pv?.account === "dry";
   const amount = size ? Number(size.replace(",", ".")) : pv?.size_sol;
   const badSize = size && !(amount > 0 && amount <= 100);
+  const sf = pv?.safety || null;
+  const risky = !!pv && sf?.level !== "low"; // anything but a low rating (or no check at all) needs an explicit yes
   const submit = async () => {
     setBusy(true); setErr("");
     try {
-      const r = await api("/api/buy", { method: "POST", body: { mint, size_sol: size ? amount : null, strategy: "signal" } });
+      const r = await api("/api/buy", { method: "POST", body: { mint, size_sol: size ? amount : null, strategy: "signal", risk_ack: risky ? ack : undefined } });
       setCmd({ id: r.command_id, status: "pending" });
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
@@ -72,7 +75,7 @@ export function BuyModal({ mint, symbol, signal, onClose }) {
     ) : (
       <>
         <button className="btn" onClick={onClose}>Abbrechen</button>
-        <button className={`btn ${live ? "danger" : "primary"}`} disabled={busy || !pv || !!pv.blocked || badSize || !pv.available}
+        <button className={`btn ${live ? "danger" : "primary"}`} disabled={busy || !pv || !!pv.blocked || badSize || !pv.available || (risky && !ack)}
           onClick={submit}>{live ? `Mit Echtgeld kaufen (${n(amount, 2)} SOL)` : dry ? `Im Dry-Run kaufen (${n(amount, 2)} SOL)` : `Auf Papier kaufen (${n(amount, 2)} SOL)`}</button>
       </>
     )}>
@@ -97,6 +100,7 @@ export function BuyModal({ mint, symbol, signal, onClose }) {
             Der Bot kauft sofort zum Marktpreis. Verkauft wird wie bei Halbautomatisch: du verkaufst selbst mit dem Verkaufen-Knopf,
             der Bot zeigt dir Hinweise bei Ziel, Stop und wenn das Smart Money aussteigt. Betriebsart Modus 2 gerade: {MODE_TXT[pv.mode] || "–"}.
           </div>
+          {risky && !pv.blocked && <RugWarning s={sf} ack={ack} setAck={setAck} />}
           {pv.blocked && <Callout kind="warn" icon="alert">{pv.blocked}</Callout>}
           {live ? <Callout kind="bad" icon="alert">Echtgeld ist für Modus 2 eingeschaltet. Dieser Kauf nutzt echtes SOL aus deiner Wallet.</Callout>
             : dry ? <Callout kind="warn" icon="info">Dry-Run: Die Order wird gebaut, signiert und simuliert, aber nicht gesendet. Gebucht wird im Konto „Dry-Run“.</Callout>
@@ -106,6 +110,24 @@ export function BuyModal({ mint, symbol, signal, onClose }) {
       {cmd && <BuyStatus cmd={cmd} waited={waited} live={live} />}
       {err && <Callout kind="bad" icon="alert">{err}</Callout>}
     </Modal>
+  );
+}
+
+/** The rug verdict in plain sight before a manual buy: level, score and every flag, plus an explicit checkbox. */
+function RugWarning({ s, ack, setAck }) {
+  const lv = s?.level || "unchecked";
+  const why = (s?.reasons || []).filter(Boolean);
+  const hard = lv === "high" || lv === "critical";
+  return (
+    <Callout kind={hard ? "bad" : "warn"} icon="alert">
+      <div className="b">Rug-Prüfung: {RISK[lv]?.l || lv}{s?.score != null ? ` (${n(s.score)} von 100)` : ""}</div>
+      {why.length > 0 ? <ul style={{ margin: "4px 0 6px 18px", padding: 0 }}>{why.map((w) => <li key={w}>{w}</li>)}</ul>
+        : <div>{lv === "unchecked" ? "Dieser Coin wurde noch nicht geprüft. Versteckte Steuern, Honeypot oder Wash-Volumen sind nicht ausgeschlossen." : "Keine Einzelgründe gespeichert."}</div>}
+      <label className="row" style={{ gap: 8, marginTop: 4, cursor: "pointer" }}>
+        <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
+        <span>Ich habe die Warnung gelesen und kaufe trotzdem.</span>
+      </label>
+    </Callout>
   );
 }
 
