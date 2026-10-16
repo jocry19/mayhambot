@@ -187,3 +187,99 @@ def test_ws_urls_setting(monkeypatch):
     assert Settings().ws_url == "off"
     monkeypatch.delenv("CT_WS_URLS")
     assert len(Settings().ws_urls) == 3
+
+
+# ---------------------------------------------------------------------- latency, gaps, coverage
+def _helius_rpc(monkeypatch, tx_for):
+    calls = []
+
+    def fake_call(self, method, params, priority="live"):
+        calls.append((method, priority))
+        if method == "getTransaction":
+            return tx_for(params[0])
+        return [{"signature": s} for s in ("sigNew", "sigMid")]  # newest first
+
+    monkeypatch.setattr(chain.Rpc, "call", fake_call)
+    monkeypatch.setattr(chain, "_core_http", None)
+    return chain.Rpc(Settings(rpc_url="https://mainnet.helius-rpc.com/?api-key=k", poll_rpc_url="")), calls
+
+
+def test_poll_never_skips_a_transaction_it_could_not_read(env, monkeypatch):
+    s, conn, ex, state = env
+    store.add_wallets(conn, [W], "manual")
+    conn.execute("UPDATE ct_wallets SET last_sig='sigOld' WHERE address=?", (W,))
+    tracker._seen.clear()
+    ok = {"sigMid": False}
+    rpc, _ = _helius_rpc(monkeypatch, lambda sig: parsed_tx(-3_000_000_000, 0, 1_000_000) if ok.get(sig, True) else None)
+    row = conn.execute("SELECT * FROM ct_wallets WHERE address=?", (W,)).fetchone()
+    assert tracker.poll(conn, s, rpc, row, "live") == []  # sigMid (older) not readable yet -> stop before it
+    assert conn.execute("SELECT last_sig FROM ct_wallets").fetchone()[0] == "sigOld"
+    ok["sigMid"] = True
+    row = conn.execute("SELECT * FROM ct_wallets WHERE address=?", (W,)).fetchone()
+    got = tracker.poll(conn, s, rpc, row, "live", covered=True)
+    assert len(got) == 2 and conn.execute("SELECT last_sig FROM ct_wallets").fetchone()[0] == "sigNew"
+    assert tracker.DETECTED["gap"] >= 2  # the websocket watched this wallet and missed both
+
+
+def test_detection_lag_is_recorded_per_source(env, monkeypatch):
+    from copytrade import stats
+    s, conn, ex, state = env
+    store.add_wallets(conn, [W], "manual")
+    tracker._seen.clear()
+    tx = parsed_tx(-3_000_000_000, 0, 1_000_000)
+    tx["blockTime"] = int(time.time()) - 4
+    rpc, _ = _helius_rpc(monkeypatch, lambda sig: tx)
+    sw = tracker.process_signature(conn, s, rpc, W, "sigWS", received_at=time.time() - 2)
+    assert sw
+    df = stats.detection(conn)
+    assert list(df.source) == ["ws"] and 3.5 <= df.lag_s.iloc[0] < 30 and 1.5 <= df.notify_lag_s.iloc[0] < 30
+    sm = stats.detection_summary(conn)
+    assert sm.iloc[0]["n"] == 1 and sm.iloc[0]["within_30s"] == 1.0
+    assert tracker.lag_summary(0)["ws"]["n"] >= 1
+
+
+def test_every_active_wallet_is_watched_live_best_first(env):
+    s, conn, ex, state = env
+    others = [f"Aaaa{i:040d}"[:44] for i in range(5)]
+    store.add_wallets(conn, others, "auto")
+    store.add_wallets(conn, [W], "manual")
+    conn.execute("INSERT OR REPLACE INTO wallets(address, tier) VALUES (?, 'ultra')", (others[3],))
+    store._winfo_cache.clear()
+    got = tracker.ws_wallets(conn, s)
+    assert got[0] == W and got[1] == others[3] and len(got) == 6  # not only "hot" wallets any more
+    s2 = Settings(db_path=s.db_path, ws_max_wallets=2)
+    assert tracker.ws_wallets(conn, s2) == [W, others[3]]
+
+
+def test_watcher_copies_from_its_own_thread_and_dedupes_two_streams(env, monkeypatch):
+    from copytrade import watch
+    s, conn, ex, state = env
+    store.add_wallets(conn, [W], "manual")
+    tracker._seen.clear()
+    tx = parsed_tx(-3_000_000_000, 0, 1_000_000)
+    rpc, calls = _helius_rpc(monkeypatch, lambda sig: tx)
+    seen = []
+    from copytrade import strategy as strat_mod
+    monkeypatch.setattr(strat_mod.Strategy, "on_whale_buy", lambda self, sw, deferred=False: seen.append(sw.signature))
+    a, b = FakeNode(), FakeNode()
+    stop = threading.Event()
+    s2 = Settings(db_path=s.db_path, ws_urls=[f"ws://127.0.0.1:{a.port}", f"ws://127.0.0.1:{b.port}"], ws_parallel=2)
+    w = watch.Watcher(s2, rpc, {"paper": ex}, stop).start([W])
+    try:
+        assert _wait(lambda: W in w.covered() and all(W in st.covered() for st in w.streams))
+        a.notify(W, "sigX")
+        b.notify(W, "sigX")  # same transaction on both connections
+        assert _wait(lambda: len(seen) == 1)  # (the swap carries the transaction's own signature)
+        time.sleep(0.5)
+        assert len(seen) == 1 and w.handled == 1 and calls == [("getTransaction", "live")]
+        assert "up" in w.status()
+    finally:
+        stop.set()
+        w.stop()
+
+
+def test_stream_survives_answers_without_result():
+    st = ws.WalletStream(Settings(), url="ws://x")
+    pending = {1: ("sub", W)}
+    st._handle({"jsonrpc": "2.0", "id": 1}, pending, {})  # no result, no error: ignored, not a crash
+    assert not st._subs and not pending

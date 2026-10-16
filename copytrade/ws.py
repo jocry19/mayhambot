@@ -34,12 +34,16 @@ class WalletStream:
     events: queue of (wallet, signature, received_at) for successful transactions mentioning the wallet.
     """
 
-    def __init__(self, s: Settings, url: str | list[str] | None = None):
+    SUBSCRIBE_BATCH = 25  # new subscriptions per 5-s sync (no burst of 150 requests on a fresh connection)
+
+    def __init__(self, s: Settings, url: str | list[str] | None = None, events: queue.Queue | None = None,
+                 name: str = "wallet-ws"):
         urls = [url] if isinstance(url, str) else (url or [u for u in s.ws_urls if u != "off"])
         self.urls = urls
         self._idx = 0
+        self.name = name
         self.max_wallets = s.ws_max_wallets
-        self.events: queue.Queue = queue.Queue()
+        self.events: queue.Queue = events if events is not None else queue.Queue()
         self.connected = False
         self.stats = {"notifications": 0, "connects": 0, "errors": 0}
         self._wanted: set[str] = set()
@@ -64,7 +68,7 @@ class WalletStream:
         if websockets is None:
             log.warning("websockets not installed: wallet detection by polling only")
             return self
-        self._thread = threading.Thread(target=lambda: asyncio.run(self._main()), name="wallet-ws", daemon=True)
+        self._thread = threading.Thread(target=lambda: asyncio.run(self._main()), name=self.name, daemon=True)
         self._thread.start()
         return self
 
@@ -115,7 +119,7 @@ class WalletStream:
                 with self._lock:
                     want, have = set(self._wanted), dict(self._subs)
                 busy = {w for _, w in pending.values()}
-                for w in sorted(want - set(have) - busy):
+                for w in sorted(want - set(have) - busy)[: self.SUBSCRIBE_BATCH]:
                     req_id += 1
                     pending[req_id] = ("sub", w)
                     await sock.send(json.dumps({"jsonrpc": "2.0", "id": req_id, "method": "logsSubscribe",
@@ -134,8 +138,8 @@ class WalletStream:
     def _handle(self, msg: dict, pending: dict, sub_wallet: dict) -> None:
         if "id" in msg and msg["id"] in pending:
             op, w = pending.pop(msg["id"])
-            if "error" in msg:
-                log.debug("ws %s %s failed: %s", op, w[:6], msg["error"])
+            if "error" in msg or "result" not in msg:
+                log.debug("ws %s %s failed: %s", op, w[:6], msg.get("error"))
                 return
             with self._lock:
                 if op == "sub":

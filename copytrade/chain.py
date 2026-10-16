@@ -59,6 +59,7 @@ class Rpc:
                 self.public = Rpc(settings, url=pu)
         self.poller = self.public  # old name
         self.fallbacks = 0
+        self.bulk_failures = 0  # public bulk reads that failed (not retried on Helius)
         self.counts: dict[str, int] = {}  # "public:getTransaction" -> n (hourly usage log)
         self.pooled = url is not None and _is_pool_url(self.url)  # rotate over core's public endpoint pool
         self.hosts: dict[str, int] = {}  # public endpoint host -> calls (hourly usage log)
@@ -102,6 +103,9 @@ class Rpc:
             except CreditsExhausted:
                 raise
             except Exception as e:
+                if priority != "live":  # backfill, discovery, net polls: try again later, no Helius credits
+                    self.bulk_failures += 1
+                    raise
                 log.debug("public rpc %s failed, using main rpc: %s", method, e)
             self.fallbacks += 1
         return self.call(method, params, priority)

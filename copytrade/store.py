@@ -54,6 +54,11 @@ CREATE TABLE IF NOT EXISTS ct_events (
     ts INTEGER, level TEXT, kind TEXT, message TEXT, data TEXT
 );
 CREATE TABLE IF NOT EXISTS ct_state (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS ct_detect (
+    sig TEXT, wallet TEXT, side TEXT, source TEXT, block_ts INTEGER, notified_at REAL, detected_at REAL,
+    sol REAL, PRIMARY KEY (sig, wallet)
+);
+CREATE INDEX IF NOT EXISTS idx_ct_detect_ts ON ct_detect(detected_at);
 """
 
 

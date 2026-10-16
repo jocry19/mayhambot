@@ -428,7 +428,10 @@ def test_wallet_polls_use_free_rpc_and_fall_back(monkeypatch):
     rpc = chain.Rpc(Settings(rpc_url="https://mainnet.helius-rpc.com/?api-key=k", poll_rpc_url=""))
     assert rpc.poll_signatures(W) == [{"signature": "x"}]
     assert urls == ["https://api.mainnet-beta.solana.com"]  # no Helius credit for "anything new?"
-    rpc.poll_signatures(W)  # public RPC fails -> main RPC
+    with pytest.raises(RuntimeError):  # bulk read fails on public: retried later, never on Helius credits
+        rpc.poll_signatures(W)
+    assert urls[-1] == "https://api.mainnet-beta.solana.com" and rpc.bulk_failures == 1
+    rpc.poll_signatures(W, priority="live")  # time-critical: public fails -> main RPC
     assert urls[-1] == "https://mainnet.helius-rpc.com/" and rpc.poll_fallbacks == 1
     assert chain.Rpc(Settings(rpc_url="https://mainnet.helius-rpc.com/?api-key=k", poll_rpc_url="off")).poller is None
 

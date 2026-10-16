@@ -196,3 +196,34 @@ def backtest(conn, s: Settings, size_sol: float | None = None) -> pd.DataFrame:
     if not bt.empty:
         bt["equity_sol"] = bt["pnl_sol"].cumsum()
     return bt
+
+
+def detection(conn, hours: float = 24, side: str | None = "buy") -> pd.DataFrame:
+    """How late we see whale swaps: one row per recognised swap with lag_s = recognised - block time and the
+    source (ws = websocket, poll = polling, gap = polling found what the websocket missed)."""
+    q = "SELECT * FROM ct_detect WHERE detected_at >= ?" + (" AND side=?" if side else "") + " ORDER BY detected_at"
+    args: list = [time.time() - hours * 3600] + ([side] if side else [])
+    try:
+        df = pd.read_sql_query(q, conn, params=args)
+    except Exception:
+        return pd.DataFrame()
+    if df.empty:
+        return df
+    df["lag_s"] = df["detected_at"] - df["block_ts"]
+    df["notify_lag_s"] = df["notified_at"] - df["block_ts"]  # chain -> websocket message (ws only)
+    df["dt"] = pd.to_datetime(df["detected_at"], unit="s", utc=True)
+    return df
+
+
+def detection_summary(conn, hours: float = 24) -> pd.DataFrame:
+    """Per source: n, share, p50/p90/p99/max lag in seconds and the share seen within 10 s / 30 s."""
+    df = detection(conn, hours)
+    if df.empty:
+        return df
+    g = df.groupby("source")["lag_s"]
+    out = g.agg(n="size", p50="median", p90=lambda x: x.quantile(0.9), p99=lambda x: x.quantile(0.99),
+                max="max").reset_index()
+    out["share"] = out["n"] / out["n"].sum()
+    out["within_10s"] = g.apply(lambda x: (x <= 10).mean()).values
+    out["within_30s"] = g.apply(lambda x: (x <= 30).mean()).values
+    return out

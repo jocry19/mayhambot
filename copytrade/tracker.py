@@ -9,8 +9,9 @@ Wallets whose history proves bad (enough samples, negative score) are deactivate
 from __future__ import annotations
 
 import logging
+import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from pathlib import Path
 
 from . import chain, market, store
@@ -21,23 +22,66 @@ WALLETS_FILE = Path(__file__).with_name("wallets.txt")
 
 # signatures already handled (websocket and polling both see the same transaction: act once)
 _seen: OrderedDict[str, None] = OrderedDict()
-DETECTED = {"ws": 0, "poll": 0}  # swaps found per source since the last hourly log line
+_seen_lock = threading.Lock()  # websocket worker and polling run in different threads
+DETECTED = {"ws": 0, "poll": 0, "gap": 0}  # swaps per source since the last hourly line; gap = poll found a
+#                                            swap of a wallet the websocket was watching (missed notification)
 WS_LATENCY: list[float] = []  # seconds from websocket notification to recognised swap (hourly mean)
+# (source, side, seconds from the swap's block time to our recognition) of recent swaps, for the hourly line
+LAG: deque = deque(maxlen=5000)
 
 
 def _mark(sig: str) -> bool:
     """True the first time a signature is seen."""
-    if sig in _seen:
-        return False
-    _seen[sig] = None
-    if len(_seen) > 20000:
-        _seen.popitem(last=False)
-    return True
+    with _seen_lock:
+        if sig in _seen:
+            return False
+        _seen[sig] = None
+        if len(_seen) > 20000:
+            _seen.popitem(last=False)
+        return True
+
+
+def _release(sig: str) -> None:
+    """Could not read the transaction: let the other path (polling / websocket) try it again."""
+    with _seen_lock:
+        _seen.pop(sig, None)
 
 
 def _known(conn, sig: str, wallet: str) -> bool:
     return sig in _seen or conn.execute("SELECT 1 FROM ct_swaps WHERE sig=? AND wallet=? LIMIT 1",
                                         (sig, wallet)).fetchone() is not None
+
+
+def _claim(conn, sig: str, wallet: str) -> bool:
+    """Atomically take a signature for handling (False: already handled or being handled elsewhere)."""
+    if conn.execute("SELECT 1 FROM ct_swaps WHERE sig=? AND wallet=? LIMIT 1", (sig, wallet)).fetchone():
+        return False
+    return _mark(sig)
+
+
+def record_detection(conn, sw: chain.Swap, source: str, notified_at: float | None = None) -> float:
+    """Store how late we saw a swap (block time -> recognised), per source. Returns the lag in seconds."""
+    now = time.time()
+    lag = max(0.0, now - sw.block_time) if sw.block_time else float("nan")
+    LAG.append((source, sw.side, lag, now))
+    try:
+        conn.execute("INSERT OR IGNORE INTO ct_detect VALUES (?,?,?,?,?,?,?,?)",
+                     (sw.signature, sw.wallet, sw.side, source, sw.block_time, notified_at, now, sw.sol_amount))
+    except Exception as e:  # metrics never block trading
+        log.debug("detect log failed: %s", e)
+    return lag
+
+
+def lag_summary(since: float = 0.0, side: str | None = "buy") -> dict:
+    """{source: {n, p50, p90, max}} of block-time -> recognition lags (seconds) since `since`."""
+    out: dict = {}
+    for src in ("ws", "poll", "gap"):
+        xs = sorted(x for s_, sd, x, t in list(LAG) if s_ == src and t >= since and (side is None or sd == side)
+                    and x == x)
+        if xs:
+            out[src] = {"n": len(xs), "p50": xs[len(xs) // 2], "p90": xs[min(len(xs) - 1, int(len(xs) * 0.9))],
+                        "max": xs[-1]}
+    return out
 
 
 def load_manual(conn, s: Settings) -> int:
@@ -131,6 +175,21 @@ def poll_interval(s: Settings, last_swap: int | None, now: float, manual: bool =
     return s.poll_cold_seconds
 
 
+def ws_wallets(conn, s: Settings) -> list[str]:
+    """Wallets for real-time websocket watching: every active wallet, manual and Ultra/Smart first, then the
+    whale ranking, then the most recently active; at most CT_WS_MAX_WALLETS."""
+    rows = conn.execute(
+        """SELECT w.address, w.source, r.score, (SELECT MAX(ts) FROM ct_swaps x WHERE x.wallet=w.address) AS last_swap
+           FROM ct_wallets w LEFT JOIN ct_wallet_rank r ON r.address = w.address WHERE w.active = 1""").fetchall()
+
+    def key(r):
+        tier = store.wallet_info(conn, r["address"]).get("tier")
+        return (r["source"] != "manual", {"ultra": 0, "smart": 1}.get(tier, 2),
+                -(r["score"] if r["score"] is not None else -1), -(r["last_swap"] or 0))
+
+    return [r["address"] for r in sorted(rows, key=key)][: s.ws_max_wallets]
+
+
 def hot_wallets(conn, s: Settings, now: float | None = None) -> list[str]:
     """Wallets polled at the fast rate (recent swaps, manual): these get a websocket subscription."""
     now = now or time.time()
@@ -189,9 +248,11 @@ def backfill(conn, s: Settings, rpc: chain.Rpc, wallet: str, limit: int = 80) ->
     return n
 
 
-def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk") -> list[chain.Swap]:
+def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk",
+         covered: bool = False) -> list[chain.Swap]:
     """New swaps since the last poll (oldest first). priority 'live' for wallets nobody watches in real time;
-    the transactions of new finds are always read in the live lane (a fresh whale buy may follow)."""
+    the transactions of new finds are always read in the live lane (a fresh whale buy may follow).
+    covered: the websocket watches this wallet, so a find here is a gap (missed notification)."""
     wallet = wallet_row["address"]
     last = wallet_row["last_sig"]
     sigs = rpc.poll_signatures(wallet, limit=15, until=last, priority=priority) if last \
@@ -207,23 +268,32 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk") 
         return []
     solusd = market.sol_usd(s)
     out = []
-    for sg in reversed(sigs):
-        if sg.get("err") or _known(conn, sg["signature"], wallet):
-            continue  # failed, or already handled from the websocket
-        _mark(sg["signature"])
-        try:
-            sw = chain.extract_swap(rpc.transaction(sg["signature"], priority="live"), wallet, solusd)
-        except Exception as e:
-            log.debug("tx failed: %s", e)
+    cursor = last
+    for sg in reversed(sigs):  # oldest first
+        if sg.get("err") or not _claim(conn, sg["signature"], wallet):
+            cursor = sg["signature"]  # failed on chain, or already handled from the websocket
             continue
+        try:
+            tx = rpc.transaction(sg["signature"], priority="live")
+            if tx is None:
+                raise RuntimeError("transaction not available yet")
+        except Exception as e:
+            _release(sg["signature"])
+            log.debug("tx failed, retry next poll: %s", e)
+            break  # the cursor stays before it: the next poll reads it again, nothing is skipped
+        cursor = sg["signature"]
+        sw = chain.extract_swap(tx, wallet, solusd)
         if sw:
             out.append(sw)
     if out:
         store.save_swaps(conn, out, solusd)
-        DETECTED["poll"] += len(out)
+        src = "gap" if covered else "poll"
+        DETECTED[src] += len(out)
+        for sw in out:
+            record_detection(conn, sw, src)
     # advance the cursor only after the swaps are stored (a locked write is retried without losing them)
     conn.execute("UPDATE ct_wallets SET last_sig=?, last_polled=? WHERE address=?",
-                 (sigs[0]["signature"], int(time.time()), wallet))
+                 (cursor, int(time.time()), wallet))
     conn.commit()
     return out
 
@@ -232,8 +302,8 @@ def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, 
                       received_at: float | None = None) -> chain.Swap | None:
     """A transaction the websocket reported for a watched wallet -> stored swap (or None). Public RPC first; a
     brand-new transaction can be missing there for a moment, so retry and ask the main RPC on the last try."""
-    if _known(conn, sig, wallet):
-        return None
+    if not _claim(conn, sig, wallet):
+        return None  # duplicate notification (both sockets) or already polled
     tx = None
     for i in range(tries):
         try:
@@ -246,13 +316,14 @@ def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, 
             break
         time.sleep(0.7)
     if not tx:
+        _release(sig)
         return None  # the polling net picks it up later
-    _mark(sig)
     solusd = market.sol_usd(s)
     sw = chain.extract_swap(tx, wallet, solusd)
     if sw:
         store.save_swaps(conn, [sw], solusd)
         DETECTED["ws"] += 1
+        record_detection(conn, sw, "ws", received_at)
         if received_at:
             WS_LATENCY.append(time.time() - received_at)
     return sw

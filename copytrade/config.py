@@ -80,7 +80,10 @@ class Settings:
     def ws_url(self) -> str:
         return "off" if not self.ws_urls or self.ws_urls[0] == "off" else self.ws_urls[0]
 
-    ws_max_wallets: int = field(default_factory=lambda: _i("CT_WS_MAX_WALLETS", 40))
+    # every active wallet up to this many gets a subscription (manual, Ultra/Smart, ranked first)
+    ws_max_wallets: int = field(default_factory=lambda: _i("CT_WS_MAX_WALLETS", 150))
+    # independent websocket connections on different endpoints watching the same wallets (one drop is no gap)
+    ws_parallel: int = field(default_factory=lambda: _i("CT_WS_PARALLEL", 2))
     discover_every_s: float = field(default_factory=lambda: _f("CT_DISCOVER_EVERY_SECONDS", 1800))
     poll_warm_seconds: float = field(default_factory=lambda: _f("CT_POLL_WARM_SECONDS", 60))
     poll_cold_seconds: float = field(default_factory=lambda: _f("CT_POLL_COLD_SECONDS", 300))

@@ -6,7 +6,7 @@ import signal
 import threading
 import time
 
-from . import chain, learn, ranking, store, tracker, ws
+from . import chain, learn, ranking, store, tracker, watch, ws
 from .config import Settings
 from .execution import make_executors
 from .strategy import Strategy
@@ -22,8 +22,9 @@ class Engine:
         self.exs = make_executors(s, self.rpc)
         self.strategy = Strategy(self.conn, s, self.exs)
         self._stop = stop_event or threading.Event()
-        self.stream: ws.WalletStream | None = None
+        self.watcher: watch.Watcher | None = None
         self._last_usage = time.time()
+        self._last_ws_sync = 0.0
 
     # ------------------------------------------------------------------ maintenance
     def maintain(self, discover: bool = True) -> None:
@@ -66,20 +67,22 @@ class Engine:
     def poll_round(self) -> int:
         """Poll the wallets that are due (hot ones every few seconds, quiet ones every 1-5 min), within the RPC budget."""
         budget = max(1, int(self.s.rpc_max_rps * self.s.wallet_poll_seconds * 0.5))
-        covered = self.stream.covered() if self.stream else set()
+        covered = self.watcher.covered() if self.watcher else set()
         batch = tracker.due_wallets(self.conn, self.s, covered=covered)[:budget]
         hot = set(tracker.hot_wallets(self.conn, self.s)) - covered  # no live watch: polling is the fast path
         seen = 0
         for w in batch:
             try:
                 prio = "live" if w["address"] in hot else "bulk"
-                for sw in store.retry_locked(tracker.poll, self.conn, self.s, self.rpc, w, prio):
+                for sw in store.retry_locked(tracker.poll, self.conn, self.s, self.rpc, w, prio,
+                                             w["address"] in covered):
                     seen += 1
                     self._on_swap(sw)
             except Exception as e:
                 log.debug("poll %s failed: %s", w["address"][:6], e)
-        if self.stream:
-            self.stream.set_wallets(tracker.hot_wallets(self.conn, self.s))
+        if self.watcher and time.time() - self._last_ws_sync > 60:
+            self._last_ws_sync = time.time()
+            self.watcher.set_wallets(tracker.ws_wallets(self.conn, self.s))
         return seen
 
     def _on_swap(self, sw) -> None:
@@ -88,52 +91,31 @@ class Engine:
         else:
             self.strategy.on_whale_sell(sw)
 
-    def drain_stream(self, until: float) -> int:
-        """Handle websocket notifications until `until` (returns at once without a stream)."""
-        n = 0
-        while self.stream and not self._stop.is_set():
-            left = until - time.time()
-            if left <= 0:
-                break
-            try:
-                wallet, sig, got = self.stream.events.get(timeout=min(0.5, left))
-            except Exception:  # queue.Empty
-                continue
-            try:
-                sw = store.retry_locked(tracker.process_signature, self.conn, self.s, self.rpc, wallet, sig,
-                                        3, got)
-                if sw:
-                    n += 1
-                    self._on_swap(sw)
-            except Exception as e:
-                log.debug("ws swap %s failed: %s", sig[:8], e)
-        return n
-
     def usage_line(self, force: bool = False) -> str | None:
         """Once an hour: swaps found by websocket vs. polling, and RPC calls public vs. Helius."""
         if not force and time.time() - self._last_usage < 3600:
             return None
-        self._last_usage = time.time()
         u = self.rpc.usage()
         pub = sum(v for k, v in u.items() if k.startswith("public:"))
         hel = sum(v for k, v in u.items() if k.startswith("helius:"))
-        st = self.stream
         lat = tracker.WS_LATENCY
         line = (f"detection last hour: {tracker.DETECTED['ws']} swaps via websocket"
                 + (f" (mean {sum(lat) / len(lat):.2f}s notification->swap)" if lat else "")
-                + f", {tracker.DETECTED['poll']} via polling; websocket {'connected' if st and st.connected else 'off/disconnected'}"
-                + (f" to {st.url.split('?')[0]} ({len(st.covered())} wallets, {st.stats['connects']} connects)"
-                   if st else "")
+                + f", {tracker.DETECTED['poll']} via polling, {tracker.DETECTED['gap']} gaps (polling found what"
+                f" the websocket missed); whale buy lag block->recognised: {watch.lag_text(self._last_usage)}"
+                + f"; websockets: {self.watcher.status() if self.watcher else 'off'}"
                 + f"; rpc calls public {pub}"
                 + (f" ({', '.join(f'{h} {n}' for h, n in sorted(self.rpc.endpoints().items(), key=lambda x: -x[1]))})"
                    if self.rpc.endpoints() else "")
-                + f", helius {hel}, fallbacks {self.rpc.fallbacks}")
-        tracker.DETECTED.update(ws=0, poll=0)
+                + f", helius {hel}, fallbacks {self.rpc.fallbacks}, public bulk failures {self.rpc.bulk_failures}")
+        tracker.DETECTED.update(ws=0, poll=0, gap=0)
+        self.rpc.fallbacks = self.rpc.bulk_failures = 0
         tracker.WS_LATENCY.clear()
         self.rpc.counts.clear()
         if self.rpc.public:
             self.rpc.public.counts.clear()
             self.rpc.public.hosts.clear()
+        self._last_usage = time.time()
         log.info(line)
         return line
 
@@ -180,8 +162,10 @@ class Engine:
         threading.Thread(target=price_loop, name="positions", daemon=True).start()
         threading.Thread(target=maint_loop, name="maintenance", daemon=True).start()
         if self.s.ws_url != "off" and ws.available():
-            self.stream = ws.WalletStream(self.s).start()
-            self.stream.set_wallets(tracker.hot_wallets(self.conn, self.s))
+            # websocket notifications get their own thread: a slow polling round never delays a copy
+            self.watcher = watch.Watcher(self.s, self.rpc, self.exs, self._stop).start(
+                tracker.ws_wallets(self.conn, self.s))
+            self._last_ws_sync = time.time()
         while not self._stop.is_set():
             t0 = time.time()
             try:
@@ -190,13 +174,9 @@ class Engine:
                 self.usage_line()
             except Exception as e:
                 log.warning("poll round failed: %s", e)
-            until = t0 + max(0.5, self.s.wallet_poll_seconds)
-            if self.stream:
-                self.drain_stream(until)
-            else:
-                self._stop.wait(max(0.0, until - time.time()))
-        if self.stream:
-            self.stream.stop()
+            self._stop.wait(max(0.5, self.s.wallet_poll_seconds - (time.time() - t0)))
+        if self.watcher:
+            self.watcher.stop()
         store.event(self.conn, "stop", "Copy-Trader gestoppt")
 
 
