@@ -255,6 +255,10 @@ def collect() -> dict:
     lb = last_backup()
     if db_path().exists() and (not lb or now - lb.stat().st_mtime > 3 * 3600):
         problems["backup_old"] = f"Letztes Backup: {ago(lb.stat().st_mtime) if lb else 'nie'}."
+    try:
+        problems.update(check_resources(procs))
+    except Exception as e:  # noqa: BLE001 - a resource probe must never break the watchdog
+        print(f"resources: {e}")
     power = check_power()
     if power == "Akku":
         problems["on_battery"] = "Mac läuft auf Akku: bitte Netzteil anschließen, sonst schläft er ein."
@@ -375,6 +379,119 @@ def check_planned_restarts(st: dict):
     st["planned_seen"] = last
 
 
+# ---------------------------------------------------------------- resources / maintenance
+LOG_STALL_MIN = {"signals": 30}   # services that log every cycle; silent this long = hung (pid alive, no progress)
+
+
+def _rss_mb(pid: int) -> float | None:
+    try:
+        out = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, timeout=5).stdout
+        return int(out.strip()) / 1024 if out.strip() else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def check_resources(procs: dict, now: float | None = None) -> dict:
+    """Memory per service, a growing SQLite WAL, and services that are alive but stopped logging."""
+    now = now or time.time()
+    problems = {}
+    soft, hard = cfg("MEM_WARN_MB", 1500.0), cfg("MEM_RESTART_MB", 3000.0)
+    big, runaway = [], []
+    for name, alive in procs.items():
+        if not alive:
+            continue
+        try:
+            pid = int((ROOT / "data" / "pids" / f"{name}.pid").read_text())
+        except (OSError, ValueError):
+            continue
+        mb = _rss_mb(pid)
+        if mb is None:
+            continue
+        if mb > hard:
+            runaway.append(f"{name} {mb:.0f} MB")
+        elif mb > soft:
+            big.append(f"{name} {mb:.0f} MB")
+    if runaway:
+        problems["mem_runaway"] = f"Speicher läuft über: {', '.join(runaway)} (Grenze {hard:.0f} MB), Neustart."
+    elif big:
+        problems["mem_high"] = f"Hoher Speicherverbrauch: {', '.join(big)}."
+    wal = Path(str(db_path()) + "-wal")
+    try:
+        wal_mb = wal.stat().st_size / 1e6
+        if wal_mb > cfg("WAL_WARN_MB", 1000.0):
+            problems["wal_big"] = (f"Datenbank-Journal (WAL) ist {wal_mb:.0f} MB groß: ein Leser hält den Checkpoint "
+                                   "auf. Neustart räumt das auf.")
+    except OSError:
+        pass
+    stalled = []
+    for name, mins in LOG_STALL_MIN.items():
+        f = ROOT / "logs" / f"{name}.log"
+        if procs.get(name) and f.exists() and now - f.stat().st_mtime > mins * 60:
+            stalled.append(f"{name} seit {(now - f.stat().st_mtime) / 60:.0f} min")
+    if stalled:
+        problems["service_hung"] = f"Dienst hängt (läuft, schreibt aber nichts): {', '.join(stalled)}."
+    return problems
+
+
+def nightly_maintenance(st: dict, now: float | None = None) -> str | None:
+    """Once a day in the quiet hour (MAINT_HOUR, local time, default 4): let SQLite refresh its planner stats
+    (PRAGMA optimize) and fold the WAL back into the database (passive checkpoint, never blocks writers).
+    No VACUUM: it would lock the 8 writers out for minutes. Index damage is repaired by the backup."""
+    now = now or time.time()
+    lt = time.localtime(now)
+    day = time.strftime("%Y-%m-%d", lt)
+    if lt.tm_hour != cfg("MAINT_HOUR", 4) or st.get("maint_day") == day or not db_path().exists():
+        return None
+    st["maint_day"] = day
+    t0 = time.time()
+    c = sqlite3.connect(str(db_path()), timeout=30)
+    try:
+        c.execute("PRAGMA optimize")
+        busy, log_pages, done = c.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+    finally:
+        c.close()
+    msg = (f"Wartung {day}: optimize, Checkpoint {done}/{log_pages} Seiten"
+           f"{' (Leser aktiv)' if busy else ''}, {time.time() - t0:.1f} s")
+    print(msg)
+    return msg
+
+
+def ops_report() -> str:
+    """Answer to the Telegram command /betrieb: services, updater, backups, disk, open problems."""
+    lines = [build_summary().split("\n", 1)[1]]
+    try:
+        stf = ROOT / "data" / "autoupdate_state.json"
+        au = json.loads(stf.read_text()) if stf.exists() else {}
+        head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True,
+                              timeout=10).stdout.strip()
+        upd = f"Version {head or '?'}"
+        if au.get("red_streak"):
+            upd += f", Tests seit {au['red_streak']} Runde(n) rot"
+        if au.get("blocked"):
+            upd += ", " + au["blocked"]
+        if (ROOT / "data" / "NO_AUTO_UPDATE").exists() or str(cfg("AUTO_UPDATE", "1")).lower() in ("0", "false", "off"):
+            upd += ", Auto-Update AUS"
+        last = ""
+        lf = ROOT / "logs" / "update.log"
+        if lf.exists():
+            for ln in reversed(lf.read_text(errors="replace").splitlines()[-300:]):
+                if ln[:4].isdigit() and (" deployed " in ln or " rolled back" in ln):
+                    last = ln[:120]
+                    break
+        lines.append(f"Update: {upd}" + (f"\nLetzte Runde: {last}" if last else ""))
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"Update-Status nicht lesbar ({type(e).__name__})")
+    lb = last_backup()
+    lines.append(f"Backup: {ago(lb.stat().st_mtime) if lb else 'keins'}"
+                 + (f", {lb.stat().st_size / 1e6:.0f} MB" if lb else ""))
+    try:
+        size = db_path().stat().st_size / 1e6 if db_path().exists() else 0
+        lines.append(f"Datenbank: {size:.0f} MB · frei: {shutil.disk_usage(ROOT).free / 1e9:.0f} GB")
+    except OSError:
+        pass
+    return "🛠 <b>Betrieb</b>\n" + "\n".join(lines)
+
+
 def watchdog(args) -> int:
     st = load_state()
     now = time.time()
@@ -393,7 +510,7 @@ def watchdog(args) -> int:
     seen = st.setdefault("problems", {})     # key -> {first, count, alerted, msg}
     repeat = cfg("ALERT_REPEAT_HOURS", 6) * 3600
     restartable = {"app_down", "service_down", "dashboard_down", "feed_stalled", "copytrade_stalled",
-                   "sniper_stalled"}
+                   "sniper_stalled", "service_hung", "mem_runaway", "wal_big"}
     need_restart = []
 
     for key, msg in r["problems"].items():
@@ -420,6 +537,14 @@ def watchdog(args) -> int:
                 send_alert(f"🟢 Wieder OK (war: {seen[key].get('msg', key)})")
             del seen[key]
 
+    try:
+        m = nightly_maintenance(st)
+        if m:
+            log_line = ROOT / "logs" / "maintenance.log"
+            with open(log_line, "a") as fh:
+                fh.write(time.strftime("%Y-%m-%d %H:%M:%S ") + m + "\n")
+    except Exception as e:  # noqa: BLE001
+        print(f"maintenance: {e}")
     try:
         check_planned_restarts(st)
     except Exception as e:  # noqa: BLE001
@@ -970,11 +1095,12 @@ def main(argv=None) -> int:
     sub.add_parser("rotate-logs")
     sub.add_parser("test-alert")
     sub.add_parser("setup-telegram").add_argument("--neu", action="store_true", help="Chat-ID neu suchen")
+    sub.add_parser("report")
     sm = sub.add_parser("summary")
     sm.add_argument("--send", action="store_true", help="per Telegram senden")
     a = ap.parse_args(argv)
     fn = {"status": status, "health": health, "watchdog": watchdog, "backup": backup,
-          "list-backups": list_backups, "summary": summary, "setup-telegram": setup_telegram, "restore": restore, "rotate-logs": rotate_logs,
+          "list-backups": list_backups, "summary": summary, "report": lambda a: print(ops_report()) or 0, "setup-telegram": setup_telegram, "restore": restore, "rotate-logs": rotate_logs,
           "test-alert": lambda _: 0 if send_alert("Test: Watchdog-Alarme kommen an ✅") else 1}[a.cmd]
     return fn(a)
 

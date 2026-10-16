@@ -24,7 +24,7 @@ USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 SOL = "So11111111111111111111111111111111111111112"
 TOKEN_PROGRAMS = ("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
 HELP = ("/notaus: keine Echtgeld-Käufe mehr\n/alles_verkaufen: Not-Aus und alle Live-Positionen verkaufen\n"
-        "/weiter: Not-Aus aufheben\n/live: Status")
+        "/weiter: Not-Aus aufheben\n/live: Status\n/betrieb: Dienste, Update, Backup, Speicher")
 
 
 def _tg_cfg() -> tuple[str, str]:
@@ -72,6 +72,20 @@ def status_text(conn, cfg) -> str:
     return "\n".join(lines)
 
 
+def ops_report() -> str:
+    """Operations report from deploy/ops.py (services, auto-update, backup, disk); read-only."""
+    try:
+        import importlib.util
+        from pathlib import Path
+
+        spec = importlib.util.spec_from_file_location("mayham_ops", Path(__file__).resolve().parents[1] / "deploy" / "ops.py")
+        ops = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ops)
+        return ops.ops_report().replace("<b>", "").replace("</b>", "")
+    except Exception as e:  # noqa: BLE001
+        return f"Betriebsbericht nicht verfügbar ({type(e).__name__})"
+
+
 def handle_command(conn, cfg, text: str) -> str:
     cmd = (text or "").strip().split()[0].split("@")[0].lower() if text and text.strip() else ""
     if cmd == "/notaus":
@@ -95,6 +109,8 @@ def handle_command(conn, cfg, text: str) -> str:
         return "✅ Not-Aus aufgehoben, Fehlerzähler zurückgesetzt."
     if cmd in ("/live", "/status"):
         return status_text(conn, cfg)
+    if cmd in ("/betrieb", "/bot"):
+        return ops_report()
     return HELP
 
 

@@ -118,6 +118,13 @@ sein, sonst geht es automatisch zurück auf die laufende Version. Danach `mayham
 - Not-Aus: `touch data/NO_AUTO_UPDATE` (wieder an: `rm data/NO_AUTO_UPDATE`) oder `AUTO_UPDATE=0` in `.env`.
   Ganz aus: `bash deploy/mac/install-updater.sh --off`. Stand: `.venv/bin/python deploy/autoupdate.py --status`.
 
+## Stand per Telegram abfragen
+
+`/betrieb` an den Bot: Dienste, Datenfeed, Signale, Papier/Echtgeld, Helius-Credits, laufende Version, rote
+Update-Runden, letzte Update-Runde, letztes Backup, Datenbankgröße und freier Speicher. Antwortet der Dienst
+`live`, der die Bot-Befehle liest (dort auch `/live`, `/notaus`, `/weiter`). Auf dem Mac dasselbe:
+`.venv/bin/python deploy/ops.py report`.
+
 ## Alarme (Telegram)
 
 Ein Problem muss in zwei Runden hintereinander auftauchen (≈4 min), dann kommt 🔴, bei Neustart 🔁,
@@ -126,6 +133,11 @@ Neustart höchstens alle 15 min. Geprüft wird:
 
 - alle Prozesse aus (`app_down`) oder einzelne (`service_down`; überwacht werden automatisch alle Dienste aus `mayham.py`, auch der Forschungsdienst `research`), Dashboard antwortet nicht
 - keine neuen Marktdaten seit `FEED_STALL_MIN` (15 min), Copy-Trader pollt nicht mehr
+- Dienst hängt: `signals` läuft, schreibt aber 30 min nichts ins Log (`service_hung`, Neustart)
+- Speicher je Dienst: ab `MEM_WARN_MB` (1500) Hinweis, ab `MEM_RESTART_MB` (3000) Neustart
+- Datenbank-Journal (`mayhambot.db-wal`) größer als `WAL_WARN_MB` (1000): ein Leser hält den Checkpoint auf, Neustart
+- Jede Nacht um `MAINT_HOUR` (4 Uhr): `PRAGMA optimize` und ein Checkpoint, der niemanden blockiert
+  (Protokoll in `logs/maintenance.log`). Kein VACUUM, das würde alle Dienste minutenlang sperren.
 - weniger als 2 GB frei, letztes Backup älter als 3 h, Mac auf Akku
 - Pause > 10 min seit dem letzten Watchdog-Lauf (Mac schlief / war aus)
 - mehr als `LOCK_ALERT_PER_RUN` (20) 'database is locked' in den Logs innerhalb von 2 min (Datenbank überlastet)
