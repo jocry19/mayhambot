@@ -98,6 +98,22 @@ Three layers, in this order on every call:
 Every 10 minutes each process logs `usage helius: N calls, M 429, budget X/min, credits today a/b, month c/d
 (e% share) (...)`, and every 429 is logged as `429 GET host/path [rpc method]`.
 
+### Live and bulk lanes (public RPC)
+
+```python
+http.post_json(url, payload, priority="live")         # time-critical read, e.g. getTransaction of a fresh whale buy
+http.throttle(host, priority="live", method="getTransaction")   # own HTTP clients
+```
+
+Solana public RPC (api.mainnet-beta.solana.com; limits per the Solana docs on public cluster endpoints, from
+memory, not re-checked online: 100 requests / 10 s per IP, 40 / 10 s per single method, 40 connections) gets a
+cross-process sliding window in `WINDOW_LIMITS`: at most 90 calls per 10 s in total and 36 per method, so one
+method (getTransaction) never starves the others.
+- `priority="bulk"` (default, backfills, research) may use only `(1 - PUBLIC_RPC_LIVE_SHARE)` of the window
+  (share default 0.4, so 54 of 90) and pauses while a live call is waiting (`data/ratelimit/<host>.live` marker).
+- `priority="live"` (copytrade, safety, sniper) may use the whole window and skips the plain spacing queue.
+- `usage()` shows `live_calls`, `bulk_calls`, `live_waited_s`, `bulk_waited_s` per group.
+
 ### Helius monthly credits
 
 Checked in the Helius docs on 2026-10-16 (docs.helius.xyz/docs/billing/credits.md, helius.dev/docs/billing/plans-and-rate-limits):

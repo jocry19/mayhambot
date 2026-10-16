@@ -202,6 +202,7 @@ def test_api_usage(demo, tmp_path, monkeypatch, capsys):
     from web import queries as Q
 
     monkeypatch.setattr(chttp, "_LOCK_DIR", str(tmp_path))
+    monkeypatch.setenv("HELIUS_SHARE_SAFETY", "15")  # keep safety's cap above the 120000 used below
     Q._USAGE_HIST.clear()
     now = int(time.time())
 

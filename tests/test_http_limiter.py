@@ -190,3 +190,56 @@ def test_das_and_enhanced_share_one_fixed_spacing(monkeypatch, tmp_path):
     assert seen == [http.DAS_ENHANCED_SPACING, "api.helius.xyz", http.DAS_ENHANCED_SPACING, "beta.helius-rpc.com",
                     "beta.helius-rpc.com"]
     assert http.HOST_INTERVAL[http.DAS_ENHANCED_SPACING] >= 0.5
+
+
+def _clock(monkeypatch, start=1000.0):
+    clock = {"t": start}
+    monkeypatch.setattr(http.time, "time", lambda: clock["t"])
+
+    def sleep(s):
+        clock["t"] += s
+    monkeypatch.setattr(http.time, "sleep", sleep)
+    monkeypatch.setattr(http.os.path, "getmtime", lambda p: http._marker_times.get(p, 0))
+    monkeypatch.setattr(http.os, "utime", lambda p, t: http._marker_times.__setitem__(p, clock["t"]))
+    return clock
+
+
+http._marker_times = {}
+PUB = "api.mainnet-beta.solana.com"
+
+
+def test_bulk_leaves_room_for_live(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    http._marker_times.clear()
+    clock = _clock(monkeypatch)
+    monkeypatch.setenv("PUBLIC_RPC_LIVE_SHARE", "0.4")
+    for i in range(54):  # bulk may use 60 % of 90 per 10 s
+        http._window_wait(PUB, f"m{i % 5}", "bulk")
+    t = clock["t"]
+    http._window_wait(PUB, "getTransaction", "live")  # live passes at once
+    assert clock["t"] == t
+    http._window_wait(PUB, "m1", "bulk")  # bulk must wait for the window (and the live marker)
+    assert clock["t"] > t
+
+
+def test_per_method_cap(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    http._marker_times.clear()
+    clock = _clock(monkeypatch)
+    for _ in range(36):
+        http._window_wait(PUB, "getTransaction", "live")
+    t = clock["t"]
+    http._window_wait(PUB, "getAccountInfo", "live")  # another method is not starved
+    assert clock["t"] == t
+    http._window_wait(PUB, "getTransaction", "live")
+    assert clock["t"] >= t + 9.9
+
+
+def test_usage_splits_lanes(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    http._marker_times.clear()
+    _clock(monkeypatch)
+    http.throttle(PUB, priority="live", method="getTransaction")
+    http.throttle(PUB, method="getSignaturesForAddress")
+    u = http.usage()[PUB]
+    assert u["live_calls"] == 1 and u["bulk_calls"] == 1 and "live_waited_s" in u

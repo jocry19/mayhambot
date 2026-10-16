@@ -48,7 +48,7 @@ if not getattr(logging.Formatter.format, "_redacting", False):
 HOST_INTERVAL = {
     "api.geckoterminal.com": 4.0,      # documented 30 req/min, in practice 429s at 20/min across our processes
     "api.dexscreener.com": 0.25,       # 300 req/min on pair endpoints, 60 on profiles
-    "api.mainnet-beta.solana.com": 0.25,
+    "api.mainnet-beta.solana.com": 0.11,  # plus WINDOW_LIMITS (100 / 10 s per IP, 40 / 10 s per method)
     "api.helius.xyz": 0.6,              # free plan: DAS + Enhanced API together 2 req/s, see DAS_ENHANCED_SPACING
     "helius-das-enhanced": 0.5,         # virtual: every DAS (any Helius host) and api.helius.xyz call, 2 req/s
     "mainnet.helius-rpc.com": 0.12,
@@ -175,7 +175,9 @@ def budget(host_or_group):
 def _count(group, key, n=1):
     with _budget_lock:
         for d in (_usage, _usage_window):
-            d.setdefault(group, {"calls": 0, "429": 0, "waited_s": 0.0, "credits": 0, "refused": 0})[key] += n
+            d.setdefault(group, {"calls": 0, "429": 0, "waited_s": 0.0, "credits": 0, "refused": 0,
+                                 "live_calls": 0, "bulk_calls": 0, "live_waited_s": 0.0,
+                                 "bulk_waited_s": 0.0})[key] += n
 
 
 def _take_budget(host):
@@ -457,15 +459,101 @@ def rpc_url(method="", helius_url=None):
     return url
 
 
-def throttle(host, interval=None, cost=None, das=False):
+# ---------------- live / bulk lanes with window limits ----------------
+# Solana public RPC (docs "Clusters and public RPC endpoints"): 100 requests / 10 s per IP, 40 / 10 s per single
+# method, 40 concurrent connections. We keep a margin; live calls (a fresh whale buy) may use the whole window,
+# bulk calls (backfills) only (1 - LIVE_SHARE) of it, and bulk pauses while live calls are waiting.
+WINDOW_LIMITS = {"api.mainnet-beta.solana.com": {"window": 10.0, "total": 90, "per_method": 36}}
+LIVE_MARKER_SECONDS = 2.0
+
+
+def live_share():
+    try:
+        return min(0.9, max(0.0, float(os.getenv("PUBLIC_RPC_LIVE_SHARE") or 0.4)))
+    except ValueError:
+        return 0.4
+
+
+def _window_wait(host, method, priority):
+    """Cross-process sliding window for hosts in WINDOW_LIMITS. Returns seconds waited."""
+    import json
+    lim = WINDOW_LIMITS.get(host)
+    if not lim:
+        return 0.0
+    try:
+        import fcntl
+    except ImportError:
+        return 0.0
+    os.makedirs(_LOCK_DIR, exist_ok=True)
+    path = os.path.join(_LOCK_DIR, host + ".window")
+    marker = os.path.join(_LOCK_DIR, host + ".live")
+    live = priority == "live"
+    waited, t0 = 0.0, time.time()
+    while True:
+        with open(path, "a+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                try:
+                    calls = json.loads(f.read() or "[]")
+                except ValueError:
+                    calls = []
+                now = time.time()
+                calls = [c for c in calls if c[0] > now - lim["window"]]
+                total = len(calls)
+                same = sum(1 for c in calls if c[1] == (method or ""))
+                cap = lim["total"] if live else int(lim["total"] * (1 - live_share()))
+                live_waiting = False
+                if not live:
+                    try:
+                        live_waiting = now - os.path.getmtime(marker) < LIVE_MARKER_SECONDS
+                    except OSError:
+                        pass
+                ok = total < cap and same < lim["per_method"] and not live_waiting
+                if ok:
+                    calls.append([now, method or "", "L" if live else "B"])
+                    f.seek(0)
+                    f.truncate()
+                    json.dump(calls, f)
+                    f.flush()
+                    break
+                # wait until the oldest relevant call leaves the window
+                rel = [c[0] for c in calls if total >= cap or c[1] == (method or "")]
+                wait = (min(rel) + lim["window"] - now) if rel and not live_waiting else 0.2
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+        if live:  # tell bulk callers in every process to step aside
+            try:
+                with open(marker, "a"):
+                    os.utime(marker, None)
+            except OSError:
+                pass
+        time.sleep(max(0.05, min(wait, 2.0)))
+        waited = time.time() - t0
+    return waited
+
+
+def throttle(host, interval=None, cost=None, das=False, priority="bulk", method=None):
     """Block until this process may call `host`: Helius credits (cost, default = the host's base cost),
-    then its own per-minute budget (see budget()), then the shared cross-process spacing for SHARED_HOSTS.
-    DAS calls (das=True) and api.helius.xyz also wait for the fixed 2 req/s DAS + Enhanced spacing."""
+    then its own per-minute budget (see budget()), then the shared cross-process spacing for SHARED_HOSTS,
+    then the window limits (WINDOW_LIMITS) in the 'live' or 'bulk' lane.
+    DAS calls (das=True) and api.helius.xyz also wait for the fixed 2 req/s DAS + Enhanced spacing.
+    priority='live' for time-critical reads (copying a fresh buy), 'bulk' (default) for backfills."""
+    lane = "live" if priority == "live" else "bulk"
     _charge(credit_cost(f"https://{host}/") if cost is None else cost)
     _take_budget(host)
+    t0 = time.time()
     if das or host == "api.helius.xyz":
         _shared_spacing(DAS_ENHANCED_SPACING, HOST_INTERVAL[DAS_ENHANCED_SPACING])
-    _shared_spacing(host, interval)
+    if host in WINDOW_LIMITS and lane == "live":
+        # live skips the plain spacing queue (bulk callers hold it); the window keeps the host limit
+        _window_wait(host, method, lane)
+    else:
+        _shared_spacing(host, interval)
+        _window_wait(host, method, lane)
+    g = group_of(host)
+    _count(g, f"{lane}_calls")
+    _count(g, f"{lane}_waited_s", time.time() - t0)
 
 
 def _shared_spacing(host, interval=None):
@@ -548,7 +636,7 @@ def _wait_local(host, iv):
         _last[host] = time.monotonic()
 
 
-def _request(method, url, retries=4, timeout=20, **kw):
+def _request(method, url, retries=4, timeout=20, priority="bulk", **kw):
     host = urlparse(url).netloc
     cost = credit_cost(url, kw)
     if cost == 1 and method == "POST" and kw.get("public_fallback", True):
@@ -560,8 +648,9 @@ def _request(method, url, retries=4, timeout=20, **kw):
     das = group_of(host) == CREDIT_GROUP and any(
         isinstance(it, dict) and it.get("method") in DAS_METHODS
         for it in (payload if isinstance(payload, list) else [payload]))
+    rpc_method = payload.get("method") if isinstance(payload, dict) else ("batch" if payload else None)
     for attempt in range(retries + 1):
-        throttle(host, cost=cost, das=das)
+        throttle(host, cost=cost, das=das, priority=priority, method=rpc_method)
         try:
             r = _session.request(method, url, timeout=timeout, **kw)
         except requests.RequestException as e:
