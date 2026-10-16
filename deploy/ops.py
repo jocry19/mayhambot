@@ -475,7 +475,10 @@ def restore(args) -> int:
     if not args.no_stop:
         if managed:
             plist = Path.home() / "Library" / "LaunchAgents" / f"{APP_LABEL}.plist"
-            subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
+            for _ in range(3):   # bootstrap right after bootout can fail with "5: Bad request"
+                if subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)]).returncode == 0:
+                    break
+                time.sleep(2)
         else:
             subprocess.run([py, "mayham.py", "start"], cwd=ROOT)
     return 0

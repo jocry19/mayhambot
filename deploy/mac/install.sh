@@ -36,7 +36,13 @@ plist() {  # label interval|keepalive program args...
 </dict></plist>
 PL
   launchctl bootout "gui/$UID_/$label" 2>/dev/null || true
-  launchctl bootstrap "gui/$UID_" "$LA/$label.plist"
+  # bootout returns before teardown is finished; bootstrapping too early fails with "5: Bad request"
+  for _ in $(seq 20); do launchctl print "gui/$UID_/$label" >/dev/null 2>&1 || break; sleep 0.5; done
+  for try in 1 2 3; do
+    launchctl bootstrap "gui/$UID_" "$LA/$label.plist" && break
+    [ $try = 3 ] && { echo "❌ $label konnte nicht geladen werden"; return 1; }
+    sleep 2
+  done
   echo "✅ $label"
 }
 
