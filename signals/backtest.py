@@ -197,7 +197,7 @@ def replay(snaps, prices, c, cfg=settings, watched=None):
         last[mint] = t
         o = outcome(prices.get(mint, []), t, watched=(watched or {}).get(mint))
         if o:
-            res.append(dict(o, t=t, mint=mint, **m))
+            res.append(dict(o, t=t, mint=mint, p=pm, **m))
     return res
 
 

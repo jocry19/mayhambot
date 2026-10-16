@@ -17,7 +17,7 @@ def test_fit_shrinks_small_buckets_toward_global_mean():
     assert t["global_ev"] == round(g, 4)
     b = t["buckets"][ev.bucket(2, 300, 0)]
     assert b["n"] == 2 and b["mean"] == 0.44 and g < b["ev"] < 0.44      # shrunk, still above the mean
-    assert ev.predict(t, 2, 300, 0)[0] == b["ev"]
+    assert ev.predict(t, 2, 300, 0)[0] == t["buckets"][ev.bucket(2, 300, 0) + "|pna"]["ev"]
     assert ev.predict(t, 3, 900, 2) == (t["global_ev"], 0, "e3+|n>=500|s1+")   # unseen bucket
     assert ev.predict(None, 2, 300, 0) == (None, 0, None)
 
@@ -118,3 +118,13 @@ def test_predictions_stored_every_15_minutes_per_coin():
     engine._stored.clear()
     assert engine._store_now("M", 1000) and not engine._store_now("M", 1500) and engine._store_now("M", 1900)
     assert engine._store_now("N", 1500)
+
+
+def test_model_band_bucket_shrinks_toward_its_setup():
+    rs = ([dict(res(2, 300, 0, -0.2), p=0.05)] * 20 + [dict(res(2, 300, 0, 0.5), p=0.35)] * 5)
+    t = ev.fit(rs, cost=0.06, shrink=10)
+    base = t["buckets"][ev.bucket(2, 300, 0)]
+    hi = t["buckets"][ev.bucket(2, 300, 0) + "|p>=.30"]
+    assert hi["n"] == 5 and base["ev"] < hi["ev"] < 0.44
+    assert ev.predict(t, 2, 300, 0, 0.4)[2].endswith("|p>=.30")
+    assert ev.predict(t, 2, 300, 0, None)[2] == ev.bucket(2, 300, 0)      # no 'na' band seen: setup bucket

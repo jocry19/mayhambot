@@ -35,27 +35,46 @@ def bucket(entities, net_usd, sellers):
     return f"e{e}|n{n}|s{s}"
 
 
+def p_band(p):
+    """The model's live P(+50 % in 1h) as a band; 'na' when the model had no prediction then."""
+    if p is None:
+        return "na"
+    return "<.15" if p < 0.15 else "<.30" if p < 0.30 else ">=.30"
+
+
 def fit(results, cost=backtest.COST, shrink=SHRINK):
-    """results: replayed setups with entities, net, sellers and tp_ret. -> {global, n, buckets {key: {n, mean, ev}}}"""
+    """Two levels, each shrunk toward its parent: setup bucket (entities, net, sellers) toward the global mean, then
+    setup bucket x model band (p_band of the live model prediction) toward its setup bucket. The first five real
+    signals (model score 30-45) hit +50 % within 1h four times while the plain setups lost on average, so the model
+    band is where the edge is; the shrinkage keeps a thin band from dominating."""
     if not results:
         return dict(global_ev=None, n=0, buckets={})
     rets = [r["tp_ret"] - cost for r in results]
     g = sum(rets) / len(rets)
-    by = {}
+    by, byp = {}, {}
     for r, x in zip(results, rets):
-        by.setdefault(bucket(r["entities"], r["net"], r["sellers"]), []).append(x)
+        k = bucket(r["entities"], r["net"], r["sellers"])
+        by.setdefault(k, []).append(x)
+        byp.setdefault(f"{k}|p{p_band(r.get('p'))}", []).append(x)
     buckets = {k: dict(n=len(v), mean=round(sum(v) / len(v), 4),
                        ev=round((sum(v) + shrink * g) / (len(v) + shrink), 4)) for k, v in by.items()}
+    for k, v in byp.items():
+        parent = buckets[k.rsplit("|p", 1)[0]]["ev"]
+        buckets[k] = dict(n=len(v), mean=round(sum(v) / len(v), 4),
+                          ev=round((sum(v) + shrink * parent) / (len(v) + shrink), 4))
     return dict(global_ev=round(g, 4), n=len(results), buckets=buckets)
 
 
-def predict(table, entities, net_usd, sellers):
-    """(ev, n, bucket key). Unknown bucket: the global mean, n 0."""
+def predict(table, entities, net_usd, sellers, p=None):
+    """(ev, n, bucket key): the setup x model-band bucket, else the setup bucket, else the global mean (n 0)."""
     if not table or table.get("global_ev") is None:
         return None, 0, None
     k = bucket(entities, net_usd, sellers)
-    b = table["buckets"].get(k)
-    return (b["ev"], b["n"], k) if b else (table["global_ev"], 0, k)
+    for key in (f"{k}|p{p_band(p)}", k):
+        b = table["buckets"].get(key)
+        if b:
+            return b["ev"], b["n"], key
+    return table["global_ev"], 0, k
 
 
 def blend(bucket_ev, n, model_exp_net, shrink=SHRINK):
@@ -82,7 +101,7 @@ def calibrate(conn, hours=CALIB_HOURS, now=None, cost=backtest.COST, min_ev=MIN_
     cut = len(res) * 2 // 3
     train, test = res[:cut], res[cut:]
     t_train = fit(train, cost)
-    picked = [r for r in test if (predict(t_train, r["entities"], r["net"], r["sellers"])[0] or -1) > min_ev]
+    picked = [r for r in test if (predict(t_train, r["entities"], r["net"], r["sellers"], r.get("p"))[0] or -1) > min_ev]
     oos = backtest.summary(picked, cost)
     oos["baseline_all"] = backtest.summary(test, cost)
     active = int(oos["n"] >= min_oos_n and oos["mean_tp"] > 0)

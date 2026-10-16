@@ -506,7 +506,8 @@ def evaluate(conn, mints, cfg=settings, now=None):
         m = apply_market(conn, mint, apply_safety(conn, mint, apply_model(conn, mint, now, token_metrics(conn, mint, qc, now, cfg))), now)
         m = dict(m, min_net=min_net)
         if ev_table:
-            e, n, k = ev_mod.predict(ev_table, m.get("entities", m["smart_buyers"]), m["net_usd"], m.get("sellers", 0))
+            e, n, k = ev_mod.predict(ev_table, m.get("entities", m["smart_buyers"]), m["net_usd"], m.get("sellers", 0),
+                                     m.get("prediction"))
             e = ev_mod.blend(e, n, m.get("model_exp_net"))
             m.update(ev=e, ev_n=n, ev_bucket=k)
             f["max_ev"] = e if f["max_ev"] is None else max(f["max_ev"], e)
