@@ -75,7 +75,8 @@ Neuen Key eintragen (nur du, nie in einen Chat oder ins Repo):
 1. Auf helius.dev einen neuen kostenlosen Key anlegen.
 2. `open -e ~/Documents/WALLET/mayhambot/.env` und `HELIUS_API_KEY=<neuer Key>` setzen. Steht dort auch
    `SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=...`, den Key dort ebenfalls ersetzen (oder die Zeile leeren).
-3. Speichern, dann `.venv/bin/python mayham.py stop` und `.venv/bin/python mayham.py start`.
+3. Speichern, dann `.venv/bin/python mayham.py stop` und `.venv/bin/python mayham.py start` (jeder Dienst liest
+   `.env` nur beim Start, deshalb alle neu starten).
    Der Credit-Zähler startet für den neuen Key neu ("Helius key changed, credit ledger reset" im Log).
 
 ## Alarme (Telegram)

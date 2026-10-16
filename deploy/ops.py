@@ -575,11 +575,13 @@ def helius_credits() -> dict | None:
     """Month/day totals of the shared Helius credit ledger (core.http), None when there is no ledger yet."""
     import hashlib  # noqa: PLC0415
     month = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m")
-    stats, led = None, {}
+    stats, led, status = None, {}, None
     try:
         sys.path.insert(0, str(ROOT))
         from core import http as core_http  # noqa: PLC0415
         stats = core_http.credits()
+        if hasattr(core_http, "credits_status"):
+            status = core_http.credits_status()
     except Exception:  # noqa: BLE001 - app venv missing: read the ledger file directly
         pass
     f = ROOT / "data" / "ratelimit" / "credits-helius.json"
@@ -602,10 +604,14 @@ def helius_credits() -> dict | None:
         month_used = sum(v.get("month", 0) for v in svcs)
         today = sum((v.get("days") or {}).get(day, 0) for v in svcs)
         budget = None
-    # identifies the key without ever storing it: ledger key-change stamp if present, else a short hash
-    key = led.get("key_changed_at") or hashlib.sha256(cfg("HELIUS_API_KEY", "").encode()).hexdigest()[:8]
+    if status:   # core's whole-plan view: used/limit for the current key, key fingerprint (never the key)
+        month_used = status.get("used", month_used)
+        limit = status.get("limit") or limit
+    # identifies the key without ever storing it: core's 8-hex fingerprint, else our own short hash
+    key = ((status or {}).get("key_fp") or led.get("key_fp")
+           or hashlib.sha256(cfg("HELIUS_API_KEY", "").encode()).hexdigest()[:8])
     return {"month": month, "month_used": month_used, "month_limit": limit, "today": today,
-            "day_budget": budget, "key": str(key), "warn_level": led.get("warn_level")}
+            "day_budget": budget, "key": str(key), "warn_level": (status or {}).get("warn_level")}
 
 
 def _fmt_int(x) -> str:
