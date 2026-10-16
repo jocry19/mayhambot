@@ -96,7 +96,8 @@ def calibrate(conn, hours=CALIB_HOURS, now=None, cost=backtest.COST, min_ev=MIN_
     since, until = now - int(hours * 3600), now - 3600
     data = backtest.load(conn, since, until, window)
     snaps = backtest.snapshots(data, since, until, window)
-    res = backtest.replay(snaps, data["prices"], BASE_RULE, watched=data.get("watched"))
+    st = {}
+    res = backtest.replay(snaps, data["prices"], BASE_RULE, watched=data.get("watched"), stats=st)
     res.sort(key=lambda r: r["t"])
     cut = len(res) * 2 // 3
     train, test = res[:cut], res[cut:]
@@ -104,11 +105,12 @@ def calibrate(conn, hours=CALIB_HOURS, now=None, cost=backtest.COST, min_ev=MIN_
     picked = [r for r in test if (predict(t_train, r["entities"], r["net"], r["sellers"], r.get("p"))[0] or -1) > min_ev]
     oos = backtest.summary(picked, cost)
     oos["baseline_all"] = backtest.summary(test, cost)
+    oos["unmeasured_all"] = st.get("unmeasured", 0)  # setups without a measurable outcome, left out of every number
     active = int(oos["n"] >= min_oos_n and oos["mean_tp"] > 0)
     table = fit(res, cost)
-    notes = (f"{len(res)} replayed setups, pit tiers {data['pit']}; out of sample {oos['n']} picked, mean "
+    notes = (f"{len(res)} replayed setups ({st.get('unmeasured', 0)} unmeasurable left out), pit tiers {data['pit']}; out of sample {oos['n']} picked, mean "
              f"{oos['mean_tp']:+.1%} vs all {oos['baseline_all'].get('mean_tp', 0):+.1%}" if oos["n"]
-             else f"{len(res)} replayed setups, nothing picked out of sample")
+             else f"{len(res)} replayed setups ({st.get('unmeasured', 0)} unmeasurable left out), nothing picked out of sample")
     conn.execute("INSERT INTO signal_calibration(ts, hours, n_train, n_all, active, table_json, oos_json, notes) "
                  "VALUES (?,?,?,?,?,?,?,?)", (now, hours, len(train), len(res), active, json.dumps(table),
                                                json.dumps(oos), notes))

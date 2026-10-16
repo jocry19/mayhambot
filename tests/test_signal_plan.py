@@ -128,3 +128,46 @@ def test_lag_and_hit_150_reported(tmp_path):
     s = c.execute("SELECT * FROM signals").fetchone()
     assert "letzter Smart-Kauf vor 1 min 35 s" in notifier.format_signal(dict(s, wallets_json="[]", avg_quality=50,
                                                                                 smart_buyers=2, net_usd=300))
+
+
+def test_single_bad_print_is_no_high(tmp_path):
+    from signals.backtest import confirmed, robust_max
+    assert robust_max([1.0, 1.05, 3.0, 1.02]) == 1.05                   # one stray print
+    assert robust_max([1.0, 1.2, 1.45, 1.7, 1.6]) == 1.7                 # a real run, print by print
+    assert confirmed([1.0, 3.0, 1.0], [False, True, False])[1] == 3.0    # snapshots always stand
+    c = conn(tmp_path)
+    now = 100_000
+    t = now - 2 * 3600
+    c.execute("INSERT INTO signals(ts, mint, score, price_usd) VALUES (?,?,?,?)", (t, "B", 40, 1.0))
+    for dt, p in ((90, 1.1), (300, 1.15), (310, 2.4), (320, 1.12), (1200, 1.3)):
+        c.execute("INSERT INTO trades(sig, mint, wallet, side, ts, price_usd) VALUES (?,?,?,?,?,?)",
+                  (f"s{dt}", "B", "W", "buy", t + dt, p))
+    c.commit()
+    engine.update_outcomes(c, now=now)
+    s = c.execute("SELECT * FROM signals").fetchone()
+    assert round(s["max_ret_1h"], 3) == round(1.3 / 1.1 - 1, 3)        # 2.4 ignored, entry after the delay at 1.1
+
+
+def test_unmeasured_counted_and_plan_hit_rate_out_of_sample(tmp_path):
+    c = conn(tmp_path)
+    now = 2_000_000
+    peaks = [0.1, 0.9, 0.2, 1.0, 0.3, 1.1, 0.6, 0.7, 0.05, 0.08, 0.04, 0.02]
+    for i, mx in enumerate(peaks):
+        c.execute("INSERT INTO signals(ts, mint, score, price_usd, ret_1h, max_ret_1h) VALUES (?,?,?,?,?,?)",
+                  (now - 86400 + i * 600, f"M{i}", 40, 1.0, 0.0, mx))
+    c.execute("INSERT INTO signals(ts, mint, score, price_usd) VALUES (?,?,?,?)", (now - 5 * 3600, "GAP", 40, 1.0))
+    c.commit()
+    lv = plan.levels(c, now)
+    assert lv["n_unmeasured"] == 1 and lv["hit_rate_oos"] == 0.0        # the newest third all missed the old target
+    a = {b["band"]: b for b in funnel.outcomes(c, 48, now=now)}["all"]
+    assert a["n_unmeasured"] == 1 and a["hit_50_with_unmeasured"] == round(5 / 13, 3)
+
+
+def test_backtest_counts_unmeasured_setups():
+    from signals import backtest
+    m = dict(entities=2, net=300, sellers=0, score=50, wallets=2)
+    snaps = [(1000, "A", m, None), (1000, "B", m, None)]
+    prices = {"A": [(1010, 1.0), (1500, 1.6), (4600, 1.2)]}
+    st = {}
+    res = backtest.replay(snaps, prices, dict(wallets=1, net=0, score=0, p=None, sellers=None), stats=st)
+    assert [r["mint"] for r in res] == ["A"] and st["unmeasured"] == 1

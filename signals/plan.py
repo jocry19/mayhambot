@@ -27,21 +27,27 @@ def _q(vals, q):
 
 
 def levels(conn, now=None, days=DAYS, min_n=MIN_N):
-    """dict(target, stop, n, hit_rate, peak_min, source) for the next alert."""
+    """dict(target, stop, n, n_unmeasured, hit_rate (in sample), hit_rate_oos, peak_min, source) for the next alert."""
     now = now or int(time.time())
     rows = conn.execute("SELECT max_ret_1h, dd_before_peak_1h, peak_min_1h FROM signals "
-                        "WHERE ts>=? AND max_ret_1h IS NOT NULL", (now - days * 86400,)).fetchall()
+                        "WHERE ts>=? AND max_ret_1h IS NOT NULL ORDER BY ts", (now - days * 86400,)).fetchall()
+    missing = conn.execute("SELECT COUNT(*) FROM signals WHERE ts>=? AND ts<=? AND max_ret_1h IS NULL",
+                           (now - days * 86400, now - 7200)).fetchone()[0]
     mx = [r[0] for r in rows]
-    out = dict(target=DEFAULT_TARGET, stop=DEFAULT_STOP, n=len(rows), hit_rate=None, peak_min=None,
-               source="default")
+    out = dict(target=DEFAULT_TARGET, stop=DEFAULT_STOP, n=len(rows), n_unmeasured=missing, hit_rate=None,
+               hit_rate_oos=None, peak_min=None, source="default")
     if len(rows) >= min_n:
         out.update(target=round(min(1.5, max(0.15, _q(mx, 1 - TARGET_SHARE))), 2), source="history")
+        # honest check: a target set on the older two thirds, scored on the newest third it never saw
+        cut = len(mx) * 2 // 3
+        t_old = min(1.5, max(0.15, _q(mx[:cut], 1 - TARGET_SHARE)))
+        out["hit_rate_oos"] = round(sum(1 for x in mx[cut:] if x >= t_old) / len(mx[cut:]), 2)
     winners = [r for r in rows if r[0] >= out["target"]]
     dips = [r[1] for r in winners if r[1] is not None]
     if len(rows) >= min_n and len(dips) >= 5:
         out["stop"] = round(min(-0.1, max(-0.5, _q(dips, 1 - STOP_KEEP) - 0.05)), 2)
-    if rows:
-        out["hit_rate"] = round(sum(1 for x in mx if x >= out["target"]) / len(rows), 2)
+    if rows:  # in sample, so ~TARGET_SHARE by construction once from history; unmeasured calls count as misses
+        out["hit_rate"] = round(sum(1 for x in mx if x >= out["target"]) / (len(rows) + missing), 2)
     mins = [r[2] for r in winners if r[2] is not None]
     if mins:
         out["peak_min"] = round(_q(mins, 0.5))

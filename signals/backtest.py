@@ -137,6 +137,26 @@ def price_near(pts, t, tol):
     return best
 
 
+CONFIRM = 1.25  # a print above both neighbours by more than this is a single bad print, not a reachable high
+
+
+def confirmed(prices, trusted=None):
+    """Prices with single bad prints replaced: a value only stands if a direct neighbour is within CONFIRM of it
+    (as core.scoring._price_index, stricter), so one stray print never counts as a +50 % high. trusted[i] True
+    (a DexScreener snapshot, already an aggregated pool price) always stands."""
+    out = []
+    for i, p in enumerate(prices):
+        nb = [prices[j] for j in (i - 1, i + 1) if 0 <= j < len(prices)]
+        ok = not nb or (trusted is not None and trusted[i]) or any(p <= CONFIRM * x for x in nb)
+        out.append(p if ok else max(x for x in nb if x < p))
+    return out
+
+
+def robust_max(prices, trusted=None):
+    c = confirmed(prices, trusted)
+    return max(c) if c else None
+
+
 def outcome(series, t, tp=TP, watched=None):
     """Entry: first price within 5 min after t. ret_1h: price within 5 min of t + 1h (never a later print).
     A watched coin (DexScreener snapshots right before t) that has no price at all after t + 30 min counts as dead
@@ -146,7 +166,7 @@ def outcome(series, t, tp=TP, watched=None):
         return None
     p0 = series[i][1]
     path = [p for ts, p in series[i:] if ts <= t + 3600]
-    mx = max(path) / p0 - 1
+    mx = robust_max(path) / p0 - 1
     p1 = price_near(series[i:], t + 3600, 300)
     if p1 is None:
         was_watched = bool(watched) and price_near(watched, t, 1800) is not None
@@ -187,8 +207,12 @@ def _keep(m, pm, c):
                 or (c["sellers"] is not None and m["sellers"] > c["sellers"]))
 
 
-def replay(snaps, prices, c, cfg=settings, watched=None):
+def replay(snaps, prices, c, cfg=settings, watched=None, stats=None):
+    """stats (dict, optional) gets 'unmeasured': setups with no entry or +1 h price that are not provably dead.
+    They are not in the results, so every caller must report the count next to the numbers."""
     last, res = {}, []
+    if stats is not None:
+        stats["unmeasured"] = 0
     for t, mint, m, pm in snaps:
         if not _keep(m, pm, c):
             continue
@@ -198,6 +222,8 @@ def replay(snaps, prices, c, cfg=settings, watched=None):
         o = outcome(prices.get(mint, []), t, watched=(watched or {}).get(mint))
         if o:
             res.append(dict(o, t=t, mint=mint, p=pm, **m))
+        elif stats is not None:
+            stats["unmeasured"] += 1
     return res
 
 

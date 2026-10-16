@@ -136,6 +136,9 @@ def outcomes(conn, hours=168, cost=COST, now=None, bands=(0, 20, 30, 40, 50, 60,
                  mean_ret_1h_after_cost=round(sum(r["ret_1h"] for r in b) / len(b) - cost, 3),
                  dead=sum(1 for r in b if r["ret_1h"] <= -0.9))
         d.update(peak_after_call(b))
+        if name == "all":  # unmeasured calls (no price near +1 h, not provably dead) count as misses here
+            d.update(n_unmeasured=missing, hit_50_with_unmeasured=round(
+                sum(1 for r in b if (r["max_ret_1h"] or 0) >= 0.5) / (len(b) + missing), 3))
         out.append(d)
     if missing:  # due but unmeasurable (no price near +1h): listed, so a gap never hides a loser silently
         out.append(dict(band="no 1h price", n=missing))

@@ -18,7 +18,7 @@ from core import scoring
 from core.config import settings
 from signals import ev as ev_mod
 from signals import plan
-from signals.backtest import DEAD_RET, price_near
+from signals.backtest import DEAD_RET, confirmed, price_near, robust_max
 
 log = logging.getLogger("mayhambot.signals")
 MANUAL_DEFAULT_SCORE = 70.0
@@ -625,12 +625,16 @@ def evaluate(conn, mints, cfg=settings, now=None):
     return new
 
 
-def peak_stats(pts, t0, p0, horizon=3600):
+ENTRY_DELAY_S = int(os.getenv("SIGNAL_ENTRY_DELAY_S", 60))  # alert to a hand-placed buy
+
+
+def peak_stats(pts, t0, p0, horizon=3600, snaps=None):
     """The 1 h high after the call, as a manual trader sees it: minutes to the peak and the deepest dip before it
     (what a stop must survive to catch that peak). Empty when there is no price within the hour."""
     w = [(t, v) for t, v in pts if t0 < t <= t0 + horizon]
     if not w:
         return {}
+    w = list(zip([t for t, _ in w], confirmed([v for _, v in w], [snaps is not None and x in snaps for x in w])))
     i = max(range(len(w)), key=lambda k: w[k][1])
     before = [v for _, v in w[:i + 1]]
     return dict(peak_min_1h=round((w[i][0] - t0) / 60, 1), dd_before_peak_1h=min(0.0, min(before) / p0 - 1))
@@ -659,6 +663,10 @@ def update_outcomes(conn, now=None, cfg=settings):
             "SELECT ts, price_usd FROM trades WHERE mint=? AND ts>? AND ts<=? AND price_usd>0 ORDER BY ts",
             (s["mint"], s["ts"], s["ts"] + 86400))]
         pts = sorted(snap + prints)
+        snapset = set(snap)
+
+        def rmax(w):  # w: [(ts, price)]; snapshots stand, single trade prints need a neighbour to confirm them
+            return robust_max([v for _, v in w], [(t, v) in snapset for t, v in w])
         tok = conn.execute("SELECT liquidity_usd FROM tokens WHERE mint=?", (s["mint"],)).fetchone()
         dead = bool(tok and tok[0] is not None and tok[0] < dead_liq)
         flags = []
@@ -678,21 +686,25 @@ def update_outcomes(conn, now=None, cfg=settings):
             return None
         upd = {"ret_5m": ret(300, 120), "ret_15m": ret(900, 300), "ret_1h": ret(3600, 300),
                "ret_6h": ret(6 * 3600, 1800)}
-        h1 = [v for t, v in pts if t <= s["ts"] + 3600]
+        # highs as someone acting on the alert could get them: from ENTRY_DELAY_S after the call, entering at the
+        # worse of the call price and the price then, and with single bad prints filtered out (robust_max)
+        pe = max(p0, price_near(pts, s["ts"] + ENTRY_DELAY_S, 120) or p0)
+        after = [(t, v) for t, v in pts if t >= s["ts"] + ENTRY_DELAY_S]
+        h1 = [(t, v) for t, v in after if t <= s["ts"] + 3600]
         if now >= s["ts"] + 3600:
             if h1:
-                upd["max_ret_1h"] = max(h1) / p0 - 1
+                upd["max_ret_1h"] = rmax(h1) / pe - 1
                 if s["mcap_usd"]:
                     upd["max_mcap_1h"] = s["mcap_usd"] * (1 + upd["max_ret_1h"])
             elif upd["ret_1h"] == DEAD_RET:
                 upd["max_ret_1h"] = DEAD_RET
-            upd.update(peak_stats(pts, s["ts"], p0))
+            upd.update(peak_stats(after, s["ts"], pe, snaps=snapset))
         for key, dt in (("max_ret_15m", 900), ("max_ret_4h", 4 * 3600)):
-            w = [v for t, v in pts if t <= s["ts"] + dt]
+            w = [(t, v) for t, v in after if t <= s["ts"] + dt]
             if now >= s["ts"] + dt and w:
-                upd[key] = max(w) / p0 - 1
+                upd[key] = rmax(w) / pe - 1
         if now >= s["ts"] + 86400 and pts:
-            upd["max_ret_24h"] = max(v for _, v in pts) / p0 - 1
+            upd["max_ret_24h"] = rmax(after or pts) / pe - 1
         upd["outcome_flag"] = "dead" if "dead" in flags else "gap" if "gap" in flags else "ok"
         sets = {k: v for k, v in upd.items() if v is not None}
         conn.execute(f"UPDATE signals SET {', '.join(k + '=?' for k in sets)} WHERE id=?", (*sets.values(), s["id"]))
