@@ -601,3 +601,25 @@ def test_inflight_position_and_command_states(demo):
     live = c.get("/api/copytrade?mode=live").json()
     assert [p["status"] for p in live["failed"]] == ["failed"] and live["failed"][0]["exit_reason"]
     assert any(x["status"] == "expired" for x in d["commands"])
+
+
+def test_live_card_and_kill_switch(demo, monkeypatch):
+    monkeypatch.setenv("LIVE_TRADING", "true")
+    monkeypatch.delenv("LIVE_DRY_RUN", raising=False)
+    from web.db import cache
+
+    cache.clear()
+    c = _client(demo)
+    d = c.get("/api/live").json()
+    assert d["available"] and d["state"] == "dry" and not d["killed"]
+    assert {"wallet", "dry_run", "clean"} <= {x["key"] for x in d["checks"]} and d["limits"]["max_position_sol"] > 0
+    st = {o["status"]: o["status_de"] for o in d["orders"]}
+    assert st["dry_ok"] == "Dry-Run ok" and st["rejected"].startswith("abgelehnt")
+    body = str(d)
+    assert "DemoTradingWallet1111" not in body  # only the first 6 characters of the trading wallet
+    r = c.post("/api/live/kill", json={"reason": "Test"})
+    assert r.status_code == 200
+    assert c.get("/api/live").json()["killed"].startswith("Dashboard: Test")
+    assert c.post("/api/live/unkill", json={"confirm": "FREIGEBEN"}).status_code in (404, 405)  # release stays off the dashboard
+    assert c.get("/api/control").json()["live_dry_run"] is True
+    assert c.get("/api/copytrade?mode=dry").status_code == 200

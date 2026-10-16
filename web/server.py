@@ -157,6 +157,7 @@ def _buy_preview(conn, mint: str) -> dict:
     name = (ctl.get("active_presets") or {}).get(strategy) or "standard"
     p = (ctl.get("presets") or {}).get(name) or {}
     live = bool(ctl.get("live", {}).get(strategy)) and bool(load().live_ready)
+    dry = live and _live_dry_run()
     tok = q.one(conn, "SELECT symbol, mcap_usd, liquidity_usd, price_usd FROM tokens WHERE mint=?", (mint,)) \
         if q.has(conn, "tokens") else None
     blocked = None
@@ -174,8 +175,17 @@ def _buy_preview(conn, mint: str) -> dict:
     return {"available": True, "mint": mint, "symbol": (tok or {}).get("symbol"), "mcap_usd": (tok or {}).get("mcap_usd"),
             "liquidity_usd": (tok or {}).get("liquidity_usd"), "strategy": strategy, "mode": (ctl.get("modes") or {}).get(strategy),
             "preset": name, "size_sol": p.get("size_sol"), "take_profit": p.get("take_profit"), "stop_loss": p.get("stop_loss"),
-            "max_hold_min": p.get("max_hold_min"), "account": "live" if live else "paper",
+            "max_hold_min": p.get("max_hold_min"), "account": "dry" if dry else "live" if live else "paper",
             "open_position_id": held.get(mint), "pending_buy_id": pending.get(mint), "blocked": blocked, "safety": safety}
+
+
+def _live_dry_run() -> bool:
+    """live/ rehearses (signs and simulates, sends nothing) while LIVE_DRY_RUN is not false."""
+    try:
+        from live.config import load as live_load
+        return bool(live_load().dry_run)
+    except Exception:
+        return False
 
 
 @app.get("/api/buy/preview")
@@ -233,7 +243,7 @@ def wallet(address: str):
 
 @app.get("/api/copytrade")
 def copytrade(mode: str = "paper", strategy: str | None = None):
-    if mode not in ("paper", "live"):
+    if mode not in ("paper", "dry", "live"):
         raise HTTPException(400, "mode paper|live")
     return ok(cache.get(("ct", mode, strategy), 4, lambda: q.copytrade(read_conn(), mode, strategy or None)))
 
@@ -534,7 +544,7 @@ async def buy(request: Request):
     if pv.get("account") == "live" and eff > cap:
         raise HTTPException(409, f"Echtgeld-Kauf über {cap:g} SOL nicht erlaubt (LIVE_MAX_TRADE_SOL)")
     cid = control.request_buy(conn, mint, float(size) if size else None, strategy=strategy)
-    acct = "Echtgeld" if pv.get("account") == "live" else "Papier"
+    acct = {"live": "Echtgeld", "dry": "Dry-Run, nichts wird gesendet"}.get(pv.get("account"), "Papier")
     return _done(f"Kauf beauftragt ({acct}, Preset {pv.get('preset')}); der Bot führt ihn in Sekunden aus", command_id=cid,
                  account=pv.get("account"))
 
@@ -575,6 +585,32 @@ async def safety_override(mint: str, request: Request):
     else:
         safety.clear_override(conn, mint)
     return _done(f"Coin {SAFETY_ACTIONS[action]}")
+
+
+@app.get("/api/live")
+def live_status():
+    def calc():
+        try:
+            return q.live_overview(write_conn())
+        except sqlite3.OperationalError as e:
+            return {"available": False, "error": q._redact(str(e))[:200]}
+    return ok(cache.get(("live",), 5, calc))
+
+
+@app.post("/api/live/kill")
+async def live_kill(request: Request):
+    """Real-money kill switch (live.store.kill): no new live buys; sells still run. Only switching OFF is offered
+    here; releasing it stays on the Mac (python -m live resume) or in Telegram (/weiter)."""
+    b = await request.json()
+    try:
+        from live import store as lstore
+    except Exception as e:
+        raise HTTPException(503, f"live/ fehlt: {e}")
+    conn = write_conn()
+    lstore.init(conn)
+    lstore.kill(conn, ("Dashboard: " + (str(b.get("reason") or "").strip() or "Not-Aus gedrückt"))[:200])
+    lstore.event_safe(conn, "Not-Aus im Dashboard gedrückt")
+    return _done("Not-Aus aktiv: keine neuen Echtgeld-Käufe, Verkäufe laufen weiter")
 
 
 @app.post("/api/commands/{cid}/cancel")

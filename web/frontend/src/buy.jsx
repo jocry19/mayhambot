@@ -50,6 +50,7 @@ export function BuyModal({ mint, symbol, signal, onClose }) {
   useEffect(() => { if (cmd && cmd.status !== "pending") refreshAll(); }, [cmd?.status]);
 
   const live = pv?.account === "live";
+  const dry = pv?.account === "dry";
   const amount = size ? Number(size.replace(",", ".")) : pv?.size_sol;
   const badSize = size && !(amount > 0 && amount <= 100);
   const submit = async () => {
@@ -72,14 +73,14 @@ export function BuyModal({ mint, symbol, signal, onClose }) {
       <>
         <button className="btn" onClick={onClose}>Abbrechen</button>
         <button className={`btn ${live ? "danger" : "primary"}`} disabled={busy || !pv || !!pv.blocked || badSize || !pv.available}
-          onClick={submit}>{live ? `Mit Echtgeld kaufen (${n(amount, 2)} SOL)` : `Auf Papier kaufen (${n(amount, 2)} SOL)`}</button>
+          onClick={submit}>{live ? `Mit Echtgeld kaufen (${n(amount, 2)} SOL)` : dry ? `Im Dry-Run kaufen (${n(amount, 2)} SOL)` : `Auf Papier kaufen (${n(amount, 2)} SOL)`}</button>
       </>
     )}>
       {!pv && !err && <div className="dim">Lade Preset …</div>}
       {pv && !cmd && (
         <>
           <div className="buy-grid">
-            <div className="kv"><span className="k">Konto</span><span className={`v ${live ? "down" : "up"}`}>{live ? "Echtgeld" : "Papier"}</span></div>
+            <div className="kv"><span className="k">Konto</span><span className={`v ${live ? "down" : "up"}`}>{live ? "Echtgeld" : dry ? "Dry-Run (nichts wird gesendet)" : "Papier"}</span></div>
             <div className="kv"><span className="k">Preset (Modus 2)</span><span className="v">{pv.preset}</span></div>
             <div className="kv"><span className="k">Betrag</span><span className="v">{sol(amount)}</span></div>
             <div className="kv"><span className="k">Ziel / Stop</span><span className="v">{pv.take_profit != null ? `+${pct(pv.take_profit)}` : "–"} / {pv.stop_loss != null ? `−${pct(pv.stop_loss)}` : "–"}</span></div>
@@ -98,6 +99,7 @@ export function BuyModal({ mint, symbol, signal, onClose }) {
           </div>
           {pv.blocked && <Callout kind="warn" icon="alert">{pv.blocked}</Callout>}
           {live ? <Callout kind="bad" icon="alert">Echtgeld ist für Modus 2 eingeschaltet. Dieser Kauf nutzt echtes SOL aus deiner Wallet.</Callout>
+            : dry ? <Callout kind="warn" icon="info">Dry-Run: Die Order wird gebaut, signiert und simuliert, aber nicht gesendet. Gebucht wird im Konto „Dry-Run“.</Callout>
             : <Callout icon="info">Papiermodus: echte Preise, simulierte Ausführung. Echtgeld geht nur mit dem Hauptschalter in der .env.</Callout>}
         </>
       )}
@@ -120,7 +122,7 @@ function BuyStatus({ cmd, waited, live }) {
     const p = cmd.position;
     return (
       <Callout kind="good" icon="check">
-        Gekauft: Position #{p.id} {live ? "mit Echtgeld" : "auf Papier"}, {sol(p.size_sol)} bei MC {mc(p.entry_mcap_usd)}
+        Gekauft: Position #{p.id} {p.mode === "live" ? "mit Echtgeld" : p.mode === "dry" ? "im Dry-Run" : "auf Papier"}, {sol(p.size_sol)} bei MC {mc(p.entry_mcap_usd)}
         {p.take_profit != null && ` · Ziel +${pct(p.take_profit)}`}{p.stop_loss != null && ` · Stop −${pct(p.stop_loss)}`}.
       </Callout>
     );

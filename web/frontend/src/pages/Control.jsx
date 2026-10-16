@@ -3,6 +3,7 @@ import { act, dt, n, usePoll } from "../lib.js";
 import { Callout, Card, Icon, Modal, Switch, Table } from "../ui.jsx";
 import { CMD_STATUS, CoinLink, StatusBadge } from "../parts.jsx";
 import { RISK, RiskBadge, SafetyButtons } from "../safety.jsx";
+import { LiveCard } from "../live.jsx";
 
 function SafetyList() {
   const { data: d } = usePoll("/api/safety", 15000);
@@ -150,6 +151,8 @@ export default function Control() {
         </Card>
       </div>
 
+      <LiveCard />
+
       {STRATS.map((s) => {
         const [key, title, desc] = s;
         const mode = ctl.modes[key];
@@ -157,7 +160,7 @@ export default function Control() {
         const p = ctl.presets[ctl.active_presets[key]] || {};
         return (
           <Card key={key} title={title} sub={desc}
-            actions={<span className={`badge ${live && ctl.live_ready ? "live" : "good"}`}>{live && ctl.live_ready ? "ECHTGELD" : "Papier"}</span>}>
+            actions={<span className={`badge ${live && ctl.live_ready ? (ctl.live_dry_run ? "warn" : "live") : "good"}`}>{live && ctl.live_ready ? (ctl.live_dry_run ? "DRY-RUN" : "ECHTGELD") : "Papier"}</span>}>
             <div className="grid g4" style={{ gap: 10 }}>
               {MODES.map(([m, l, h]) => (
                 <div key={m} className={`mode-card ${mode === m ? "on" : ""}`} role="button" tabIndex={0}

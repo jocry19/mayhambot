@@ -192,7 +192,7 @@ export function TierSrc({ src, version, synced }) {
 // ct_positions.status and ct_commands.status in German, one place for every page
 export const POS_STATUS = {
   open: ["offen", "accent"], opening: ["wird eröffnet", "warn"], pending_buy: ["Kauf läuft", "warn"],
-  pending_sell: ["Verkauf läuft", "warn"], stuck: ["hängt", "bad"], failed: ["fehlgeschlagen", "bad"], closed: ["geschlossen", ""],
+  closing: ["wird verkauft", "warn"], pending_sell: ["Verkauf läuft", "warn"], stuck: ["hängt", "bad"], failed: ["fehlgeschlagen", "bad"], closed: ["geschlossen", ""],
 };
 export const CMD_STATUS = {
   pending: ["wartet", "warn"], done: ["erledigt", "good"], failed: ["fehlgeschlagen", "bad"],

@@ -1198,6 +1198,11 @@ def control_state(conn):
     s = load()
     out["live_ready"] = s.live_ready
     out["live_master"] = s.live_trading
+    try:  # live/ rehearses while LIVE_DRY_RUN is not false: 'live' switched on then means dry run, nothing is sent
+        from live.config import load as live_load  # type: ignore
+        out["live_dry_run"] = bool(live_load().dry_run)
+    except Exception:
+        out["live_dry_run"] = False
     out["mode_labels"] = dict(control.MODE_LABELS)
     out["strategies"] = {k: control.STRATEGY_LABELS.get(k, k) for k in control.STRATEGIES}
     if not has(conn, "ct_control"):
@@ -1222,7 +1227,7 @@ def control_state(conn):
 
 # ct_positions.status besides open/closed: opening = intent row before the swap, failed = live buy that bought nothing;
 # pending_buy/pending_sell/stuck come with live trading. In-flight rows are listed with the open ones.
-POS_IN_FLIGHT = ("open", "opening", "pending_buy", "pending_sell", "stuck")
+POS_IN_FLIGHT = ("open", "opening", "closing", "pending_buy", "pending_sell", "stuck")
 
 
 def copytrade(conn, mode="paper", strategy=None):
@@ -1547,6 +1552,50 @@ def sniper_stream(conn, now=None):
     out["load_deep"] = deep["load"] if deep and deep.get("load") is not None else (_f(out["deep_1h"] / cap, 3) if cap else None)
     out["api"] = [r for r in api_usage().get("rows", []) if r["service"] == "sniper"]
     return out
+
+
+# live_orders.status (live/store.py, live/executor.py) in German with a tone for the badge
+LIVE_ORDER_STATUS = {
+    "new": ("angelegt", "warn"), "sending": ("wird gesendet", "warn"), "unknown": ("unklar", "bad"),
+    "landed": ("ausgeführt", "good"), "landed_late": ("spät ausgeführt", "good"), "landed_unbooked": ("ausgeführt, nicht gebucht", "bad"),
+    "failed": ("fehlgeschlagen", "bad"), "expired": ("verfallen", "bad"), "sim_failed": ("Simulation fehlgeschlagen", "bad"),
+    "rejected": ("abgelehnt (Grenze)", ""), "dry_ok": ("Dry-Run ok", "good"), "dry_sim_failed": ("Dry-Run: Simulation fehlgeschlagen", "bad"),
+    "dry_built": ("Dry-Run gebaut", "good"),
+}
+
+
+def live_overview(conn):
+    """The real-money path at a glance (live/): off / dry run / real money, the go-live checklist, hard limits,
+    kill switch, exposure per book and the newest orders. Needs a writable connection because
+    live.readiness.report creates live_state/live_orders if missing. No key, URL or .env value leaves here:
+    the wallet shows as its first 6 characters (as the report does), errors are redacted."""
+    try:
+        from live import config as lcfg, guard, readiness, store  # type: ignore
+    except Exception as e:
+        return {"available": False, "error": _redact(str(e))[:200]}
+    cfg = lcfg.load()
+    rep = readiness.report(conn, cfg)
+    state = "off" if not cfg.enabled else ("dry" if cfg.dry_run else "live")
+    books = {}
+    for m in ("dry", "live"):
+        op = guard.open_positions(conn, m)
+        books[m] = {"open": len(op), "exposure_sol": _f(guard.exposure(conn, m), 4), "pnl_24h_sol": _f(guard.loss_24h(conn, m), 4)}
+    orders = []
+    for o in store.recent(conn, 30):
+        lab, tone = LIVE_ORDER_STATUS.get(o.get("status"), (o.get("status") or "–", ""))
+        orders.append({k: o.get(k) for k in ("id", "ts", "dry", "side", "mint", "status", "attempt", "price_impact", "slippage_bps",
+                                             "realized_slippage", "done_ts")}
+                      | {"status_de": lab, "tone": tone, "sig": (o.get("sig") or "")[:12] or None,
+                         "error": _redact(o.get("error") or o.get("sim_err") or "")[:200] or None,
+                         "fee_sol": _f((o.get("fee_lamports") or 0) / 1e9, 6) if o.get("fee_lamports") else None})
+    since = int(time.time()) - 86400
+    counts = {r["status"]: r["n"] for r in rows(conn, "SELECT status, COUNT(*) n FROM live_orders WHERE ts>=? GROUP BY status", (since,))}
+    checks = [{**c, "detail": _redact(c.get("detail") or "")} for c in rep["checks"]]
+    return {"available": True, "state": state, "enabled": cfg.enabled, "dry_run": cfg.dry_run, "require_gate": cfg.require_gate,
+            "ready": rep["ready"], "checks": checks, "limits": rep["limits"], "killed": store.killed(conn) or None,
+            "consecutive_fails": store.consecutive_fails(conn), "max_consecutive_fails": cfg.max_consecutive_fails,
+            "pending": len(store.pending(conn)), "books": books, "dry": rep["dry"], "live": rep["live"], "advance": rep["advance"],
+            "orders": orders, "counts_24h": counts, "heartbeat": int(float(store.get(conn, "heartbeat") or 0)) or None}
 
 
 def _redact(text):

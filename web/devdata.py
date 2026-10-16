@@ -76,6 +76,26 @@ def _inflight_demo(conn, r, tokens, now):
             conn.execute(f"INSERT INTO ct_commands({','.join(row)}) VALUES ({','.join('?' * len(row))})", list(row.values()))
 
 
+def _live_demo(conn, r, tokens, now):
+    """live/ tables in their real format: a rehearsal (dry run) history with one failed simulation and one
+    rejected order, so the control page's real-money card has orders and a partly met go-live checklist."""
+    try:
+        from live import store
+    except Exception:
+        return
+    store.init(conn)
+    tok = [t for t in tokens if t["pts"]]
+    plan = [("buy", "dry_ok", None), ("buy", "dry_ok", None), ("sell", "dry_built", None), ("buy", "dry_sim_failed", "Simulation: slippage tolerance exceeded"),
+            ("buy", "rejected", "Grenze: max. 2 offene Positionen"), ("buy", "dry_ok", None), ("sell", "dry_built", None)]
+    for i, (side, st, err) in enumerate(plan):
+        oid = store.new_order(conn, dry=True, side=side, mint=r.choice(tok)["mint"], in_raw=100_000_000)
+        conn.execute("UPDATE live_orders SET ts=?, status=?, error=?, price_impact=?, slippage_bps=?, done_ts=? WHERE id=?",
+                     (now - 3600 * (len(plan) - i), st, err, round(r.uniform(.002, .02), 4), 300, now - 3600 * (len(plan) - i) + 3, oid))
+    store.put(conn, "heartbeat", now - 40)
+    store.put(conn, "wallet_pubkey", "DemoTradingWallet1111111111111111111111111")
+    conn.commit()
+
+
 def _learn_demo(conn, r, now):
     """Self-learning tables of copytrade (ct_evals, ct_param_versions) in their real format, if copytrade has them."""
     try:
@@ -728,6 +748,7 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
                       p_now * 1e9, "open", hint, now - 60 if hint else None, json.dumps({"fill_source": "jupiter"})))
     conn.execute(_named(conn, "INSERT INTO ct_events VALUES (?,?,?,?,?)"), (now - 60, "info", "hint", "VERKAUFS-HINWEIS: Ziel erreicht", None))
     _inflight_demo(conn, r, tokens, now)
+    _live_demo(conn, r, tokens, now)
     control.set_mode(conn, "signal", "semi")
     try:  # signals/ syncs the active model's tiers into wallets every rescore (core.scoring)
         from core.scoring import sync_model_tiers

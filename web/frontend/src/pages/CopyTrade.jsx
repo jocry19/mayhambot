@@ -17,7 +17,7 @@ function SellButton({ p }) {
         <Modal title={`${p.symbol} verkaufen?`} onClose={() => setAsk(false)} actions={<>
           <button className="btn" onClick={() => setAsk(false)}>Abbrechen</button>
           <button className={`btn ${p.mode === "live" ? "danger" : "primary"}`} onClick={() => act(`/api/positions/${p.id}/sell`).finally(() => setAsk(false))}>
-            {p.mode === "live" ? "Echt verkaufen" : "Verkaufen (Papier)"}
+            {p.mode === "live" ? "Echt verkaufen" : p.mode === "dry" ? "Verkaufen (Dry-Run)" : "Verkaufen (Papier)"}
           </button>
         </>}>
           <div className="t2">Position #{p.id}: {sol(p.size_sol)} in {p.symbol}, aktuell <Delta v={p.unrealized_pct} />. Der Bot verkauft alles in wenigen Sekunden.</div>
@@ -77,12 +77,13 @@ export default function CopyTrade() {
   return (
     <div className="col" style={{ gap: 16 }}>
       <div className="row" style={{ gap: 12 }}>
-        <Seg value={mode} onChange={setMode} options={[["paper", "Papierkonto"], ["live", "Echtgeld-Konto"]]} />
+        <Seg value={mode} onChange={setMode} options={[["paper", "Papierkonto"], ["dry", "Dry-Run"], ["live", "Echtgeld-Konto"]]} />
         <Seg value={strategy} onChange={setStrategy} options={[["", "Alle Modi"], ["whale", "Modus 1 · Wal-Pumps"], ["signal", "Modus 2 · Signale"], ["manual", "Manuell"]]} />
         <span className="sp" />
         <span className="dim">Modus 1: {MODE_LABEL[ctl.modes?.whale] || "–"} · Modus 2: {MODE_LABEL[ctl.modes?.signal] || "–"}{ctl.paused ? " · Käufe pausiert" : ""}</span>
         <a href="#/control" className="btn sm">Steuerung</a>
       </div>
+      {mode === "dry" && <Callout icon="info">Dry-Run-Konto: Orders, die der Echtgeld-Pfad gebaut, signiert und simuliert, aber nie gesendet hat. Gebucht mit Quote-Preisen wie auf Papier.</Callout>}
       {mode === "live" && !ctl.live_ready && <Callout icon="info">Echtgeld ist aus. Der Hauptschalter steht in der .env (LIVE_TRADING=true und ein Schlüssel), danach je Modus unter Steuerung.</Callout>}
 
       <div className="tiles">
