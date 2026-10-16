@@ -56,7 +56,7 @@ Ein Problem muss in zwei Runden hintereinander auftauchen (≈4 min), dann kommt
 wenn es behoben ist 🟢. Offene Probleme werden alle `ALERT_REPEAT_HOURS` (6 h) wiederholt.
 Neustart höchstens alle 15 min. Geprüft wird:
 
-- alle Prozesse aus (`app_down`) oder einzelne (`service_down`; überwacht werden automatisch alle Dienste aus `mayham.py`, auch der Forschungsdienst `model`), Dashboard antwortet nicht
+- alle Prozesse aus (`app_down`) oder einzelne (`service_down`; überwacht werden automatisch alle Dienste aus `mayham.py`, auch der Forschungsdienst `research`), Dashboard antwortet nicht
 - keine neuen Marktdaten seit `FEED_STALL_MIN` (15 min), Copy-Trader pollt nicht mehr
 - weniger als 2 GB frei, letztes Backup älter als 3 h, Mac auf Akku
 - Pause > 10 min seit dem letzten Watchdog-Lauf (Mac schlief / war aus)

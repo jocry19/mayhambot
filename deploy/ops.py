@@ -54,7 +54,7 @@ def _services():
         import mayham  # noqa: PLC0415 - stdlib-only module, no side effects on import
         return tuple(mayham.SERVICES)
     except Exception:  # noqa: BLE001
-        return ("signals", "copytrade", "dashboard", "model")
+        return ("signals", "copytrade", "dashboard", "research")
 
 
 SERVICES = _services()
