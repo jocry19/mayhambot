@@ -12,6 +12,8 @@ import ops  # noqa: E402
 
 FAKE_MAYHAM = '''import subprocess, sys
 from pathlib import Path
+if sys.argv[1:2] == ["backup"]:
+    sys.exit(1 if Path("BACKUP_FAILS").exists() else 0)
 if sys.argv[1] == "update":
     old = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     subprocess.check_call(["git", "pull", "-q", "--ff-only", "origin", "main"])
@@ -34,6 +36,8 @@ def repo(tmp_path, monkeypatch):
         sh(d, "git", "config", "user.email", "t@t")
         sh(d, "git", "config", "user.name", "t")
     (dev / "mayham.py").write_text(FAKE_MAYHAM)
+    (dev / "deploy").mkdir()
+    (dev / "deploy" / "ops.py").write_text(FAKE_MAYHAM.replace('sys.argv[1:2] == ["backup"]', 'True'))
     sh(dev, "git", "add", ".")
     sh(dev, "git", "commit", "-qm", "v1")
     sh(dev, "git", "push", "-q", "origin", "HEAD:main")
@@ -148,3 +152,15 @@ def test_index_only_problems_are_repairable(tmp_path):
     c.commit()
     c.close()
     assert ops._repair_indexes(db) == []
+
+
+def test_failed_backup_blocks_deploy(repo):
+    work, push, head, alerts = repo
+    (work / "BACKUP_FAILS").write_text("")
+    push("feature")
+    before = head()
+    assert "Backup" in autoupdate.run_once(alerts.append)
+    autoupdate.run_once(alerts.append)
+    assert head() == before and len(alerts) == 1
+    (work / "BACKUP_FAILS").unlink()
+    assert autoupdate.run_once(alerts.append).startswith("eingespielt")

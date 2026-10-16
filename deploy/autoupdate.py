@@ -10,6 +10,7 @@ Spielt nichts ein, wenn
   - LIVE_TRADING=true in .env steht oder offene Echtgeld-Positionen in der DB sind,
   - der Checkout lokale Änderungen hat oder nicht vorspulbar ist,
   - der letzte Deploy weniger als AUTO_UPDATE_MIN (10) Minuten her ist,
+  - das Backup vor dem Update fehlschlägt (Integritätsprüfung),
   - derselbe Commit schon einmal an den Tests gescheitert ist (der nächste Push wird wieder probiert).
 
   python deploy/autoupdate.py           # einmal prüfen (das macht launchd)
@@ -126,6 +127,12 @@ def run_once(alert=ops.send_alert, now=None) -> str:
     if now - st.get("last_deploy", 0) < gap:
         return "warte (höchstens ein Deploy pro 10 min)"
 
+    # no deploy without a fresh, verified backup (integrity_check in ops.backup); mayham.py update ignores its failure
+    b = subprocess.run([_python(), "deploy/ops.py", "backup"], cwd=ROOT, capture_output=True, text=True, timeout=900)
+    if b.returncode != 0:
+        log(f"backup failed, update pending: {(b.stdout + b.stderr).strip()[-500:]}")
+        return _once(st, alert, f"backup:{target}", f"⏸ Update {subject} wartet: Backup vor dem Update ist "
+                     "fehlgeschlagen. Details: logs/update.log")
     log(f"deploy {head[:7]} -> {subject}")
     st["last_deploy"] = now
     _save(st)
