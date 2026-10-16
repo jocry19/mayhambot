@@ -214,5 +214,6 @@ ROI, consistency (profit not from one lucky hit), scaled by confidence (number o
   - It fits mean TP return after costs per bucket (entities 1/2/3+, net <200/<500/>=500, smart sellers 0/1+), shrunk toward the global mean (`SIGNAL_EV_SHRINK` 10).
   - It fits on the first two thirds and tests the rule "EV > `SIGNAL_MIN_EV`" on the last third. The table goes active only if that out-of-sample run made money with at least 10 signals.
   - While a table is active, EV > `SIGNAL_MIN_EV` replaces the wallets, net and score minimums. Rug protection still vetoes at a safety factor below 0.6.
+  - Without an active table the fixed minimums count distinct entities (clusters), not wallets, and the model's own `exp_net_ret` (TP exit, after costs) must be at least `SIGNAL_MODEL_MIN_EXP_NET` (default 0), else the funnel counts `low_ev`.
   - Every run is a row in `signal_calibration`.
 - Each signal stores `ev`, `ev_n` and `reason`, a German "Dafür … Dagegen …" text. The Telegram alert shows both.

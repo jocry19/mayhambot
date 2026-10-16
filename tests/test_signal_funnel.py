@@ -42,6 +42,10 @@ def test_reason_is_first_failing_condition():
     assert engine._reason(dict(m, smart_buyers=2, net_usd=100), cfg) == "low_net"
     assert engine._reason(dict(m, smart_buyers=2, net_usd=900, score=59), cfg) == "low_score"
     assert engine._reason(dict(m, smart_buyers=2, net_usd=900, score=59, min_score=20), cfg) is None
+    ok = dict(m, smart_buyers=2, net_usd=900, score=59, min_score=20)
+    assert engine._reason(dict(ok, entities=1), cfg) == "few_entities"     # 2 wallets of one owner (RDSTR)
+    assert engine._reason(dict(ok, model_exp_net=-0.10), cfg) == "low_ev"  # model expects a loss after costs
+    assert engine._reason(dict(ok, model_exp_net=0.03), cfg) is None
 
 
 def test_funnel_counts_stored_metrics(tmp_path):

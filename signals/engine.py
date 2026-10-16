@@ -143,6 +143,9 @@ def explain(m, cfg=settings):
     return out
 
 
+MODEL_MIN_EXP_NET = float(os.getenv("SIGNAL_MODEL_MIN_EXP_NET", 0.0))
+
+
 def _reason(m, cfg, strict=False):
     """First failing condition or None. strict=True after check_before_signal: an unchecked coin is judged by its
     safety factor too (before that it still gets its quick check instead of an early veto)."""
@@ -153,12 +156,14 @@ def _reason(m, cfg, strict=False):
         if sp.get("factor", 1.0) < EV_MIN_SAFETY_FACTOR and (strict or sp.get("checked") is not False):
             return "safety_drop"  # rug protection still vetoes: high risk, blocked, or still unchecked
         return None if m["ev"] > ev_mod.MIN_EV else "low_ev"
-    if m["smart_buyers"] < cfg.signal_min_wallets:
+    if m.get("entities", m["smart_buyers"]) < cfg.signal_min_wallets:  # distinct owners, not wallets of one cluster
         return "few_entities"
     if m["net_usd"] < m.get("min_net", cfg.signal_min_net_usd):
         return "low_net"
     if m["score"] < m.get("min_score", cfg.signal_min_score):
         return "low_score"
+    if m.get("model_exp_net") is not None and m["model_exp_net"] < MODEL_MIN_EXP_NET:
+        return "low_ev"  # the model's own net return (TP exit, after costs) says this setup loses money
     return None
 
 
@@ -502,7 +507,7 @@ def evaluate(conn, mints, cfg=settings, now=None):
     min_net = min_net_usd(conn, cfg, now)
     ev_table = ev_mod.active_table(conn)
     f.update({k: 0 for k in FUNNEL_KEYS}, max_score=0.0, min_score=None, min_net=min_net, ev_active=bool(ev_table),
-             max_ev=None)
+             max_ev=None, max_model_exp_net=None)
     model_guard.reset()
     for mint in mints:
         tok = conn.execute("SELECT symbol, name, price_usd, mcap_usd, liquidity_usd FROM tokens WHERE mint=?",
@@ -518,6 +523,9 @@ def evaluate(conn, mints, cfg=settings, now=None):
             e = ev_mod.blend(e, n, m.get("model_exp_net"))
             m.update(ev=e, ev_n=n, ev_bucket=k)
             f["max_ev"] = e if f["max_ev"] is None else max(f["max_ev"], e)
+        if m.get("model_exp_net") is not None:
+            x = f["max_model_exp_net"]
+            f["max_model_exp_net"] = m["model_exp_net"] if x is None else max(x, m["model_exp_net"])
         m["reason"] = explain(m, cfg)
         if "prediction" in m:
             pred, pred_label = m["prediction"], m["prediction_label"]
