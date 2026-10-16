@@ -93,7 +93,7 @@ function streamState(s) {
 function Stream({ s }) {
   const [label, cls] = streamState(s);
   const fromCounters = s.rate_source === "counters";
-  const rateSub = fromCounters ? `aus den Zählern des Dienstes, gemessen über ${dur(s.rate_span_s)}` : "aus den gespeicherten Launches der letzten Stunde";
+  const rateSub = fromCounters ? `aus den Zählern des Dienstes, gemessen über ${dur(s.rate_span_s / 60)}` : "aus den gespeicherten Launches der letzten Stunde";
   return (
     <div className="tiles">
       <Tile label="Datenstrom (PumpPortal)" value={<span className={cls}>{label}</span>}

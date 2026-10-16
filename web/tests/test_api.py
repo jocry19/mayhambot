@@ -331,3 +331,39 @@ def test_sniper_heartbeat(tmp_path):
     s = Q.sniper_stream(conn, now=1800)
     assert s["service_up"] and not s["connected"]
     Q._SNIPER_HIST.clear()
+
+
+def test_rpc_pool(demo, tmp_path, monkeypatch, capsys):
+    import json
+    import time as _t
+
+    from core import http as chttp
+    from web import queries as Q
+    from cli.report import rpc_pool_line
+
+    monkeypatch.setattr(chttp, "_LOCK_DIR", str(tmp_path))
+    monkeypatch.setenv("PUBLIC_RPC_URLS", "https://a.example,https://b.example/?api-key=SECRET,https://c.example")
+    monkeypatch.setattr(chttp, "_latency", {})
+    now = _t.time()
+    (tmp_path / "rpc-pool.json").write_text(json.dumps({
+        "a.example": {"ok": True, "checked_at": now - 60, "latency_ms": 180, "disabled_until": 0},
+        "b.example": {"ok": True, "checked_at": now - 60, "latency_ms": 90, "disabled_until": now + 300, "reason": "429 x3"}}))
+    usage = {"rows": [
+        {"service": "copytrade", "group": "a.example", "calls": 500, "calls_window": 200, "429_window": 3, "live_calls_window": 50,
+         "bulk_calls_window": 150, "latency_ms_window": 1200.0, "window_s": 600},
+        {"service": "sniper", "group": "a.example", "calls": 100, "calls_window": 100, "429_window": 0, "live_calls_window": 50,
+         "bulk_calls_window": 50, "latency_ms_window": 900.0, "window_s": 600}]}
+    p = Q.rpc_pool(now=now, usage=usage)
+    assert p["total"] == 3 and p["active"] == 2
+    r = {x["host"]: x for x in p["rows"]}
+    assert r["b.example"]["state"] == "pausiert" and r["b.example"]["reason"] == "429 x3"
+    assert r["c.example"]["state"] == "ungeprüft" and r["c.example"]["calls_window"] is None
+    a = r["a.example"]
+    assert a["calls_window"] == 300 and a["429_window"] == 3 and a["live_share"] == 0.333
+    assert a["latency_ms"] == 1100 and a["latency_src"] == "Aufrufe" and a["services"] == ["copytrade", "sniper"]
+    assert p["fastest_host"] == "a.example" and "SECRET" not in json.dumps(p)
+    monkeypatch.setattr(Q, "rpc_pool", lambda **k: p)
+    line = rpc_pool_line()
+    assert line.startswith("RPC-Pool: 2 von 3 Endpunkten aktiv") and "1.100 ms" in line and "pausiert: b.example" in line
+    s = _client(demo).get("/api/system").json()
+    assert "rpc_pool" in s

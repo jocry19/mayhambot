@@ -45,6 +45,9 @@ def status() -> None:
     cl = credits_line()
     if cl:
         con.print(cl)
+    rl = rpc_pool_line()
+    if rl:
+        con.print(rl)
     sl = sniper_line(s.get("sniper"))
     if sl:
         con.print(sl)
@@ -208,3 +211,18 @@ def sniper_line(sn: dict | None) -> str:
         " · [yellow]Websocket getrennt[/]" if sn.get("service_up") and not sn.get("connected") else ""
     return (f"Launch-Sniper (Papier): {n(sn.get('launches_today'))} Launches heute, {n(sn.get('entered_today'))} gekauft, "
             f"Ergebnis [{tone_}]{sol(pnl, 3, signed=True)}[/] aus {n(sn.get('closed'))} Trades, {last}{down}")
+
+
+def rpc_pool_line() -> str:
+    """'RPC-Pool: n von m Endpunkten aktiv, schnellster X ms' (red when none is active, yellow above 1 s)."""
+    from web import queries as Q
+
+    p = Q.rpc_pool()
+    if not p.get("available") or not p.get("total"):
+        return ""
+    a, m = p["active"], p["total"]
+    head = f"[red]{a} von {m} Endpunkten aktiv[/]" if not a else f"{a} von {m} Endpunkten aktiv"
+    ms = p.get("fastest_ms")
+    fast = "" if ms is None else f", schnellster [{'yellow' if ms > p['slow_ms'] else 'dim'}]{n(ms)} ms[/] ({escape(p['fastest_host'])})"
+    paused = [r["host"] for r in p["rows"] if r["state"] == "pausiert"]
+    return f"RPC-Pool: {head}{fast}" + (f" · pausiert: {escape(', '.join(paused))}" if paused else "")

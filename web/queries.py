@@ -1461,6 +1461,49 @@ def sniper_summary(conn, now=None):
     return out
 
 
+# ====================================================================== public RPC pool
+RPC_SLOW_MS = 1000
+
+
+def rpc_pool(now=None, usage=None):
+    """Keyless public RPC endpoints (core.http.pool_status) with this window's calls per endpoint host.
+
+    Rows: host, state (aktiv | pausiert | ungeprüft), disabled_until, reason, latency_ms (mean over the last
+    10 min when calls were made, else the probe), calls/429/live/bulk in the window summed over services.
+    Only hosts are returned, never URLs (a custom PUBLIC_RPC_URLS entry could carry a key)."""
+    try:
+        from core import http as chttp  # type: ignore
+        st = chttp.pool_status() or {}
+    except Exception as e:  # older core.http without the pool
+        return {"available": False, "note": f"core.http.pool_status fehlt: {e}"[:200], "rows": []}
+    now = now or time.time()
+    usage = usage if usage is not None else api_usage(now)
+    rows_ = []
+    for host, d in st.items():
+        us = [r for r in usage.get("rows", []) if r.get("group") == host]
+        wsum = lambda k: sum(r.get(k) or 0 for r in us) if any(r.get(k) is not None for r in us) else None  # noqa: E731
+        lat_w = [(r["latency_ms_window"], r.get("calls_window") or 0) for r in us if r.get("latency_ms_window")]
+        lat = (sum(a * b for a, b in lat_w) / sum(b for _, b in lat_w)) if lat_w and sum(b for _, b in lat_w) else None
+        until = d.get("disabled_until") or 0
+        state = "pausiert" if until > now else "aktiv" if d.get("ok") or d.get("checked_at") else "ungeprüft"
+        live, bulk = wsum("live_calls_window"), wsum("bulk_calls_window")
+        lb = (live or 0) + (bulk or 0)
+        rows_.append({"host": host, "state": state, "disabled_until": int(until) if until > now else None,
+                      "reason": (d.get("reason") or "")[:80] if state == "pausiert" else "",
+                      "checked_at": int(d["checked_at"]) if d.get("checked_at") else None,
+                      "latency_ms": _f(lat if lat is not None else d.get("latency_ms"), 0),
+                      "latency_src": "Aufrufe" if lat is not None else "Probe" if d.get("latency_ms") else None,
+                      "calls_window": wsum("calls_window"), "429_window": wsum("429_window"),
+                      "live_window": live, "bulk_window": bulk, "live_share": _f(live / lb, 3) if lb else None,
+                      "services": sorted({r["service"] for r in us if (r.get("calls") or 0) > 0})})
+    act = [r for r in rows_ if r["state"] != "pausiert"]
+    lats = [r["latency_ms"] for r in act if r["latency_ms"] is not None]
+    fastest = min(act, key=lambda r: r["latency_ms"] if r["latency_ms"] is not None else 1e12) if lats else None
+    return {"available": True, "rows": rows_, "active": len(act), "total": len(rows_), "slow_ms": RPC_SLOW_MS,
+            "fastest_host": fastest["host"] if fastest else None, "fastest_ms": fastest["latency_ms"] if fastest else None,
+            "window_s": max((r.get("window_s") or 0 for r in usage.get("rows", [])), default=0)}
+
+
 # ====================================================================== overview + system
 def overview(conn):
     now = now_ts()
@@ -1528,13 +1571,14 @@ def system(conn):
         size = None
     return {"db_path": path, "db_size": size, "tables": counts, "last": last, "services": services,
             "tier_source": tier_source(conn), "now": now_ts(), "sol_usd": _f(sol_usd(conn), 2),
-            "api_usage": cache.get(("api_usage",), 10, api_usage)}
+            "api_usage": cache.get(("api_usage",), 10, api_usage),
+            "rpc_pool": cache.get(("rpc_pool",), 10, lambda: rpc_pool(usage=cache.get(("api_usage",), 10, api_usage)))}
 
 
 # ====================================================================== API budgets (core.http usage files)
 _USAGE_HIST = {}            # (service, group) -> deque[(ts, calls)] sampled whenever the dashboard reads usage
 USAGE_WINDOW_S = 600
-_WINDOW_KEYS = ("calls", "live_calls", "bulk_calls", "live_waited_s", "bulk_waited_s")
+_WINDOW_KEYS = ("calls", "live_calls", "bulk_calls", "live_waited_s", "bulk_waited_s", "429", "latency_ms_sum")
 USAGE_STALE_S = 180         # usage files are rewritten every minute; older means the service is not running
 
 
@@ -1582,6 +1626,10 @@ def api_usage(now=None):
                 for k in ("live_calls", "bulk_calls", "live_waited_s", "bulk_waited_s"):
                     row[f"{k}_window"] = _f(snap[k] - base.get(k, 0), 1) if win > 0 else None
             row["429"] = v.get("429") or 0
+            row["429_window"] = snap["429"] - base.get("429", 0) if win > 0 else None
+            if v.get("latency_ms_sum") and win > 0:   # pool endpoints: mean answer time over the window
+                dc, dl = calls - base.get("calls", 0), snap["latency_ms_sum"] - base.get("latency_ms_sum", 0)
+                row["latency_ms_window"] = _f(dl / dc, 1) if dc > 0 and dl > 0 else None
             out.append(row)
     # Helius credits: shared monthly ledger (core.http.credits), one row per service with a share
     total = None

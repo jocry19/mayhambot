@@ -1,4 +1,4 @@
-import { TIER_SOURCE, ago, compact, dt, n, pct, usePoll } from "../lib.js";
+import { TIER_SOURCE, ago, compact, dt, dur, n, pct, usePoll } from "../lib.js";
 import { Card, Empty, Table, Tile } from "../ui.jsx";
 
 const GROUP = { helius: "Helius (RPC)", geckoterminal: "GeckoTerminal" };
@@ -112,6 +112,32 @@ const LABELS = {
   ct_events: "Bot-Protokoll", ct_equity: "Equity-Punkte", research_candles: "Kerzen", research_reports: "Forschungsberichte",
 };
 
+/** Keyless public Solana RPC endpoints (core.http pool): state, answer time, calls in the last 10 min. */
+function RpcPool({ p }) {
+  if (!p || !p.available) return null;
+  const slow = p.slow_ms || 1000;
+  const win = p.window_s ? (p.window_s >= 540 ? "10 min" : dur(p.window_s / 60)) : "10 min";
+  return (
+    <Card title="Öffentliche RPC-Endpunkte"
+      sub={`${n(p.active)} von ${n(p.total)} aktiv${p.fastest_ms != null ? ` · schnellster ${p.fastest_host} mit ${n(p.fastest_ms)} ms` : ""} · Aufrufe der letzten ${win}, alle Dienste`} flush>
+      <Table rows={p.rows} rowKey={(r) => r.host} empty="Keine Endpunkte eingetragen" cols={[
+        { k: "host", l: "Endpunkt", fmt: (r) => <span className="mono">{r.host}</span> },
+        { k: "state", l: "Status", fmt: (r) => (r.state === "pausiert"
+          ? <span><span className="badge bad">pausiert</span> <span className="dim">bis {dt(r.disabled_until)}{r.reason ? ` · ${r.reason}` : ""}</span></span>
+          : <span className={`badge ${r.state === "aktiv" ? "good" : ""}`}>{r.state}</span>) },
+        { k: "latency_ms", l: "Antwortzeit", r: true, sort: (r) => r.latency_ms ?? 1e9, fmt: (r) => (r.latency_ms != null
+          ? <span className={r.latency_ms > slow ? "warn-ink" : ""} title={r.latency_src === "Probe" ? "aus der letzten Prüfung" : "Mittel der Aufrufe"}>{n(r.latency_ms)} ms{r.latency_src === "Probe" ? <span className="dim"> · Probe</span> : ""}</span>
+          : <span className="dim">–</span>) },
+        { k: "calls_window", l: "Aufrufe", r: true, fmt: (r) => (r.calls_window != null ? n(r.calls_window) : "–") },
+        { k: "429_window", l: "429", r: true, fmt: (r) => (r["429_window"] ? <span className="down">{n(r["429_window"])}</span> : r["429_window"] === 0 ? "0" : "–") },
+        { k: "live_share", l: "Live / Bulk", r: true, fmt: (r) => (r.live_share != null
+          ? <span title={`${n(r.live_window)} live · ${n(r.bulk_window)} bulk`}>{pct(r.live_share)} / {pct(1 - r.live_share)}</span> : "–") },
+        { k: "services", l: "Genutzt von", sort: false, fmt: (r) => (r.services?.length ? r.services.join(", ") : <span className="dim">–</span>) },
+      ]} />
+    </Card>
+  );
+}
+
 export default function System() {
   const { data: d } = usePoll("/api/system", 10000);
   if (!d) return <div className="empty">Lade …</div>;
@@ -128,6 +154,7 @@ export default function System() {
       </div>
       <CreditsTotal t={d.api_usage?.credits} />
       <ApiUsage u={d.api_usage} />
+      <RpcPool p={d.rpc_pool} />
       <div className="grid g2">
         <Card title="Dienste" sub="Prozesse der App (python mayham.py status)" flush>
           <Table rows={d.services} rowKey={(r) => r.name} empty="Keine Prozess-Infos (App läuft woanders oder als launchd/systemd-Dienst)" cols={[
