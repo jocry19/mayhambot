@@ -14,6 +14,8 @@ rich>=13
 streamlit>=1.50
 plotly>=5.20
 pandas>=2.0
+# brain/ (learning decider: Bayesian model in numpy; also comes with pandas)
+numpy>=1.26
 # copytrade: real-time whale detection (logsSubscribe); without it the copy trader only polls
 websockets>=12
 # live/ (real-money path: builds and signs Solana transactions locally)
