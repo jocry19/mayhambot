@@ -1,3 +1,17 @@
 # Known good wallets to research first: one per line, "<address> [label] # source"
 # e.g. copied from the GMGN / Birdeye / Cielo top-trader pages of coins that pumped.
 # They are only candidates: the model still tiers them purely on their own measured history.
+CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o # user 2026-10-16
+4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9 # user 2026-10-16
+ACTbvbNm5qTLuofNRPxFPMtHAAtdH1CtzhCZatYHy831 # user 2026-10-16
+2fg5QD1eD7rzNNCsvnhmXFm5hqNgwTTG8p7kQ6f3rx6f # user 2026-10-16
+ardinRsN1mNYVeoJWTBsWeYeXvuR9UUDGMsCDKpb6AT # user 2026-10-16
+EDXHdSFdadFbYFFjxPXBqMe1kCEDFqpPu552uvp48HR8 # user 2026-10-16
+AXgzGEvbgaFeb1xhdXkQc5D5CehZUa89ci2F9ugQPLaA # user 2026-10-16
+5o786j42vqZuVG3Q6aQts98aUZqhpZ2P3qVMkBfyj6zm # user 2026-10-16
+EeXvxkcGqMDZeTaVeawzxm9mbzZwqDUMmfG3bF7uzumH # user 2026-10-16
+PMJA8UQDyWTFw2Smhyp9jGA6aTaP7jKHR7BPudrgyYN # user 2026-10-16
+DjiJKVgtS3MrR9VasbQWMMZUpB4zsbipeKUJR1YLw91r # user 2026-10-16
+AQ46kfYT3hW28Xg5gWHrJkzFSz1oGWBHC3FsTbqgMEco # user 2026-10-16
+FaNaUysvKBbfoRAhu7P7R5wPfHe7PaCXs9xy5LgLj3gu # user 2026-10-16
+CKcWAvvDYr2H3Wj3ACr5zRynrYRSzir2zE5bTf8wiUmT # user 2026-10-16

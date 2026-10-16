@@ -33,7 +33,9 @@ def from_files(conn):
             parts = line.split("#")[0].split()
             if not parts or not _valid(parts[0]):
                 continue
-            add_research_wallets(conn, [parts[0]], f"seed_file:{src or f.name}"[:60], 80.0)
+            # "# user ..." marks wallets the user asked about: backfilled first, ahead of the bulk seed lists
+            prio = 100.0 if src.lower().startswith("user") else 80.0
+            add_research_wallets(conn, [parts[0]], f"seed_file:{src or f.name}"[:60], prio)
             if len(parts) > 1:
                 from core import wallets
                 wallets.add_wallet(conn, parts[0], label=" ".join(parts[1:])[:40], source="seed")

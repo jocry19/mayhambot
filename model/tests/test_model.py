@@ -313,3 +313,15 @@ def test_dead_coin_holdings_count_as_zero():
     ds = data.load(conn)
     assert wallet_stats.compute(ds, 3000, min_position_usd=1)[0]["W"]["total_pnl_usd"] == 0
     assert wallet_stats.compute(ds, 2000 + 90000, min_position_usd=1)[0]["W"]["total_pnl_usd"] == -100  # stale 25 h
+
+
+def test_seed_file_user_lines_get_top_priority(tmp_path, monkeypatch):
+    from research import seeds, store
+    conn = store.connect(str(tmp_path / "s.db"))
+    f = tmp_path / "seed.txt"
+    a, b = "A" * 43, "B" * 43
+    f.write_text(f"# comment\n{a} # user 2026-10-16\n{b} # kolscan\n")
+    monkeypatch.setattr(seeds, "SEED_FILES", [f])
+    assert seeds.from_files(conn) == 2
+    pr = dict(conn.execute("SELECT address, priority FROM research_wallets"))
+    assert pr[a] == 100.0 and pr[b] == 80.0
