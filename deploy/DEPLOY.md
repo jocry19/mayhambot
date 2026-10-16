@@ -129,11 +129,13 @@ Update-Runden, letzte Update-Runde, letztes Backup, Datenbankgröße und freier 
 
 Ein Problem muss in zwei Runden hintereinander auftauchen (≈4 min), dann kommt 🔴, bei Neustart 🔁,
 wenn es behoben ist 🟢. Offene Probleme werden alle `ALERT_REPEAT_HOURS` (6 h) wiederholt.
-Neustart höchstens alle 15 min. Geprüft wird:
+Neustart höchstens alle 15 min und höchstens `MAX_RESTARTS_PER_HOUR` (3) pro Stunde, danach nur noch ein Alarm
+(🛑), damit ein echter Defekt keine Neustart-Schleife wird. Geprüft wird:
 
 - alle Prozesse aus (`app_down`) oder einzelne (`service_down`; überwacht werden automatisch alle Dienste aus `mayham.py`, auch der Forschungsdienst `research`), Dashboard antwortet nicht
 - keine neuen Marktdaten seit `FEED_STALL_MIN` (15 min), Copy-Trader pollt nicht mehr
-- Dienst hängt: `signals` läuft, schreibt aber 30 min nichts ins Log (`service_hung`, Neustart)
+- Dienst hängt: `signals` läuft, schreibt aber 30 min keine Zeile ins Log (`service_hung`, Neustart). Der Dienst
+  loggt jede Runde (alle 2 bis 3 min), auch ohne Signal; ruhige Nächte ohne Signal lösen das also nicht aus
 - Speicher je Dienst: ab `MEM_WARN_MB` (1500) Hinweis, ab `MEM_RESTART_MB` (3000) Neustart
 - Datenbank-Journal (`mayhambot.db-wal`) größer als `WAL_WARN_MB` (1000): ein Leser hält den Checkpoint auf, Neustart
 - Jede Nacht um `MAINT_HOUR` (4 Uhr): `PRAGMA optimize` und ein Checkpoint, der niemanden blockiert

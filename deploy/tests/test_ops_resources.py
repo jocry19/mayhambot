@@ -63,3 +63,29 @@ def test_ops_report_shows_update_state(tmp_path, monkeypatch):
     (tmp_path / "logs" / "update.log").write_text("2026-10-16 20:59:33 deployed ff8ecfc x: 9 von 9 Dienste laufen stabil\n")
     r = ops.ops_report()
     assert "Dienste 9/9" in r and "Tests seit 2 Runde(n) rot" in r and "deployed ff8ecfc" in r and "Backup: keins" in r
+
+
+def test_watchdog_caps_restarts_per_hour(tmp_path, monkeypatch):
+    import types
+    _setup(tmp_path, monkeypatch)
+    state, sent, restarts = {}, [], []
+    clock = [1_000_000.0]
+    monkeypatch.setattr(ops.time, "time", lambda: clock[0])
+    monkeypatch.setattr(ops, "load_state", lambda: state)
+    monkeypatch.setattr(ops, "save_state", lambda s: None)
+    monkeypatch.setattr(ops, "send_alert", lambda m: sent.append(m) or True)
+    monkeypatch.setattr(ops, "restart_app", lambda why: restarts.append(why) or "App neu gestartet")
+    monkeypatch.setattr(ops, "rotate_logs", lambda **k: 0)
+    monkeypatch.setattr(ops, "new_lock_errors", lambda st: 0)
+    monkeypatch.setattr(ops, "collect", lambda: {"problems": {"service_hung": "signals hängt"}})
+    monkeypatch.setattr(ops, "build_summary", lambda: "x")
+    for name in ("nightly_maintenance", "check_planned_restarts", "check_credit_alerts", "check_service_budgets"):
+        monkeypatch.setattr(ops, name, lambda *a, **k: None)
+    monkeypatch.setattr(ops, "RESTART_COOLDOWN", 0)
+    state["last_summary"] = 2e9
+    args = types.SimpleNamespace(no_restart=False)
+    for _ in range(12):                     # 12 rounds of 5 min = one hour of a hang that a restart cannot fix
+        ops.watchdog(args)
+        clock[0] += 300
+    assert len(restarts) == 3
+    assert sum("Neustarts in der letzten Stunde" in m for m in sent) == 1

@@ -527,10 +527,20 @@ def watchdog(args) -> int:
                 p["alerted"] = now
 
     action = None
+    recent = [t for t in st.get("restarts", []) if now - t < 3600]
+    st["restarts"] = recent
     if need_restart and not args.no_restart and now - st.get("last_restart", 0) > RESTART_COOLDOWN:
-        action = restart_app(", ".join(need_restart))
-        st["last_restart"] = now
-        send_alert(f"🔁 {action} wegen: {', '.join(seen[k]['msg'] for k in need_restart)}")
+        if len(recent) >= cfg("MAX_RESTARTS_PER_HOUR", 3):
+            # a real defect must not turn into a restart loop: alarm once per hour, leave the bot as it is
+            if now - st.get("loop_alerted", 0) > 3600:
+                send_alert(f"🛑 {len(recent)} Neustarts in der letzten Stunde, weitere setze ich aus. Problem: "
+                           f"{', '.join(seen[k]['msg'] for k in need_restart)}")
+                st["loop_alerted"] = now
+        else:
+            action = restart_app(", ".join(need_restart))
+            st["last_restart"] = now
+            st["restarts"] = recent + [now]
+            send_alert(f"🔁 {action} wegen: {', '.join(seen[k]['msg'] for k in need_restart)}")
 
     for key in list(seen):
         if key not in r["problems"]:
