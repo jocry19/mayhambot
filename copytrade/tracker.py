@@ -73,6 +73,7 @@ def record_detection(conn, sw: chain.Swap, source: str, notified_at: float | Non
                      (sw.signature, sw.wallet, sw.side, source, sw.block_time, notified_at, now, sw.sol_amount,
                       sw.sol_amount * usd or None, sw.price_sol * usd or None, getattr(sw, "dex", "") or None,
                       getattr(sw, "mcap_sol", 0.0) * usd or None))
+        conn.commit()
     except Exception as e:  # metrics never block trading
         log.debug("detect log failed: %s", e)
     return lag
@@ -291,6 +292,7 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk",
     now = int(time.time())
     if not sigs:
         conn.execute("UPDATE ct_wallets SET last_polled=? WHERE address=?", (now, wallet))
+        conn.commit()  # no-op in autocommit, but never leave a write lock open across what follows
         return []
     if not last:  # first contact: only set the cursor, do not trade old history
         conn.execute("UPDATE ct_wallets SET last_sig=?, last_polled=? WHERE address=?",
@@ -305,7 +307,8 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk",
             cursor = sg["signature"]  # failed on chain, or already handled from the websocket
             continue
         try:
-            tx = rpc.transaction(sg["signature"], priority="live")
+            # gap finds of websocket-covered wallets are old already: public pool only, no main RPC credits
+            tx = rpc.transaction(sg["signature"], priority="bulk" if covered else "live")
             if tx is None:
                 raise RuntimeError("transaction not available yet")
         except Exception as e:
@@ -329,6 +332,17 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk",
     return out
 
 
+def _key_wallet(conn, wallet: str) -> bool:
+    """Manual wallets and Ultra/Smart tiers: their fresh buys may spend main RPC credits."""
+    try:
+        r = conn.execute("SELECT source FROM ct_wallets WHERE address=?", (wallet,)).fetchone()
+        if r and r[0] == "manual":
+            return True
+    except Exception:
+        pass
+    return str(store.wallet_info(conn, wallet).get("tier") or "").lower() in ("ultra", "smart")
+
+
 def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, tries: int = 3,
                       received_at: float | None = None) -> chain.Swap | None:
     """A transaction the websocket reported for a watched wallet -> stored swap (or None). Public RPC first; a
@@ -336,11 +350,15 @@ def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, 
     if not _claim(conn, sig, wallet):
         return None  # duplicate notification (both sockets) or already polled
     tx = None
+    # main RPC credits only for wallets worth them, and only on the last try; anyone else is read on the public
+    # pool and, if that fails, picked up by the polling net a little later
+    key = _key_wallet(conn, wallet)
     for i in range(tries):
+        last_try = key and i == tries - 1
         try:
             tx = rpc.read("getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
-                                                    "commitment": "confirmed"}], main_if_empty=i == tries - 1,
-                          priority="live")
+                                                    "commitment": "confirmed"}], main_if_empty=last_try,
+                          priority="live", main_on_error=last_try)
         except Exception as e:
             log.debug("ws tx %s failed: %s", sig[:8], e)
         if tx:
@@ -406,7 +424,11 @@ def verify_swap(conn, s: Settings, rpc: chain.Rpc, sw: chain.Swap) -> str:
     return "ok"
 
 
+DETECT_KEEP_DAYS = 14
+
+
 def prune(conn, s: Settings) -> int:
+    conn.execute("DELETE FROM ct_detect WHERE detected_at < ?", (time.time() - DETECT_KEEP_DAYS * 86400,))
     cur = conn.execute(
         """UPDATE ct_wallets SET active=0 WHERE source NOT IN ('manual') AND address IN
            (SELECT address FROM ct_wallet_rank WHERE samples >= ? AND score < 0)""",

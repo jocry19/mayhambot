@@ -46,6 +46,7 @@ class Watcher:
         self._verify: collections.deque = collections.deque(maxlen=500)  # (due_at, tries, swap)
         self._thread: threading.Thread | None = None
         self._last_watchdog = 0.0
+        self._last_verify = 0.0
         self._last_gap_kick = 0.0
 
     # ------------------------------------------------------------------ control
@@ -108,7 +109,8 @@ class Watcher:
             sw = store.retry_locked(tracker.process_logs, conn, self.s, wallet, sig, logs, got)
             if sw:
                 self.fast += 1
-                self._verify.append((time.time() + 3, 0, sw))
+                if sw.side == "buy":  # buys feed ranking and entries; sells keep the curve amounts (saves RPC)
+                    self._verify.append((time.time() + 3, 0, sw))
             else:
                 sw = store.retry_locked(tracker.process_signature, conn, self.s, self.rpc, wallet, sig, 3, got)
             if sw:
@@ -148,8 +150,9 @@ class Watcher:
 
     def _verify_one(self, conn) -> None:
         """When idle: check the oldest due log-read swap against its transaction (public RPC, never Helius)."""
-        if not self._verify or self._verify[0][0] > time.time():
+        if not self._verify or self._verify[0][0] > time.time() or time.time() - self._last_verify < 2:
             return
+        self._last_verify = time.time()  # at most one check every 2 s: the public pool serves live reads first
         due, tries, sw = self._verify.popleft()
         try:
             res = tracker.verify_swap(conn, self.s, self.rpc, sw)

@@ -96,8 +96,10 @@ class Rpc:
             raise RuntimeError(f"rpc {method}: {d['error']}")
         return d.get("result")
 
-    def read(self, method: str, params: list[Any], main_if_empty: bool = False, priority: str = "bulk") -> Any:
-        """Public RPC first, main RPC on errors (or on an empty answer when main_if_empty)."""
+    def read(self, method: str, params: list[Any], main_if_empty: bool = False, priority: str = "bulk",
+             main_on_error: bool = True) -> Any:
+        """Public RPC first, main RPC on errors (or on an empty answer when main_if_empty). Bulk reads, and live
+        reads with main_on_error=False (a retry follows), never spend main RPC credits."""
         if self.public:
             try:
                 r = self.public.call(method, params, priority)
@@ -106,7 +108,7 @@ class Rpc:
             except CreditsExhausted:
                 raise
             except Exception as e:
-                if priority != "live":  # backfill, discovery, net polls: try again later, no Helius credits
+                if priority != "live" or not main_on_error:  # try again later, no Helius credits
                     self.bulk_failures += 1
                     raise
                 log.debug("public rpc %s failed, using main rpc: %s", method, e)
@@ -319,9 +321,22 @@ def swap_from_logs(logs: list | None, wallet: str, signature: str) -> Swap | Non
     getTransaction way. Amounts are the curve's (without pump.fun's ~1 % fee); the full read follows later."""
     if not logs or any("Log truncated" in (ln or "") for ln in logs):
         return None
-    evs = []
+    evs, stack = [], []  # program invocation stack from the "invoke"/"success"/"failed" lines
     for ln in logs:
-        if isinstance(ln, str) and ln.startswith("Program data: "):
+        if not isinstance(ln, str):
+            continue
+        parts = ln.split()
+        if len(parts) >= 3 and parts[0] == "Program" and parts[2] == "invoke":
+            stack.append(parts[1])
+        elif len(parts) >= 3 and parts[0] == "Program" and parts[2] in ("success", "failed"):
+            if stack and stack[-1] == parts[1]:
+                stack.pop()
+        elif ln.startswith("Program data: "):
+            # only events pump.fun itself emitted count: any program can print a look-alike "Program data:"
+            # line into a transaction that mentions a whale (copy-bot bait); pump.fun only emits a TradeEvent for
+            # a trade the user signed
+            if not stack or stack[-1] != PUMP_PROGRAM:
+                continue
             ev = decode_pump_trade(ln[14:].strip())
             if ev and ev["user"] == wallet:
                 evs.append(ev)

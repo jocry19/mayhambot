@@ -447,7 +447,14 @@ def test_watcher_copies_a_pump_buy_without_any_rpc_call_and_verifies_later(env, 
     rpc.tx = parsed_tx(-2_200_000_000, 0, 40e6)  # someone else's balances
     w._verify.append((0, 0, sw))
     w._verify_one(conn)
+    assert rpc.reads[-1:] == [("getTransaction", "bulk")] and tracker.VERIFY["rejected"] == 0  # 2-s spacing
+    w._last_verify = 0
+    w._verify_one(conn)
     assert tracker.VERIFY["rejected"] >= 1
+    # sells read from the logs are not re-read (they keep the curve amounts)
+    n = len(w._verify)
+    w.handle(conn, Strat(), WHALE, "sigSell", t0, _logs(_trade_log(1.0, 20e6, buy=False)))
+    assert len(w._verify) == n
 
 
 def _fake_streams(n=2):
@@ -530,3 +537,43 @@ def test_venue_is_read_from_the_programs_a_transaction_touches():
     assert chain.extract_swap(tx, W).dex == "pumpswap"
     tx["meta"]["innerInstructions"] = [{"instructions": [{"programId": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUJoi5QNyVTaV4"}]}]
     assert chain.dex_of(tx) == "jupiter"  # routed through the aggregator
+
+
+def test_websocket_reads_spend_main_rpc_credits_only_on_key_wallets(env, monkeypatch):
+    s, conn, ex, state = env
+    calls = []
+
+    class Pub:
+        counts, hosts = {}, {}
+
+        def call(self, method, params, priority="bulk"):
+            calls.append("public")
+            raise RuntimeError("429")
+
+    rpc = chain.Rpc(Settings(rpc_url="https://mainnet.helius-rpc.com/?api-key=k", poll_rpc_url=""))
+    rpc.public = Pub()
+    monkeypatch.setattr(chain.Rpc, "call", lambda self, m, p, priority="live": calls.append("main"))
+    monkeypatch.setattr(tracker.time, "sleep", lambda x: None)
+    store.add_wallets(conn, ["Noname1111"], "auto")
+    store._winfo_cache.clear()
+    tracker._seen.clear()
+    assert tracker.process_signature(conn, s, rpc, "Noname1111", "sigN", 3) is None
+    assert calls == ["public"] * 3  # unranked wallet: public pool only, polling picks it up
+    calls.clear()
+    store.add_wallets(conn, [W], "manual")
+    tracker.process_signature(conn, s, rpc, W, "sigM", 3)
+    assert calls == ["public", "public", "public", "main"]  # main RPC once, on the last try
+
+
+def test_look_alike_trade_events_from_other_programs_are_ignored():
+    fake = ["Program Bait111111111111111111111111111111111111 invoke [1]", _trade_log(),
+            "Program Bait111111111111111111111111111111111111 success"]
+    assert chain.swap_from_logs(fake, WHALE, "s") is None  # printed by some other program: bait
+    nested = [f"Program {chain.PUMP_PROGRAM} invoke [1]", "Program Other invoke [2]", "Program Other success",
+              _trade_log(), f"Program {chain.PUMP_PROGRAM} success"]
+    assert chain.swap_from_logs(nested, WHALE, "s")  # back in pump.fun after an inner call
+    inner = ["Program JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUJoi5QNyVTaV4 invoke [1]",
+             f"Program {chain.PUMP_PROGRAM} invoke [2]", _trade_log(), f"Program {chain.PUMP_PROGRAM} success",
+             _trade_log(mint=bytes(32 * [7])), "Program JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUJoi5QNyVTaV4 success"]
+    sw = chain.swap_from_logs(inner, WHALE, "s")  # routed through Jupiter: pump.fun's own event counts, the
+    assert sw and sw.mint == PMINT                # look-alike printed by the router does not

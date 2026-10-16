@@ -7,6 +7,7 @@ profits from what the copy tracker sees.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from pathlib import Path
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS ct_swaps (
 );
 CREATE INDEX IF NOT EXISTS idx_ct_swaps_wallet ON ct_swaps(wallet, ts);
 CREATE INDEX IF NOT EXISTS idx_ct_swaps_mint ON ct_swaps(mint, ts);
+CREATE INDEX IF NOT EXISTS idx_ct_swaps_seen ON ct_swaps(seen_at);
 CREATE TABLE IF NOT EXISTS ct_buy_outcomes (
     sig TEXT PRIMARY KEY, wallet TEXT, mint TEXT, ts INTEGER, sol_amount REAL, pool TEXT,
     entry_price_usd REAL, our_entry_price_usd REAL, first_pump_gain REAL, first_pump_min REAL,
@@ -242,8 +244,14 @@ def _share_with_core(conn: sqlite3.Connection, swaps: list, sol_usd: float) -> N
                   price_usd=s.price_sol * sol_usd, source="copytrade")
             for s in swaps
         ])
-    except Exception:
-        pass
+    except Exception as e:  # never blocks the copy path, but must not go unnoticed
+        global _share_warned
+        if time.time() - _share_warned > 3600:
+            _share_warned = time.time()
+            logging.getLogger("copytrade.store").warning("whale swaps not shared with core.trades: %s", e)
+
+
+_share_warned = 0.0
 
 
 def is_locked(e: Exception) -> bool:
