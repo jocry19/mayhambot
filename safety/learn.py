@@ -176,7 +176,12 @@ def learn(conn, cfg=None):
         bt = None
     if bt:
         report["launch_backtest"] = backtest.summary(bt)
-        store.cache_put(conn, "learn_report", report)
+    try:
+        from safety import audit
+        report["buys"] = audit.audit(conn, since=int(time.time()) - 7 * 86400, cfg=cfg)
+    except Exception:  # noqa: BLE001
+        log.exception("safety buy audit failed")
+    store.cache_put(conn, "learn_report", report)
     log.info("safety learn: %d new outcomes, %d labelled, base rug rate %.0f %%", added, report["n_labelled"],
              100 * report["base_rug_rate"])
     return report
@@ -215,6 +220,10 @@ def report_text(report):
               report["launches"]["thresholds"])
     if report.get("launch_backtest"):
         out.append(report["launch_backtest"]["text"])
+    if report.get("buys"):
+        from safety import audit
+        out.append("Käufe der letzten 7 Tage nach Rug-Stufe beim Kauf:")
+        out.append(audit.report_text(report["buys"]))
     if report.get("rug_after_min"):
         q = report["rug_after_min"]
         out.append(f"Zeit von der ersten Prüfung bis zum Rug: Median {q['median']:g} min (25–75 %: {q['p25']:g}–{q['p75']:g} min, n={q['n']})")

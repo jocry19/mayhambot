@@ -105,6 +105,11 @@ no SOL account (an emptied wallet) counts as a person, not as a program.
   `risk`. The full-history model is in `safety_cache` key `launch_model`;
   `safety.backtest.rug_probability(conn, feats)` gives a launch's rug probability within 60 min.
 
+- `python -m safety audit` (`safety/audit.py`, also in the learn report under `buys`, last 7 days): every buy of the
+  copy trader (`ct_positions`) and sniper (`sniper_positions`) and every signal, with the safety level at that moment
+  (the buyer's own `safety_level` column, else the last `safety_history` entry before the buy). Counts **leaks**
+  (bought although blocked), **blind** buys (no safety result) and the average P&L / share of ≥50 % losses per level.
+
 ## Cost (RPC budget)
 
 Only standard JSON-RPC methods (1 Helius credit each): `getAccountInfo`, `getTokenLargestAccounts`,
@@ -158,6 +163,7 @@ Enhanced API. Jupiter, DexScreener and RugCheck are keyless and not Helius.
 .venv/bin/python -m safety refresh                 # one pass over tracked coins and recent signals
 .venv/bin/python -m safety learn                   # label outcomes, re-weight checks, report
 .venv/bin/python -m safety backtest                # walk-forward on the sniper's launches
+.venv/bin/python -m safety audit                   # blocked coins bought anyway? result per level
 .venv/bin/python -m safety run                     # endless loop (own process)
 .venv/bin/python -m safety list
 .venv/bin/python -m safety block <MINT> "grund"    # allow <MINT> / clear <MINT>

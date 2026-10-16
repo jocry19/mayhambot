@@ -598,3 +598,23 @@ def test_history_check_uses_intel_network_features():
     c.execute("DELETE FROM intel_latest")
     c.commit()
     assert safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True).checks["history"]["status"] == "unknown"
+
+
+def test_audit_finds_buys_of_blocked_coins_and_results_per_level():
+    from safety import audit, store
+    c = conn()
+    store.ensure_schema(c)
+    c.execute("CREATE TABLE ct_positions (id INTEGER PRIMARY KEY, mint TEXT, opened_at INTEGER, status TEXT, "
+              "pnl_pct REAL, safety_level TEXT)")
+    c.executemany("INSERT INTO safety_history VALUES (?,?,?,?)",
+                  [("BAD", NOW - 900, 95, "critical"), ("OK", NOW - 900, 5, "low")])
+    c.executemany("INSERT INTO ct_positions(mint, opened_at, status, pnl_pct, safety_level) VALUES (?,?,?,?,?)",
+                  [("BAD", NOW - 600, "closed", -0.8, None),      # level from safety_history: a leak
+                   ("OK", NOW - 600, "closed", 0.3, None),
+                   ("NEW", NOW - 600, "closed", -0.6, None),      # never checked: blind
+                   ("OK", NOW - 600, "open", None, "low")])       # open positions are not judged yet
+    c.commit()
+    a = audit.audit(c)["copytrade"]
+    assert a["n"] == 3 and a["leaks"] == 1 and a["leak_mints"] == ["BAD"] and a["blind"] == 1
+    assert a["levels"]["critical"]["heavy_loss_share"] == 1.0 and a["levels"]["low"]["avg_pnl"] == 0.3
+    assert "1 trotz Sperre gekauft" in audit.report_text(audit.audit(c))
