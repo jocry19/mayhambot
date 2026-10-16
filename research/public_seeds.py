@@ -189,11 +189,7 @@ def run(conn, early_coins=10):
     summary["gmgn_openapi"] = st
     add_research_wallets(conn, [a for a, _, _ in rows], "gmgn_openapi", 85.0)
     summary["gmgn_openapi_new_in_seed_file"] = _append_seeds(rows)
-    rows, st = gmgn_rank()
-    summary["gmgn"] = st
-    for a, lab, src in rows:
-        add_research_wallets(conn, [a], "gmgn_rank", 90.0)
-    summary["seed_file_new"] = _append_seeds(rows)
+    # gmgn.ai web ranking pages answer 403 to scripts; the official OpenAPI above replaces them
     coins, st = pumpfun_coins()
     summary["pumpfun"] = st
     now = int(time.time())
