@@ -90,7 +90,13 @@ def compute_positions(conn):
     pidx = _price_index(conn)
     agg = {}
     last_price = {}
-    for r in conn.execute("SELECT wallet, mint, side, ts, token_amount, usd_amount, price_usd FROM trades ORDER BY ts"):
+    # buy and sell of the same token by the same wallet in one transaction: an atomic round trip
+    # (MEV / volume bot), not a position anybody held
+    atomic = {(r[0], r[1], r[2]) for r in conn.execute(
+        "SELECT sig, wallet, mint FROM trades GROUP BY sig, wallet, mint HAVING COUNT(DISTINCT side) > 1")}
+    for r in conn.execute("SELECT sig, wallet, mint, side, ts, token_amount, usd_amount, price_usd FROM trades ORDER BY ts"):
+        if atomic and (r["sig"], r["wallet"], r["mint"]) in atomic:
+            continue
         k = (r["wallet"], r["mint"])
         a = agg.setdefault(k, dict(buy_usd=0.0, sell_usd=0.0, buy_tokens=0.0, sell_tokens=0.0,
                                    first_buy_ts=None, first_buy_price=None, trades=0, last_ts=0))
