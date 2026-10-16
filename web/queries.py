@@ -482,14 +482,19 @@ def predictions(conn, mint, since=0, limit=2000):
 
 def signal_performance(conn, since=None):
     """How good were past signals: hit rate and returns per score bucket, per tier mix, per market cap."""
+    # same definition as the signal service (signals/engine.py): its stored high (outlier prints dropped, from 60 s
+    # after the alert at the worse fill) decides; a signal whose hour is over without a measurement counts as missed
     all_items = signals(conn, since=since, limit=20000)
-    items = [x for x in all_items if x["outcome"].get("max_ret_1h") is not None]
+    # exactly signals/funnel.outcomes: a call is due 65 min after it fired; measured = it has a 1 h price
+    due = now_ts() - 3900
+    items = [x for x in all_items if x["ts"] <= due]
 
     def grp(xs):
-        hits = sum(1 for x in xs if x["outcome"]["max_ret_1h"] >= PUMP_1H)
+        hits = sum(1 for x in xs if (x["outcome"]["max_ret_1h"] if x["outcome"]["max_ret_1h"] is not None else -1) >= PUMP_1H)
         r1 = [x["outcome"]["ret_1h"] for x in xs if x["outcome"].get("ret_1h") is not None]
-        mx = [x["outcome"]["max_ret_1h"] for x in xs]
+        mx = [x["outcome"]["max_ret_1h"] for x in xs if x["outcome"]["max_ret_1h"] is not None]
         return {"n": len(xs), "hits": hits, "hit_rate": _f(hits / len(xs), 3) if xs else None,
+                "unmeasured": sum(1 for x in xs if x["outcome"].get("ret_1h") is None),
                 "median_ret_1h": _f(statistics.median(r1), 4) if r1 else None,
                 "median_max_1h": _f(statistics.median(mx), 4) if mx else None}
     by_bucket = [{"bucket": f"{lo}–{min(hi, 100)}", **grp([x for x in items if lo <= (x["score"] or 0) < hi])}
@@ -503,7 +508,7 @@ def signal_performance(conn, since=None):
                (("< 50k", 0, 5e4), ("50–250k", 5e4, 2.5e5), ("250k–1M", 2.5e5, 1e6), ("1–10M", 1e6, 1e7), ("> 10M", 1e7, 1e15))]
     scatter = [{"id": x["id"], "symbol": x["symbol"], "mint": x["mint"], "score": x["score"],
                 "max_ret_1h": _f(x["outcome"]["max_ret_1h"], 4), "mcap_usd": x["mcap_usd"],
-                "hit": x["outcome"]["max_ret_1h"] >= PUMP_1H} for x in items[:2000]]
+                "hit": x["outcome"]["max_ret_1h"] >= PUMP_1H} for x in items[:2000] if x["outcome"]["max_ret_1h"] is not None]
     # daily hit rate = "does it get better over time"
     days = defaultdict(list)
     for x in items:
@@ -1195,18 +1200,27 @@ def _pos(p):
         p.update(safety_level=sf.get("level"), safety_score=sf.get("score"), safety_reasons=sf.get("reasons") or [])
     if p.get("whale_ts") and p.get("opened_at"):
         p["entry_delay_s"] = p["opened_at"] - p["whale_ts"]
-    if p.get("status") == "open" and p.get("entry_price_sol") and p.get("last_price_sol"):
-        p["unrealized_pct"] = _f(p["last_price_sol"] / p["entry_price_sol"] - 1, 4)
-        p["unrealized_sol"] = _f((p["last_price_sol"] - p["entry_price_sol"]) * (p.get("tokens") or 0), 4)
+    if p.get("status") in POS_HELD and p.get("entry_price_sol") and p.get("last_price_sol"):
+        # what selling now would bring: mid price minus the exit cost (fees + slippage), against what the entry cost
+        liq = p["last_price_sol"] * (p.get("tokens") or 0) * (1 - EXIT_COST)
+        cost = p.get("entry_cost_sol") or p["entry_price_sol"] * (p.get("tokens") or 0)
+        p["liq_value_sol"] = _f(liq, 4)
+        p["unrealized_sol"] = _f(liq - cost, 4)
+        p["unrealized_pct"] = _f(liq / cost - 1, 4) if cost else None
     return p
 
 
 def _summary(ps):
+    """Headline = realized (closed trades) + open positions at their liquidation value (mid minus exit cost),
+    open = every position still holding tokens (open, closing, pending_sell, stuck), not only status 'open'."""
     closed = [p for p in ps if p.get("status") == "closed" and p.get("pnl_sol") is not None]
-    opn = [p for p in ps if p.get("status") == "open"]
+    opn = [p for p in ps if p.get("status") in POS_IN_FLIGHT]
+    unreal = sum(p.get("unrealized_sol") or 0 for p in opn)
     s = {"trades": len(closed), "open": len(opn),
-         "open_value_sol": _f(sum((p.get("last_price_sol") or 0) * (p.get("tokens") or 0) for p in opn), 4),
-         "unrealized_sol": _f(sum(p.get("unrealized_sol") or 0 for p in opn), 4)}
+         "open_value_sol": _f(sum(p.get("liq_value_sol") or 0 for p in opn), 4),
+         "unrealized_sol": _f(unreal, 4), "unpriced_open": sum(1 for p in opn if p.get("unrealized_sol") is None),
+         "realized_sol": _f(sum(p["pnl_sol"] for p in closed), 4) if closed else 0.0,
+         "total_sol": _f(sum(p["pnl_sol"] for p in closed) + unreal, 4)}
     if not closed:
         return s
     wins = [p for p in closed if p["pnl_sol"] > 0]
@@ -1274,6 +1288,10 @@ def control_state(conn):
 # pending_buy/pending_sell/stuck come with live trading. In-flight rows are listed with the open ones.
 # copytrade books: strict paper (the live rules), explore (deliberately wider, to learn; copytrade/strategy.py), live
 CT_ACCOUNTS = ("paper", "explore", "live")
+# positions that still hold tokens (valued at liquidation) and the haircut for selling them now:
+# DexScreener mid minus about half the ~4.5-6 % paper round trip (audit round 3, finding 9)
+POS_HELD = ("open", "closing", "pending_sell", "stuck")
+EXIT_COST = 0.03
 POS_IN_FLIGHT = ("open", "opening", "closing", "pending_buy", "pending_sell", "stuck")
 
 
@@ -1886,11 +1904,11 @@ def situation(conn, now=None, sniper=None, ct=None, model=None, signals_24h=None
                     "headline": headline, "detail": detail})
 
     add("signals", "/signals", f"{signals_24h or 0} Signale in 24 h",
-        f"Trefferquote {round(100 * perf['hit_rate'])} %" if perf and perf.get("hit_rate") is not None else "")
+        f"Trefferquote gesamt {round(100 * perf['hit_rate'])} % aus {perf['n']}" if perf and perf.get("hit_rate") is not None else "")
     paper = (ct or {}).get("paper") or {}
-    add("copytrade", "/copytrade", f"Papier streng {paper['pnl_sol']:+.2f} SOL".replace(".", ",") if paper.get("pnl_sol") is not None else "noch keine Trades",
+    add("copytrade", "/copytrade", f"Papier streng {paper['total_sol']:+.2f} SOL (realisiert + offen)".replace(".", ",") if paper.get("trades") or paper.get("open") else "noch keine Trades",
         (f"{paper.get('open') or 0} offen · {paper.get('trades') or 0} Trades" if paper else "") +
-        (f" · Erkundung {ex['pnl_sol']:+.2f} SOL".replace(".", ",") if (ex := (ct or {}).get("explore") or {}).get("pnl_sol") is not None else ""))
+        (f" · Erkundung {ex['total_sol']:+.2f} SOL".replace(".", ",") if (ex := (ct or {}).get("explore") or {}).get("total_sol") is not None else ""))
     sq = cache.get(("safety_quality",), 60, lambda: safety_quality(conn))
     blocked = scalar(conn, "SELECT COUNT(*) FROM safety_tokens WHERE blocked=1", default=0) if has(conn, "safety_tokens", "blocked") else None
     best = None

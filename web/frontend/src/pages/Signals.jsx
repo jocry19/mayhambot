@@ -81,8 +81,9 @@ export default function Signals() {
 
       {perf && (
         <div className="tiles">
-          <Tile label="Ausgewertete Signale" value={n(perf.n)} sub={`Treffer = +${pct(perf.pump_threshold)} innerhalb 1 h`} />
-          <Tile label="Trefferquote gesamt" value={perf.hit_rate != null ? pct(perf.hit_rate) : "–"} sub={`${perf.hits} Treffer`} />
+          <Tile label="Ausgewertete Signale" value={n(perf.n)} sub={`Treffer = Hoch ab 60 s nach dem Alarm ≥ +${pct(perf.pump_threshold)} in 1 h`} />
+          <Tile label="Trefferquote gesamt" value={perf.hit_rate != null ? pct(perf.hit_rate) : "–"}
+            sub={`${perf.hits} Treffer${perf.unmeasured ? ` · ${perf.unmeasured} ohne Messung zählen als verfehlt` : ""}`} />
           <Tile label="Median Max-Anstieg 1 h" value={perf.median_max_1h != null ? pctSigned(perf.median_max_1h, 0) : "–"} cls={perf.median_max_1h > 0 ? "up" : ""} sub="nach dem Signal" />
           <Tile label="Median Ergebnis 1 h" value={perf.median_ret_1h != null ? pctSigned(perf.median_ret_1h, 0) : "–"} cls={perf.median_ret_1h > 0 ? "up" : perf.median_ret_1h < 0 ? "down" : ""} sub="Preis genau 1 h danach" />
         </div>

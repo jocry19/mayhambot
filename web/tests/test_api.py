@@ -687,3 +687,29 @@ def test_signal_plan_and_reach(demo, tmp_path):
     assert r50["hits"] >= m["reach"][1]["max_ret_4h"]["hits"] >= m["reach"][2]["max_ret_4h"]["hits"]
     planned = [s for s in rows if s["plan"]["target_ret"] is not None]
     assert m["planned"] == len(planned) and m["target_hits"] == sum(1 for s in planned if s["plan"]["target_hit_ts"])
+
+
+def test_summary_realized_plus_open():
+    from web import queries as Q
+
+    ps = [Q._pos({"status": "closed", "pnl_sol": -1.0, "pnl_pct": -0.5, "closed_at": 1, "opened_at": 0}),
+          Q._pos({"status": "closed", "pnl_sol": 0.5, "pnl_pct": 0.25, "closed_at": 2, "opened_at": 1}),
+          Q._pos({"status": "stuck", "entry_price_sol": 1.0, "last_price_sol": 2.0, "tokens": 1.0, "entry_cost_sol": 1.0, "opened_at": 3})]
+    s = Q._summary(ps)
+    assert s["open"] == 1 and s["realized_sol"] == -0.5
+    assert s["unrealized_sol"] == round(2 * (1 - Q.EXIT_COST) - 1, 4) and s["total_sol"] == round(-0.5 + s["unrealized_sol"], 4)
+    assert s["max_drawdown_sol"] == -1.0  # the curve starts at 0, so the first loss counts
+
+
+def test_signal_hit_rate_counts_unmeasured(demo, tmp_path):
+    import shutil
+    import time as _t
+
+    db = str(tmp_path / "hr.db")
+    shutil.copy(demo, db)
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO signals(ts, mint, symbol, score) VALUES (?, 'Unmeasured1111111111111111111111111pump', 'U', 50)", (int(_t.time()) - 7200,))
+    con.commit()
+    con.close()
+    p = _client(db).get("/api/signals/performance").json()
+    assert p["unmeasured"] >= 1 and p["hit_rate"] == round(p["hits"] / p["n"], 3)

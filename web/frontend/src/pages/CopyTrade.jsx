@@ -89,8 +89,10 @@ export default function CopyTrade() {
       {mode === "live" && !ctl.live_ready && <Callout icon="info">Echtgeld ist aus. Der Hauptschalter steht in der .env (LIVE_TRADING=true und ein Schlüssel), danach je Modus unter Steuerung.</Callout>}
 
       <div className="tiles">
-        <Tile label="Kontostand" value={eq != null ? sol(eq) : d.balance_sol != null ? sol(d.balance_sol) : "–"} sub={`${sol(s.open_value_sol, 2)} in offenen Positionen`} />
-        <Tile label="Gewinn / Verlust" value={solSigned(s.pnl_sol, 2)} cls={(s.pnl_sol || 0) >= 0 ? "up" : "down"} sub={s.trades ? `Ø ${n((s.avg_pnl_pct || 0) * 100, 1)} % pro Trade` : "noch keine Trades"} />
+        <Tile label="Kontostand" value={eq != null ? sol(eq) : d.balance_sol != null ? sol(d.balance_sol) : "–"} sub={`${sol(s.open_value_sol, 2)} in offenen Positionen (Verkaufswert)`} />
+        <Tile label="Gewinn / Verlust (realisiert + offen)" value={solSigned(s.total_sol, 2)} cls={(s.total_sol || 0) >= 0 ? "up" : "down"}
+          title="Abgeschlossene Trades plus offene Positionen zum heutigen Verkaufswert (Mittelkurs minus 3 % Ausstiegskosten)"
+          sub={`realisiert ${solSigned(s.realized_sol, 2)} · offen ${solSigned(s.unrealized_sol, 2)}${s.trades ? ` · Ø ${n((s.avg_pnl_pct || 0) * 100, 1)} % pro Trade` : ""}${s.unpriced_open ? ` · ${s.unpriced_open} ohne Kurs` : ""}`} />
         <Tile label="Gewinner-Quote" value={s.trades ? pct(s.win_rate) : "–"} sub={`${n(s.trades)} abgeschlossene Trades`} />
         <Tile label="Profit-Faktor" value={s.profit_factor != null ? n(s.profit_factor, 2) : s.trades ? "∞" : "–"} sub={s.trades ? `Ø Gewinn ${pct(s.avg_win_pct)} · Ø Verlust ${pct(s.avg_loss_pct)}` : "Gewinne ÷ Verluste"} />
         <Tile label="Max. Drawdown" value={s.max_drawdown_sol != null ? sol(s.max_drawdown_sol, 2) : "–"} sub={`bester ${pct(s.best_pct)} · schlechtester ${pct(s.worst_pct)}`} />
