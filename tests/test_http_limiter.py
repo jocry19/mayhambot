@@ -417,3 +417,23 @@ def test_endpoint_refusing_one_method_is_avoided_for_it(monkeypatch, tmp_path):
     assert 2 * http.METHOD_AVOID_BASE - 1 < away <= 2 * http.METHOD_AVOID_BASE
     http._pool_result("a.example", True, 5.0, 200, method="getTransaction")
     assert "getTransaction" not in http.pool_status()["a.example"]["avoid"]
+
+
+def test_own_transactions_keep_helius_when_share_used_up(monkeypatch, tmp_path):
+    _credit_env(monkeypatch, tmp_path, "copytrade", day=31, month_credits=100)  # 15 credits today
+    for _ in range(15):
+        http._charge(1)
+    calls = []
+
+    class R:
+        status_code = 200
+        headers = {}
+
+        def json(self):
+            return {"result": "sig"}
+    monkeypatch.setattr(http._session, "request", lambda m, url, **kw: calls.append(url) or R())
+    helius = "https://beta.helius-rpc.com/?api-key=k"
+    assert http.rpc_url("sendTransaction", helius) == helius
+    assert http.rpc_url("getBalance", helius) in http.public_rpc_urls()
+    http.post_json(helius, {"method": "sendTransaction", "params": []})
+    assert calls == [helius]  # not moved to the public node, not refused
