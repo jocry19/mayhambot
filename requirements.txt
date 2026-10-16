@@ -1,0 +1,9 @@
+# core + signals
+requests>=2.31
+python-dotenv>=1.0
+# dashboard
+streamlit>=1.50
+plotly>=5.20
+pandas>=2.0
+# copytrade (live trading only)
+# solders>=0.21

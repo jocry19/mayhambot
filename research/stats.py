@@ -1,0 +1,151 @@
+"""Small pure-Python statistics: Wilson interval, AUC, standardized logistic + ridge regression."""
+import math
+
+
+def wilson(k, n, z=1.96):
+    """(rate, lower, upper) of a binomial proportion."""
+    if n <= 0:
+        return 0.0, 0.0, 1.0
+    p = k / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return p, max(0.0, c - h), min(1.0, c + h)
+
+
+def auc(scores, labels):
+    """Rank AUC (probability a random positive scores higher than a random negative)."""
+    pairs = sorted(zip(scores, labels), key=lambda x: x[0])
+    n_pos = sum(1 for _, y in pairs if y)
+    n_neg = len(pairs) - n_pos
+    if not n_pos or not n_neg:
+        return None
+    rank_sum, i = 0.0, 0
+    while i < len(pairs):
+        j = i
+        while j + 1 < len(pairs) and pairs[j + 1][0] == pairs[i][0]:
+            j += 1
+        avg_rank = (i + j) / 2 + 1
+        rank_sum += avg_rank * sum(1 for k in range(i, j + 1) if pairs[k][1])
+        i = j + 1
+    return (rank_sum - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+
+
+def sigmoid(z):
+    if z >= 0:
+        return 1 / (1 + math.exp(-z))
+    e = math.exp(z)
+    return e / (1 + e)
+
+
+def standardize_fit(X):
+    k = len(X[0]) if X else 0
+    n = len(X)
+    mean = [sum(r[j] for r in X) / n for j in range(k)] if n else [0.0] * k
+    std = []
+    for j in range(k):
+        v = sum((r[j] - mean[j]) ** 2 for r in X) / n if n else 0.0
+        std.append(math.sqrt(v) if v > 1e-12 else 1.0)
+    return mean, std
+
+
+def _z(X, mean, std):
+    return [[(r[j] - mean[j]) / std[j] for j in range(len(mean))] for r in X]
+
+
+def logistic_fit(X, y, l2=5.0, iters=400, lr=0.5, weights=None):
+    """L2-regularised logistic regression on standardized inputs (Newton-free, full-batch GD with
+    backtracking). Returns dict(bias, coef, mean, std) with coef per standard deviation."""
+    mean, std = standardize_fit(X)
+    Z = _z(X, mean, std)
+    n, k = len(Z), len(mean)
+    w = weights or [1.0] * n
+    W = sum(w)
+    pbar = min(0.99, max(0.01, sum(wi * yi for wi, yi in zip(w, y)) / W))
+    b = math.log(pbar / (1 - pbar))
+    c = [0.0] * k
+
+    def loss(b, c):
+        s = 0.0
+        for zi, yi, wi in zip(Z, y, w):
+            t = b + sum(cj * zj for cj, zj in zip(c, zi))
+            s += wi * (math.log1p(math.exp(-abs(t))) + max(t, 0) - yi * t)
+        return s / W + l2 * sum(cj * cj for cj in c) / (2 * max(W, 1))
+
+    cur = loss(b, c)
+    step = lr
+    for _ in range(iters):
+        gb, gc = 0.0, [0.0] * k
+        for zi, yi, wi in zip(Z, y, w):
+            e = wi * (sigmoid(b + sum(cj * zj for cj, zj in zip(c, zi))) - yi)
+            gb += e
+            for j in range(k):
+                gc[j] += e * zi[j]
+        gb /= W
+        gc = [g / W + l2 * cj / max(W, 1) for g, cj in zip(gc, c)]
+        while step > 1e-6:
+            nb, nc = b - step * gb, [cj - step * g for cj, g in zip(c, gc)]
+            new = loss(nb, nc)
+            if new <= cur:
+                b, c, cur = nb, nc, new
+                step *= 1.3
+                break
+            step /= 2
+        if abs(gb) + sum(abs(g) for g in gc) < 1e-5 or step <= 1e-6:
+            break
+    return dict(bias=b, coef=c, mean=mean, std=std)
+
+
+def logistic_predict(m, x):
+    t = m["bias"] + sum(c * (xi - mu) / sd for c, xi, mu, sd in zip(m["coef"], x, m["mean"], m["std"]))
+    return sigmoid(t)
+
+
+def contributions(m, x):
+    """Per-feature effect on the log-odds relative to the training average."""
+    return [c * (xi - mu) / sd for c, xi, mu, sd in zip(m["coef"], x, m["mean"], m["std"])]
+
+
+def _solve(A, b):
+    n = len(A)
+    M = [row[:] + [bi] for row, bi in zip(A, b)]
+    for i in range(n):
+        p = max(range(i, n), key=lambda r: abs(M[r][i]))
+        M[i], M[p] = M[p], M[i]
+        if abs(M[i][i]) < 1e-12:
+            continue
+        for r in range(n):
+            if r != i:
+                f = M[r][i] / M[i][i]
+                for cidx in range(i, n + 1):
+                    M[r][cidx] -= f * M[i][cidx]
+    return [M[i][n] / M[i][i] if abs(M[i][i]) > 1e-12 else 0.0 for i in range(n)]
+
+
+def ridge_fit(X, y, l2=5.0):
+    mean, std = standardize_fit(X)
+    Z = _z(X, mean, std)
+    k = len(mean)
+    ybar = sum(y) / len(y) if y else 0.0
+    A = [[sum(z[i] * z[j] for z in Z) + (l2 if i == j else 0.0) for j in range(k)] for i in range(k)]
+    bvec = [sum(z[i] * (yi - ybar) for z, yi in zip(Z, y)) for i in range(k)]
+    return dict(bias=ybar, coef=_solve(A, bvec) if k else [], mean=mean, std=std)
+
+
+def ridge_predict(m, x):
+    return m["bias"] + sum(c * (xi - mu) / sd for c, xi, mu, sd in zip(m["coef"], x, m["mean"], m["std"]))
+
+
+def median(xs):
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    n = len(xs)
+    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+
+def quantile(xs, q):
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    return xs[min(len(xs) - 1, max(0, int(q * (len(xs) - 1) + 0.5)))]

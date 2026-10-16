@@ -1,0 +1,7 @@
+[Unit]
+Description=mayhambot Backup
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mayhambot
+Environment=BACKUP_DIR=/var/backups/mayhambot
+ExecStart=/usr/bin/python3 deploy/ops.py backup

@@ -1,0 +1,162 @@
+"""SQLite storage. Schema is created on connect; columns are only ever added, never removed."""
+import sqlite3
+import time
+from pathlib import Path
+
+from core.config import settings
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS tokens (
+    mint TEXT PRIMARY KEY, symbol TEXT, name TEXT, pool_address TEXT, dex TEXT,
+    price_usd REAL, mcap_usd REAL, liquidity_usd REAL, pair_created_at INTEGER,
+    price_change_m5 REAL, price_change_h1 REAL, price_change_h24 REAL, volume_h1 REAL,
+    first_seen INTEGER, last_updated INTEGER, tracked INTEGER DEFAULT 1, last_trades_fetch INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS token_prices (
+    mint TEXT, ts INTEGER, price_usd REAL, mcap_usd REAL, liquidity_usd REAL,
+    PRIMARY KEY (mint, ts)
+);
+CREATE TABLE IF NOT EXISTS trades (
+    sig TEXT, wallet TEXT, mint TEXT, side TEXT, ts INTEGER,
+    token_amount REAL, sol_amount REAL, usd_amount REAL, price_usd REAL, source TEXT,
+    PRIMARY KEY (sig, wallet, mint, side)
+);
+CREATE INDEX IF NOT EXISTS idx_trades_mint_ts ON trades(mint, ts);
+CREATE INDEX IF NOT EXISTS idx_trades_wallet_ts ON trades(wallet, ts);
+CREATE TABLE IF NOT EXISTS wallets (
+    address TEXT PRIMARY KEY, label TEXT DEFAULT '', source TEXT DEFAULT 'auto', manual INTEGER DEFAULT 0,
+    score REAL DEFAULT 0, is_smart INTEGER DEFAULT 0, is_bot INTEGER DEFAULT 0,
+    tokens_traded INTEGER DEFAULT 0, win_rate REAL, early_rate REAL, realized_pnl_usd REAL,
+    total_pnl_usd REAL, roi REAL, median_peak_multiple REAL, consistency REAL,
+    last_trade_ts INTEGER, backfilled_at INTEGER DEFAULT 0, first_seen INTEGER, updated_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS wallet_positions (
+    wallet TEXT, mint TEXT, buy_usd REAL, sell_usd REAL, buy_tokens REAL, sell_tokens REAL,
+    realized_pnl_usd REAL, unrealized_pnl_usd REAL, roi REAL, first_buy_ts INTEGER,
+    first_buy_price REAL, peak_multiple REAL, trades INTEGER,
+    PRIMARY KEY (wallet, mint)
+);
+CREATE TABLE IF NOT EXISTS signal_metrics (
+    ts INTEGER, mint TEXT, window_min INTEGER, buy_usd REAL, sell_usd REAL, net_usd REAL,
+    smart_buyers INTEGER, avg_quality REAL, score REAL, price_usd REAL,
+    PRIMARY KEY (ts, mint)
+);
+CREATE TABLE IF NOT EXISTS signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, mint TEXT, symbol TEXT, score REAL,
+    net_usd REAL, buy_usd REAL, smart_buyers INTEGER, avg_quality REAL, price_usd REAL, mcap_usd REAL,
+    wallets_json TEXT, notified INTEGER DEFAULT 0,
+    ret_5m REAL, ret_15m REAL, ret_1h REAL, max_ret_1h REAL
+);
+CREATE INDEX IF NOT EXISTS idx_signals_mint ON signals(mint, ts);
+"""
+
+# columns added after the first release: (table, column, type). Applied on connect, idempotent.
+MIGRATIONS = [
+    ("wallets", "tier", "TEXT"),                    # 'ultra' | 'smart' | 'good' | NULL
+    ("signal_metrics", "buy_sol", "REAL"),
+    ("signal_metrics", "net_sol", "REAL"),
+    ("signal_metrics", "mcap_usd", "REAL"),
+    ("signal_metrics", "n_ultra", "INTEGER"),
+    ("signal_metrics", "n_smart", "INTEGER"),
+    ("signal_metrics", "n_good", "INTEGER"),
+    ("signal_metrics", "prediction", "REAL"),
+    ("signal_metrics", "contributions_json", "TEXT"),
+    ("signals", "buy_sol", "REAL"),
+    ("signals", "net_sol", "REAL"),
+    ("signals", "liquidity_usd", "REAL"),
+    ("signals", "n_ultra", "INTEGER"),
+    ("signals", "n_smart", "INTEGER"),
+    ("signals", "n_good", "INTEGER"),
+    ("signals", "prediction", "REAL"),
+    ("signals", "prediction_label", "TEXT"),
+    ("signals", "contributions_json", "TEXT"),
+    ("signals", "model_version", "TEXT"),
+    ("signals", "max_mcap_1h", "REAL"),
+    ("signals", "ret_6h", "REAL"),
+    ("signals", "max_ret_24h", "REAL"),
+]
+
+
+def _migrate(conn):
+    for table, col, typ in MIGRATIONS:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+    conn.commit()
+
+
+def connect(path=None) -> sqlite3.Connection:
+    path = path or settings.db_path
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass  # e.g. network filesystems
+    conn.executescript(SCHEMA)
+    _migrate(conn)
+    return conn
+
+
+def insert_trades(conn, trades) -> int:
+    before = conn.total_changes
+    conn.executemany(
+        "INSERT OR IGNORE INTO trades VALUES (?,?,?,?,?,?,?,?,?,?)",
+        [(t.sig, t.wallet, t.mint, t.side, int(t.ts), t.token_amount, t.sol_amount,
+          t.usd_amount, t.price_usd, t.source) for t in trades],
+    )
+    added = conn.total_changes - before
+    now = int(time.time())
+    conn.executemany(
+        "INSERT OR IGNORE INTO wallets(address, source, first_seen, updated_at) VALUES (?, 'auto', ?, ?)",
+        [(w, now, now) for w in {t.wallet for t in trades}],
+    )
+    conn.commit()
+    return added
+
+
+def upsert_tokens(conn, tokens, tracked=None):
+    """tracked=None/True marks tokens as watched; False only stores price data (never un-watches)."""
+    now = int(time.time())
+    for t in tokens:
+        conn.execute(
+            """INSERT INTO tokens(mint, symbol, name, pool_address, dex, price_usd, mcap_usd, liquidity_usd,
+                   pair_created_at, price_change_m5, price_change_h1, price_change_h24, volume_h1,
+                   first_seen, last_updated, tracked)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(mint) DO UPDATE SET
+                   symbol=COALESCE(NULLIF(excluded.symbol,''), symbol),
+                   name=COALESCE(NULLIF(excluded.name,''), name),
+                   pool_address=COALESCE(NULLIF(excluded.pool_address,''), pool_address),
+                   dex=COALESCE(NULLIF(excluded.dex,''), dex),
+                   price_usd=excluded.price_usd, mcap_usd=excluded.mcap_usd,
+                   liquidity_usd=excluded.liquidity_usd,
+                   pair_created_at=COALESCE(NULLIF(excluded.pair_created_at,0), pair_created_at),
+                   price_change_m5=excluded.price_change_m5, price_change_h1=excluded.price_change_h1,
+                   price_change_h24=excluded.price_change_h24, volume_h1=excluded.volume_h1,
+                   last_updated=excluded.last_updated,
+                   tracked=MAX(COALESCE(tracked,0), ?)""",
+            (t.mint, t.symbol, t.name, t.pool_address, t.dex, t.price_usd, t.mcap_usd, t.liquidity_usd,
+             t.pair_created_at, t.price_change_m5, t.price_change_h1, t.price_change_h24, t.volume_h1,
+             now, now, 1 if tracked is None else int(tracked), 1 if tracked is None else int(tracked)),
+        )
+        if t.price_usd:
+            conn.execute("INSERT OR REPLACE INTO token_prices VALUES (?,?,?,?,?)",
+                         (t.mint, now, t.price_usd, t.mcap_usd, t.liquidity_usd))
+    conn.commit()
+
+
+def latest_price(conn, mint):
+    r = conn.execute("SELECT price_usd FROM tokens WHERE mint=?", (mint,)).fetchone()
+    return r["price_usd"] if r and r["price_usd"] else None
+
+
+def trades_for_mint(conn, mint, since_ts=None):
+    return conn.execute("SELECT * FROM trades WHERE mint=? AND ts>=? ORDER BY ts",
+                        (mint, since_ts or 0)).fetchall()
+
+
+def trades_for_wallet(conn, wallet, since_ts=None):
+    return conn.execute("SELECT * FROM trades WHERE wallet=? AND ts>=? ORDER BY ts",
+                        (wallet, since_ts or 0)).fetchall()

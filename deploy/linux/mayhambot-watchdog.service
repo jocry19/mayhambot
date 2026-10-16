@@ -1,0 +1,8 @@
+[Unit]
+Description=mayhambot watchdog (Neustart + Telegram-Alarm)
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mayhambot
+Environment=WATCHDOG_RUNTIME=docker
+Environment="WATCHDOG_RESTART_CMD=/usr/bin/docker compose -f deploy/docker/compose.yml up -d --force-recreate app"
+ExecStart=/usr/bin/python3 deploy/ops.py watchdog

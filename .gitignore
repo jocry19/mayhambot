@@ -1,0 +1,21 @@
+# secrets
+.env
+*.pem
+*keypair*.json
+id.json
+# runtime data
+data/*
+!data/.gitkeep
+data/pids/
+logs/
+*.log
+# python
+__pycache__/
+.venv/
+.pytest_cache/
+.DS_Store
+*.db
+*.db-*
+*.sqlite*
+deploy_key*
+.ssh/

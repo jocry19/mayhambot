@@ -1,0 +1,7 @@
+[Unit]
+Description=mayhambot Backup stündlich
+[Timer]
+OnCalendar=hourly
+Persistent=true
+[Install]
+WantedBy=timers.target

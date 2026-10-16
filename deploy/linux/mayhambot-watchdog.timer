@@ -1,0 +1,7 @@
+[Unit]
+Description=mayhambot watchdog alle 2 Minuten
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+[Install]
+WantedBy=timers.target

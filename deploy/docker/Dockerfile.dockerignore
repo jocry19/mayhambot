@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+.venv
+data
+logs
+secrets
+**/__pycache__
+.pytest_cache
+.git
+*.pem
+*keypair*.json
+id.json

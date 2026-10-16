@@ -1,0 +1,530 @@
+#!/usr/bin/env python3
+"""mayhambot operations: health check, watchdog with Telegram alerts, backups, log rotation.
+
+Standard library only, so it also runs when the app's venv is broken and on a bare Linux host.
+Run from anywhere; paths are relative to the mayhambot folder (parent of deploy/).
+
+  python deploy/ops.py status                 # human-readable overview (app, feed, backups, power)
+  python deploy/ops.py health [--json]        # exit 0 = healthy, 1 = problem (Docker HEALTHCHECK)
+  python deploy/ops.py watchdog               # one watchdog round: check, restart, alert, rotate logs
+  python deploy/ops.py backup                 # consistent DB snapshot + config + models -> BACKUP_DIR
+  python deploy/ops.py list-backups
+  python deploy/ops.py restore <archive>      # stops the app, restores, starts it again
+  python deploy/ops.py rotate-logs
+  python deploy/ops.py test-alert             # sends a Telegram test message
+
+Settings (optional, in .env):
+  BACKUP_DIR            where backups go (default: ~/mayhambot-backups); use a 2nd disk or cloud folder
+  BACKUP_KEEP_HOURS     keep every backup this long (default 48), then one per day ...
+  BACKUP_KEEP_DAYS      ... for this many days (default 30)
+  FEED_STALL_MIN        alert/restart when no new market data for this long (default 15)
+  ALERT_REPEAT_HOURS    repeat an unresolved alert every N hours (default 6)
+  WATCHDOG_RUNTIME      local (default) | docker   (docker: the host watches the container)
+  WATCHDOG_RESTART_CMD  override the restart command
+  LOG_MAX_MB            rotate logs/*.log above this size (default 20), keeps 5 compressed
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import gzip
+import json
+import os
+import platform
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+IS_MAC = platform.system() == "Darwin"
+APP_LABEL = "de.mayhambot.app"
+SERVICES = ("signals", "copytrade", "dashboard")
+CONFIRM_RUNS = 2          # a problem must be seen in 2 consecutive rounds before restart/alert
+RESTART_COOLDOWN = 15 * 60
+SECRET_KEYS = ("SOLANA_PRIVATE_KEY",)   # never written into backups
+
+
+# ---------------------------------------------------------------- config
+def load_env() -> dict:
+    env = {}
+    f = ROOT / ".env"
+    if f.exists():
+        for line in f.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            v = v.split(" #", 1)[0].strip().strip('"').strip("'")
+            env[k.strip()] = v
+    env.update({k: v for k, v in os.environ.items() if k in env or k.startswith(("BACKUP_", "WATCHDOG_",
+                "FEED_", "ALERT_", "LOG_", "MAYHAM_", "TELEGRAM_", "DASHBOARD_"))})
+    return env
+
+
+ENV = load_env()
+
+
+def cfg(name, default):
+    v = ENV.get(name)
+    return type(default)(v) if v not in (None, "") else default
+
+
+def db_path() -> Path:
+    p = Path(os.path.expanduser(cfg("MAYHAM_DB_PATH", str(ROOT / "data" / "mayhambot.db"))))
+    return p if p.is_absolute() else ROOT / p
+
+
+def backup_dir() -> Path:
+    return Path(os.path.expanduser(cfg("BACKUP_DIR", "~/mayhambot-backups")))
+
+
+STATE_FILE = ROOT / "data" / "watchdog_state.json"
+
+
+def load_state() -> dict:
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(s: dict):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(s, indent=1))
+    tmp.replace(STATE_FILE)
+
+
+def ago(ts) -> str:
+    if not ts:
+        return "nie"
+    m = (time.time() - ts) / 60
+    return f"vor {m:.0f} min" if m < 120 else f"vor {m / 60:.1f} h"
+
+
+# ---------------------------------------------------------------- checks
+def check_processes() -> dict:
+    """Per service: alive? (pid files written by mayham.py)."""
+    out = {}
+    for name in SERVICES:
+        f = ROOT / "data" / "pids" / f"{name}.pid"
+        alive = False
+        try:
+            os.kill(int(f.read_text()), 0)
+            alive = True
+        except (OSError, ValueError):
+            pass
+        out[name] = alive
+    return out
+
+
+def check_dashboard(timeout=5) -> bool:
+    port = cfg("DASHBOARD_PORT", "8501")
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/_stcore/health", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:  # noqa: BLE001
+        return False
+
+
+HEARTBEATS = {  # name -> SQL returning the newest unix ts of fresh data
+    "Marktdaten": "SELECT MAX(ts) FROM token_prices",
+    "Trades": "SELECT MAX(ts) FROM trades",
+    "Copy-Trading-Polling": "SELECT MAX(last_polled) FROM ct_wallets WHERE active=1",
+}
+
+
+def check_feed() -> dict:
+    """Newest timestamp per data feed, read-only. Missing table/DB = None (not yet started)."""
+    out = {k: None for k in HEARTBEATS}
+    p = db_path()
+    if not p.exists():
+        return out
+    try:
+        conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=10)
+        for k, sql in HEARTBEATS.items():
+            try:
+                out[k] = conn.execute(sql).fetchone()[0]
+            except sqlite3.Error:
+                pass
+        conn.close()
+    except sqlite3.Error:
+        pass
+    return out
+
+
+def check_power() -> str | None:
+    if not IS_MAC:
+        return None
+    try:
+        r = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=5).stdout
+        return "Netzteil" if "AC Power" in r else "Akku"
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def launchd_loaded(label: str) -> bool:
+    if not IS_MAC:
+        return False
+    r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"], capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def last_backup() -> Path | None:
+    files = sorted(backup_dir().glob("mayhambot-*.tar.gz"))
+    return files[-1] if files else None
+
+
+def collect() -> dict:
+    """Run all checks and derive the list of problems (key -> German message)."""
+    runtime = cfg("WATCHDOG_RUNTIME", "local")
+    stall = cfg("FEED_STALL_MIN", 15) * 60
+    procs = check_processes() if runtime == "local" else {}
+    dash = check_dashboard()
+    feed = check_feed()
+    now = time.time()
+    problems = {}
+    dead = [n for n, ok in procs.items() if not ok]
+    if runtime == "local" and len(dead) == len(SERVICES):
+        problems["app_down"] = "mayhambot läuft nicht (keine Prozesse)."
+    elif dead:
+        problems["service_down"] = f"Teil-Ausfall: {', '.join(dead)} läuft nicht."
+    if not dash and "app_down" not in problems:
+        problems["dashboard_down"] = "Dashboard antwortet nicht."
+    md = feed.get("Marktdaten")
+    if md and now - md > stall:
+        problems["feed_stalled"] = f"Keine neuen Marktdaten seit {(now - md) / 60:.0f} min (Internet/APIs?)."
+    cp = feed.get("Copy-Trading-Polling")
+    if cp and now - cp > stall:
+        problems["copytrade_stalled"] = f"Copy-Trader pollt seit {(now - cp) / 60:.0f} min keine Wallets."
+    try:
+        free_gb = shutil.disk_usage(db_path().parent if db_path().parent.exists() else ROOT).free / 1e9
+        if free_gb < 2:
+            problems["disk_low"] = f"Nur noch {free_gb:.1f} GB Speicher frei."
+    except OSError:
+        free_gb = None
+    lb = last_backup()
+    if db_path().exists() and (not lb or now - lb.stat().st_mtime > 3 * 3600):
+        problems["backup_old"] = f"Letztes Backup: {ago(lb.stat().st_mtime) if lb else 'nie'}."
+    power = check_power()
+    if power == "Akku":
+        problems["on_battery"] = "Mac läuft auf Akku: bitte Netzteil anschließen, sonst schläft er ein."
+    return {"ts": now, "runtime": runtime, "processes": procs, "dashboard": dash, "feed": feed,
+            "free_gb": free_gb, "last_backup": str(lb) if lb else None, "power": power, "problems": problems}
+
+
+# ---------------------------------------------------------------- alerts
+def send_alert(text: str) -> bool:
+    """Telegram via the app's notifier when importable, else plain urllib (same bot/chat from .env)."""
+    token, chat = cfg("TELEGRAM_BOT_TOKEN", ""), cfg("TELEGRAM_CHAT_ID", "")
+    print(f"[alert] {text}")
+    if not (token and chat):
+        return True   # nothing configured: console only, don't keep retrying
+    text = f"🛠 <b>mayhambot Betrieb</b> ({platform.node()})\n{text}"
+    try:
+        sys.path.insert(0, str(ROOT))
+        from signals.notifier import TelegramNotifier  # noqa: PLC0415
+        return TelegramNotifier(token, chat).send(text) is not False
+    except Exception:  # noqa: BLE001 - app venv missing/broken: fall back to stdlib
+        pass
+    try:
+        data = urllib.parse.urlencode({"chat_id": chat, "text": text, "parse_mode": "HTML"}).encode()
+        with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data, timeout=15) as r:
+            return r.status == 200
+    except Exception as e:  # noqa: BLE001
+        print(f"[alert] telegram failed: {e}")
+        return False
+
+
+# ---------------------------------------------------------------- restart
+def restart_app(reason: str) -> str:
+    cmd = cfg("WATCHDOG_RESTART_CMD", "")
+    if cmd:
+        r = subprocess.run(cmd, shell=True, cwd=ROOT)
+        return f"Neustart ({cmd}) -> {r.returncode}"
+    if IS_MAC and launchd_loaded(APP_LABEL):
+        r = subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{APP_LABEL}"])
+        return f"Neustart über launchd -> {r.returncode}"
+    py = ROOT / ".venv" / "bin" / "python"
+    py = str(py) if py.exists() else sys.executable
+    subprocess.run([py, "mayham.py", "stop"], cwd=ROOT, capture_output=True)
+    time.sleep(2)
+    r = subprocess.run([py, "mayham.py", "start"], cwd=ROOT, capture_output=True)
+    return f"Neustart über mayham.py start -> {r.returncode}"
+
+
+def watchdog(args) -> int:
+    st = load_state()
+    now = time.time()
+    # gap detection: the watchdog runs every ~2 min, a long gap means the Mac slept or was off
+    last_run = st.get("last_run")
+    gap_min = (now - last_run) / 60 if last_run else 0
+    if gap_min > cfg("GAP_ALERT_MIN", 10):
+        send_alert(f"⏸ {gap_min:.0f} min Pause erkannt (Mac schlief oder war aus). Läuft wieder.")
+    st["last_run"] = now
+
+    rotate_logs(quiet=True)
+    r = collect()
+    seen = st.setdefault("problems", {})     # key -> {first, count, alerted, msg}
+    repeat = cfg("ALERT_REPEAT_HOURS", 6) * 3600
+    restartable = {"app_down", "service_down", "dashboard_down", "feed_stalled", "copytrade_stalled"}
+    need_restart = []
+
+    for key, msg in r["problems"].items():
+        p = seen.setdefault(key, {"first": now, "count": 0, "alerted": 0})
+        p["count"] += 1
+        p["msg"] = msg
+        if p["count"] < CONFIRM_RUNS:
+            continue
+        if key in restartable:
+            need_restart.append(key)
+        if not p["alerted"] or now - p["alerted"] > repeat:
+            if send_alert(f"🔴 {msg}"):
+                p["alerted"] = now
+
+    action = None
+    if need_restart and not args.no_restart and now - st.get("last_restart", 0) > RESTART_COOLDOWN:
+        action = restart_app(", ".join(need_restart))
+        st["last_restart"] = now
+        send_alert(f"🔁 {action} wegen: {', '.join(seen[k]['msg'] for k in need_restart)}")
+
+    for key in list(seen):
+        if key not in r["problems"]:
+            if seen[key].get("alerted"):
+                send_alert(f"🟢 Wieder OK: {seen[key].get('msg', key)}")
+            del seen[key]
+
+    save_state(st)
+    print(json.dumps({"problems": r["problems"], "action": action}, ensure_ascii=False))
+    return 0
+
+
+# ---------------------------------------------------------------- backup
+def _snapshot_db(src: Path, dst: Path):
+    """Online-consistent copy via SQLite's backup API (safe while the app writes)."""
+    s = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=60)
+    d = sqlite3.connect(dst)
+    s.backup(d, pages=4096, sleep=0.05)
+    s.close()
+    ok = d.execute("PRAGMA quick_check").fetchone()[0]
+    d.execute("PRAGMA journal_mode=DELETE")
+    d.close()
+    if ok != "ok":
+        raise RuntimeError(f"Integritätsprüfung der Kopie fehlgeschlagen: {ok}")
+
+
+def _redacted_env() -> str:
+    lines = []
+    for line in (ROOT / ".env").read_text().splitlines():
+        k = line.split("=", 1)[0].strip()
+        lines.append(f"{k}=<entfernt: nicht im Backup>" if k in SECRET_KEYS and "=" in line
+                     and line.split("=", 1)[1].strip() else line)
+    return "\n".join(lines) + "\n"
+
+
+def backup(args) -> int:
+    out = backup_dir()
+    out.mkdir(parents=True, exist_ok=True)
+    os.chmod(out, 0o700)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    final = out / f"mayhambot-{stamp}.tar.gz"
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        tar_tmp = td / "b.tar.gz"
+        with tarfile.open(tar_tmp, "w:gz", compresslevel=6) as tar:
+            src = db_path()
+            if src.exists():
+                snap = td / "mayhambot.db"
+                _snapshot_db(src, snap)
+                tar.add(snap, "data/mayhambot.db")
+            if (ROOT / ".env").exists():
+                e = td / "env"
+                e.write_text(_redacted_env())
+                tar.add(e, ".env")
+            # everything else in data/ (models, caches, state), minus live DB files and pids
+            data = ROOT / "data"
+            for f in sorted(data.rglob("*")) if data.exists() else []:
+                rel = f.relative_to(ROOT)
+                if (not f.is_file() or "pids" in rel.parts or f.name.startswith(src.name)
+                        or ".db" in f.name or f.suffix in (".tmp",)):
+                    continue
+                tar.add(f, str(rel))
+            for extra in ("copytrade/wallets.txt",):
+                if (ROOT / extra).exists():
+                    tar.add(ROOT / extra, extra)
+            meta = td / "BACKUP.json"
+            meta.write_text(json.dumps({"created": stamp, "host": platform.node(), "db": str(src)}))
+            tar.add(meta, "BACKUP.json")
+        shutil.move(str(tar_tmp), final)
+    os.chmod(final, 0o600)
+    removed = prune_backups(out)
+    print(f"Backup: {final} ({final.stat().st_size / 1e6:.1f} MB), {removed} alte entfernt")
+    return 0
+
+
+def prune_backups(out: Path) -> int:
+    keep_h, keep_d = cfg("BACKUP_KEEP_HOURS", 48), cfg("BACKUP_KEEP_DAYS", 30)
+    now = time.time()
+    days_kept = set()
+    removed = 0
+    for f in sorted(out.glob("mayhambot-*.tar.gz"), reverse=True):   # newest first
+        age = now - f.stat().st_mtime
+        day = f.name[10:18]
+        if age < keep_h * 3600:
+            continue
+        if age < keep_d * 86400 and day not in days_kept:
+            days_kept.add(day)
+            continue
+        f.unlink()
+        removed += 1
+    return removed
+
+
+def list_backups(args) -> int:
+    for f in sorted(backup_dir().glob("mayhambot-*.tar.gz")):
+        print(f"{f}  {f.stat().st_size / 1e6:7.1f} MB  {ago(f.stat().st_mtime)}")
+    return 0
+
+
+def restore(args) -> int:
+    arc = Path(args.archive).expanduser()
+    if not arc.exists():
+        arc = backup_dir() / args.archive
+    py = ROOT / ".venv" / "bin" / "python"
+    py = str(py) if py.exists() else sys.executable
+    managed = IS_MAC and launchd_loaded(APP_LABEL)
+    if not args.no_stop:
+        if managed:
+            subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{APP_LABEL}"])
+        subprocess.run([py, "mayham.py", "stop"], cwd=ROOT)
+        time.sleep(3)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    dst = db_path()
+    with tempfile.TemporaryDirectory() as td, tarfile.open(arc) as tar:
+        try:
+            tar.extractall(td, filter="data")
+        except TypeError:  # Python without extraction filters (macOS system 3.9)
+            if any(m.name.startswith(("/", "..")) or ".." in Path(m.name).parts for m in tar.getmembers()):
+                raise SystemExit("Archiv enthält unsichere Pfade, Abbruch")
+            tar.extractall(td)
+        td = Path(td)
+        if (td / "data" / "mayhambot.db").exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            for suffix in ("", "-wal", "-shm"):
+                old = Path(str(dst) + suffix)
+                if old.exists():
+                    old.rename(f"{old}.vor-restore-{stamp}")
+            shutil.copy2(td / "data" / "mayhambot.db", dst)
+        for f in (td / "data").rglob("*") if (td / "data").exists() else []:
+            if f.is_file() and f.name != "mayhambot.db":
+                t = ROOT / f.relative_to(td)
+                t.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, t)
+        if (td / ".env").exists() and (args.with_env or not (ROOT / ".env").exists()):
+            if (ROOT / ".env").exists():
+                shutil.copy2(ROOT / ".env", ROOT / f".env.vor-restore-{stamp}")
+            shutil.copy2(td / ".env", ROOT / ".env")
+            os.chmod(ROOT / ".env", 0o600)
+            print(".env wiederhergestellt (SOLANA_PRIVATE_KEY war nicht im Backup, ggf. neu eintragen)")
+    print(f"Wiederhergestellt aus {arc}; alte DB liegt als *.vor-restore-{stamp} daneben")
+    if not args.no_stop:
+        if managed:
+            plist = Path.home() / "Library" / "LaunchAgents" / f"{APP_LABEL}.plist"
+            subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
+        else:
+            subprocess.run([py, "mayham.py", "start"], cwd=ROOT)
+    return 0
+
+
+# ---------------------------------------------------------------- logs
+def rotate_logs(args=None, quiet=False) -> int:
+    """copytruncate: the app keeps its O_APPEND handles, so copy + truncate is safe without a restart."""
+    limit = cfg("LOG_MAX_MB", 20) * 1e6
+    for f in (ROOT / "logs").glob("*.log"):
+        try:
+            if f.stat().st_size < limit:
+                continue
+            for i in range(4, 0, -1):
+                a = f.with_name(f"{f.name}.{i}.gz")
+                if a.exists():
+                    a.replace(f.with_name(f"{f.name}.{i + 1}.gz"))
+            with open(f, "rb") as src, gzip.open(f.with_name(f"{f.name}.1.gz"), "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            with open(f, "r+b") as h:
+                h.truncate(0)
+            f.with_name(f"{f.name}.6.gz").unlink(missing_ok=True)
+            if not quiet:
+                print(f"rotiert: {f.name}")
+        except OSError as e:
+            print(f"rotate {f.name}: {e}")
+    return 0
+
+
+# ---------------------------------------------------------------- status / health
+def health(args) -> int:
+    r = collect()
+    hard = {k: v for k, v in r["problems"].items() if k not in ("backup_old", "on_battery", "disk_low")}
+    if args.json:
+        print(json.dumps(r, ensure_ascii=False, default=str))
+    else:
+        print("OK" if not hard else "\n".join(hard.values()))
+    return 1 if hard else 0
+
+
+def status(args) -> int:
+    r = collect()
+    st = load_state()
+    yes = lambda b: "✅" if b else "❌"  # noqa: E731
+    print("mayhambot Status", dt.datetime.now().strftime("%d.%m.%Y %H:%M"))
+    if r["processes"]:
+        print("Prozesse:   " + "  ".join(f"{n} {yes(ok)}" for n, ok in r["processes"].items()))
+    print(f"Dashboard:  {yes(r['dashboard'])}  http://localhost:{cfg('DASHBOARD_PORT', '8501')}")
+    for k, ts in r["feed"].items():
+        print(f"{k + ':':22s}{ago(ts)}")
+    if IS_MAC:
+        for lbl, what in ((APP_LABEL, "App-Autostart"), ("de.mayhambot.watchdog", "Watchdog"),
+                          ("de.mayhambot.backup", "Backups"), ("de.mayhambot.keepawake", "Wachhalten")):
+            print(f"{what + ':':22s}{yes(launchd_loaded(lbl))}")
+        print(f"{'Strom:':22s}{r['power']}")
+    print(f"{'Watchdog lief:':22s}{ago(st.get('last_run'))}")
+    print(f"{'Letztes Backup:':22s}{r['last_backup'] or 'keins'}"
+          + (f" ({ago(Path(r['last_backup']).stat().st_mtime)})" if r["last_backup"] else ""))
+    print(f"{'Freier Speicher:':22s}{r['free_gb']:.1f} GB" if r["free_gb"] is not None else "")
+    print("Probleme:   " + ("keine" if not r["problems"] else ""))
+    for v in r["problems"].values():
+        print(f"  - {v}")
+    return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="mayhambot Betrieb")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status")
+    h = sub.add_parser("health")
+    h.add_argument("--json", action="store_true")
+    w = sub.add_parser("watchdog")
+    w.add_argument("--no-restart", action="store_true")
+    sub.add_parser("backup")
+    sub.add_parser("list-backups")
+    r = sub.add_parser("restore")
+    r.add_argument("archive")
+    r.add_argument("--with-env", action="store_true", help=".env aus dem Backup übernehmen")
+    r.add_argument("--no-stop", action="store_true", help="App nicht stoppen/starten (z.B. auf neuem Server)")
+    sub.add_parser("rotate-logs")
+    sub.add_parser("test-alert")
+    a = ap.parse_args(argv)
+    fn = {"status": status, "health": health, "watchdog": watchdog, "backup": backup,
+          "list-backups": list_backups, "restore": restore, "rotate-logs": rotate_logs,
+          "test-alert": lambda _: 0 if send_alert("Test: Watchdog-Alarme kommen an ✅") else 1}[a.cmd]
+    return fn(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

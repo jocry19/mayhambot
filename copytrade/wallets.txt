@@ -1,0 +1,1 @@
+# Whale-Wallets, denen der Copy-Trader immer folgt (eine Adresse pro Zeile, # = Kommentar)
