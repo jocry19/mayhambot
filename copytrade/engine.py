@@ -105,6 +105,8 @@ class Engine:
         tracker.DETECTED.update(wslog=0, ws=0, poll=0, gap=0)
         self.rpc.fallbacks = self.rpc.bulk_failures = 0
         tracker.WS_LATENCY.clear()
+        chain.LOG_STATS.clear()
+        chain.LOG_VENUES.clear()
         self.rpc.counts.clear()
         if self.rpc.public:
             self.rpc.public.counts.clear()

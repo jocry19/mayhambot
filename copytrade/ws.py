@@ -46,11 +46,12 @@ class WalletStream:
     rest_until: dict[str, float] = {}
 
     def __init__(self, s: Settings, url: str | list[str] | None = None, events: queue.Queue | None = None,
-                 name: str = "wallet-ws"):
+                 name: str = "wallet-ws", complement: bool = False):
         urls = [url] if isinstance(url, str) else (url or [u for u in s.ws_urls if u != "off"])
         self.urls = urls
         self._idx = 0
         self.name = name
+        self.complement = complement  # second stream: covers what a capped first stream cannot hold
         self.max_wallets = s.ws_max_wallets
         self.events: queue.Queue = events if events is not None else queue.Queue()
         self.connected = False
@@ -97,6 +98,15 @@ class WalletStream:
         if self.connected and not self._kick:
             self._kick = reason
             self.stats["kicks"] += 1
+
+    def _pick(self, wanted: list[str], cap: int) -> list[str]:
+        """Which wallets to subscribe under a cap. The primary stream takes the best `cap`; a complement stream
+        takes the ones the primary cannot hold first and fills up with the best, so two capped connections
+        cover up to twice the cap instead of the same wallets twice."""
+        if len(wanted) <= cap or not self.complement:
+            return wanted[:cap]
+        rest = wanted[cap:][:cap]
+        return wanted[: cap - len(rest)] + rest
 
     def _allow(self) -> bool:
         """Token bucket: SUBS_PER_SEC subscription requests per second, no bursts."""
@@ -172,7 +182,7 @@ class WalletStream:
                 last_sync = time.time()
                 cap = self.caps.get(self.url, self.max_wallets)
                 with self._lock:
-                    want_list, have = list(self._wanted)[:cap], dict(self._subs)
+                    want_list, have = self._pick(list(self._wanted), cap), dict(self._subs)
                 want = set(want_list)
                 busy = {w for _, w in pending.values()}
                 for w in [w for w in want_list if w not in have and w not in busy]:

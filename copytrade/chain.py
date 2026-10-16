@@ -9,6 +9,7 @@ import base64
 import hashlib
 import logging
 import struct
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -299,6 +300,10 @@ def _b58(b: bytes) -> str:
     return "1" * (len(b) - len(b.lstrip(b"\0"))) + out
 
 
+LOG_STATS: Counter = Counter()  # why notifications were (not) read from their logs, since the last report
+LOG_VENUES: Counter = Counter()  # venues of notifications that were not readable from the logs
+
+
 def decode_pump_trade(data_b64: str) -> dict | None:
     """pump.fun TradeEvent (Anchor event in a 'Program data:' log line) -> dict, else None. Layout: disc 8,
     mint 32, sol_amount u64, token_amount u64, is_buy bool, user 32, timestamp i64, virtual reserves 2x u64."""
@@ -319,8 +324,13 @@ def swap_from_logs(logs: list | None, wallet: str, signature: str) -> Swap | Non
     whale buy is known well under a second after the notification. Only the clear case (all of the wallet's
     trade events in one coin and one direction, logs complete); anything else returns None and goes the normal
     getTransaction way. Amounts are the curve's (without pump.fun's ~1 % fee); the full read follows later."""
-    if not logs or any("Log truncated" in (ln or "") for ln in logs):
+    if not logs:
+        LOG_STATS["no_logs"] += 1
         return None
+    if any("Log truncated" in (ln or "") for ln in logs):
+        LOG_STATS["truncated"] += 1
+        return None
+    programs: set[str] = set()
     evs, stack = [], []  # program invocation stack from the "invoke"/"success"/"failed" lines
     for ln in logs:
         if not isinstance(ln, str):
@@ -328,6 +338,7 @@ def swap_from_logs(logs: list | None, wallet: str, signature: str) -> Swap | Non
         parts = ln.split()
         if len(parts) >= 3 and parts[0] == "Program" and parts[2] == "invoke":
             stack.append(parts[1])
+            programs.add(parts[1])
         elif len(parts) >= 3 and parts[0] == "Program" and parts[2] in ("success", "failed"):
             if stack and stack[-1] == parts[1]:
                 stack.pop()
@@ -340,11 +351,21 @@ def swap_from_logs(logs: list | None, wallet: str, signature: str) -> Swap | Non
             ev = decode_pump_trade(ln[14:].strip())
             if ev and ev["user"] == wallet:
                 evs.append(ev)
-    if not evs or len({(e["mint"], e["is_buy"]) for e in evs}) != 1:
+    if not evs:
+        # which venues the unread notifications went through (tells whether another decoder would pay off)
+        seen = {DEX_PROGRAMS[p] for p in programs if p in DEX_PROGRAMS}
+        LOG_STATS["pump_no_event" if PUMP_PROGRAM in programs else "not_pump"] += 1
+        for name in seen or {"other"}:
+            LOG_VENUES[name] += 1
+        return None
+    if len({(e["mint"], e["is_buy"]) for e in evs}) != 1:
+        LOG_STATS["mixed"] += 1
         return None
     sol, tok = sum(e["sol"] for e in evs), sum(e["tokens"] for e in evs)
     if tok <= 0 or sol < 0.001:
+        LOG_STATS["dust"] += 1
         return None
+    LOG_STATS["read"] += 1
     last = evs[-1]  # curve state after the wallet's last trade: price * 1e9 supply = market cap
     mcap = last["v_sol"] / last["v_tok"] * 1e9 if last["v_tok"] else 0.0
     return Swap(signature=signature, wallet=wallet, block_time=int(last["ts"] or 0),

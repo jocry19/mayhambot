@@ -638,3 +638,24 @@ def test_watchdog_does_not_count_misses_before_the_own_subscription():
     for i in range(6):
         a.recent[f"s{i}"] = (now - 60 - i, W)
     assert w.watchdog(now) == []
+
+
+def test_two_capped_streams_cover_more_wallets_together():
+    ws_ = [f"w{i}" for i in range(150)]
+    a = ws.WalletStream(Settings(), url="ws://x")
+    b = ws.WalletStream(Settings(), url="ws://x", complement=True)
+    pa, pb = a._pick(ws_, 80), b._pick(ws_, 80)
+    assert pa == ws_[:80] and pb[:10] == ws_[:10] and pb[10:] == ws_[80:]
+    assert len(set(pa) | set(pb)) == 150  # instead of 80 twice
+    assert b._pick(ws_[:50], 80) == ws_[:50]  # no cap pressure: both watch everything
+
+
+def test_unread_notifications_are_counted_by_reason_and_venue():
+    chain.LOG_STATS.clear()
+    chain.LOG_VENUES.clear()
+    chain.swap_from_logs(None, WHALE, "s")
+    chain.swap_from_logs(["Program pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA invoke [1]",
+                          "Program pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA success"], WHALE, "s")
+    chain.swap_from_logs(_logs(_trade_log()), WHALE, "s")
+    assert chain.LOG_STATS == {"no_logs": 1, "not_pump": 1, "read": 1}
+    assert chain.LOG_VENUES == {"pumpswap": 1}

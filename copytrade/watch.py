@@ -13,7 +13,7 @@ import queue
 import threading
 import time
 
-from . import store, tracker, ws
+from . import chain, store, tracker, ws
 from .config import Settings
 
 log = logging.getLogger("copytrade.watch")
@@ -41,7 +41,8 @@ class Watcher:
         urls = [u for u in s.ws_urls if u != "off"]
         n = max(1, min(s.ws_parallel, len(urls))) if urls else 0
         # stream i starts on endpoint i and rotates through the rest on drops
-        self.streams = [ws.WalletStream(s, url=urls[i:] + urls[:i], events=self.events, name=f"wallet-ws-{i}")
+        self.streams = [ws.WalletStream(s, url=urls[i:] + urls[:i], events=self.events, name=f"wallet-ws-{i}",
+                                     complement=i > 0)
                         for i in range(n)]
         self.handled = 0
         self.fast = 0  # swaps read straight from the notification logs (no getTransaction)
@@ -81,8 +82,12 @@ class Watcher:
                  f"({len(st.covered())} wallets, {st.stats['connects']} connects, {st.stats['kicks']} watchdog)"
                  for st in self.streams]
         v = tracker.VERIFY
+        why = ", ".join(f"{k} {n}" for k, n in chain.LOG_STATS.most_common())
+        venues = ", ".join(f"{k} {n}" for k, n in chain.LOG_VENUES.most_common(6))
         return ("; ".join(parts) or "off") + (f"; {self.fast} read from logs, verified {v['checked']}"
-                                              f" (corrected {v['corrected']}, rejected {v['rejected']})")
+                                              f" (corrected {v['corrected']}, rejected {v['rejected']})"
+                                              + (f"; log reading: {why}" if why else "")
+                                              + (f"; unread venues: {venues}" if venues else ""))
 
     # ------------------------------------------------------------------ worker
     def _work(self) -> None:
