@@ -98,7 +98,18 @@ class Settings:
     # --- entry filters ------------------------------------------------------
     min_liquidity_usd: float = field(default_factory=lambda: _f("CT_MIN_LIQUIDITY_USD", 15000))
     max_token_age_h: float = field(default_factory=lambda: _f("CT_MAX_TOKEN_AGE_H", 72))
-    max_entry_delay_s: float = field(default_factory=lambda: _f("CT_MAX_ENTRY_DELAY_S", 90))
+    # 30 s: copies later than 30 s after the whale lost 12 % per trade on paper (10/2026), within 30 s 3 %
+    max_entry_delay_s: float = field(default_factory=lambda: _f("CT_MAX_ENTRY_DELAY_S", 30))
+    # wash trading (safety/ check "wash": share of volume bought AND sold by the same wallets): no copy above
+    max_wash_share: float = field(default_factory=lambda: _f("CT_MAX_WASH_SHARE", 0.30))
+    # at most this many whale-mode copies per coin within 6 h (all wallets together; 0 = no limit)
+    max_copies_per_coin: int = field(default_factory=lambda: _i("CT_MAX_COPIES_PER_COIN", 2))
+    # paper only: copy unranked whales at half size so the ranking learns faster (off: every whale buy is
+    # still measured and replayed by learn.py from ct_buy_outcomes, so learning does not need these trades)
+    explore_unranked: bool = field(default_factory=lambda: _b("CT_EXPLORE_UNRANKED", False))
+    # copy a ranked whale only if its past buys (ct_evals, our current exits, calibrated costs) made money
+    require_edge: bool = field(default_factory=lambda: _b("CT_REQUIRE_EDGE", True))
+    edge_min_n: int = field(default_factory=lambda: _i("CT_EDGE_MIN_N", 8))
     max_price_run_since_whale: float = field(default_factory=lambda: _f("CT_MAX_RUN_SINCE_WHALE", 0.15))
 
     # --- exits ----------------------------------------------------------------

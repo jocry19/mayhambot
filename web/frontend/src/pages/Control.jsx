@@ -33,6 +33,7 @@ const MODES = [
 const STRATS = [
   ["whale", "Modus 1 · Wal-Pumps kopieren", "Kauft direkt nach den Walen, deren Käufe die besten Copy-Trading-Pumps auslösen, und verkauft in den ersten Pump."],
   ["signal", "Modus 2 · Smart-Money-Signale kaufen", "Kauft die besten Smart-Money-Signale mit deinem Preset. Ist das Modell trainiert, entscheidet dessen Score und die Note A–E skaliert die Größe."],
+  ["launch", "Modus 3 · Launch-Sniper-Käufe", "Kauft die Launches, die der Sniper nach Bundle- und Insider-Prüfung einsteigen würde, mit dessen Ausstiegen (Stop, Trailing ab TP1, Haltezeit). Stop nie weiter als dein Preset."],
 ];
 const FIELDS = [
   ["size_sol", "SOL pro Trade", "", 1],
@@ -104,7 +105,7 @@ function PresetEditor({ ctl }) {
         <label className="fld">Speichern als<input className="in" value={name} onChange={(e) => setName(e.target.value)} /></label>
         <label className="fld">Gleich verwenden für
           <select className="in" value={useFor} onChange={(e) => setUseFor(e.target.value)}>
-            <option value="">nicht zuweisen</option><option value="whale">Modus 1</option><option value="signal">Modus 2</option>
+            <option value="">nicht zuweisen</option><option value="whale">Modus 1</option><option value="signal">Modus 2</option><option value="launch">Modus 3</option>
           </select>
         </label>
         <span className="sp" />

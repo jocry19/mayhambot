@@ -54,6 +54,8 @@ TRAIN_SHARE = 0.7
 GAIN_CLIP = (-0.6, 2.0)
 RETRY_S = 2 * 86400  # entries without candles are retried this long, then recorded as unevaluable
 TRADE_WEIGHT = 2  # our own trades count double vs. hypothetical whale buys / signals
+CALIB_MIN_TRADES = 10  # own trades needed before the paper/sim cost gap is applied
+CALIB_MAX_EXTRA = 0.10  # never add more than 10 %-points of extra cost per round trip
 
 
 def init(conn) -> None:
@@ -261,7 +263,7 @@ def _rows(conn, strategy: str, wallet: str | list[str] | None = None,
     return out
 
 
-def _means(rows: Sequence[dict], n_var: int) -> list[float]:
+def _means(rows: Sequence[dict], n_var: int, extra_cost: float = 0.0) -> list[float]:
     tot = [0.0] * n_var
     wsum = sum(r["w"] for r in rows) or 1
     for r in rows:
@@ -271,7 +273,54 @@ def _means(rows: Sequence[dict], n_var: int) -> list[float]:
         for i, x in enumerate(g):
             if x is not None:
                 tot[i] += r["w"] * max(GAIN_CLIP[0], min(GAIN_CLIP[1], x))
-    return [t / wsum for t in tot]
+    return [t / wsum - extra_cost for t in tot]
+
+
+def extra_cost(conn, strategy: str) -> float:
+    """Cost the 1-minute simulation misses, measured on our own closed trades: median(simulated - actual).
+
+    The grid assumes sim.ROUNDTRIP_COST (3 %); real paper fills (Jupiter quote, adverse slippage both ways,
+    priority fees) cost more (10/2026: 6.8 % for a buy sold one second later). 0 until CALIB_MIN_TRADES."""
+    try:
+        rows = conn.execute("SELECT sim_actual - actual_gain FROM ct_evals WHERE kind='trade' AND strategy=? "
+                            "AND actual_gain IS NOT NULL AND sim_actual IS NOT NULL", (strategy,)).fetchall()
+    except Exception:
+        return 0.0
+    gaps = sorted(r[0] for r in rows)
+    if len(gaps) < CALIB_MIN_TRADES:
+        return 0.0
+    mid = len(gaps) // 2
+    med = gaps[mid] if len(gaps) % 2 else (gaps[mid - 1] + gaps[mid]) / 2
+    return max(0.0, min(CALIB_MAX_EXTRA, med))
+
+
+def wallet_edge(conn, wallet: str) -> dict:
+    """What copying this whale (or its cluster) with our current exits made on its past buys, after costs.
+
+    Uses every replayed buy in ct_evals (whale buys and our own trades), the variant closest to the
+    parameters the bot would use now, and the calibrated extra cost. Only the past is used, so gating on
+    mean > 0 is a walk-forward decision. -> {"n", "mean", "variant"}"""
+    from . import store
+
+    ws = [wallet]
+    ent = store.entity(conn, wallet)
+    if ent.startswith("cluster:"):
+        try:
+            ws = [r[0] for r in conn.execute("SELECT address FROM wallets WHERE cluster_id=?", (ent[8:],))] or ws
+        except Exception:
+            pass
+    variants = sim.GRID
+    idx = sim.nearest(current_params(conn, "whale", wallet), variants)
+    q = ",".join("?" * len(ws))
+    vals = []
+    for r in conn.execute(f"SELECT gains FROM ct_evals WHERE strategy='whale' AND grid_version=? AND gains!='[]' "
+                          f"AND kind IN ('whale_buy','trade') AND wallet IN ({q})", (sim.GRID_VERSION, *ws)):
+        g = json.loads(r[0])
+        if len(g) == len(variants) and g[idx] is not None:
+            vals.append(max(GAIN_CLIP[0], min(GAIN_CLIP[1], g[idx])))
+    cost = extra_cost(conn, "whale")
+    mean = (sum(vals) / len(vals) - cost) if vals else 0.0
+    return {"n": len(vals), "mean": mean, "variant": variants[idx].key(), "extra_cost": cost}
 
 
 def _allowed(variants: Sequence[sim.Variant], cap_sl: float, cap_hold: float) -> list[int]:
@@ -320,18 +369,21 @@ def tune_scope(conn, strategy: str, rows: list[dict], scope: str, min_n: int, mi
     allowed = _allowed(variants, pre.stop_loss, max(pre.max_hold_min, 15))
     if not allowed:
         return None
-    mtr, mte = _means(train, len(variants)), _means(test, len(variants))
+    cost = extra_cost(conn, strategy)
+    mtr, mte = _means(train, len(variants), cost), _means(test, len(variants), cost)
     best = max(allowed, key=lambda i: mtr[i])
     cur = current_params(conn, strategy, wallet)
     base = sim.nearest(cur, variants)
-    accepted = int(mte[best] > mte[base] + MIN_IMPROVEMENT and mte[best] > 0)
+    # in the black on the older AND the newer part, and better than now out of sample; a variant that loses
+    # money in training is the least bad of 1296, not an edge (10/2026: version 9 had train -0.8 %)
+    accepted = int(mte[best] > mte[base] + MIN_IMPROVEMENT and mte[best] > 0 and mtr[best] > 0)
     params = variants[best].as_dict()
     if scope == "mode":
         params["block"] = _learn_filters(rows, best, split)
     trades = [r for r in rows if r["kind"] == "trade" and r["actual"] is not None and r["sim_actual"] is not None]
     gap = (sum(r["actual"] - r["sim_actual"] for r in trades) / len(trades)) if trades else None
     notes = {"variants": len(variants), "baseline": variants[base].key(), "best": variants[best].key(),
-             "calibration_gap": gap, "n_trades": len(trades),
+             "calibration_gap": gap, "extra_cost": cost, "n_trades": len(trades),
              "kinds": {k: sum(1 for r in rows if r["kind"] == k) for k in ("trade", "whale_buy", "signal")}}
     last = conn.execute(
         "SELECT params, accepted FROM ct_param_versions WHERE strategy=? AND scope=? ORDER BY id DESC LIMIT 1",
@@ -400,10 +452,10 @@ def params_for(conn, strategy: str, wallet: str | None = None, apply_caps: bool 
             from . import store
 
             r = conn.execute("SELECT id, params FROM ct_param_versions WHERE strategy=? AND scope=? AND active=1 "
-                             "ORDER BY id DESC LIMIT 1", (strategy, store.entity(conn, wallet))).fetchone()
-        if r is None:
+                             "AND train_gain > 0 ORDER BY id DESC LIMIT 1", (strategy, store.entity(conn, wallet))).fetchone()
+        if r is None:  # versions accepted before training had to be in the black are ignored
             r = conn.execute("SELECT id, params FROM ct_param_versions WHERE strategy=? AND scope='mode' AND active=1 "
-                             "ORDER BY id DESC LIMIT 1", (strategy,)).fetchone()
+                             "AND train_gain > 0 ORDER BY id DESC LIMIT 1", (strategy,)).fetchone()
     except Exception:
         return None
     if r is None:

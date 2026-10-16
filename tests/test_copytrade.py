@@ -77,7 +77,7 @@ def test_simulate_exit_stop_first():
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    s = Settings(db_path=tmp_path / "t.db")
+    s = Settings(db_path=tmp_path / "t.db", explore_unranked=True)  # paper exploration path
     conn = store.connect(s)
     snap = market.PairSnapshot(MINT, "MEME", "pool", "raydium", 0.0003, 3e-6, 80_000, 1e6, 5000, 30000,
                                10, 2, 120, 1.0, 5.0, int(time.time() * 1000) - 3600_000, time.time())
@@ -431,3 +431,121 @@ def test_wallet_polls_use_free_rpc_and_fall_back(monkeypatch):
     rpc.poll_signatures(W)  # public RPC fails -> main RPC
     assert urls[-1] == "https://mainnet.helius-rpc.com/" and rpc.poll_fallbacks == 1
     assert chain.Rpc(Settings(rpc_url="https://mainnet.helius-rpc.com/?api-key=k", poll_rpc_url="off")).poller is None
+
+
+# ---------------------------------------------------------------- entry gates from the 10/2026 paper review
+def _rank(conn, samples=10, score=0.5):
+    conn.execute("INSERT OR REPLACE INTO ct_wallet_rank(address, samples, hit_rate, score, take_profit, max_hold_min, "
+                 "updated_at) VALUES (?,?,?,?,?,?,?)", (W, samples, 0.5, score, 0.4, 60, int(time.time())))
+
+
+def _evals(conn, gain, n=10, kind="whale_buy"):
+    import json as _json
+
+    from copytrade import sim
+    for i in range(n):
+        conn.execute("INSERT INTO ct_evals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (kind, f"e{gain}{i}", "whale", W, MINT, int(time.time()) - 9000 + i, sim.GRID_VERSION,
+                      _json.dumps([gain] * len(sim.GRID)), None, None, "{}", int(time.time())))
+
+
+def test_unranked_whales_only_measured_without_exploration(env):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path), ex)
+    assert st.on_whale_buy(whale_buy()) is None
+    msgs = [r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'")]
+    assert any("nur mitgemessen" in m for m in msgs)
+
+
+def test_ranked_whale_needs_edge_after_costs(env):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path), ex)
+    _rank(conn)
+    _evals(conn, -0.05)
+    assert st.on_whale_buy(whale_buy()) is None  # its past buys lost money with our exits
+    assert any("Vorteil" in r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'"))
+    conn.execute("DELETE FROM ct_evals")
+    _evals(conn, 0.12)
+    assert st.on_whale_buy(whale_buy())  # proven: copied at full size
+    p = conn.execute("SELECT * FROM ct_positions").fetchone()
+    assert p["size_sol"] == pytest.approx(s.position_size_sol)
+
+
+def test_extra_cost_from_own_trades_lowers_the_edge(env):
+    from copytrade import learn
+    s, conn, ex, state = env
+    _rank(conn)
+    _evals(conn, 0.02)
+    for i in range(12):  # paper fills 4 %-points worse than the simulation said
+        conn.execute("INSERT INTO ct_evals(kind, ref, strategy, wallet, mint, ts, grid_version, gains, actual_gain, "
+                     "sim_actual, features, created_at) VALUES ('trade',?,?,?,?,?,1,'[]',?,?,'{}',0)",
+                     (str(i), "whale", "other", MINT, i, -0.07, -0.03))
+    assert learn.extra_cost(conn, "whale") == pytest.approx(0.04)
+    e = learn.wallet_edge(conn, W)
+    assert e["n"] == 10 and e["mean"] == pytest.approx(0.02 - 0.04)
+
+
+def test_wash_traded_coin_and_coin_limit(env, monkeypatch):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    monkeypatch.setattr(strategy, "wash_share", lambda c, m: 0.4)
+    assert st.on_whale_buy(whale_buy()) is None
+    assert any("Wash-Trading" in r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'"))
+    monkeypatch.setattr(strategy, "wash_share", lambda c, m: 0.1)
+    now = int(time.time())
+    for i in range(s.max_copies_per_coin):
+        conn.execute("INSERT INTO ct_positions(mode, strategy, wallet, mint, opened_at, status) "
+                     "VALUES ('paper','whale',?,?,?,'closed')", (f"w{i}", MINT, now - 60))
+    assert st.on_whale_buy(whale_buy()) is None
+    assert any("in diesem Coin" in r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'"))
+
+
+def test_learned_version_that_lost_in_training_is_ignored(env):
+    import json as _json
+
+    from copytrade import learn
+    s, conn, ex, state = env
+    conn.execute("INSERT INTO ct_param_versions(ts, strategy, scope, params, n_train, n_test, train_gain, test_gain, "
+                 "baseline_test_gain, accepted, active) VALUES (0,'whale','mode',?,200,90,-0.008,0.003,-0.05,1,1)",
+                 (_json.dumps({"delay_s": 15, "take_profit": 0.4, "stop_loss": 0.1, "trail_activate": 0.15,
+                               "trail_drawdown": 0.08, "max_hold_min": 45, "inflow_exit": 0}),))
+    assert learn.params_for(conn, "whale") is None
+
+
+def _launch(conn, decided_ts=None, mcap_usd=1e6):
+    conn.execute("CREATE TABLE IF NOT EXISTS sniper_launches (mint TEXT PRIMARY KEY, source TEXT, decided_ts INTEGER, "
+                 "decision TEXT, score REAL, risk REAL, mcap_decide_usd REAL)")
+    conn.execute("INSERT OR REPLACE INTO sniper_launches(mint, source, decided_ts, decision, score, risk, mcap_decide_usd) "
+                 "VALUES (?,?,?,?,?,?,?)", (MINT, "pumpportal", decided_ts or int(time.time()), "enter", 55, 20, mcap_usd))
+    return conn.execute("SELECT * FROM sniper_launches WHERE mint=?", (MINT,)).fetchone()
+
+
+def test_launch_mode_off_by_default_then_buys_sniper_entries(env):
+    from copytrade import control
+    from copytrade.engine import follow_launches
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    assert control.mode(conn, "launch") == "off"
+    _launch(conn)
+    assert follow_launches(conn, st) == 0 and conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0] == 0
+    control.set_mode(conn, "launch", "auto")
+    assert follow_launches(conn, st) == 0  # first start only remembers where it is
+    _launch(conn, decided_ts=int(time.time()) + 1)
+    assert follow_launches(conn, st) == 1
+    p = conn.execute("SELECT * FROM ct_positions WHERE strategy='launch'").fetchone()
+    pre = control.preset(conn, "launch")
+    ex_ = strategy.sniper_exits()
+    assert p and p["mode"] == "paper" and p["size_sol"] == pytest.approx(pre.size_sol)
+    assert p["stop_loss"] == pytest.approx(min(ex_["stop_loss"], pre.stop_loss))  # never wider than the preset
+    assert p["trail_activate"] == pytest.approx(ex_["trail_activate"])
+
+
+def test_launch_mode_skips_old_or_run_up_launches(env):
+    from copytrade import control
+    s, conn, ex, state = env
+    control.set_mode(conn, "launch", "auto")
+    st = strategy.Strategy(conn, s, ex)
+    assert st.on_launch(_launch(conn, decided_ts=int(time.time()) - 600)) is None
+    assert st.on_launch(_launch(conn, mcap_usd=0.5e6)) is None  # snapshot fdv 1e6 = +100 % since the decision
+    msgs = [r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'")]
+    assert any("zu alt" in m for m in msgs) and any("Sniper-Entscheidung schon" in m for m in msgs)

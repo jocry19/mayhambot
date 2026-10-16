@@ -154,6 +154,7 @@ class Engine:
                 try:
                     store.retry_locked(strat.process_commands)
                     store.retry_locked(follow_signals, conn, strat)
+                    store.retry_locked(follow_launches, conn, strat)
                     store.retry_locked(strat.update)
                     if time.time() - last_eq > 60:
                         store.retry_locked(strat.equity_snapshot)
@@ -216,6 +217,28 @@ def follow_signals(conn, strat: Strategy) -> int:
         except Exception as e:
             log.warning("signal %s failed: %s", sig["id"], e)
         store.set_state(conn, "last_signal_id", sig["id"])
+    return len(rows)
+
+
+def follow_launches(conn, strat: Strategy) -> int:
+    """Mode 3: hand launches the sniper entered (sniper_launches.decision='enter') to the strategy."""
+    from . import control
+
+    if control.mode(conn, "launch") == "off":
+        return 0
+    try:
+        last = store.get_state(conn, "last_launch_ts")
+        if last is None:  # first start: do not buy old launches
+            r = conn.execute("SELECT COALESCE(MAX(decided_ts), 0) FROM sniper_launches").fetchone()
+            store.set_state(conn, "last_launch_ts", str(r[0]))
+            return 0
+        rows = conn.execute("SELECT * FROM sniper_launches WHERE decision='enter' AND decided_ts > ? "
+                            "ORDER BY decided_ts", (int(last),)).fetchall()
+    except Exception:  # sniper/ not installed or its table missing
+        return 0
+    for row in rows:
+        store.set_state(conn, "last_launch_ts", str(row["decided_ts"]))
+        strat.on_launch(row)
     return len(rows)
 
 

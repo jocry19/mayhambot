@@ -1,10 +1,11 @@
 """Operating modes, real-money presets and manual commands.
 
 Everything here lives in the database, so the dashboard, the terminal (cli/) and
-the trading loop share it without restarts. Two strategies:
+the trading loop share it without restarts. Three strategies:
 
   whale   mode 1: copy the whales that trigger the best copy-trading pumps, sell into the first pump
   signal  mode 2: buy the best smart-money signals of the signal engine with your preset
+  launch  mode 3: buy the launches the sniper decided to enter (sniper_launches.decision='enter'), sniper exits
 
 Each strategy has an operating mode:
   off     nothing
@@ -21,12 +22,12 @@ import json
 import time
 from dataclasses import asdict, dataclass, fields
 
-STRATEGIES = ("whale", "signal")
+STRATEGIES = ("whale", "signal", "launch")
 MODES = ("off", "manual", "semi", "auto")
 MODE_LABELS = {"off": "Aus", "manual": "Manuell (nur Signale)", "semi": "Halbautomatisch (Bot kauft, du verkaufst)",
                "auto": "Automatisch (Bot kauft und verkauft)"}
 STRATEGY_LABELS = {"whale": "Modus 1 · Wal-Pumps kopieren", "signal": "Modus 2 · Smart-Money-Signale kaufen",
-                   "manual": "Manuell gekauft"}
+                   "launch": "Modus 3 · Launch-Sniper-Käufe", "manual": "Manuell gekauft"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ct_control (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER);
@@ -83,10 +84,12 @@ BUILTIN = {
 
 DEFAULTS = {
     "mode:whale": "auto", "mode:signal": "auto",  # in paper mode everything trades, so the stats fill up
-    "preset:whale": "standard", "preset:signal": "standard",
-    "live:whale": "0", "live:signal": "0",
+    "mode:launch": "off",  # sniper/ already paper-trades every launch it enters; this mode is for real buys later
+    "preset:whale": "standard", "preset:signal": "standard", "preset:launch": "vorsichtig",
+    "live:whale": "0", "live:signal": "0", "live:launch": "0",
     "paused": "0",
     "autotune:whale": "1", "autotune:signal": "1",  # self-learning exits/filters (copytrade/learn.py)
+    "autotune:launch": "0",  # exits come from sniper/ (SNIPER_* settings), not from the grid
 }
 
 

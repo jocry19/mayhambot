@@ -147,7 +147,7 @@ export const short = (a, k = 4) => (a ? `${a.slice(0, k)}…${a.slice(-k)}` : "�
 export const sign = (v) => (v == null ? "" : v > 0 ? "up" : v < 0 ? "down" : "");
 export const TIER_LABEL = { ultra: "Ultra Smart", smart: "Smart", good: "Good", other: "Andere" };
 export const TIERS = ["ultra", "smart", "good"];
-export const STRAT_LABEL = { whale: "Modus 1 · Wal-Pumps", signal: "Modus 2 · Signale", manual: "Manuell" };
+export const STRAT_LABEL = { whale: "Modus 1 · Wal-Pumps", signal: "Modus 2 · Signale", launch: "Modus 3 · Launches", manual: "Manuell" };
 export const MODE_LABEL = { off: "Aus", manual: "Manuell", semi: "Halbautomatisch", auto: "Automatisch" };
 export const ALGO_LABEL = { gbm: "Gradient Boosting", logistic: "Logistische Regression", prior: "Startannahme", heuristic: "Heuristik" };
 export const DROP_LABEL = { tiers: "ohne Tier-Eingänge", crowd: "ohne Crowd-Eingänge", price_time: "ohne Preis/Zeit-Eingänge" };

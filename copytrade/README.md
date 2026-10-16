@@ -169,7 +169,7 @@ slippage_bps` (Anteile: 0.2 = 20 %; `min_score`, `min_smart_buyers`, `max_signal
    Wallets mit vielen Daten und negativem Score werden abgeschaltet, Bots (>80 Transaktionen in 15 min) ignoriert.
 3. **Kopieren**, wenn: Wal gut bewertet, Kauf jünger als `CT_MAX_ENTRY_DELAY_S`, Preis seit dem Wal nicht schon
    mehr als `CT_MAX_RUN_SINCE_WHALE` gestiegen, Copy-Ansturm noch nicht da, Liquidität ≥ `CT_MIN_LIQUIDITY_USD`,
-   Risiko-Limits frei. Im Papiermodus werden unbewertete Wale mit halber Größe "erkundet", damit das Ranking schneller lernt.
+   Risiko-Limits frei. Unbewertete Wale werden nur mitgemessen (mit `CT_EXPLORE_UNRANKED=true` im Papiermodus mit halber Größe "erkundet").
 4. **Verkaufen** in den ersten Pump: Ziel = `CT_TP_FRACTION` × typischer erster Pump dieses Wals (begrenzt auf
    `CT_TP_MIN`…`CT_TP_MAX`), oder wenn der Copy-Ansturm abflaut (5-min-Käufe 40 % unter Spitze) und wir im Plus sind,
    Trailing-Stop, Stop-Loss, Wal verkauft, oder die typische Zeit bis zum Gipfel ist um. `CT_EXIT_MODE=target` nimmt
@@ -184,6 +184,33 @@ Die Note A–E skaliert die Größe (A 1,5×, B 1,2×, C 1×, D 0,6×, E 0,4×).
 `max_signal_age_s`, Liquidität/Market Cap im Preset-Rahmen, Preis seit dem Signal nicht schon +50 %.
 Ausstieg: Ziel, Stop, Trailing, Zeit, oder „Smart Money steigt aus“ (die Wallets des Signals haben ≥ 50 % verkauft).
 Ultra- und Smart-Wallets des Modells werden außerdem als Wale für Modus 1 beobachtet.
+
+## Modus 3 · Launch (Sniper-Käufe)
+
+Liest neue Zeilen von `sniper_launches` mit `decision='enter'` (der Sniper hat nach Bundle-, Insider- und
+Safety-Prüfung eingestiegen, im Papiermodus) und kauft sie mit dem Preset des Modus (Standard `vorsichtig`).
+Ausstiege aus den Sniper-Einstellungen: Stop `SNIPER_STOP_PCT`, Trailing-Stop ab `SNIPER_TP1_PCT` mit
+`SNIPER_TRAIL_PCT`, Haltezeit `SNIPER_MAX_HOLD_MIN`, Ziel 3 × TP1; Stop nie weiter, Haltezeit nie länger als das
+Preset. Teilverkauf bei TP1 und Ausstieg bei Insider-Verkäufen bleiben im Sniper. Nicht gekauft wird, wenn die
+Entscheidung älter als 60 s ist oder der Market Cap seither um mehr als 30 % gestiegen ist.
+Standard: **aus** (`mode:launch`), kein Selbstlernen. Echtgeld nur mit `.env`-Hauptschalter und `live:launch`.
+
+## Einstiegs-Tore (Auswertung der ersten 55 Papier-Trades, 10/2026)
+
+Die ersten 55 Trades (alle Modus 1, alle „Erkundung“ unbewerteter Wale) verloren 0,93 SOL: im Schnitt −6,7 %
+je Trade, genau die Kosten eines Kaufs mit sofortigem Verkauf (6,8 %); 33 Trades lagen in einem Wash-Trading-Coin,
+36 endeten nach im Mittel 2 min mit dem Verkauf des Wals. Auf 410 nachgespielten Wal-Käufen war mit echten
+Kosten keine der 1296 Varianten im Plus. Daher:
+
+- `CT_EXPLORE_UNRANKED=false`: unbewertete Wale werden nur mitgemessen (ct_buy_outcomes → ct_evals), nicht gekauft.
+- `CT_REQUIRE_EDGE=true`: ein bewerteter Wal (oder sein Cluster) wird nur kopiert, wenn seine früheren Käufe mit den
+  aktuellen Ausstiegen nach kalibrierten Kosten im Plus lagen (`learn.wallet_edge`, mindestens `CT_EDGE_MIN_N`=8).
+- `CT_MAX_WASH_SHARE=0.30`: kein Kauf, wenn der Rug-Schutz (Prüfung „wash“) mehr Hin-und-her-Volumen misst.
+- `CT_MAX_COPIES_PER_COIN=2`: höchstens 2 Wal-Kopien je Coin in 6 h, egal welcher Wal.
+- `CT_MAX_ENTRY_DELAY_S=30` (vorher 90): später als 30 s nach dem Wal lagen die Trades bei −12 %, davor bei −3 %.
+- Lernen: `learn.extra_cost` = Median(Simulation − tatsächlich) der eigenen Trades (ab 10, höchstens 10 %-Punkte)
+  wird von jeder Variante abgezogen; übernommen wird eine Variante nur, wenn sie im Training **und** im Test im
+  Plus liegt. Aktive Versionen mit Trainingsverlust werden ignoriert.
 
 ## Rug-Schutz (safety/)
 
@@ -262,8 +289,13 @@ CT_ASSUMED_LATENCY_S=15
 # Einstieg
 CT_MIN_LIQUIDITY_USD=15000
 CT_MAX_TOKEN_AGE_H=72
-CT_MAX_ENTRY_DELAY_S=90
+CT_MAX_ENTRY_DELAY_S=30
 CT_MAX_RUN_SINCE_WHALE=0.15
+CT_MAX_WASH_SHARE=0.30
+CT_MAX_COPIES_PER_COIN=2
+CT_EXPLORE_UNRANKED=false
+CT_REQUIRE_EDGE=true
+CT_EDGE_MIN_N=8
 
 # Ausstieg
 CT_EXIT_MODE=first_pump    # first_pump | target | inflow_peak

@@ -31,7 +31,9 @@ from .config import Settings
 
 log = logging.getLogger("copytrade.strategy")
 
-EXPLORE_UNRANKED = True  # paper only: copy unranked whales at half size so the ranking learns faster
+COIN_WINDOW_S = 6 * 3600  # window of Settings.max_copies_per_coin
+LAUNCH_MAX_RUN = 0.3  # mode 3: market cap up more than this since the sniper decided -> not bought
+LAUNCH_MAX_AGE_S = 60  # mode 3: a sniper decision older than this is not bought (launch prices move in seconds)
 EXIT_NAMES = {"target": "Ziel erreicht", "inflow_peak": "Copy-Ansturm vorbei", "trail": "Trailing-Stop",
               "stop": "Stop-Loss", "time": "Zeit abgelaufen", "whale": "Wal verkauft", "no_market": "kein Markt",
               "smart_exit": "Smart Money steigt aus", "manual": "von dir verkauft"}
@@ -141,11 +143,21 @@ class Strategy:
         rank = ranking.wallet_rank(self.conn, swap.wallet)
         size, explore = p.size_sol, False
         if rank is None or rank["samples"] < s.min_wallet_samples:
-            if not (EXPLORE_UNRANKED and ex.mode == "paper"):
-                return self._skip("whale", swap.mint, "Wallet noch nicht bewertet", wallet=swap.wallet)
+            if not (s.explore_unranked and ex.mode == "paper"):
+                return self._skip("whale", swap.mint, "Wallet noch nicht bewertet (nur mitgemessen)",
+                                  wallet=swap.wallet)
             explore, size = True, size * 0.5
         elif rank["score"] < s.min_wallet_score:
             return self._skip("whale", swap.mint, f"Wallet-Score zu niedrig ({rank['score'] * 100:.1f})",
+                              wallet=swap.wallet)
+        elif s.require_edge:
+            edge = learn.wallet_edge(self.conn, swap.wallet)
+            if edge["n"] < s.edge_min_n or edge["mean"] <= 0:
+                return self._skip("whale", swap.mint,
+                                  f"Vorteil nach Kosten nicht nachgewiesen ({edge['n']} Käufe, "
+                                  f"Ø {edge['mean']:+.1%}; nur mitgemessen)", wallet=swap.wallet, edge=edge)
+        if s.max_copies_per_coin and self._coin_copies(swap.mint) >= s.max_copies_per_coin:
+            return self._skip("whale", swap.mint, f"schon {s.max_copies_per_coin}× in diesem Coin kopiert (6 h)",
                               wallet=swap.wallet)
 
         snap = market.snapshot(swap.mint, s)
@@ -166,6 +178,10 @@ class Strategy:
         safe, why = self._safety("whale", swap.mint)
         if why:
             return self._skip("whale", swap.mint, why, snap, wallet=swap.wallet, safety=safe)
+        wash = wash_share(self.conn, swap.mint)
+        if wash is not None and wash >= s.max_wash_share:
+            return self._skip("whale", swap.mint, f"Wash-Trading: {wash:.0%} des Volumens hin und her", snap,
+                              wallet=swap.wallet)
 
         tp = p.take_profit
         if p.learned_tp and rank and rank["take_profit"]:
@@ -205,6 +221,11 @@ class Strategy:
             return self._skip("whale", swap.mint, block, snap)
         return self.open("whale", m, swap.mint, size, snap, p, reason=reason, wallet=swap.wallet,
                          whale=swap, meta=info, score=info["wallet_score"] or 0, **exits)
+
+    def _coin_copies(self, mint: str) -> int:
+        """Whale-mode positions in this coin within COIN_WINDOW_S, any wallet."""
+        return self.conn.execute("SELECT COUNT(*) FROM ct_positions WHERE mint=? AND strategy='whale' AND opened_at>?",
+                                 (mint, int(time.time()) - COIN_WINDOW_S)).fetchone()[0]
 
     def _cluster_copied(self, ent: str, mint: str, window_s: int = 6 * 3600) -> bool:
         """Another wallet of the same cluster was already copied on this coin recently (count the entity once)."""
@@ -302,6 +323,43 @@ class Strategy:
             return self._skip("signal", mint, block, snap)
         return self.open("signal", m, mint, size, snap, p, reason=reason, meta=info, signal_id=sig["id"],
                          score=score, **exits)
+
+    # ------------------------------------------------------------------ mode 3: launches of the sniper
+    def on_launch(self, row) -> int | None:
+        """row: a sniper_launches row with decision='enter'. Exits follow the sniper's settings (SNIPER_*):
+        stop = SNIPER_STOP_PCT, trailing from SNIPER_TP1_PCT with SNIPER_TRAIL_PCT, SNIPER_MAX_HOLD_MIN.
+        The sniper's partial sale at TP1 and its insider-sell exit stay in sniper/ (paper)."""
+        m = control.mode(self.conn, "launch")
+        if m == "off":
+            return None
+        mint = row["mint"]
+        age = time.time() - (row["decided_ts"] or 0)
+        if age > LAUNCH_MAX_AGE_S:
+            return self._skip("launch", mint, f"Launch-Entscheidung zu alt ({age:.0f}s)")
+        p = control.preset(self.conn, "launch")
+        snap = market.snapshot(mint, self.s)
+        if not snap or snap.price_sol <= 0:
+            return self._skip("launch", mint, "kein Marktpreis")
+        dec_mcap = row["mcap_decide_usd"] if "mcap_decide_usd" in row.keys() else None
+        if dec_mcap and snap.fdv and snap.fdv / dec_mcap - 1 > LAUNCH_MAX_RUN:
+            return self._skip("launch", mint, f"seit der Sniper-Entscheidung schon +{snap.fdv / dec_mcap - 1:.0%}", snap)
+        safe, why = self._safety("launch", mint)
+        if why:
+            return self._skip("launch", mint, why, snap, safety=safe)
+        ex = sniper_exits()
+        info = {"launch_score": row["score"], "launch_risk": row["risk"], "launch_source": row["source"],
+                "decided_ts": row["decided_ts"], "sniper_exits": ex, "safety": safe}
+        reason = f"Sniper-Einstieg, Score {row['score'] or 0:.0f}, Risiko {row['risk'] or 0:.0f}"
+        if m == "manual":
+            control.alert(self.conn, "launch", mint, snap.symbol, "signal", reason, price_sol=snap.price_sol,
+                          price_usd=snap.price_usd, mcap_usd=snap.fdv, score=row["score"] or 0, data=info)
+            return None
+        block = self._risk_block("launch", p, p.size_sol, mint)
+        if block:
+            return self._skip("launch", mint, block, snap)
+        return self.open("launch", m, mint, p.size_sol, snap, p, reason=reason, meta=info, score=row["score"] or 0,
+                         tp=ex["take_profit"], hold=min(ex["max_hold_min"], p.max_hold_min), sl=ex["stop_loss"],
+                         trail=(ex["trail_activate"], ex["trail_drawdown"]), inflow=0)
 
     # ------------------------------------------------------------------ open / close
     def open(self, strategy: str, managed: str, mint: str, size: float, snap, p: control.Preset, *, tp: float,
@@ -500,6 +558,39 @@ class Strategy:
             self.conn.execute("INSERT OR REPLACE INTO ct_equity VALUES (?,?,?,?,?)",
                               (now, mode, bal, open_val, bal + open_val))
         self.conn.commit()
+
+
+# ---------------------------------------------------------------------- sniper exits for mode 3
+def sniper_exits() -> dict:
+    """The sniper's exit settings as copy-trader fractions (defaults if sniper/ is missing)."""
+    try:
+        from sniper.config import load as sniper_settings  # type: ignore
+
+        c = sniper_settings()
+        tp1, trail, stop, hold = c.tp1_pct, c.trail_pct, c.stop_pct, c.max_hold_min
+    except Exception:
+        tp1, trail, stop, hold = 60.0, 25.0, 30.0, 60.0
+    # no partial sale here: the trailing stop arms at TP1, the hard target sits far above it
+    return {"take_profit": 3 * tp1 / 100, "trail_activate": tp1 / 100, "trail_drawdown": trail / 100,
+            "stop_loss": stop / 100, "max_hold_min": hold}
+
+
+# ---------------------------------------------------------------------- wash trading (safety/ check)
+def wash_share(conn, mint: str) -> float | None:
+    """Share of recent volume that the same wallets bought AND sold (safety/ check "wash"), None = unknown."""
+    try:
+        import safety  # type: ignore
+
+        a = safety.get(conn, mint)
+    except Exception:
+        return None
+    if not a:
+        return None
+    try:
+        v = ((a.checks or {}).get("wash") or {}).get("data", {}).get("roundtrip_share")
+        return float(v) if v is not None else None
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------- research model hook
