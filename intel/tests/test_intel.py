@@ -391,5 +391,7 @@ def test_quote_round_spares_jupiter(conn):
 
 
 def test_time_indexes(conn):
-    assert "idx_trades_ts" in store.ensure_indexes(conn)
+    store.ensure_indexes(conn)
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert {"idx_trades_ts", "idx_token_prices_ts", "idx_safety_tokens_ts"} <= names
     assert store.ensure_indexes(conn) == []
