@@ -194,7 +194,25 @@ def sync_model_tiers(conn):
     return last_tier_sync
 
 
-def rescore_all(conn, cfg=settings) -> int:
+RESCORE_MAX_AGE_S = 600
+_last_rescore = {}  # db file -> (newest trade rowid, time, wallets scored)
+
+
+def rescore_all(conn, cfg=settings, force=False) -> int:
+    """Recompute every wallet's positions, score and tier. Without new trades since the last run in this process
+    it is skipped for up to RESCORE_MAX_AGE_S (only current prices would move unrealized PnL): the full pass reads
+    every trade and price and rewrites wallet_positions and wallets, ~8 s and a write lock on a 300k-trade DB."""
+    path = conn.execute("PRAGMA database_list").fetchone()[2]
+    newest = conn.execute("SELECT MAX(rowid) FROM trades").fetchone()[0]
+    last = _last_rescore.get(path)
+    if not force and last and last[0] == newest and time.time() - last[1] < RESCORE_MAX_AGE_S:
+        return last[2]
+    n = _rescore(conn, cfg)
+    _last_rescore[path] = (newest, time.time(), n)
+    return n
+
+
+def _rescore(conn, cfg) -> int:
     positions = compute_positions(conn)
     conn.execute("DELETE FROM wallet_positions")
     conn.executemany(
