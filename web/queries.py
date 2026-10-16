@@ -1556,11 +1556,12 @@ def sniper_stream(conn, now=None):
 
 # live_orders.status (live/store.py, live/executor.py) in German with a tone for the badge
 LIVE_ORDER_STATUS = {
-    "new": ("angelegt", "warn"), "sending": ("wird gesendet", "warn"), "unknown": ("unklar", "bad"),
-    "landed": ("ausgeführt", "good"), "landed_late": ("spät ausgeführt", "good"), "landed_unbooked": ("ausgeführt, nicht gebucht", "bad"),
-    "failed": ("fehlgeschlagen", "bad"), "expired": ("verfallen", "bad"), "sim_failed": ("Simulation fehlgeschlagen", "bad"),
-    "rejected": ("abgelehnt (Grenze)", ""), "dry_ok": ("Dry-Run ok", "good"), "dry_sim_failed": ("Dry-Run: Simulation fehlgeschlagen", "bad"),
-    "dry_built": ("Dry-Run gebaut", "good"),
+    "new": ("angelegt", "warn"), "sending": ("wird gesendet", "warn"), "unknown": ("unklar, blockiert Käufe", "bad"),
+    "landed": ("gelandet", "good"), "landed_late": ("spät gelandet, wird gebucht", "good"),
+    "landed_unbooked": ("gelandet ohne Buchung, Wallet prüfen", "bad"), "failed": ("auf der Chain fehlgeschlagen", "bad"),
+    "expired": ("verfallen, nie gelandet", "bad"), "sim_failed": ("Vorab-Simulation abgelehnt, nichts gesendet", ""),
+    "rejected": ("vor dem Senden abgelehnt", ""), "dry_ok": ("Dry-Run simuliert ok", "good"),
+    "dry_sim_failed": ("Dry-Run Simulation fehlgeschlagen", "bad"), "dry_built": ("Dry-Run Verkauf gebaut", "good"),
 }
 
 
@@ -1591,11 +1592,14 @@ def live_overview(conn):
     since = int(time.time()) - 86400
     counts = {r["status"]: r["n"] for r in rows(conn, "SELECT status, COUNT(*) n FROM live_orders WHERE ts>=? GROUP BY status", (since,))}
     checks = [{**c, "detail": _redact(c.get("detail") or "")} for c in rep["checks"]]
+    # orders that need a human: fate unknown (blocks buys) or landed on chain without a booked position
+    attention = {r["status"]: r["n"] for r in rows(conn, "SELECT status, COUNT(*) n FROM live_orders WHERE dry=0 AND "
+                                                      "status IN ('unknown','landed_unbooked') GROUP BY status")}
     return {"available": True, "state": state, "enabled": cfg.enabled, "dry_run": cfg.dry_run, "require_gate": cfg.require_gate,
             "ready": rep["ready"], "checks": checks, "limits": rep["limits"], "killed": store.killed(conn) or None,
             "consecutive_fails": store.consecutive_fails(conn), "max_consecutive_fails": cfg.max_consecutive_fails,
             "pending": len(store.pending(conn)), "books": books, "dry": rep["dry"], "live": rep["live"], "advance": rep["advance"],
-            "orders": orders, "counts_24h": counts, "heartbeat": int(float(store.get(conn, "heartbeat") or 0)) or None}
+            "orders": orders, "counts_24h": counts, "attention": attention, "heartbeat": int(float(store.get(conn, "heartbeat") or 0)) or None}
 
 
 def _redact(text):

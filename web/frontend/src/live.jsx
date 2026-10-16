@@ -28,6 +28,8 @@ export function LiveCard() {
       {d.killed ? <Callout kind="bad" icon="alert"><span className="b">Not-Aus aktiv:</span> {d.killed}. Keine neuen Echtgeld-Käufe, Verkäufe laufen weiter.
         Aufheben geht auf dem Mac mit <span className="mono">python -m live resume</span> oder in Telegram mit <span className="mono">/weiter</span>.</Callout>
         : <Callout kind={d.state === "live" ? "bad" : ""} icon={d.state === "live" ? "alert" : "info"}>{expl}</Callout>}
+      {d.attention?.unknown > 0 && <Callout kind="bad" icon="alert"><span className="b">{d.attention.unknown} Order(s) unklar:</span> ob sie gelandet sind, ist nicht bekannt. Bis das geklärt ist, kauft der Bot nichts mit Echtgeld.</Callout>}
+      {d.attention?.landed_unbooked > 0 && <Callout kind="bad" icon="alert"><span className="b">{d.attention.landed_unbooked} Order(s) gelandet ohne Buchung:</span> auf der Chain ausgeführt, aber keine Position gebucht. Bitte die Trading-Wallet prüfen.</Callout>}
       <div className="tiles wrap-sub" style={{ marginTop: 12 }}>
         <Tile label="Go-Live-Prüfung" value={d.ready ? <span className="up">bestanden</span> : <span className="down">offen</span>}
           sub={d.require_gate ? "echte Orders erst nach bestandener Prüfung" : "Prüfung abgeschaltet (LIVE_REQUIRE_GATE=false)"} />

@@ -614,7 +614,7 @@ def test_live_card_and_kill_switch(demo, monkeypatch):
     assert d["available"] and d["state"] == "dry" and not d["killed"]
     assert {"wallet", "dry_run", "clean"} <= {x["key"] for x in d["checks"]} and d["limits"]["max_position_sol"] > 0
     st = {o["status"]: o["status_de"] for o in d["orders"]}
-    assert st["dry_ok"] == "Dry-Run ok" and st["rejected"].startswith("abgelehnt")
+    assert st["dry_ok"] == "Dry-Run simuliert ok" and st["rejected"] == "vor dem Senden abgelehnt" and d["attention"] == {}
     body = str(d)
     assert "DemoTradingWallet1111" not in body  # only the first 6 characters of the trading wallet
     r = c.post("/api/live/kill", json={"reason": "Test"})
