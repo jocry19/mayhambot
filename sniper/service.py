@@ -33,6 +33,7 @@ class Service:
         self.connected = False
         self.ws_msgs = 0
         self._dex_conn = None
+        self._hb_conn = store.connect(db_path)
 
     def sol_usd(self):
         """Cached SOL price; never blocks (the event loop calls this). Refreshed by sol_round."""
@@ -153,6 +154,19 @@ class Service:
     def tiers_round(self):
         self.engine.tiers = store.tier_map(self.conn)
 
+    def heartbeat(self):
+        """Service status for web/ and cli/ (they cannot see this process's memory): sniper_state 'service_status'."""
+        with self.engine.lock:
+            subs = sum(1 for s in self.engine.launches.values() if s.subscribed)
+            n = len(self.engine.launches)
+        now = time.time()
+        budget = {k: {"used_last_min": self.budget.per_min[k] - self.budget.left(k, now), "per_min": self.budget.per_min[k],
+                      "total": self.budget.total[k]} for k in self.budget.per_min}
+        store.set_state(self._hb_conn, "service_status", json.dumps({
+            "ts": int(now), "connected": self.connected, "ws_msgs": self.ws_msgs, "subscribed": subs, "in_memory": n,
+            "queue": self.q.qsize(), "open_positions": len(self.engine.book.open), "budget": budget,
+            "counters": dict(self.engine.counters), "pump_api_ok": self.enricher.pump_ok}))
+
     def prune_round(self):
         store.prune(self.conn, self.cfg.keep_days)
 
@@ -172,6 +186,7 @@ class Service:
         threading.Thread(target=self.worker, daemon=True, name="sniper-stage2").start()
         tasks = [asyncio.create_task(self.ws_loop()), asyncio.create_task(self.tick_loop()),
                  asyncio.create_task(self.every(300, self.sol_round)),
+                 asyncio.create_task(self.every(10, self.heartbeat, 1)),
                  asyncio.create_task(self.every(self.cfg.dex_every_sec, self.dex_round, 10)),
                  asyncio.create_task(self.every(600, self.tiers_round, 600)),
                  asyncio.create_task(self.every(3600, self.prune_round, 120)),
@@ -187,6 +202,11 @@ class Service:
             self.stop.set()
             for t in tasks:
                 t.cancel()
+            self.connected = False
+            try:
+                self.heartbeat()
+            except Exception:  # noqa: BLE001
+                pass
             self.report()
             if self.record:
                 self.record.close()

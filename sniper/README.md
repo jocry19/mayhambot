@@ -112,7 +112,13 @@ Kauf nur bei `score ≥ SNIPER_MIN_SCORE` (50), `risk ≤ SNIPER_MAX_RISK` (45) 
 | `sniper_launch_wallets` | mint, wallet, role (`bundle`/`insider`/`dev`/`early`), slot, ts, tokens, sol, funder, sold_pct |
 | `sniper_curve` | Curve-Verlauf der ersten 15 min tief geprüfter Launches (ts, mcap_sol, v_sol, n_trades) |
 | `sniper_positions` | Papier-Positionen: Einstieg, Fill-Quelle, TP1, Peak, realisiert, Ausstiegsgrund, PnL, `params_json`, `events_json` |
-| `sniper_state` | `paper_balance_sol` |
+| `sniper_state` | `paper_balance_sol`; `service_status` (Heartbeat alle 10 s, JSON, siehe unten) |
+
+`service_status` (lesen mit `json.loads(store.get_state(conn, "service_status"))`): `ts` (Unix-Sekunden; älter als
+30 s = Dienst steht), `connected` (PumpPortal-Websocket offen), `ws_msgs` (Nachrichten seit Start), `subscribed`
+(Coins im Trade-Abo), `in_memory`, `queue` (Kandidaten in der Warteschlange für Stufe 2), `open_positions`,
+`budget: {rpc|api|deep: {used_last_min, per_min, total}}`, `counters: {creates, trades, migrations, stage1, stage2,
+entries}` (seit Start), `pump_api_ok`. Beim Beenden wird einmal `connected: false` geschrieben.
 
 ## Einstellungen (`.env`, alle optional)
 

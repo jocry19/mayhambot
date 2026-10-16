@@ -368,3 +368,13 @@ def test_no_buy_without_launch_data(conn):
     st = eng.tick(T0 + c.decide_sec + 1)[0]
     _, reason, pos = eng.finalize(st, {"errors": ["pump.fun down"]}, now=T0 + 22)
     assert reason == "unverified" and pos is None
+
+
+def test_heartbeat(tmp_path):
+    from sniper.service import Service
+    svc = Service(cfg(), db_path=str(tmp_path / "hb.db"))
+    svc.connected, svc.ws_msgs = True, 7
+    svc.heartbeat()
+    hb = json.loads(store.get_state(svc.conn, "service_status"))
+    assert hb["connected"] and hb["ws_msgs"] == 7 and hb["queue"] == 0
+    assert set(hb["budget"]) == {"rpc", "api", "deep"} and hb["budget"]["rpc"]["per_min"] == 10
