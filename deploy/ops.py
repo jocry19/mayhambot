@@ -651,6 +651,7 @@ def leave_background_band():
 
 
 def backup(args) -> int:
+    t0 = time.time()
     leave_background_band()
     out = backup_dir()
     out.mkdir(parents=True, exist_ok=True)
@@ -687,7 +688,9 @@ def backup(args) -> int:
         shutil.move(str(tar_tmp), final)
     os.chmod(final, 0o600)
     removed = prune_backups(out)
-    print(f"Backup: {final} ({final.stat().st_size / 1e6:.1f} MB), {removed} alte entfernt")
+    kept = list(out.glob("mayhambot-*.tar.gz"))
+    print(f"Backup: {final} ({final.stat().st_size / 1e6:.1f} MB, {time.time() - t0:.0f} s), {removed} alte entfernt, "
+          f"{len(kept)} Backups mit {sum(f.stat().st_size for f in kept) / 1e9:.2f} GB")
     return 0
 
 

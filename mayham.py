@@ -240,7 +240,10 @@ def _checks_ok():
                                       and p.parent.name != "node_modules")
             print("Tests: " + ", ".join(dirs))
             for cmd in ([PY, "tests/test_logic.py"], [PY, "-m", "pytest", *dirs, "-q", "-x", "-p", "no:cacheprovider"]):
+                t0 = time.time()
                 r = subprocess.run(cmd, cwd=wt, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                last = ((r.stdout or "").strip().splitlines() or [""])[-1]
+                print(f"{cmd[-1] if len(cmd) == 2 else 'pytest'}: {time.time() - t0:.0f} s ({last[:120]})")
                 if r.returncode != 0:
                     print("Tests rot:", " ".join(cmd[1:]))
                     print("\n".join((r.stdout or "").splitlines()[-30:]))  # the failing test lands in update.log
