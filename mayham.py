@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent
 LOGS = ROOT / "logs"
 PIDS = ROOT / "data" / "pids"
 PORT = os.getenv("DASHBOARD_PORT", "8501")
+HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1")  # 0.0.0.0 = also reachable from other devices in the network
 PY = sys.executable
 LABEL = "de.mayhambot.app"
 PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
@@ -28,7 +29,7 @@ SERVICES = {
     "signals": [PY, "-m", "signals.run"],
     "copytrade": [PY, "-m", "copytrade", "run"],
     "dashboard": [PY, "-m", "streamlit", "run", "dashboard/app.py", "--server.headless", "true",
-                  "--server.port", PORT, "--browser.gatherUsageStats", "false"],
+                  "--server.port", PORT, "--server.address", HOST, "--browser.gatherUsageStats", "false"],
 }
 # research + retraining loop from model/ (other thread), started only once it exists
 if (ROOT / "model" / "__main__.py").exists():
