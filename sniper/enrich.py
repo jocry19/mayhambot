@@ -74,7 +74,9 @@ class LaunchFetcher(Fetcher):
         if not self.budget.take("rpc", 1, wait=3.0):
             raise BudgetExceeded("sniper: RPC minute budget used up")
         self.sniper_rpc += 1
-        j = http.post_json(self.rpc_url, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, retries=1)
+        # live lane: the launch-slot and funder checks decide a buy within seconds (method is read from the payload)
+        j = http.post_json(self.rpc_url, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, retries=1,
+                           priority="live")
         if "error" in j:
             raise RuntimeError(f"{method}: {j['error']}")
         return j.get("result")

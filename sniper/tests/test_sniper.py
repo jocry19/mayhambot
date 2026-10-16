@@ -311,7 +311,7 @@ def test_dex_prices(monkeypatch):
 
 def test_launch_fetcher_caps_rpc(monkeypatch):
     calls = []
-    monkeypatch.setattr(enrich.http, "post_json", lambda url, payload, **kw: calls.append(payload) or {"result": []})
+    monkeypatch.setattr(enrich.http, "post_json", lambda url, payload, **kw: calls.append((payload, kw["priority"])) or {"result": []})
     b = enrich.Budget({"rpc": 3, "api": 10, "deep": 2})
     f = enrich.LaunchFetcher(cfg(), b, rpc_cap=2, rpc_url="https://rpc.example")
     f.rpc("getSlot", [])
@@ -322,7 +322,7 @@ def test_launch_fetcher_caps_rpc(monkeypatch):
     f2.rpc("getSlot", [])
     with pytest.raises(enrich.BudgetExceeded):
         f2.budget.take("rpc", 1) or (_ for _ in ()).throw(enrich.BudgetExceeded("minute"))
-    assert len(calls) == 3 and b.left("rpc") == 0
+    assert len(calls) == 3 and b.left("rpc") == 0 and all(p == "live" for _, p in calls)
 
 
 def test_enricher_uses_caches_before_network(conn, monkeypatch):
