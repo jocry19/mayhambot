@@ -736,15 +736,63 @@ def check_rugcheck(ctx):
     return r.finish(cap=45)
 
 
+def _intel_latest(ctx):
+    try:
+        import intel
+        return intel.latest(ctx.conn, "coin", ctx.mint)
+    except Exception:  # noqa: BLE001 - intel not installed or its tables missing
+        return None
+
+
+def check_history(ctx):
+    """Track record of the people behind the coin, from the intel service's network features (no network):
+    the dev's earlier launches, the funder network's launches and launch wallets seen in earlier rugs.
+    Backup measurement (4,625 launches): a dev with an earlier rug rugged 2.2x as often, a launch with a
+    wallet of an earlier rug 6.7x. Rates are shrunk toward 0 while the dev has few launches."""
+    r = CheckResult("history", "Rug-Vorgeschichte")
+    lt = _intel_latest(ctx)
+    c = ctx.cfg
+    if not lt or ctx.now - (lt.get("ts") or 0) > c.history_max_age_sec:
+        r.status = "unknown"
+        return r.finish()
+    f = lt.get("features") or {}
+    dn, dr, d2 = f.get("net_dev_launches"), f.get("net_dev_rug_rate"), f.get("net_dev_hit2x_rate")
+    fn, fr = f.get("net_funder_launches"), f.get("net_funder_rug_rate")
+    bad, good, bots = f.get("net_early_bad"), f.get("net_early_good"), f.get("net_bot_share_60m")
+    if all(v is None for v in (dn, fn, bad, bots)):
+        r.status = "unknown"
+        return r.finish()
+    r.data.update(dev_launches=dn, dev_rug_rate=dr, dev_hit2x_rate=d2, funder_launches=fn, funder_rug_rate=fr,
+                  early_bad=bad, early_good=good, bot_share_60m=bots, features_ts=lt.get("ts"))
+    if dn and dr is not None:
+        rugs = round(dr * dn)
+        shrunk = rugs / (dn + 2)
+        if rugs:
+            r.add(ramp(shrunk, 0.1, 0.6, 20, 60),
+                  f"Der Dev hat {rugs} von {dn:.0f} früheren Launches gerugged.")
+        elif dn >= 3 and (d2 or 0) >= 0.3:
+            r.positives.append(f"Dev ohne Rug in {dn:.0f} Launches, {100 * d2:.0f} % davon verdoppelten sich.")
+    if fn and fr is not None and fn >= c.history_min_funder_launches:
+        shrunk = fr * fn / (fn + 3)
+        if shrunk >= 0.15:
+            r.add(ramp(shrunk, 0.15, 0.6, 15, 55),
+                  f"Aus demselben Geldgeber-Netz kamen {fn:.0f} Launches, {100 * fr:.0f} % davon Rugs.")
+    if bad:
+        r.add(ramp(bad, 1, 4, 30, 65),
+              f"{bad:.0f} {'Wallet' if bad == 1 else 'Wallets'} aus früheren Rugs {'kaufte' if bad == 1 else 'kauften'} beim Launch.")
+    elif good and good >= 2:
+        r.positives.append(f"{good:.0f} Launch-Wallets aus früheren 2x-Launches, keine aus Rugs.")
+    if bots is not None and bots >= c.history_bot_share_warn:
+        r.add(ramp(bots, c.history_bot_share_warn, 0.8, 15, 40),
+              f"{100 * bots:.0f} % des Volumens der letzten Stunde kommt von Sandwich- oder Roundtrip-Bots (unechtes Volumen).")
+    return r.finish(cap=85)
+
+
 def check_exit(ctx):
     """Soft rug in progress, from the intel service's latest coin features (no network): insiders selling,
     liquidity leaving, smart buyers getting out. Most rugs of young coins with burned LP look like this."""
     r = CheckResult("exit", "Ausstieg Insider/Liquidität")
-    try:
-        import intel
-        lt = intel.latest(ctx.conn, "coin", ctx.mint)
-    except Exception:  # noqa: BLE001 - intel not installed or its tables missing
-        lt = None
+    lt = _intel_latest(ctx)
     if not lt or ctx.now - (lt.get("ts") or 0) > ctx.cfg.exit_max_age_sec:
         r.status = "unknown"
         return r.finish()
@@ -776,5 +824,5 @@ def check_exit(ctx):
 
 
 QUICK = [check_authorities, check_sell_sim, check_liquidity, check_lp, check_socials, check_wash,
-         check_rugcheck, check_holders, check_exit]
+         check_rugcheck, check_holders, check_exit, check_history]
 DEEP = [check_dev, check_insiders, check_bundles]

@@ -81,6 +81,7 @@ count for `SAFETY_CARRY_MAX_AGE_SEC`=2 h. Findings that were made keep their lev
 | `wash` | our own `trades` table (no network) | round-trip share ≥ `SAFETY_WASH_BLOCK_ROUNDTRIP` (0.5) | round-trip volume of the same wallets (from `SAFETY_WASH_ROUNDTRIP_WARN` 0.25), top-3 volume share (from `SAFETY_WASH_TOP3_WARN` 0.4) |
 | `socials` | DexScreener info, RugCheck metadata | – | no website/socials, mutable metadata |
 | `exit` | intel features (`intel.latest`, no network) | – | liquidity leaving in the last 60 min, insider sells relative to liquidity, share of smart money exiting, liquidity that appeared and vanished (flash) |
+| `history` | intel network features (`net_dev_*`, `net_funder_*`, `net_early_bad/good`, `net_bot_share_60m`; no network, up to `SAFETY_HISTORY_MAX_AGE_SEC`=6 h old) | – | dev's earlier rugs (shrunk while he has few launches), rug rate of the funder network (≥ `SAFETY_HISTORY_MIN_FUNDER_LAUNCHES`=3), launch wallets from earlier rugs, bot volume share ≥ `SAFETY_HISTORY_BOT_SHARE_WARN`=0.4 |
 | `rugcheck` | api.rugcheck.xyz report (keyless, optional) | RugCheck says rugged | its other danger/warn items (max 45; items our own checks measure are skipped) |
 
 Funding from an exchange hot wallet never links wallets (one exchange funds thousands of strangers).

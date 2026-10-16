@@ -84,6 +84,9 @@ class SafetySettings:
 
     # soft rug in progress (intel features, no network)
     exit_max_age_sec: int = field(default_factory=lambda: _i("SAFETY_EXIT_MAX_AGE_SEC", 900))
+    history_max_age_sec: int = field(default_factory=lambda: _i("SAFETY_HISTORY_MAX_AGE_SEC", 21600))
+    history_min_funder_launches: int = field(default_factory=lambda: _i("SAFETY_HISTORY_MIN_FUNDER_LAUNCHES", 3))
+    history_bot_share_warn: float = field(default_factory=lambda: _f("SAFETY_HISTORY_BOT_SHARE_WARN", 0.4))
     exit_liq_drop_warn: float = field(default_factory=lambda: _f("SAFETY_EXIT_LIQ_DROP_WARN", 0.3))
     exit_insider_sell_warn: float = field(default_factory=lambda: _f("SAFETY_EXIT_INSIDER_SELL_WARN", 0.05))
     deep_young_h: float = field(default_factory=lambda: _f("SAFETY_DEEP_YOUNG_H", 3))   # one deep check per young coin

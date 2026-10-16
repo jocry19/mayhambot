@@ -136,7 +136,7 @@ def test_clean_coin_is_low_risk():
     c = conn()
     a = safety.assess(MINT, c, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
     assert a.level == "low" and not a.blocked, a.reasons
-    assert a.coverage > 0.8
+    assert a.coverage > 0.75  # exit and history need the intel service
     assert any("Mint-Authority abgegeben" in p for p in a.positives)
     assert safety.signal_penalty(c, MINT, CFG)["factor"] == 1.0
     assert not safety.is_blocked(c, MINT)
@@ -573,3 +573,28 @@ def test_launch_backtest_walk_forward():
     rep2 = learn.learn(c, CFG)
     assert rep2["launch_backtest"]["scores"]["learned"]["auc"] == learned["auc"]
     assert "Rückrechnung Sniper-Launches" in learn.report_text(rep2)
+
+
+def test_history_check_uses_intel_network_features():
+    from intel import store as istore
+    c = conn()
+    istore.ensure_schema(c)
+
+    def put(feats):
+        c.execute("INSERT OR REPLACE INTO intel_latest(kind, key, ts, coverage, features_json, meta_json) VALUES (?,?,?,?,?,?)",
+                  ("coin", MINT, NOW, 1.0, json.dumps(feats), "{}"))
+        c.commit()
+        return safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
+
+    a = put({"net_dev_launches": 4, "net_dev_rug_rate": 0.75, "net_early_bad": 3, "net_bot_share_60m": 0.6})
+    h = a.checks["history"]
+    text = " ".join(r["text"] for r in a.reasons)
+    assert h["status"] == "ok" and h["risk"] >= 60 and "3 von 4 früheren Launches" in text and "früheren Rugs" in text
+    assert a.level in ("high", "critical")
+    one = put({"net_dev_launches": 1, "net_dev_rug_rate": 1.0}).checks["history"]["risk"]
+    assert 20 <= one < 45                                   # one earlier rug of a new dev: a warning, no block
+    g = put({"net_dev_launches": 5, "net_dev_rug_rate": 0.0, "net_dev_hit2x_rate": 0.4, "net_early_good": 3})
+    assert g.checks["history"]["risk"] == 0 and any("2x" in p for p in g.positives)
+    c.execute("DELETE FROM intel_latest")
+    c.commit()
+    assert safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True).checks["history"]["status"] == "unknown"
