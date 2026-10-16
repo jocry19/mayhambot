@@ -243,3 +243,42 @@ def test_usage_splits_lanes(monkeypatch, tmp_path):
     http.throttle(PUB, method="getSignaturesForAddress")
     u = http.usage()[PUB]
     assert u["live_calls"] == 1 and u["bulk_calls"] == 1 and "live_waited_s" in u
+
+
+def test_new_helius_key_resets_ledger_and_keeps_history(monkeypatch, tmp_path):
+    import json
+    _credit_env(monkeypatch, tmp_path, "research", day=5, month_credits=1_000_000)
+    monkeypatch.setenv("HELIUS_API_KEY", "old-key-123")
+    for _ in range(3):
+        http._charge(100)
+    assert http.credits("research")["credits_month"] == 300
+    monkeypatch.setenv("HELIUS_API_KEY", "new-key-456")
+    st = http.credits_status()  # read-only view already shows the fresh quota
+    assert st["used"] == 0 and st["key_changed_at"] and st["history"][-1]["used"] == 300
+    http._charge(1)
+    raw = (tmp_path / "credits-helius.json").read_text()
+    assert "old-key-123" not in raw and "new-key-456" not in raw
+    led = json.loads(raw)
+    assert led["history"][-1]["reason"] == "key" and led["services"]["research"]["month"] == 1
+    assert http.credits("research")["key_changed_at"] == led["key_changed_at"]
+
+
+def test_warn_level(monkeypatch, tmp_path):
+    _credit_env(monkeypatch, tmp_path, "", month_credits=1000)
+    for _ in range(8):
+        http._charge(100)
+    st = http.credits_status()
+    assert st["warn_level"] == 0.8 and st["warn"]
+    assert http.credits("research")["warn"]
+
+
+def test_stale_process_with_old_key_does_not_flip_back(monkeypatch, tmp_path):
+    _credit_env(monkeypatch, tmp_path, "research", day=5, month_credits=1_000_000)
+    monkeypatch.setenv("HELIUS_API_KEY", "old")
+    http._charge(10)
+    monkeypatch.setenv("HELIUS_API_KEY", "new")
+    http._charge(5)
+    monkeypatch.setenv("HELIUS_API_KEY", "old")  # another service not restarted yet
+    http._charge(1)
+    st = http.credits_status()
+    assert st["used"] == 6 and len(st["history"]) == 1

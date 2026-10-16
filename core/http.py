@@ -345,9 +345,7 @@ def _ledger_update(fn):
             led = json.loads(f.read() or "{}")
         except ValueError:
             led = {}
-        month = _now_parts()[0]
-        if led.get("month") != month:  # new UTC calendar month: start from zero
-            led = {"month": month, "services": {}}
+        led = _roll(led, write=True)
         res = fn(led)
         f.seek(0)
         f.truncate()
@@ -379,8 +377,70 @@ def credits(service=None):
     ...}} for every service (or one dict for `service`). Shared by all processes, survives restarts."""
     led = _ledger_read()
     svcs = set(led.get("services", {})) | set(_credit_cfg()[2])
-    allc = {s: _svc_stats(led, s) for s in sorted(svcs)}
+    status = _status(led)
+    allc = {s: dict(_svc_stats(led, s), key_changed_at=status["key_changed_at"], warn_level=status["warn_level"],
+                    warn=status["warn"]) for s in sorted(svcs)}
     return allc.get(service) if service else allc
+
+
+WARN_LEVEL = 0.8
+
+
+def _status(led):
+    used = sum(v.get("month", 0) for v in led.get("services", {}).values())
+    limit = _credit_cfg()[0]
+    level = round(used / limit, 4) if limit else 0.0
+    return dict(month=led.get("month"), key_fp=led.get("key_fp"), key_changed_at=led.get("key_changed_at"),
+                used=used, limit=limit, warn_level=level, warn=level >= WARN_LEVEL,
+                history=led.get("history", []))
+
+
+def credits_status():
+    """Whole-plan view: {month, key_fp (8 hex of sha256, never the key), key_changed_at, used, limit,
+    warn_level (share of the month used, 0..1), warn (>= 80 %), history [{month, key_fp, used, until}]}."""
+    return _status(_ledger_read())
+
+
+def _key_fp():
+    key = os.getenv("HELIUS_API_KEY", "")
+    if not key:
+        try:
+            from core.config import settings
+            key = settings.helius_api_key or ""
+        except Exception:  # noqa: BLE001
+            key = ""
+    if not key:
+        return ""
+    import hashlib
+    return hashlib.sha256(key.encode()).hexdigest()[:8]
+
+
+def _roll(led, write=False):
+    """New UTC month or a new Helius key (fresh quota): start counting from zero, keep the old totals in
+    led['history']. write=False only computes the view (credits() never writes)."""
+    month = _now_parts()[0]
+    fp = _key_fp()
+    services = led.get("services", {})
+    used = sum(v.get("month", 0) for v in services.values())
+    history = list(led.get("history", []))
+    new = dict(led)
+    if led.get("month") != month:
+        if led.get("month") and used:
+            history.append({"month": led.get("month"), "key_fp": led.get("key_fp"), "used": used,
+                            "until": int(time.time()), "reason": "month"})
+        new = {"month": month, "services": {}, "key_fp": fp or led.get("key_fp"),
+               "key_changed_at": led.get("key_changed_at")}
+    elif fp and led.get("key_fp") and fp != led.get("key_fp") and fp not in {h.get("key_fp") for h in history}:
+        # (a key seen before = a process still running with the old .env: never switch back)
+        history.append({"month": month, "key_fp": led.get("key_fp"), "used": used, "until": int(time.time()),
+                        "reason": "key"})
+        new = {"month": month, "services": {}, "key_fp": fp, "key_changed_at": int(time.time())}
+        if write:
+            log.warning("Helius key changed, credit ledger reset (old key used %d credits this month)", used)
+    elif fp and not led.get("key_fp"):
+        new["key_fp"] = fp
+    new["history"] = history[-24:]
+    return new
 
 
 def _ledger_read():
@@ -392,9 +452,7 @@ def _ledger_read():
             led = json.loads(f.read() or "{}")
     except (OSError, ValueError):
         led = {}
-    if led.get("month") != _now_parts()[0]:
-        led = {"month": _now_parts()[0], "services": {}}
-    return led
+    return _roll(led)
 
 
 def credits_left_today(service=None):

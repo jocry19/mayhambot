@@ -140,6 +140,11 @@ http.CreditsExhausted             # raised instead of calling when today's share
   raise `CreditsExhausted` (callers already treat it as a failed request) instead of emptying the month early.
 - DAS + Enhanced: one fixed cross-process spacing of 0.5 s (2 req/s) for api.helius.xyz and DAS methods on any Helius host.
 - `credits()` and `credits_left_today()` only read the ledger (no lock), safe to poll from the dashboard.
+- New Helius key in `.env` (fresh free quota): the ledger stores only a fingerprint (first 8 hex of sha256, never
+  the key). A new fingerprint resets month and day counts for all services, logs `Helius key changed, credit ledger
+  reset`, and keeps the old totals in `history` ({month, key_fp, used, until, reason}). A process still running
+  with an older key never switches back. `http.credits_status()` = {month, key_fp, key_changed_at, used, limit,
+  warn_level (0..1), warn (>= 80 %), history}; every `credits()` row also carries key_changed_at, warn_level, warn.
 - Warning in the log once the whole month reaches 80 %. A process without a service name is counted as `other`
   but not limited.
 
