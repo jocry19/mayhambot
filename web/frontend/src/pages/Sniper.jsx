@@ -220,7 +220,7 @@ export default function Sniper() {
       </div>
 
       <Card title="Was bringt jeder Filter?" flush
-        sub={`Übersprungene Launches nachgemessen. „Ohne Filter“ = gleicher Einsatz (${sol(ft.size_sol)}), 60 min gehalten, ohne Stop und Gebühren. Positiver Filterwert = der Filter hat Geld gespart.`}>
+        sub={`Übersprungene Launches nachgemessen. „Ohne Filter“ = gleicher Einsatz (${sol(ft.size_sol)}), 60 min gehalten, ohne Stop, mit denselben Kosten wie die Papier-Trades (${pct(ft.cost_pct, 1)} je Kauf und Verkauf). Positiver Filterwert = der Filter hat Geld gespart.`}>
         <Table rows={st.filters} rowKey={(r) => r.code} initialSort={{ k: "n", d: "desc" }} empty="Noch nichts übersprungen" cols={[
           { k: "label", l: "Filter" },
           { k: "n", l: "Übersprungen", r: true, fmt: (r) => n(r.n) },

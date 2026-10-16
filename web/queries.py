@@ -512,7 +512,7 @@ def signal_performance(conn, since=None):
     # daily hit rate = "does it get better over time"
     days = defaultdict(list)
     for x in items:
-        days[x["ts"] // 86400 * 86400].append(x)
+        days[local_day0(x["ts"])].append(x)
     daily = [{"ts": d, **grp(xs)} for d, xs in sorted(days.items())]
     # how many calls reached +50/+100/+150 % at their high within 15 min / 1 h / 4 h / 24 h (only calls with that window known)
     reach = []
@@ -1758,6 +1758,20 @@ def sniper_check_errors(conn, mints):
     return out
 
 
+def _sniper_round_trip(cfg, size):
+    """Cost of one paper buy + sell as a fraction of the stake, from sniper.config (defaults when it is missing)."""
+    fee = getattr(cfg, "curve_fee_pct", 1.25) / 100
+    slip = getattr(cfg, "adverse_slippage", 0.03)
+    fixed = 2 * (getattr(cfg, "priority_fee_sol", 0.001) + getattr(cfg, "network_fee_sol", 0.000005))
+    return 2 * fee + 2 * slip + (fixed / size if size else 0)
+
+
+def local_day0(now=None):
+    """Start of today in the Mac's local time zone (the user's "heute"), as a unix ts."""
+    t = time.localtime(int(now or time.time()))
+    return int(time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, -1)))
+
+
 def sniper_view(conn, hours=24, limit=300):
     """Everything for the Launch-Sniper page. Read-only: the sniper trades on paper only."""
     if not has(conn, "sniper_launches"):
@@ -1772,12 +1786,15 @@ def sniper_view(conn, hours=24, limit=300):
     cfg = _sniper_cfg()
     size = cfg.size_sol if cfg else 0.1
     start = cfg.paper_start_sol if cfg else None
-    # filter value: what each skip reason would have earned with the same stake, held 60 min (no fees)
+    # filter value: what each skip reason would have earned with the same stake, held 60 min, after the same
+    # round-trip costs the paper trades pay (pump.fun fee and adverse slippage per leg, priority + network fee),
+    # so "ohne Filter" compares net with net
+    cost = _sniper_round_trip(cfg, size)
     per = defaultdict(lambda: {"sum": 0.0, "n": 0})
     for r in rows(conn, "SELECT skip_reason, ret_60m FROM sniper_launches WHERE decision='skip' AND decided_ts>=? "
                         "AND ret_60m IS NOT NULL", (now - int(hours * 3600) if hours else 0,)):
         d = per[r["skip_reason"] or "?"]
-        d["sum"] += max(-1.0, r["ret_60m"])
+        d["sum"] += max(-1.0, r["ret_60m"]) - cost
         d["n"] += 1
     for f in st.get("filters", []):
         d = per.get(f["code"], {"sum": 0.0, "n": 0})
@@ -1788,7 +1805,7 @@ def sniper_view(conn, hours=24, limit=300):
     paper = st.get("paper") or {}
     st["filter_total"] = {"with_sol": _f(paper.get("pnl_sol"), 4), "skipped_sol": _f(without, 4),
                           "without_sol": _f((paper.get("pnl_sol") or 0) + without, 4), "size_sol": size,
-                          "measured": sum(d["n"] for d in per.values())}
+                          "measured": sum(d["n"] for d in per.values()), "cost_pct": _f(cost, 4)}
     launches = sniper.recent(conn, limit=limit)
     for x in launches:
         x["source_label"] = SNIPER_SOURCE.get(x.get("source"), x.get("source") or "–")
@@ -1842,7 +1859,7 @@ def sniper_summary(conn, now=None):
     if not has(conn, "sniper_launches"):
         return None
     now = int(now or time.time())
-    day0 = now - now % 86400
+    day0 = local_day0(now)
     out = {"launches_today": scalar(conn, "SELECT COUNT(*) FROM sniper_launches WHERE COALESCE(created_ts, decided_ts)>=?", (day0,), 0),
            "entered_today": scalar(conn, "SELECT COUNT(*) FROM sniper_launches WHERE decision='enter' AND decided_ts>=?", (day0,), 0)}
     if has(conn, "sniper_positions"):

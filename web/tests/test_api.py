@@ -288,6 +288,7 @@ def test_sniper_page(demo, empty, capsys):
     ft = d["stats"]["filter_total"]
     assert ft["measured"] > 0 and abs(ft["without_sol"] - ((ft["with_sol"] or 0) + ft["skipped_sol"])) < 1e-3
     assert any(f.get("filter_value_sol") is not None for f in d["stats"]["filters"])
+    assert 0.05 < ft["cost_pct"] < 0.3  # skipped launches pay the same round-trip costs as paper trades
     mint = d["launches"][0]["mint"]
     assert c.get(f"/api/sniper/{mint}").status_code == 200
     o = c.get("/api/overview").json()["sniper"]
@@ -723,3 +724,13 @@ def test_learning_progress(demo):
     for r in d["rows"]:
         assert 0 <= r["oos_trades"] <= r["trades"] and 0 <= r["progress"] <= 1
     assert any(r["gate"] for r in d["rows"] if r["account"] == "paper")
+
+
+def test_local_day0():
+    import time as _t
+    from web import queries as Q
+
+    now = 1_760_000_000
+    d0 = Q.local_day0(now)
+    assert d0 <= now < d0 + 25 * 3600 and _t.localtime(d0)[3:6] == (0, 0, 0)
+    assert _t.localtime(d0)[:3] == _t.localtime(now)[:3]

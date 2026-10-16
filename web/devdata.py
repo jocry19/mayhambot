@@ -73,6 +73,8 @@ def _inflight_demo(conn, r, tokens, now):
     for row in src:
         d = dict(zip(pcols_l, row))
         k = 0.1 / (d.get("size_sol") or 0.5)
+        if d.get("intent"):
+            d["intent"] = f"explore-{d['intent']}"
         d.update(mode="explore", size_sol=0.1, entry_cost_sol=(d.get("entry_cost_sol") or 0) * k, tokens=(d.get("tokens") or 0) * k,
                  pnl_sol=round((d.get("pnl_sol") or 0) * k * r.uniform(0.3, 1.1) - r.uniform(0, 0.01), 5))
         conn.execute(f"INSERT INTO ct_positions({','.join(d)}) VALUES ({','.join('?' * len(d))})", list(d.values()))
