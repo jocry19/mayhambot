@@ -24,6 +24,9 @@ log = logging.getLogger("mayhambot.signals")
 MANUAL_DEFAULT_SCORE = 70.0
 
 
+MAX_CLUSTER_TIERED = int(os.getenv("SIGNAL_MAX_CLUSTER_TIERED", 3))
+
+
 class QualityCache:
     def __init__(self, conn, cfg=settings):
         self.cfg = cfg
@@ -32,6 +35,7 @@ class QualityCache:
         self.model_version, self.model_tiers = scoring.model_tiers(conn)  # one truth once model/ is active
         self.sol_usd = recent_sol_usd(conn)
         self._c = {}
+        self._sizes = None
 
     def get(self, wallet, mint):
         k = (wallet, mint)
@@ -51,9 +55,19 @@ class QualityCache:
         return self._c[k]
 
     def entity(self, wallet):
-        """Wallets of one model cluster (same funder etc.) are one buyer."""
+        """Wallets of one model cluster (same funder etc.) are one buyer. A cluster with more than
+        MAX_CLUSTER_TIERED tiered members is not one owner but a chain: research clusters by co-buying within 60 s,
+        and union-find links every smart wallet that follows the same calls into one component. Its wallets count
+        on their own."""
         c = (self.model_tiers.get(wallet) or (None, None, None))[2]
-        return f"cluster:{c}" if c else wallet
+        if not c:
+            return wallet
+        if self._sizes is None:
+            self._sizes = {}
+            for v in self.model_tiers.values():
+                if v[2] and v[0] in ("ultra", "smart"):
+                    self._sizes[v[2]] = self._sizes.get(v[2], 0) + 1
+        return f"cluster:{c}" if self._sizes.get(c, 0) <= MAX_CLUSTER_TIERED else wallet
 
 
 def recent_sol_usd(conn, n=200):

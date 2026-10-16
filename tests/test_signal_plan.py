@@ -171,3 +171,13 @@ def test_backtest_counts_unmeasured_setups():
     st = {}
     res = backtest.replay(snaps, prices, dict(wallets=1, net=0, score=0, p=None, sellers=None), stats=st)
     assert [r["mint"] for r in res] == ["A"] and st["unmeasured"] == 1
+
+
+def test_big_cluster_is_a_chain_not_one_owner():
+    qc = object.__new__(engine.QualityCache)
+    qc._sizes = None
+    qc.model_tiers = {"A": ("smart", 1, "c1", None), "B": ("smart", 1, "c1", None),
+                      **{f"W{i}": ("ultra", 1, "big", None) for i in range(6)}, "G": ("good", 1, "c1", None)}
+    assert qc.entity("A") == qc.entity("B") == "cluster:c1"            # 2 tiered wallets: one owner
+    assert qc.entity("W0") == "W0" and qc.entity("W1") == "W1"          # 6 in one cluster: a chain, counted apart
+    assert qc.entity("X") == "X"
