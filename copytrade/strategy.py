@@ -284,13 +284,14 @@ class Strategy:
         if age > p.max_signal_age_s:
             return self._skip("signal", mint, f"Signal zu alt ({age:.0f}s)")
         model = model_view(sig, self.conn)
-        if model:  # trained research model: its score is P(pump within 1 h) x 100
+        if model and model["informative"]:  # trained research model: its score is P(pump within 1 h) x 100
             score = model["score"]
             if score < p.min_model_score:
                 return self._skip("signal", mint, f"Modell {score:.0f} (Note {model.get('grade')}) < {p.min_model_score:.0f}")
-        else:  # model not trained yet: the signal engine's own score
+        else:  # model not trained yet, or only the base rate: the signal engine's own score
             if p.require_model:
-                return self._skip("signal", mint, "Modell noch nicht trainiert")
+                return self._skip("signal", mint, "Modell noch nicht trainiert" if not model
+                                  else "Modell schlägt die Basisrate nicht (keine Aussage)")
             score = sig["score"]
             if score < p.min_score:
                 return self._skip("signal", mint, f"Signal-Score {score:.0f} < {p.min_score:.0f}")
@@ -690,6 +691,10 @@ def model_view(sig, conn=None) -> dict | None:
     if not out or out.get("score") is None or not out.get("version"):
         return None  # untrained model: fall back to the signal score
     grade = out.get("grade")
+    h1 = (out.get("horizons") or {}).get("1h") or {}
+    # a horizon whose model did not beat the base rate in the holdout only returns the base rate: no information,
+    # so no grade-based sizing (and a missing p_win_net is never read as a signal)
+    informative = h1.get("algo") != "base" and h1.get("model") != "prior"
     return {"score": float(out["score"]), "grade": grade, "version": out.get("version"),
-            "p_pump_1h": ((out.get("horizons") or {}).get("1h") or {}).get("p_pump"),
-            "size_factor": GRADE_SIZE.get(grade, 1.0), "tiers": out.get("tiers")}
+            "p_pump_1h": h1.get("p_pump"), "p_win_net_1h": h1.get("p_win_net"), "informative": informative,
+            "size_factor": GRADE_SIZE.get(grade, 1.0) if informative else 1.0, "tiers": out.get("tiers")}

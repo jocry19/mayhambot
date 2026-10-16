@@ -645,3 +645,15 @@ def test_paper_buy_needs_a_safety_result(env, monkeypatch):
     assert conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0] == 0
     msgs = [r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'")]
     assert sum("kein Kauf ohne Prüfung" in m for m in msgs) == 2
+
+
+def test_model_view_base_rate_model_carries_no_signal(monkeypatch):
+    import model as _model
+    out = {"score": 12.0, "grade": "A", "version": 3, "tiers": {},
+           "horizons": {"1h": {"p_pump": 0.12, "algo": "base", "model": "logistic"}}}
+    monkeypatch.setattr(_model, "score_token", lambda mint, conn=None: out)
+    v = strategy.model_view({"mint": MINT})
+    assert v["informative"] is False and v["size_factor"] == 1.0 and v["p_win_net_1h"] is None
+    out["horizons"]["1h"].update(algo="gbm", p_win_net=0.4)
+    v = strategy.model_view({"mint": MINT})
+    assert v["informative"] and v["size_factor"] == strategy.GRADE_SIZE["A"] and v["p_win_net_1h"] == 0.4
