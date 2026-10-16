@@ -97,3 +97,10 @@ def test_update_outcomes_bounded_and_dead(tmp_path):
     assert round(live["ret_1h"], 3) == 0.3 and round(live["ret_5m"], 3) == 0.1 and live["outcome_flag"] == "gap"
     assert live["ret_15m"] is None                         # nothing within 5 min of +15m: no stale substitute
     assert rug["ret_1h"] == -0.95 and rug["max_ret_1h"] == 0.5 - 1 and rug["outcome_flag"] == "dead"
+
+
+def test_report_file(tmp_path):
+    c = conn_with(None, tmp_path)
+    p = funnel.write_report(c, path=tmp_path / "r" / "signals_report.json", now=10_000)
+    rep = json.loads(p.read_text())
+    assert set(rep) >= {"funnel_4h", "funnel_24h", "outcomes_24h", "outcomes_7d", "calibration", "recent_signals"}

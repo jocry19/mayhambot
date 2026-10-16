@@ -109,12 +109,44 @@ def outcomes(conn, hours=168, cost=COST, now=None, bands=(0, 20, 30, 40, 50, 60,
     return out
 
 
+REPORT_EVERY = 3600
+
+
+def write_report(conn, path=None, now=None):
+    """Hourly self-report for threads that may read logs but not the DB: reports/signals_report.json next to
+    the DB (data/ on the Mac; funnel 4 h / 24 h, outcomes by band 24 h / 7 d, newest EV calibration). Small, no secrets, overwritten."""
+    from pathlib import Path
+    now = now or int(time.time())
+    path = Path(path) if path else Path(settings.db_path).parent / "reports" / "signals_report.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cal = None
+    try:
+        r = conn.execute("SELECT ts, active, n_all, oos_json, notes FROM signal_calibration ORDER BY id DESC LIMIT 1").fetchone()
+        if r:
+            cal = dict(ts=r[0], active=bool(r[1]), n_all=r[2], oos=json.loads(r[3] or "{}"), notes=r[4])
+    except Exception:  # noqa: BLE001 - no calibration yet
+        pass
+    rep = dict(ts=now, funnel_4h=funnel(conn, 4, now=now), funnel_24h=funnel(conn, 24, now=now),
+               outcomes_24h=outcomes(conn, 24, now=now), outcomes_7d=outcomes(conn, 168, now=now), calibration=cal,
+               recent_signals=[dict(r) for r in conn.execute(
+                   "SELECT ts, symbol, score, ev, ev_n, smart_buyers, net_usd, ret_1h, max_ret_1h, outcome_flag, reason "
+                   "FROM signals ORDER BY ts DESC LIMIT 20")])
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(rep, ensure_ascii=False, indent=1, default=str))
+    tmp.replace(path)
+    return path
+
+
 def main():
     ap = argparse.ArgumentParser(description="signal funnel: where coins drop out")
     ap.add_argument("--hours", type=float, default=10)
     ap.add_argument("--outcomes", action="store_true", help="signal results by score band after costs")
+    ap.add_argument("--report", action="store_true", help="write data/reports/signals_report.json now")
     a = ap.parse_args()
     conn = db.connect()
+    if a.report:
+        print(write_report(conn))
+        return
     if a.outcomes:
         for b in outcomes(conn, a.hours):
             print(b)

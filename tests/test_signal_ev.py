@@ -62,3 +62,9 @@ def test_calibration_goes_active_only_after_out_of_sample_profit(tmp_path, monke
     assert not r["active"]
     monkeypatch.setattr(ev.time, "time", lambda: 10_100)
     assert ev.active_table(c) is None                                             # losing table never goes live
+
+
+def test_blend_weights_bucket_by_evidence():
+    assert ev.blend(0.10, 30, None) == 0.10
+    assert ev.blend(0.10, 0, -0.05, shrink=10) == -0.05            # no bucket evidence: the model decides
+    assert ev.blend(0.10, 30, -0.05, shrink=10) == round(0.75 * 0.10 + 0.25 * -0.05, 4)

@@ -378,6 +378,7 @@ def evaluate(conn, mints, cfg=settings, now=None):
         m = dict(m, min_net=min_net)
         if ev_table:
             e, n, k = ev_mod.predict(ev_table, m.get("entities", m["smart_buyers"]), m["net_usd"], m.get("sellers", 0))
+            e = ev_mod.blend(e, n, m.get("model_exp_net"))
             m.update(ev=e, ev_n=n, ev_bucket=k)
             f["max_ev"] = e if f["max_ev"] is None else max(f["max_ev"], e)
         m["reason"] = explain(m, cfg)

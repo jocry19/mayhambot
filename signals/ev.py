@@ -58,6 +58,15 @@ def predict(table, entities, net_usd, sellers):
     return (b["ev"], b["n"], k) if b else (table["global_ev"], 0, k)
 
 
+def blend(bucket_ev, n, model_exp_net, shrink=SHRINK):
+    """Bucket EV and the model's own expected net return (exp_net_ret, already after costs) weighted by evidence:
+    a bucket with n replayed setups gets n / (n + SHRINK), the model the rest. Without a model value: the bucket."""
+    if model_exp_net is None or bucket_ev is None:
+        return bucket_ev
+    w = n / (n + shrink)
+    return round(w * bucket_ev + (1 - w) * model_exp_net, 4)
+
+
 BASE_RULE = dict(wallets=1, net=0, score=0, p=None, sellers=None)  # every setup the EV table may later judge
 
 

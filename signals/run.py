@@ -13,7 +13,7 @@ import time
 from core import db, scoring, wallets
 from core.config import settings
 from core.sources import market, wallet_source
-from signals import engine, notifier
+from signals import engine, funnel, notifier
 
 log = logging.getLogger("mayhambot.run")
 
@@ -171,6 +171,7 @@ class Backfiller:
 
 
 _backfiller = None
+_last_report = 0.0
 
 
 def cycle(conn, i):
@@ -183,6 +184,13 @@ def cycle(conn, i):
         bf = backfill(conn, deadline=time.time() + 20)
     db.retry_locked(conn, lambda: scoring.rescore_all(conn))
     engine.last_cluster_stats.update(wallets=0, entities=0)
+    global _last_report
+    if time.time() - _last_report >= funnel.REPORT_EVERY:
+        try:
+            funnel.write_report(conn)
+            _last_report = time.time()
+        except Exception:  # noqa: BLE001 - a report must never stop signals
+            log.exception("signals report failed")
     if engine.ev_mod.due(conn):
         try:
             engine.ev_mod.calibrate(conn)
