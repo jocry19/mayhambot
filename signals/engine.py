@@ -102,6 +102,10 @@ def explain(m, cfg=settings):
         pro.append(f"{m['n_ultra']} Ultra dabei")
     if m.get("prediction") is not None:
         (pro if m["prediction"] >= 0.3 else con).append(f"Modell: {m['prediction'] * 100:.0f} % Chance auf +50 % in 1 h")
+    if m.get("model_exp_net") is not None:
+        (pro if m["model_exp_net"] > 0 else con).append(
+            f"Modell erwartet {_eur(m['model_exp_net'])} nach Kosten"
+            + (f" ({m['model_p_net'] * 100:.0f} % Gewinnchance)" if m.get("model_p_net") is not None else ""))
     if m.get("ev") is not None:
         (pro if m["ev"] > 0 else con).append(
             f"ähnliche Setups brachten im Schnitt {_eur(m['ev'])} nach Kosten (n={m.get('ev_n') or 0})")
@@ -229,6 +233,7 @@ def apply_model(conn, mint, now, m):
              net_sol=sum((t or {}).get("net_sol", 0) or 0 for t in tiers.values()),
              prediction=h1.get("p_pump"), prediction_label=f"P(+{(h1.get('threshold') or 0.5)*100:.0f}% in 1h), Note {r.get('grade', '')}",
              contributions=contrib or m["contributions"])
+    m["model_p_net"], m["model_exp_net"] = h1.get("p_win_net"), h1.get("exp_net_ret")  # profit after costs
     m["smart_buyers"] = m["n_ultra"] + m["n_smart"]
     m["min_score"] = cfg_min_model(conn)
     if r.get("wallets"):
@@ -379,11 +384,11 @@ def evaluate(conn, mints, cfg=settings, now=None):
         conn.execute(
             """INSERT OR REPLACE INTO signal_metrics(ts, mint, window_min, buy_usd, sell_usd, net_usd, smart_buyers,
                    avg_quality, score, price_usd, buy_sol, net_sol, mcap_usd, n_ultra, n_smart, n_good, prediction,
-                   contributions_json, ev) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   contributions_json, ev, model_exp_net) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (now, mint, m["window_min"], m["buy_usd"], m["sell_usd"], m["net_usd"], m["smart_buyers"],
              m["avg_quality"], m["score"], tok["price_usd"] if tok else None, m["buy_sol"], m["net_sol"],
              tok["mcap_usd"] if tok else None, m["n_ultra"], m["n_smart"], m["n_good"], pred,
-             json.dumps(m["contributions"]), m.get("ev")))
+             json.dumps(m["contributions"]), m.get("ev"), m.get("model_exp_net")))
         conn.commit()
 
         f["coins"] += 1

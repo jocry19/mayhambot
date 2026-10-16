@@ -90,6 +90,7 @@ MIGRATIONS = [
     ("signals", "ev_n", "INTEGER"),                 # replayed setups behind that EV
     ("signals", "reason", "TEXT"),                  # German plain-text why / why not
     ("signal_metrics", "ev", "REAL"),
+    ("signal_metrics", "model_exp_net", "REAL"),   # model's expected 1h return after costs (for later replays)
 ]
 
 

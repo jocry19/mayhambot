@@ -34,8 +34,9 @@ def test_ev_gate_and_safety_veto():
 
 def test_explain_names_pros_and_cons():
     txt = engine.explain(dict(smart_buyers=2, entities=2, net_usd=420, n_ultra=1, prediction=0.12, ev=0.07, ev_n=31,
-                              sellers=1, safety={"risk": 40, "factor": 0.7, "reasons": ["Top-10 halten 60 %"]}))
+                              sellers=1, model_exp_net=-0.03, model_p_net=0.31, safety={"risk": 40, "factor": 0.7, "reasons": ["Top-10 halten 60 %"]}))
     assert txt.startswith("Dafür: 2 Smart-Käufer") and "+7 %" in txt and "n=31" in txt
+    assert "Modell erwartet -3 % nach Kosten (31 % Gewinnchance)" in txt
     assert "Dagegen:" in txt and "verkauft schon" in txt and "Rug-Risiko 40" in txt and "Modell: 12 %" in txt
 
 
