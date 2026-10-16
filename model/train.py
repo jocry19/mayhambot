@@ -9,7 +9,7 @@ from model import learn
 from model.config import msettings
 from model.tiers import tier_all
 from research import backtest, data, report, wallet_stats
-from research.store import connect, ensure_schema, save_report
+from research.store import connect, ensure_schema, retry, save_report
 
 log = logging.getLogger("model.train")
 REPORT_DIR = Path(__file__).resolve().parent.parent / "data" / "reports"
@@ -54,12 +54,16 @@ def run_once(conn=None, now=None, write_files=True):
                      s["realized_pnl_usd"], s["total_pnl_usd"], s["median_entry_mcap"], s["median_min_to_2x"],
                      s["influence_followers"], s["influence_usd"], s["inflow_lift_usd"], s["consistency"],
                      s["rug_rate"], json.dumps(s["components"])))
-    conn.execute("DELETE FROM model_wallet_stats")
-    conn.executemany("INSERT INTO model_wallet_stats VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
-    conn.executemany("INSERT OR REPLACE INTO model_tier_history VALUES (?,?,?,?)",
-                     [(vid, w, t, sc) for w, (t, sc, _) in tiers.items() if t])
-    conn.execute("UPDATE model_versions SET active = (id = ?)", (vid,))
     conn.commit()
+
+    def swap():  # one short write transaction, retried if the live app holds the lock
+        conn.execute("DELETE FROM model_wallet_stats")
+        conn.executemany("INSERT INTO model_wallet_stats VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+        conn.executemany("INSERT OR REPLACE INTO model_tier_history VALUES (?,?,?,?)",
+                         [(vid, w, t, sc) for w, (t, sc, _) in tiers.items() if t])
+        conn.execute("UPDATE model_versions SET active = (id = ?)", (vid,))
+        conn.commit()
+    retry(swap, conn=conn)
     md, rep = report.build(conn, vid, bt, tiers, weights, winfo, models, prev)
     save_report(conn, f"Modell v{vid}", md, rep, vid)
     if write_files:

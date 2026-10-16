@@ -109,6 +109,7 @@ def run_once(conn=None):
         except Exception as e:  # noqa: BLE001
             log.warning("early buyers %s failed: %s", p["mint"][:6], e)
             early = []
+        time.sleep(rsettings.pause_s)
         recent = []
         if budget.take():
             try:
@@ -148,12 +149,13 @@ def run_once(conn=None):
         if r[0] not in bots][:rsettings.wallets_per_run]
     new_mints = Counter()
     for w in due:
+        time.sleep(rsettings.pause_s)
         tr = wallet_source.wallet_trades(w, limit=rsettings.wallet_tx_limit)
         summary["wallet_trades_added"] += retry(lambda: db.insert_trades(conn, tr))
         for t in tr:
             new_mints[t.mint] += 1
-        conn.execute("UPDATE research_wallets SET backfilled_at=?, n_backfills=n_backfills+1 WHERE address=?", (now, w))
-        conn.commit()
+        retry(lambda: (conn.execute("UPDATE research_wallets SET backfilled_at=?, n_backfills=n_backfills+1 WHERE address=?",
+                                    (now, w)), conn.commit()))
     summary["wallets_backfilled"] = len(due)
     # candles for coins those wallets traded (so entries/outcomes can be measured)
     have = {r[0] for r in conn.execute("SELECT DISTINCT mint FROM research_candles")}

@@ -18,11 +18,12 @@ def _i(name, default):
 class ResearchSettings:
     # discovery budget per run (GeckoTerminal allows ~30 calls/min keyless)
     gt_calls_per_run: int = _i("RESEARCH_GT_CALLS_PER_RUN", 80)
-    early_tokens_per_run: int = _i("RESEARCH_EARLY_TOKENS_PER_RUN", 8)
-    early_max_sig_pages: int = _i("RESEARCH_EARLY_MAX_SIG_PAGES", 40)   # 1000 signatures per page
-    early_tx_per_token: int = _i("RESEARCH_EARLY_TX_PER_TOKEN", 120)    # earliest swaps parsed per token
-    wallets_per_run: int = _i("RESEARCH_WALLETS_PER_RUN", 25)
+    early_tokens_per_run: int = _i("RESEARCH_EARLY_TOKENS_PER_RUN", 5)
+    early_max_sig_pages: int = _i("RESEARCH_EARLY_MAX_SIG_PAGES", 15)   # 1000 signatures per page
+    early_tx_per_token: int = _i("RESEARCH_EARLY_TX_PER_TOKEN", 80)    # earliest swaps parsed per token
+    wallets_per_run: int = _i("RESEARCH_WALLETS_PER_RUN", 12)
     wallet_tx_limit: int = _i("RESEARCH_WALLET_TX_LIMIT", 100)
+    pause_s: float = _f("RESEARCH_PAUSE_S", 3.0)  # pause between heavy RPC jobs so the live loop keeps up
     rebackfill_hours: float = _f("RESEARCH_REBACKFILL_HOURS", 24)
     discover_every_min: float = _f("RESEARCH_DISCOVER_EVERY_MIN", 20)
     # what counts as "pumped" when choosing tokens to mine early buyers from

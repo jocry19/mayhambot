@@ -53,14 +53,16 @@ def ensure_schema(conn):
     return conn
 
 
-def retry(fn, tries=8):
-    """Run a DB write, retrying while another process holds the write lock."""
+def retry(fn, tries=8, conn=None):
+    """Run a DB write, retrying while another process holds the write lock (rolls back a half-done try)."""
     for i in range(tries):
         try:
             return fn()
         except sqlite3.OperationalError as e:
             if "locked" not in str(e) and "busy" not in str(e):
                 raise
+            if conn is not None:
+                conn.rollback()
             time.sleep(min(30, 2 ** i))
     return fn()
 
