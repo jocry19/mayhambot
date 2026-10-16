@@ -383,3 +383,7 @@ button.badge.linkish:hover { background: var(--accent-wash); color: var(--accent
 .credits-total .num { font-variant-numeric: tabular-nums; }
 .credits-total.warn { border-color: rgba(250, 178, 25, 0.45); }
 .credits-total.bad { border-color: rgba(208, 59, 59, 0.55); }
+.warn-ink { color: var(--warn); }
+.credits-hist { flex-basis: 100%; }
+.credits-hist summary { cursor: pointer; font-size: 12.5px; }
+.credits-hist table { margin-top: 6px; max-width: 640px; }

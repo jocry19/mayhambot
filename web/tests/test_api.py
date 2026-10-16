@@ -211,12 +211,13 @@ def test_api_usage(demo, tmp_path, monkeypatch, capsys):
              "api.dexscreener.com": {"calls": 40, "429": 0, "waited_s": 0, "budget_per_min": None, "last_min": 3}}
         (tmp_path / f"usage-{service}.json").write_text(json.dumps({"service": service, "pid": 1, "ts": ts, "groups": g}))
 
-    write("safety", now - 300, 100, 20)
+    write("safety", now - 300, 100, 20, {"live_calls": 10, "bulk_calls": 50, "live_waited_s": 1.0, "bulk_waited_s": 4.0})
     write("research", now - 4000, 10, 1)
     c = _client(demo)
     u = c.get("/api/system").json()["api_usage"]
     assert u["available"]
-    write("safety", now, 400, 54, {"credits": 900, "refused": 7})
+    write("safety", now, 400, 54, {"credits": 900, "refused": 7, "live_calls": 30, "bulk_calls": 250,
+                                    "live_waited_s": 4.5, "bulk_waited_s": 30.0})
     # shared Helius ledger: this month, safety used 120000, 3000 of them today
     month, day = chttp._now_parts()[:2]
     (tmp_path / "credits-helius.json").write_text(json.dumps({"month": month, "services": {
@@ -228,6 +229,9 @@ def test_api_usage(demo, tmp_path, monkeypatch, capsys):
     assert s["calls_window"] == 300 and s["window_s"] == 300 and s["load"] == 0.9 and s["429"] == 2
     assert s["credits_month"] == 120000 and s["credits_today"] == 3000 and s["refused"] == 7
     assert s["credits_cap"] and s["load_month"] == round(120000 / s["credits_cap"], 3) and s["load_day"] is not None
+    assert s["live_calls_window"] == 20 and s["live_waited_s_window"] == 3.5 and s["bulk_calls_window"] == 200
+    assert rows[("research", "helius")]["day_full"] is True and rows[("research", "helius")]["credits_day_budget"] == 0
+    assert rows[("research", "helius")]["load_day"] == 1.0
     assert ("sniper", "helius") in rows and rows[("sniper", "helius")]["stale"]  # share but no process yet
     tot = c.get("/api/system").json()["api_usage"]["credits"]
     assert tot["used"] == 820000 and tot["limit"] == 1000000 and tot["load"] == 0.82

@@ -1346,6 +1346,7 @@ def system(conn):
 # ====================================================================== API budgets (core.http usage files)
 _USAGE_HIST = {}            # (service, group) -> deque[(ts, calls)] sampled whenever the dashboard reads usage
 USAGE_WINDOW_S = 600
+_WINDOW_KEYS = ("calls", "live_calls", "bulk_calls", "live_waited_s", "bulk_waited_s")
 USAGE_STALE_S = 180         # usage files are rewritten every minute; older means the service is not running
 
 
@@ -1371,22 +1372,27 @@ def api_usage(now=None):
             if not isinstance(v, dict):
                 continue
             calls = v.get("calls") or 0
+            snap = {k: v.get(k) or 0 for k in _WINDOW_KEYS}
             h = _USAGE_HIST.setdefault((svc, g), deque(maxlen=200))
             if not h or h[-1][0] != ts:
-                if h and calls < h[-1][1]:  # service restarted: counters began again
+                if h and calls < h[-1][1].get("calls", 0):  # service restarted: counters began again
                     h.clear()
-                h.append((ts or now, calls))
+                h.append((ts or now, snap))
             while len(h) > 1 and h[1][0] <= (ts or now) - USAGE_WINDOW_S:
                 h.popleft()
-            base_ts, base_calls = h[0]
+            base_ts, base = h[0]
             win = (ts or now) - base_ts
             b = v.get("budget_per_min")
             last = v.get("last_min")
             row = {k: x for k, x in v.items() if isinstance(x, (int, float)) and not isinstance(x, bool)}
             row.update(service=svc, group=g, pid=d.get("pid"), ts=ts, stale=stale, calls=calls,
-                       calls_window=calls - base_calls if win > 0 else None, window_s=int(win) if win > 0 else 0,
+                       calls_window=calls - base.get("calls", 0) if win > 0 else None, window_s=int(win) if win > 0 else 0,
                        last_min=last, budget_per_min=b, waited_s=_f(v.get("waited_s"), 1),
                        load=_f(last / b, 3) if b and last is not None and not stale else None)
+            # public-RPC lanes (core.http live/bulk): totals since start and the same 10-min window
+            if any(k in v for k in ("live_calls", "bulk_calls")):
+                for k in ("live_calls", "bulk_calls", "live_waited_s", "bulk_waited_s"):
+                    row[f"{k}_window"] = _f(snap[k] - base.get(k, 0), 1) if win > 0 else None
             row["429"] = v.get("429") or 0
             out.append(row)
     # Helius credits: shared monthly ledger (core.http.credits), one row per service with a share
@@ -1407,7 +1413,9 @@ def api_usage(now=None):
         for k in ("credits_today", "credits_month", "credits_cap", "credits_day_budget", "share_pct"):
             row[k] = _f(c.get(k), 1)
         cap, day = c.get("credits_cap"), c.get("credits_day_budget")
-        row["load_day"] = _f((c.get("credits_today") or 0) / day, 3) if day else None
+        # day budget 0 = month share used up: "voll" (the service runs on the public RPC until next month)
+        row["load_day"] = _f((c.get("credits_today") or 0) / day, 3) if day else (None if day is None else 1.0)
+        row["day_full"] = day is not None and (not day or (c.get("credits_today") or 0) >= day)
         row["load_month"] = _f((c.get("credits_month") or 0) / cap, 3) if cap else None
         if c.get("credits_month_limit"):
             total = {"used": _f(c.get("credits_month_all"), 0), "limit": c["credits_month_limit"],
@@ -1415,6 +1423,16 @@ def api_usage(now=None):
     for r in out:
         if r["group"] == group:
             r["refused"] = r.get("refused") or 0
+    if total is not None and hasattr(chttp, "credits_status"):
+        try:
+            cs = chttp.credits_status() or {}
+            total.update(key_fp=cs.get("key_fp") or None, key_changed_at=cs.get("key_changed_at"),
+                         warn=cs.get("warn"), history=[{k: h.get(k) for k in ("month", "key_fp", "used", "until", "reason")}
+                                                      for h in (cs.get("history") or [])][::-1])
+            if cs.get("used") is not None and cs.get("limit"):
+                total.update(used=_f(cs["used"], 0), limit=cs["limit"], load=_f(cs.get("warn_level"), 4))
+        except Exception:
+            pass
     return {"available": True, "rows": out, "window_s": USAGE_WINDOW_S, "credits": total}
 
 
