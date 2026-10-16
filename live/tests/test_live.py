@@ -321,7 +321,7 @@ def test_parse_deltas_wsol_and_fee():
                                          {"owner": "A", "mint": MINT, "uiTokenAmount": {"amount": "777"}}]},
           "transaction": {"message": {"accountKeys": ["A"]}}}
     d = parse_deltas(tx, "A", MINT)
-    assert d == {"token_raw": 777, "sol_lamports": -100_000_000 - 2_039_280 - 5000, "fee": 5000}
+    assert d == {"token_raw": 777, "sol_lamports": -100_000_000 - 2_039_280 - 5000, "fee": 5000, "decimals": None}
 
 
 def test_telegram_commands(env, monkeypatch):
@@ -339,23 +339,39 @@ def test_telegram_commands(env, monkeypatch):
     assert "/notaus" in service.handle_command(conn, c, "hallo")
 
 
-def test_service_reconcile_and_data_outage(env, monkeypatch):
+def test_service_reconcile_books_late_buy_and_data_outage(env, monkeypatch):
     s, conn, rpc, jup, make = env
-    make()
+    ex = make()
     svc = service.Service(conn=conn, rpc=rpc, cfg=cfg())
     old = int(time.time()) - 600
+    conn.execute("INSERT INTO ct_positions(mode, strategy, mint, symbol, status, opened_at, size_sol, tokens, "
+                 "entry_cost_sol) VALUES ('live','signal',?, 'MEME', 'opening', ?, 0.1, 0, 0)", (MINT, old))
     a = store.new_order(conn, dry=False, side="buy", mint=MINT, in_raw=1, status="unknown", sig="B1",
                         last_valid_height=950)
     b = store.new_order(conn, dry=False, side="sell", mint=MINT, in_raw=1, status="unknown", sig="S2",
                         last_valid_height=950)
-    conn.execute("UPDATE live_orders SET ts=?", (old,))
+    fresh = store.new_order(conn, dry=False, side="buy", mint="X", in_raw=1, status="sending", sig="B3")
+    conn.execute("UPDATE live_orders SET ts=? WHERE id IN (?,?)", (old, a, b))
     rpc.statuses["B1"] = {"confirmationStatus": "confirmed", "err": None}
+    rpc.txs["B1"] = {"meta": {"err": None, "fee": 5000, "preBalances": [1_000_000_000],
+                              "postBalances": [1_000_000_000 - 102_000_000],
+                              "preTokenBalances": [],
+                              "postTokenBalances": [{"owner": ex.pubkey, "mint": MINT,
+                                                     "uiTokenAmount": {"amount": "500000000000", "decimals": 9}}]},
+                     "transaction": {"message": {"accountKeys": [{"pubkey": ex.pubkey}]}}}
     rpc.height = 2000
     svc.reconcile()
     st = dict(conn.execute("SELECT id, status FROM live_orders").fetchall())
-    assert st[a] == "landed_unbooked" and st[b] == "expired"
+    assert st[a] == "landed" and st[b] == "expired" and st[fresh] == "sending"  # too young: executor's turn
+    p = conn.execute("SELECT * FROM ct_positions").fetchone()
+    assert p["status"] == "open" and p["tokens"] == pytest.approx(500.0) and p["token_decimals"] == 9
+    assert p["entry_cost_sol"] == pytest.approx(0.102) and p["entry_tx"] == "B1"
+    # a booked order is never overwritten by a late reconcile
+    assert not store.settle(conn, a, status="landed_late")
     from live import jupiter
 
+    conn.execute("UPDATE live_orders SET status='failed' WHERE id=?", (fresh,))
+    conn.execute("DELETE FROM ct_positions")
     monkeypatch.setattr(jupiter, "quote", lambda *a, **k: None)
     for _ in range(3):
         svc.data_check()
@@ -498,3 +514,100 @@ def test_set_env_replaces_and_keeps_others(tmp_path):
     set_env(f, {"LIVE_TRADING": "true", "LIVE_DRY_RUN": "true"})
     assert f.read_text() == "A=1\nLIVE_TRADING=true\n# x\nLIVE_DRY_RUN=true\n"
     assert f.stat().st_mode & 0o077 == 0
+
+
+def test_landed_buy_with_unreadable_tx_books_wallet_balance(env, monkeypatch):
+    s, conn, rpc, jup, make = env
+    ex = make()
+    rpc.side = "buy"
+    real = rpc.call
+
+    def call(method, params, priority="live"):
+        if method == "getTransaction":
+            raise RuntimeError("429 Too Many Requests")
+        return real(method, params, priority)
+    monkeypatch.setattr(rpc, "call", call)
+    f = ex.buy(MINT, 0.1, snap())
+    assert f.ok and f.source == "live_quote_only" and f.tokens == pytest.approx(990.0)
+    assert store.recent(conn)[0]["status"] == "landed"
+
+
+def test_send_transport_error_is_confirmed_not_dropped(env, monkeypatch):
+    s, conn, rpc, jup, make = env
+    ex = make()
+    rpc.side = "buy"
+    real = rpc.call
+
+    def call(method, params, priority="live"):
+        if method == "sendTransaction" and not params[1].get("skipPreflight"):
+            real(method, params, priority)  # the node took it ...
+            raise TimeoutError("read timeout")  # ... but the answer got lost
+        return real(method, params, priority)
+    monkeypatch.setattr(rpc, "call", call)
+    f = ex.buy(MINT, 0.1, snap())
+    assert f.ok and store.recent(conn)[0]["status"] == "landed"
+
+
+def test_unknown_buy_keeps_row_marker(env):
+    s, conn, rpc, jup, make = env
+    ex = make(c=cfg(confirm_timeout_s=0))
+    rpc.side = "buy"
+    rpc.landing = "never"
+    f = ex.buy(MINT, 0.1, snap())
+    from live.executor import UNCONFIRMED
+
+    assert not f.ok and f.error.startswith(UNCONFIRMED)
+    assert store.pending(conn)
+
+
+def test_empty_balance_on_one_rpc_is_not_a_sale(env):
+    s, conn, rpc, jup, make = env
+    ex = make()
+    rpc.tokens = 0
+    f = ex.sell(MINT, 1.0, 6, None, 0)  # FakeRpc has no second RPC: no proof, no booking
+    assert not f.ok and "nicht bestätigt" in f.error
+
+
+def test_opening_rows_count_against_limits(env):
+    s, conn, rpc, jup, make = env
+    now = int(time.time())
+    store.put(conn, "heartbeat", now)
+    for m in ("a", "b"):
+        conn.execute("INSERT INTO ct_positions(mode, strategy, mint, status, opened_at, size_sol, tokens) "
+                     "VALUES ('live','whale',?, 'opening', ?, 0.1, 0)", (m, now))
+    assert "offene" in guard.check_buy(conn, cfg(), "live", 0.1, 0.5, "c")[1]
+    assert "offene" not in (guard.check_buy(conn, cfg(stage_no=2), "live", 0.1, 0.5, "c")[1] or "")
+
+
+def test_chain_failed_sell_fees_count_and_cap(env):
+    s, conn, rpc, jup, make = env
+    ex = make()
+    for i in range(6):
+        store.new_order(conn, dry=False, side="sell", mint=MINT, in_raw=1, status="failed", fee_lamports=50_000_000)
+    assert guard.loss_24h(conn, "live") == pytest.approx(-0.3)
+    rpc.tokens = 1_000_000
+    f = ex.sell(MINT, 1.0, 6, None, 0)
+    assert not f.ok and "von Hand" in f.error and not rpc.sent
+    assert store.consecutive_fails(conn) == 6
+    store.new_order(conn, dry=False, side="buy", mint=MINT, in_raw=1, status="rejected")
+    assert store.consecutive_fails(conn) == 6  # rejections cost nothing and do not count
+
+
+def test_dry_positions_never_reach_the_real_wallet(env, monkeypatch, tmp_path):
+    s, conn, rpc, jup, make = env
+    import json as _json
+
+    from copytrade import execution
+    kp = Keypair()
+    kf = tmp_path / "k.json"
+    kf.write_text(_json.dumps(list(bytes(kp))))
+    s.keypair_path = str(kf)
+    monkeypatch.setenv("LIVE_TRADING", "true")
+    monkeypatch.setenv("LIVE_DRY_RUN", "false")
+    exs = execution.make_executors(s, rpc)
+    assert exs["live"].mode == "live" and exs["dry"].dry and exs["dry"].keypair is None
+    monkeypatch.setenv("LIVE_TRADING", "false")
+    conn.execute("INSERT INTO ct_positions(mode, strategy, mint, status, opened_at, entry_cost_sol, tokens) "
+                 "VALUES ('dry','whale','m1','open',?,0.1,10)", (int(time.time()),))
+    exs = execution.make_executors(s, rpc)
+    assert exs["live"] is None and exs["dry"].dry  # new buys stay paper, dry leftovers close the dry way

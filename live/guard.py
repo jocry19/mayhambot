@@ -22,8 +22,14 @@ def open_positions(conn, mode: str) -> list:
     return conn.execute("SELECT * FROM ct_positions WHERE mode=? AND status IN ('open','closing')", (mode,)).fetchall()
 
 
-def exposure(conn, mode: str) -> float:
-    return sum(float(p["entry_cost_sol"] or 0) for p in open_positions(conn, mode))
+def buying(conn, mode: str, mint: str = "") -> list:
+    """Positions of other coins whose buy is in flight ('opening' row written by the strategy before the swap)."""
+    return conn.execute("SELECT * FROM ct_positions WHERE mode=? AND status='opening' AND mint!=?", (mode, mint)).fetchall()
+
+
+def exposure(conn, mode: str, mint: str = "") -> float:
+    return (sum(float(p["entry_cost_sol"] or 0) for p in open_positions(conn, mode))
+            + sum(float(p["size_sol"] or 0) for p in buying(conn, mode, mint)))
 
 
 def loss_24h(conn, mode: str) -> float:
@@ -32,6 +38,10 @@ def loss_24h(conn, mode: str) -> float:
     r = conn.execute("SELECT COALESCE(SUM(pnl_sol),0) FROM ct_positions WHERE mode=? AND status='closed' "
                      "AND closed_at>=?", (mode, int(time.time()) - 86400)).fetchone()
     realized = float(r[0] or 0)
+    if mode == "live":  # fees of transactions that failed on chain are real losses too
+        f = conn.execute("SELECT COALESCE(SUM(fee_lamports),0) FROM live_orders WHERE dry=0 AND status='failed' "
+                         "AND ts>=?", (int(time.time()) - 86400,)).fetchone()
+        realized -= float(f[0] or 0) / 1e9
     unreal = 0.0
     for p in open_positions(conn, mode):
         val = float(p["last_price_sol"] or 0) * float(p["tokens"] or 0)
@@ -62,7 +72,8 @@ def gate(conn, cfg: LiveConfig, force: bool = False) -> tuple[bool, str]:
     return ok, why
 
 
-def check_buy(conn, cfg: LiveConfig, mode: str, size_sol: float, balance_sol: float) -> tuple[float, str | None]:
+def check_buy(conn, cfg: LiveConfig, mode: str, size_sol: float, balance_sol: float,
+              mint: str = "") -> tuple[float, str | None]:
     """Returns (allowed size, None) or (0, reason)."""
     why = store.killed(conn)
     if why:
@@ -83,10 +94,10 @@ def check_buy(conn, cfg: LiveConfig, mode: str, size_sol: float, balance_sol: fl
             ok, why = gate(conn, cfg)
             if not ok:
                 return 0, f"Go-Live-Prüfung nicht bestanden: {why}"
-    if len(open_positions(conn, mode)) >= cfg.max_open:
+    if len(open_positions(conn, mode)) + len(buying(conn, mode, mint)) >= cfg.max_open:
         return 0, f"max. {cfg.max_open} offene Echtgeld-Positionen ({cfg.stage.name})"
     size = min(size_sol, cfg.max_position_sol)
-    room = cfg.max_exposure_sol - exposure(conn, mode)
+    room = cfg.max_exposure_sol - exposure(conn, mode, mint)
     if room < size * 0.5:
         return 0, f"Einsatz-Obergrenze {cfg.max_exposure_sol:g} SOL erreicht"
     size = min(size, room)

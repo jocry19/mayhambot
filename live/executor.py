@@ -28,6 +28,8 @@ from .wallet import KeyError_, load_keypair, pubkey_of
 log = logging.getLogger("live.exec")
 
 ATA_RENT_LAMPORTS = 2_039_280
+UNCONFIRMED = "unbestätigt:"  # Fill.error prefix: the swap may still land, keep the position row
+MAX_CHAIN_FAILS_24H = 6  # sells of one coin that failed ON CHAIN (fees paid) in 24 h before a manual sell is needed
 STUCK_AFTER = 6  # failed sell rounds before the Telegram alert
 TOKEN_PROGRAMS = {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"}
 
@@ -37,7 +39,8 @@ class GuardedLiveExecutor(PaperExecutor):
                  jup=jupiter, sleep=time.sleep, exit_only: str = ""):
         PaperExecutor.__init__(self, settings, rpc)
         self.exit_only = exit_only
-        self.assess = None  # safety.assess; tests inject their own  # reason: only sells of open real positions, no buys
+        self.assess = None
+        self.dry_seller: "GuardedLiveExecutor | None" = None  # safety.assess; tests inject their own  # reason: only sells of open real positions, no buys
         self.cfg = cfg
         self.keypair = keypair
         self.pubkey = pubkey
@@ -72,8 +75,8 @@ class GuardedLiveExecutor(PaperExecutor):
             store.put(self.conn, "dry_balance_sol", self.balance() + delta)
 
     # ------------------------------------------------------------------ chain helpers
-    def _token_accounts(self, mint: str) -> list[dict]:
-        r = self.rpc.call("getTokenAccountsByOwner", [self.pubkey, {"mint": mint},
+    def _token_accounts(self, mint: str, rpc=None) -> list[dict]:
+        r = (rpc or self.rpc).call("getTokenAccountsByOwner", [self.pubkey, {"mint": mint},
                                                       {"encoding": "jsonParsed", "commitment": "confirmed"}])
         out = []
         for a in (r or {}).get("value") or []:
@@ -87,12 +90,26 @@ class GuardedLiveExecutor(PaperExecutor):
     def _deltas(self, sig: str, mint: str) -> dict | None:
         """Landed amounts of our own swap: token raw delta, SOL lamport delta incl. fee and wSOL, fee."""
         for i in range(5):
-            tx = self.rpc.call("getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
-                                                        "commitment": "confirmed"}])
+            try:
+                tx = self.rpc.call("getTransaction", [sig, {"encoding": "jsonParsed",
+                                                            "maxSupportedTransactionVersion": 0,
+                                                            "commitment": "confirmed"}])
+            except Exception as e:  # 429/timeout: the swap DID land; the caller falls back to the wallet balance
+                log.debug("getTransaction %s: %s", sig[:8], e)
+                tx = None
             if tx:
                 return parse_deltas(tx, self.pubkey, mint)
             self.sleep(1.5 + i)
         return None
+
+    def _fee_of(self, sig: str) -> int:
+        """Fee of a landed transaction (also of one that failed on chain), 0 if unreadable."""
+        try:
+            tx = self.rpc.call("getTransaction", [sig, {"encoding": "json", "maxSupportedTransactionVersion": 0,
+                                                        "commitment": "confirmed"}])
+            return int(((tx or {}).get("meta") or {}).get("fee") or 0)
+        except Exception:
+            return 0
 
     def _send(self, b64: str, first: bool) -> str:
         opts = {"encoding": "base64", "maxRetries": 0}
@@ -206,9 +223,13 @@ class GuardedLiveExecutor(PaperExecutor):
         store.update(c, oid, status="sending", sig=sig)
         try:
             self._send(b64, first=True)
-        except Exception as e:  # preflight simulation refused it: nothing was sent
-            store.update(c, oid, status="sim_failed", sim_err=str(e)[:300])
-            return oid, {**res, "status": "sim_failed", "error": f"Vorab-Simulation: {e}"}
+        except Exception as e:
+            if str(e).startswith("rpc sendTransaction:"):  # a JSON-RPC answer: preflight refused, nothing sent
+                store.update(c, oid, status="sim_failed", sim_err=str(e)[:300])
+                return oid, {**res, "status": "sim_failed", "error": f"Vorab-Simulation: {e}"}
+            # timeout / 5xx / connection: the node may have taken it -> confirm like any sent transaction
+            log.warning("send %s: transport error, confirming anyway: %s", sig[:8], e)
+            store.update(c, oid, error=f"Sendefehler, wird bestätigt: {e}"[:300])
         verdict = self._confirm(sig, b64, last_valid)
         if verdict == "landed":
             d = self._deltas(sig, mint)
@@ -221,7 +242,7 @@ class GuardedLiveExecutor(PaperExecutor):
             store.update(c, oid, **upd)
             return oid, {**res, "status": "landed", "sig": sig, "deltas": d}
         if verdict.startswith("failed"):
-            store.update(c, oid, status="failed", error=verdict[7:][:300])
+            store.update(c, oid, status="failed", error=verdict[7:][:300], fee_lamports=self._fee_of(sig))
             return oid, {**res, "status": "failed", "sig": sig, "error": f"auf der Chain fehlgeschlagen: {verdict[7:]}"}
         store.update(c, oid, status=verdict, error="Blockhash abgelaufen, nicht gelandet" if verdict == "expired"
                      else "Status unklar, blockiert neue Käufe bis zur Klärung")
@@ -236,7 +257,7 @@ class GuardedLiveExecutor(PaperExecutor):
                 bal = self.balance()
             except Exception as e:
                 return Fill(False, error=f"Guthaben nicht lesbar: {e}")
-            size, why = guard.check_buy(self.conn, self.cfg, self.mode, size_sol, bal)
+            size, why = guard.check_buy(self.conn, self.cfg, self.mode, size_sol, bal, mint)
             why = why or guard.check_coin(self.conn, self.cfg, mint, self.assess)
             if why:
                 store.event_safe(self.conn, f"[{self.mode}] Kauf {snap.symbol if snap else mint[:6]} blockiert: {why}")
@@ -255,9 +276,13 @@ class GuardedLiveExecutor(PaperExecutor):
                 tokens = int(q["outAmount"]) / 10 ** dec * (1 - paper_adverse()) * (size - fees) / size
                 return Fill(True, tokens=tokens, sol=size, price_sol=size / tokens, price_impact=r["impact"],
                             fees_sol=fees, tx=f"dry-{oid}", source="dry_run")
+            if r["status"] == "unknown":  # may still land: the watchdog books it into the 'opening' row (service.py)
+                return Fill(False, error=f"{UNCONFIRMED} Kauf {r.get('sig', '')[:12]}… wird geprüft")
             if r["status"] != "landed":
                 return Fill(False, error=r.get("error") or r["status"])
             d = r.get("deltas")
+            if d and d.get("decimals") is not None:
+                dec = d["decimals"]  # getTokenSupply may have failed and guessed 6
             if d and d["token_raw"] > 0:
                 tokens, spent, fees = d["token_raw"] / 10 ** dec, -d["sol_lamports"] / 1e9, d["fee"] / 1e9
             else:  # landed but the transaction is not readable yet: the wallet's balance, else the quote, flagged
@@ -290,6 +315,11 @@ class GuardedLiveExecutor(PaperExecutor):
         if time.time() < not_before:
             return Fill(False, error=f"Verkauf pausiert ({fails} Fehlrunden), nächster Versuch in "
                                      f"{not_before - time.time():.0f}s")
+        n_chain = self.conn.execute("SELECT COUNT(*) FROM live_orders WHERE dry=0 AND side='sell' AND mint=? AND "
+                                    "status='failed' AND ts>=?", (mint, int(time.time()) - 86400)).fetchone()[0]
+        if n_chain >= MAX_CHAIN_FAILS_24H:
+            return Fill(False, error=f"{n_chain} Verkäufe in 24 h auf der Chain gescheitert (Gebühren): "
+                                     "bitte von Hand verkaufen, der Bot sendet nicht mehr")
         late = self._late_sell(mint, decimals)
         if late is not None:
             return late
@@ -312,8 +342,11 @@ class GuardedLiveExecutor(PaperExecutor):
 
     def _late_sell(self, mint: str, decimals: int) -> Fill | None:
         """A sell of this coin whose fate was unclear and that landed after all: book that one, never sell twice."""
-        for o in self.conn.execute("SELECT * FROM live_orders WHERE dry=0 AND side='sell' AND mint=? AND "
-                                   "status IN ('unknown','sending','landed_late') ORDER BY id DESC", (mint,)).fetchall():
+        last_buy = self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM live_orders WHERE dry=0 AND side='buy' AND "
+                                     "mint=? AND status IN ('landed','landed_late')", (mint,)).fetchone()[0]
+        for o in self.conn.execute("SELECT * FROM live_orders WHERE dry=0 AND side='sell' AND mint=? AND id>? AND "
+                                   "status IN ('unknown','sending','landed_late') ORDER BY id DESC",
+                                   (mint, last_buy)).fetchall():
             try:
                 st = self.rpc.call("getSignatureStatuses", [[o["sig"]], {"searchTransactionHistory": True}])
                 st = ((st or {}).get("value") or [None])[0]
@@ -346,6 +379,16 @@ class GuardedLiveExecutor(PaperExecutor):
             return Fill(False, error=f"Token-Bestand nicht lesbar: {e}")
         raw = sum(a["amount"] for a in accs)
         decimals = next((int(a["decimals"]) for a in accs if a["decimals"] is not None), decimals or 6)
+        if raw <= 0:  # one node's empty answer is no proof: ask a second one before writing the position off
+            other = getattr(self.rpc, "public", None)
+            try:
+                raw2 = sum(a["amount"] for a in (self._token_accounts(mint, other) if other else []))
+            except Exception:
+                raw2 = None
+            if raw2:
+                raw = raw2
+            elif other is None or raw2 is None:
+                return Fill(False, error="Bestand 0 auf einer RPC, nicht bestätigt (kein Verkauf gebucht)")
         if raw <= 0:
             reclaimed = self._close_accounts(accs)
             return Fill(True, tokens=0, sol=max(0, reclaimed) / 1e9, price_sol=0, tx="", source="live_empty",
@@ -438,18 +481,25 @@ def parse_deltas(tx: dict, owner: str, mint: str) -> dict | None:
     if owner in keys:
         i = keys.index(owner)
         native = meta["postBalances"][i] - meta["preBalances"][i]
-    return {"token_raw": token, "sol_lamports": native + wsol, "fee": int(meta.get("fee") or 0)}
+    dec = next((int((b.get("uiTokenAmount") or {}).get("decimals")) for b in (meta.get("postTokenBalances") or [])
+                + (meta.get("preTokenBalances") or []) if b.get("mint") == mint
+                and (b.get("uiTokenAmount") or {}).get("decimals") is not None), None)
+    return {"token_raw": token, "sol_lamports": native + wsol, "fee": int(meta.get("fee") or 0), "decimals": dec}
 
 
-def _open_real(settings: Settings) -> int:
+def _open_mode(settings: Settings, mode: str) -> int:
     try:
         from copytrade import store as ct_store  # type: ignore
 
         c = ct_store.connect(settings)
-        return c.execute("SELECT COUNT(*) FROM ct_positions WHERE mode='live' AND status IN ('open','closing')"
-                         ).fetchone()[0]
+        return c.execute("SELECT COUNT(*) FROM ct_positions WHERE mode=? AND status IN ('open','closing','opening')",
+                         (mode,)).fetchone()[0]
     except Exception:
         return 0
+
+
+def _open_real(settings: Settings) -> int:
+    return _open_mode(settings, "live")
 
 
 def make_executor(settings: Settings, rpc) -> GuardedLiveExecutor | None:
@@ -459,6 +509,9 @@ def make_executor(settings: Settings, rpc) -> GuardedLiveExecutor | None:
     cfg = load()
     open_real = _open_real(settings)
     if not cfg.enabled and not open_real:
+        if _open_mode(settings, "dry"):  # dry positions left after LIVE_TRADING=false: dry exits, no wallet needed
+            return GuardedLiveExecutor(settings, rpc, cfg, None, cfg.wallet_pubkey or "-", True,
+                                       exit_only="Echtgeld aus: nur Dry-Positionen schließen")
         return None
     try:
         kp = load_keypair(settings.keypair_path, settings.private_key, cfg.keychain_service)
@@ -472,12 +525,16 @@ def make_executor(settings: Settings, rpc) -> GuardedLiveExecutor | None:
         why = ("Echtgeld aus (LIVE_TRADING)" if not cfg.enabled else "Dry-Run angefordert") + \
             f": nur Verkauf der {open_real} offenen Echtgeld-Position(en), danach neu starten"
         log.warning("live executor: %s", why)
-        return GuardedLiveExecutor(settings, rpc, cfg, kp, pubkey_of(kp), False, exit_only=why)
+        ex = GuardedLiveExecutor(settings, rpc, cfg, kp, pubkey_of(kp), False, exit_only=why)
+        ex.dry_seller = GuardedLiveExecutor(settings, rpc, cfg, None, ex.pubkey, True, conn=ex.conn, exit_only=why)
+        return ex
     pub = pubkey_of(kp) if kp else cfg.wallet_pubkey
     if not pub:
         log.error("live: LIVE_TRADING=true, aber kein Schlüssel und keine LIVE_WALLET_PUBKEY")
         return None
     ex = GuardedLiveExecutor(settings, rpc, cfg, kp, pub, cfg.dry_run)
+    if not ex.dry:  # dry positions from before the switch are closed the dry way, never with real tokens
+        ex.dry_seller = GuardedLiveExecutor(settings, rpc, cfg, None, pub, True, conn=ex.conn)
     log.warning("live executor: %s, Wallet %s…, %s", "DRY-RUN (sendet nichts)" if ex.dry else "ECHTGELD",
                 pub[:6], cfg.stage.name)
     return ex

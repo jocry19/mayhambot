@@ -151,9 +151,10 @@ class Service:
             alert_once(c, "kill", f"🛑 Live-Not-Aus aktiv: {k}. Aufheben mit /weiter.", 6 * 3600)
 
     def reconcile(self) -> None:
+        wait = self.cfg.confirm_timeout_s + 120  # never race the executor while it still confirms
         for o in store.pending(self.conn):
-            if time.time() - o["ts"] < 120:
-                continue  # the executor may still be confirming it
+            if time.time() - o["ts"] < wait:
+                continue
             try:
                 st = self.rpc.call("getSignatureStatuses", [[o["sig"]], {"searchTransactionHistory": True}])
                 st = ((st or {}).get("value") or [None])[0]
@@ -163,16 +164,67 @@ class Service:
                 continue
             if st and st.get("confirmationStatus") in ("confirmed", "finalized"):
                 if st.get("err"):
-                    store.update(self.conn, o["id"], status="failed", error=f"spät geprüft: {st['err']}")
+                    if store.settle(self.conn, o["id"], status="failed", error=f"spät geprüft: {st['err']}"):
+                        self._buy_failed(o)
                 elif o["side"] == "sell":  # the executor books it at the next close attempt (_late_sell)
-                    store.update(self.conn, o["id"], status="landed_late", error="spät gelandet")
+                    store.settle(self.conn, o["id"], status="landed_late", error="spät gelandet")
                 else:
-                    store.update(self.conn, o["id"], status="landed_unbooked",
-                                 error="spät gelandet, nicht gebucht: Wallet prüfen")
-                    send(f"⚠️ Order {o['side']} {o['mint'][:6]}… ist doch gelandet, aber nicht gebucht. "
-                         "Token liegen ohne Position in der Wallet: python -m live orphans")
+                    self._book_late_buy(o)
             elif o["last_valid_height"] and height > o["last_valid_height"] + 10:
-                store.update(self.conn, o["id"], status="expired", error="spät geprüft: nie gelandet")
+                if store.settle(self.conn, o["id"], status="expired", error="spät geprüft: nie gelandet"):
+                    self._buy_failed(o)
+
+    def _row_for(self, o):
+        """The strategy's position row of this buy: same coin, live, written just before the swap, no tokens yet."""
+        if o["side"] != "buy":
+            return None
+        return self.conn.execute(
+            "SELECT * FROM ct_positions WHERE mode='live' AND mint=? AND status IN ('opening','failed') "
+            "AND COALESCE(tokens,0)=0 AND opened_at BETWEEN ? AND ? ORDER BY id DESC LIMIT 1",
+            (o["mint"], o["ts"] - 300, o["ts"] + 60)).fetchone()
+
+    def _buy_failed(self, o) -> None:
+        row = self._row_for(o)
+        if row is not None and row["status"] == "opening":
+            self.conn.execute("UPDATE ct_positions SET status='failed' WHERE id=? AND status='opening'", (row["id"],))
+            self.conn.commit()
+
+    def _book_late_buy(self, o) -> None:
+        """A buy that landed after the executor gave up: book it into its position row so stops and exits run."""
+        from .executor import parse_deltas
+
+        pub = store.get(self.conn, "wallet_pubkey")
+        try:
+            tx = self.rpc.call("getTransaction", [o["sig"], {"encoding": "jsonParsed", "commitment": "confirmed",
+                                                             "maxSupportedTransactionVersion": 0}])
+        except Exception as e:  # noqa: BLE001
+            log.debug("late buy %s: %s", o["id"], e)
+            return  # next round
+        d = parse_deltas(tx, pub, o["mint"]) if tx and pub else None
+        if not d or d["token_raw"] <= 0:
+            return
+        row = self._row_for(o)
+        dec = d.get("decimals") if d.get("decimals") is not None else 6
+        if row is None:
+            if store.settle(self.conn, o["id"], status="landed_unbooked", out_raw=d["token_raw"],
+                            sol_delta_lamports=d["sol_lamports"], fee_lamports=d["fee"],
+                            error="spät gelandet, keine Position gefunden: Wallet prüfen"):
+                send(f"⚠️ Kauf {o['mint'][:6]}… ist spät gelandet, aber ohne Position: Token liegen ohne Stop in "
+                     "der Wallet. python -m live orphans")
+            return
+        if not store.settle(self.conn, o["id"], status="landed", out_raw=d["token_raw"],
+                            sol_delta_lamports=d["sol_lamports"], fee_lamports=d["fee"], error="spät gelandet"):
+            return
+        tokens, cost = d["token_raw"] / 10 ** dec, -d["sol_lamports"] / 1e9
+        price = cost / tokens
+        self.conn.execute(
+            "UPDATE ct_positions SET status='open', tokens=?, token_decimals=?, entry_cost_sol=?, entry_price_sol=?, "
+            "entry_tx=?, high_price_sol=COALESCE(high_price_sol, ?), last_price_sol=COALESCE(last_price_sol, ?) "
+            "WHERE id=? AND status IN ('opening','failed')",
+            (tokens, dec, cost, price, o["sig"], price, price, row["id"]))
+        self.conn.commit()
+        send(f"ℹ️ Kauf {row['symbol'] or o['mint'][:6]} ist spät gelandet und jetzt gebucht ({cost:.3f} SOL); "
+             "Stops und Ausstiege laufen.")
 
     def data_check(self) -> None:
         from copytrade.config import Settings  # type: ignore

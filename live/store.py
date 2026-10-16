@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS live_state (key TEXT PRIMARY KEY, value TEXT, updated
 
 # status values
 OPEN_STATES = ("sending", "unknown")  # an order whose fate is not known yet blocks new buys
-FAIL_STATES = ("failed", "expired", "sim_failed", "rejected")
+FAIL_STATES = ("failed", "expired", "sim_failed")  # rejected = refused before sending, costs nothing
 
 
 def init(conn) -> None:
@@ -72,6 +72,18 @@ def update(conn, oid: int, **kw) -> None:
     cols = ", ".join(f"{k}=?" for k in kw)
     conn.execute(f"UPDATE live_orders SET {cols} WHERE id=?", (*kw.values(), oid))
     conn.commit()
+
+
+def settle(conn, oid: int, **kw) -> bool:
+    """update() only while the order is still unresolved ('sending'/'unknown'/'landed_late' for sells): the
+    executor may have booked it in the meantime, and a booked order must never be overwritten."""
+    if kw.get("status") and kw["status"] not in ("new", "sending"):
+        kw.setdefault("done_ts", int(time.time()))
+    cols = ", ".join(f"{k}=?" for k in kw)
+    n = conn.execute(f"UPDATE live_orders SET {cols} WHERE id=? AND status IN ('sending','unknown')",
+                     (*kw.values(), oid)).rowcount
+    conn.commit()
+    return n == 1
 
 
 def consecutive_fails(conn) -> int:

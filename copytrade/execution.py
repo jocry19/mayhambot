@@ -141,6 +141,9 @@ def make_executors(settings: Settings, rpc: chain.Rpc) -> dict:
     exs: dict = {"paper": PaperExecutor(settings, rpc), "live": None}
     ex = _live(settings, rpc)
     if ex is not None:
-        exs["live"] = ex
+        if not (ex.mode == "dry" and getattr(ex, "exit_only", "")):  # dry leftovers only: new buys stay paper
+            exs["live"] = ex
         exs[ex.mode] = ex  # 'dry' positions find their executor for the sell
+        if getattr(ex, "dry_seller", None) is not None:
+            exs["dry"] = ex.dry_seller  # never sell a dry position with the real wallet
     return exs
