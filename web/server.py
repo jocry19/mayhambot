@@ -325,6 +325,37 @@ def market_coin(mint: str):
     return ok(cache.get(("market_coin", mint), 30, build))
 
 
+@app.get("/api/intel")
+def intel_page():
+    """Zentrale: live coin board, smart money flow and rotation, ticker, wallet profiles, source monitor and
+    the measurement whether each feature helps (intel/README.md). Read-only."""
+    def build():
+        try:
+            import intel  # type: ignore
+        except Exception as e:
+            return {"available": False, "note": f"intel/ fehlt: {e}"[:200]}
+        conn = read_conn()
+        if not q.has(conn, "intel_state"):
+            return {"available": False, "note": "Die Zentrale sammelt noch keine Daten: der Dienst intel startet mit dem nächsten Update."}
+        return intel.view(conn)
+    return ok(cache.get(("intel",), 10, build))
+
+
+@app.get("/api/intel/coin/{mint}")
+def intel_coin(mint: str):
+    """Dossier of one coin: all point-in-time features with coverage, flags, ticker events, feature history."""
+    def build():
+        try:
+            import intel  # type: ignore
+        except Exception as e:
+            return {"available": False, "note": f"intel/ fehlt: {e}"[:200]}
+        conn = read_conn()
+        if not q.has(conn, "intel_latest"):
+            return {"available": False, "note": "Noch keine Zentrale-Daten."}
+        return intel.coin_view(conn, mint.strip())
+    return ok(cache.get(("intel_coin", mint), 20, build))
+
+
 @app.get("/api/system")
 def system():
     return ok(q.system(read_conn()))

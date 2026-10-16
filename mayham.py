@@ -4,7 +4,7 @@
   python mayham.py run               # everything in the foreground, Ctrl+C stops all (used by launchd)
   python mayham.py start             # everything in the background
   python mayham.py stop | status | restart
-  python mayham.py logs [signals|copytrade|research|web|safety|sniper|market]
+  python mayham.py logs [signals|copytrade|research|web|safety|sniper|market|intel]
   python mayham.py update            # git pull (GitHub transport), install requirements, restart if running
   python mayham.py install-autostart # macOS: start at login and restart on crash (launchd)
   python mayham.py remove-autostart
@@ -32,6 +32,7 @@ SERVICES = {
     "safety": [PY, "-m", "safety", "run"],  # rug/honeypot/insider refresher, every SAFETY_REFRESH_EVERY_SEC  # the dashboard (FastAPI + built frontend); the old Streamlit dashboard/ is no longer started
     "sniper": [PY, "-m", "sniper", "run"],  # launch sniper with bundle check, paper mode only (sniper/README.md)
     "market": [PY, "-m", "market", "run"],  # market phase, sectors, narratives; keyless, no Helius (market/README.md)
+    "intel": [PY, "-m", "intel", "run"],  # Zentrale: point-in-time features, ticker, source evaluation; DB only (intel/README.md)
 }
 # research + retraining loop from model/ (other thread), started only once it exists
 if (ROOT / "model" / "__main__.py").exists():
