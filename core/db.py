@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 CREATE INDEX IF NOT EXISTS idx_trades_mint_ts ON trades(mint, ts);
 CREATE INDEX IF NOT EXISTS idx_trades_wallet_ts ON trades(wallet, ts);
+CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts);
+CREATE INDEX IF NOT EXISTS idx_token_prices_ts ON token_prices(ts);
 CREATE TABLE IF NOT EXISTS wallets (
     address TEXT PRIMARY KEY, label TEXT DEFAULT '', source TEXT DEFAULT 'auto', manual INTEGER DEFAULT 0,
     score REAL DEFAULT 0, is_smart INTEGER DEFAULT 0, is_bot INTEGER DEFAULT 0,
