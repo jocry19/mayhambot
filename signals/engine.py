@@ -24,6 +24,7 @@ class QualityCache:
         self.cfg = cfg
         self.positions = scoring.load_positions(conn)
         self.meta = {r["address"]: r for r in conn.execute("SELECT address, manual, is_bot, label FROM wallets")}
+        self.model_version, self.model_tiers = scoring.model_tiers(conn)  # one truth once model/ is active
         self._c = {}
 
     def get(self, wallet, mint):
@@ -34,7 +35,12 @@ class QualityCache:
             manual = bool(m and m["manual"])
             bot = bool(m and m["is_bot"])
             score = q["score"] if q["n"] else (MANUAL_DEFAULT_SCORE if manual else 0.0)
-            tier = scoring.tier_for(score, q["n"], bot, manual, self.cfg)  # placeholder until model/ exists
+            if self.model_version is not None:
+                tier = (self.model_tiers.get(wallet) or (None,))[0]
+                if manual and not bot and tier not in ("ultra", "smart"):
+                    tier = "smart"
+            else:
+                tier = scoring.tier_for(score, q["n"], bot, manual, self.cfg)  # heuristic fallback
             self._c[k] = (score, tier, q["n"])
         return self._c[k]
 

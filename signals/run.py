@@ -128,6 +128,12 @@ def cycle(conn, i):
     notifier.notify(conn, sigs)
     engine.update_outcomes(conn)
     smart = conn.execute("SELECT COUNT(*) FROM wallets WHERE is_smart=1").fetchone()[0]
+    ts = scoring.last_tier_sync
+    if ts:
+        log.info("tiers synced from model v%s: ultra %d / smart %d / good %d",
+                 ts["version"], ts["ultra"], ts["smart"], ts["good"])
+    else:
+        log.info("tiers: heuristic (no active model version)")
     log.info("cycle %d: %d tokens, +%d trades, +%d backfill trades, %d smart wallets, %d signals (%.0fs)",
              i, len(watch), new_trades, bf, smart, len(sigs), time.time() - t0)
     return sigs

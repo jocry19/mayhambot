@@ -52,6 +52,11 @@ CREATE INDEX IF NOT EXISTS idx_signals_mint ON signals(mint, ts);
 
 # columns added after the first release: (table, column, type). Applied on connect, idempotent.
 MIGRATIONS = [
+    ("wallets", "tier_source", "TEXT"),             # 'model' (synced from model_wallet_stats) | 'heuristic'
+    ("wallets", "tier_version", "INTEGER"),         # model_versions.id the tier came from
+    ("wallets", "model_score", "REAL"),
+    ("wallets", "cluster_id", "TEXT"),
+    ("wallets", "exit_capture", "REAL"),
     ("signals", "score_raw", "REAL"),               # score before the safety penalty
     ("signals", "safety_factor", "REAL"),           # safety.signal_penalty factor (NULL = safety/ absent)
     ("signals", "safety_risk", "REAL"),             # risk 0-100, NULL = unchecked
