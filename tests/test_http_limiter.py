@@ -359,3 +359,22 @@ def test_method_limit_and_preference(monkeypatch, tmp_path):
     ok = lambda u: (True, 10.0)  # noqa: E731
     assert http.pick_public_rpc("bulk", probe=ok, method="getTokenLargestAccounts") == \
         "https://solana-rpc.publicnode.com"
+
+
+def test_retry_after_429_books_credits_once(monkeypatch, tmp_path):
+    _credit_env(monkeypatch, tmp_path, "research")
+    statuses = [429, 429, 200]
+
+    class R:
+        def __init__(self, code):
+            self.status_code, self.url = code, "https://api.helius.xyz/v0/addresses/x/transactions?api-key=k"
+            self.headers = {"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"} if code == 429 else {}
+
+        def json(self):
+            return []
+    monkeypatch.setattr(http._session, "request", lambda m, url, **kw: R(statuses.pop(0)))
+    monkeypatch.setattr(http.time, "sleep", lambda s: None)
+    url = "https://api.helius.xyz/v0/addresses/x/transactions?api-key=k"
+    before = http.credits("research")["credits_month"]
+    http.get_json(url)
+    assert http.credits("research")["credits_month"] - before == http.credit_cost(url, {})

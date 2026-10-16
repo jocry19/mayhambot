@@ -952,11 +952,14 @@ def _request(method, url, retries=4, timeout=20, priority="bulk", **kw):
         for it in (payload if isinstance(payload, list) else [payload]))
     rpc_method = payload.get("method") if isinstance(payload, dict) else ("batch" if payload else None)
     pooled = method == "POST" and host in _pool_hosts()
+    rate_limited = False
     for attempt in range(retries + 1):
         if pooled:  # any call to a pool endpoint may go to whichever endpoint has room (failover on retry)
             url = pick_public_rpc(priority, method=rpc_method)
             host = urlparse(url).netloc
-        throttle(host, cost=cost, das=das, priority=priority, method=rpc_method)
+        # a 429 is not billed, so the retry after one does not book the credits a second time
+        throttle(host, cost=0 if rate_limited and cost else cost, das=das, priority=priority, method=rpc_method)
+        rate_limited = False
         t_req = time.time()
         try:
             r = _session.request(method, url, timeout=min(timeout, POOL_TIMEOUT) if pooled else timeout, **kw)
@@ -973,8 +976,12 @@ def _request(method, url, retries=4, timeout=20, priority="bulk", **kw):
         if r.status_code == 429 or r.status_code >= 500:
             if attempt == retries:
                 raise requests.HTTPError(f"{r.status_code} for {redact(r.url)}")
-            delay = float(r.headers.get("Retry-After") or 0) or (2 ** attempt) * 2
+            try:
+                delay = float(r.headers.get("Retry-After") or 0) or (2 ** attempt) * 2
+            except ValueError:  # Retry-After as an HTTP date
+                delay = (2 ** attempt) * 2
             if r.status_code == 429:
+                rate_limited = True
                 delay = max(delay, MIN_PENALTY_SECONDS.get(host, DEFAULT_MIN_PENALTY))
                 if pooled:
                     delay = min(delay, POOL_MAX_SLEEP_429)
