@@ -125,16 +125,38 @@ def logs(name=None):
     subprocess.call(["tail", "-n", "40", "-F", *[str(f) for f in files]])
 
 
+def _checks_ok():
+    """Tests must pass before a new version goes live."""
+    for cmd in ([PY, "tests/test_logic.py"], [PY, "-m", "pytest", "tests", "-q", "-x"]):
+        if subprocess.call(cmd, cwd=ROOT, stdout=subprocess.DEVNULL) != 0:
+            print("Tests rot:", " ".join(cmd[1:]))
+            return False
+    return True
+
+
 def update():
-    was_running = any(_pid(n) for n in SERVICES)
+    """Pull main, install requirements, back up, run tests; restart only on green tests.
+    On red tests the previous commit is restored, so a broken push never goes live."""
+    old = None
     if (ROOT / ".git").exists():
+        old = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
         subprocess.check_call(["git", "pull", "--ff-only", "origin", "main"], cwd=ROOT)
     subprocess.check_call([PY, "-m", "pip", "install", "-q", "-r", "requirements.txt"], cwd=ROOT)
-    if was_running:
-        stop()
-        start()
+    if not _checks_ok():
+        if old:
+            subprocess.call(["git", "reset", "-q", "--hard", old], cwd=ROOT)
+            print(f"Update abgebrochen, zurück auf {old[:7]}. Die laufende Version bleibt aktiv.")
+        return False
+    if (ROOT / "deploy" / "ops.py").exists():
+        subprocess.call([PY, "deploy/ops.py", "backup"], cwd=ROOT)
     if PLIST.exists():
         subprocess.call(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LABEL}"])
+    elif any(_pid(n) for n in SERVICES):
+        stop()
+        start()
+    print("Update ok:", subprocess.check_output(["git", "log", "-1", "--format=%h %s"], cwd=ROOT, text=True).strip()
+          if old else "")
+    return True
 
 
 def update_loop(every):
@@ -144,9 +166,10 @@ def update_loop(every):
             before = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
             subprocess.check_call(["git", "fetch", "-q", "origin", "main"], cwd=ROOT)
             after = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=ROOT, text=True).strip()
-            if before != after:
+            if before != after and after != getattr(update_loop, "bad", None):
                 print(f"neue Version {after[:7]}, aktualisiere")
-                update()
+                if not update():
+                    update_loop.bad = after  # do not retry the same broken commit every round
         except Exception as e:  # noqa: BLE001
             print("update-loop:", e)
         time.sleep(every)

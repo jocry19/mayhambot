@@ -7,3 +7,5 @@ plotly>=5.20
 pandas>=2.0
 # copytrade (live trading only)
 # solders>=0.21
+# tests (mayham.py update runs them before every restart)
+pytest>=8.0
