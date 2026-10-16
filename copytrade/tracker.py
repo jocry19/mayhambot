@@ -129,11 +129,11 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row) -> list[chain.Swap]:
     if not sigs:
         conn.execute("UPDATE ct_wallets SET last_polled=? WHERE address=?", (now, wallet))
         return []
-    conn.execute("UPDATE ct_wallets SET last_sig=?, last_polled=? WHERE address=?",
-                 (sigs[0]["signature"], now, wallet))
-    conn.commit()
-    if not last:
-        return []  # first contact: only set the cursor, do not trade old history
+    if not last:  # first contact: only set the cursor, do not trade old history
+        conn.execute("UPDATE ct_wallets SET last_sig=?, last_polled=? WHERE address=?",
+                     (sigs[0]["signature"], now, wallet))
+        conn.commit()
+        return []
     solusd = market.sol_usd(s)
     out = []
     for sg in reversed(sigs):
@@ -148,6 +148,10 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row) -> list[chain.Swap]:
             out.append(sw)
     if out:
         store.save_swaps(conn, out, solusd)
+    # advance the cursor only after the swaps are stored (a locked write is retried without losing them)
+    conn.execute("UPDATE ct_wallets SET last_sig=?, last_polled=? WHERE address=?",
+                 (sigs[0]["signature"], int(time.time()), wallet))
+    conn.commit()
     return out
 
 

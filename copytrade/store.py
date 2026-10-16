@@ -71,6 +71,10 @@ def connect(settings: Settings) -> sqlite3.Connection:
             conn.execute("PRAGMA journal_mode=WAL")
         except sqlite3.OperationalError:
             pass
+    # Autocommit: every statement is its own short transaction, so no write lock is ever held
+    # across a network call (four services write this file). Waits up to 30 s for a busy lock.
+    conn.isolation_level = None
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.executescript(SCHEMA)
     _migrate(conn)
     from . import control
@@ -158,3 +162,18 @@ def _share_with_core(conn: sqlite3.Connection, swaps: list, sol_usd: float) -> N
         ])
     except Exception:
         pass
+
+
+def is_locked(e: Exception) -> bool:
+    return isinstance(e, sqlite3.OperationalError) and "locked" in str(e).lower()
+
+
+def retry_locked(fn, *args, **kw):
+    """Run fn; if SQLite was still locked after the busy timeout, wait briefly and retry once."""
+    try:
+        return fn(*args, **kw)
+    except sqlite3.OperationalError as e:
+        if not is_locked(e):
+            raise
+        time.sleep(2)
+        return fn(*args, **kw)

@@ -71,7 +71,7 @@ class Engine:
         seen = 0
         for w in {r["address"]: r for r in batch}.values():
             try:
-                for sw in tracker.poll(self.conn, self.s, self.rpc, w):
+                for sw in store.retry_locked(tracker.poll, self.conn, self.s, self.rpc, w):
                     seen += 1
                     if sw.side == "buy":
                         self.strategy.on_whale_buy(sw)
@@ -96,11 +96,11 @@ class Engine:
             last_eq = 0.0
             while not self._stop.is_set():
                 try:
-                    strat.process_commands()
-                    follow_signals(conn, strat)
-                    strat.update()
+                    store.retry_locked(strat.process_commands)
+                    store.retry_locked(follow_signals, conn, strat)
+                    store.retry_locked(strat.update)
                     if time.time() - last_eq > 60:
-                        strat.equity_snapshot()
+                        store.retry_locked(strat.equity_snapshot)
                         last_eq = time.time()
                 except Exception as e:
                     log.warning("position update failed: %s", e)
@@ -112,7 +112,7 @@ class Engine:
             eng.s, eng.rpc, eng.conn = self.s, self.rpc, store.connect(self.s)
             while not self._stop.is_set():
                 try:
-                    eng.maintain(discover=True)
+                    store.retry_locked(eng.maintain, discover=True)
                 except Exception as e:
                     log.warning("maintenance failed: %s", e)
                 # no wallets yet (e.g. network was down): retry soon instead of in 10 min

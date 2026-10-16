@@ -309,3 +309,37 @@ def test_geckoterminal_uses_shared_limiter(monkeypatch):
     assert cthttp.get_json("https://api.geckoterminal.com/api/v2/x", limiter_name="geckoterminal") == {"ok": 1}
     assert calls == [("throttle", "api.geckoterminal.com"), ("penalize", "api.geckoterminal.com", 40.0),
                      ("throttle", "api.geckoterminal.com")]  # no own limiter, no own sleep
+
+
+def test_db_writes_never_hold_the_lock(tmp_path):
+    import sqlite3
+    import threading
+
+    s = Settings(db_path=tmp_path / "t.db")
+    conn = store.connect(s)
+    conn.execute("UPDATE ct_state SET value='1' WHERE key='x'")
+    store.event(conn, "x", "y")
+    assert not conn.in_transaction  # autocommit: nothing stays locked across network calls
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+
+    other = sqlite3.connect(str(s.db_path), timeout=0.1, check_same_thread=False)
+    other.execute("BEGIN IMMEDIATE")  # another service holds the write lock for a moment
+    threading.Timer(0.5, other.rollback).start()
+    store.event(conn, "x", "waited for the lock")  # busy_timeout waits instead of failing
+    assert conn.execute("SELECT COUNT(*) FROM ct_events").fetchone()[0] == 2
+
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return "ok"
+
+    import copytrade.store as st_mod
+    orig = st_mod.time.sleep
+    st_mod.time.sleep = lambda x: None
+    try:
+        assert store.retry_locked(flaky) == "ok" and len(calls) == 2
+    finally:
+        st_mod.time.sleep = orig
