@@ -185,6 +185,7 @@ def robustness(data, cfg=default_cfg, min_n=100):
         rows.append({"feature": name, "label": label, "group": group, "group_label": coin.GROUPS.get(group, group), "n": len(pts),
                      "ic": ic, "ic_old": ic_old, "ic_new": ic_new, "stable": stable, "by_phase": by_phase,
                      "partial_ic": partial, "z": z, "p": _p_two_sided(z)})
+    _walk_forward(rows, data)
     qs = bh([r["p"] for r in rows])
     for r, q in zip(rows, qs):
         r["q"] = q
@@ -192,8 +193,77 @@ def robustness(data, cfg=default_cfg, min_n=100):
         r["verdict"] = ("robust" if q <= 0.05 and r["stable"] and adds else
                         "nur Größe/Alter" if q <= 0.05 and r["stable"] and not adds else
                         "instabil" if q <= 0.05 else "kein Effekt")
-    rows.sort(key=lambda r: (r["verdict"] != "robust", r["q"]))
+    qt = bh([r["p_train"] for r in rows])
+    for r, q in zip(rows, qt):
+        r["q_train"] = q
+        # trusted: found on the older 2/3 alone (q <= 5 % across all features), then the same direction with real
+        # size on the newest 1/3 it never saw, and not just market cap / age / liquidity in disguise
+        r["trusted"] = bool(q is not None and q <= 0.05 and r["ic_test"] is not None and r["ic_train"] * r["ic_test"] > 0
+                            and abs(r["ic_test"]) >= 0.03 and r["n_test"] >= 50
+                            and (r["partial_ic"] is None or abs(r["partial_ic"]) >= 0.02))
+    rows.sort(key=lambda r: (not r["trusted"], r["verdict"] != "robust", r["q"]))
     return rows
+
+
+def _walk_forward(rows, data):
+    """Per feature: rank IC on the older 2/3 (train, with its p) and on the newest 1/3 (test)."""
+    cut = int(len(data) * 2 / 3)
+    for r in rows:
+        name = r["feature"]
+        tr = [(f[name], mx) for f, mx, _ in data[:cut] if f.get(name) is not None]
+        te = [(f[name], mx) for f, mx, _ in data[cut:] if f.get(name) is not None]
+        ic_tr = evaluate.spearman([a for a, _ in tr], [b for _, b in tr]) if len(tr) >= 30 else None
+        ic_te = evaluate.spearman([a for a, _ in te], [b for _, b in te]) if len(te) >= 30 else None
+        z = ic_tr * math.sqrt(len(tr) - 3) if ic_tr is not None else None
+        r.update(ic_train=ic_tr, ic_test=ic_te, n_train=len(tr), n_test=len(te), p_train=_p_two_sided(z))
+
+
+def trusted(dp):
+    """[{feature, label, group, direction (+1 more pumps when higher, -1 fewer), ic_train, ic_test, n}] from a deep run."""
+    return [{"feature": r["feature"], "label": r["label"], "group": r["group"], "direction": 1 if r["ic_test"] > 0 else -1,
+             "ic_train": r["ic_train"], "ic_test": r["ic_test"], "n": r["n"]}
+            for r in (dp or {}).get("robustness") or [] if r.get("trusted")]
+
+
+# ------------------------------------------------------------------ our own trades
+def trade_link(conn, now, days=14, min_n=20, max_gap=1800):
+    """Do the features at entry say anything about how the copy trader's (paper) trades ended? For every closed
+    position: the newest coin snapshot of that mint taken at most max_gap before opened_at, against pnl_pct."""
+    if not store.has(conn, "ct_positions") or not store.has(conn, "intel_snapshots"):
+        return {"n": 0, "features": []}
+    pos = conn.execute("SELECT mint, opened_at, pnl_pct, mode FROM ct_positions WHERE status='closed' AND pnl_pct IS NOT NULL "
+                       "AND opened_at>=? ORDER BY opened_at", (now - days * 86400,)).fetchall()
+    import json
+    pts = []
+    for m, t, pnl, mode in pos:
+        r = conn.execute("SELECT features_json FROM intel_snapshots WHERE kind='coin' AND key=? AND ts<=? AND ts>=? "
+                         "ORDER BY ts DESC LIMIT 1", (m, t, t - max_gap)).fetchone()
+        if r:
+            pts.append((json.loads(r[0]), float(pnl)))
+    out = {"n": len(pts), "positions": len(pos), "win_rate": (sum(1 for _, p in pts if p > 0) / len(pts)) if pts else None,
+           "features": []}
+    if len(pts) < min_n:
+        out["note"] = f"Erst {len(pts)} abgeschlossene Trades mit Zentrale-Stand beim Einstieg (ab {min_n} wird gemessen)."
+        return out
+    for name, (group, label, _) in coin.FEATURES.items():
+        xs = [(f[name], p) for f, p in pts if f.get(name) is not None]
+        if len(xs) < min_n or len({x for x, _ in xs}) < 2:
+            continue
+        ic = evaluate.spearman([x for x, _ in xs], [p for _, p in xs])
+        if ic is None:
+            continue
+        xs.sort(key=lambda v: v[0])
+        h = len(xs) // 2
+        lo, hi = xs[:h], xs[h:]
+        out["features"].append({"feature": name, "label": label, "group": group, "n": len(xs), "ic": ic,
+                                "p": _p_two_sided(ic * math.sqrt(len(xs) - 3)),
+                                "win_low": sum(1 for _, p in lo if p > 0) / len(lo), "win_high": sum(1 for _, p in hi if p > 0) / len(hi),
+                                "pnl_low": statistics.median(p for _, p in lo), "pnl_high": statistics.median(p for _, p in hi)})
+    for r, q in zip(out["features"], bh([r["p"] for r in out["features"]])):
+        r["q"] = q
+    out["features"].sort(key=lambda r: -abs(r["ic"]))
+    out["features"] = out["features"][:30]
+    return out
 
 
 def redundancy(data, names, min_n=150, thr=0.8, max_pairs=40, max_samples=2000):
@@ -287,4 +357,5 @@ def run(conn, now=None, days=14, cfg=default_cfg):
     return {"ts": now, "n": len(data), "base_rate": base_rate,
             "events": event_study(conn, now, cfg=cfg, base_rate=base_rate) if store.has(conn, "intel_events") else [],
             "robustness": rob, "redundancy": redundancy(data, names) if data else [],
-            "playbook": playbook(data, cfg), "conditions": {k: v[0] for k, v in CONDITIONS.items()}}
+            "playbook": playbook(data, cfg), "conditions": {k: v[0] for k, v in CONDITIONS.items()},
+            "trades": trade_link(conn, now)}

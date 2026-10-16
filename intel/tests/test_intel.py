@@ -395,3 +395,46 @@ def test_time_indexes(conn):
     names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
     assert {"idx_trades_ts", "idx_token_prices_ts", "idx_safety_tokens_ts"} <= names
     assert store.ensure_indexes(conn) == []
+
+
+def test_trusted_only_what_carries_walk_forward(conn):
+    """A feature that works throughout is trusted; one that only worked in the older data (a regime that ended) is not."""
+    from intel import deep
+    import random
+    rnd = random.Random(3)
+    data = []
+    for i in range(1500):
+        ofi, vpin = rnd.uniform(-1, 1), rnd.random()
+        early = i < 1000
+        p = 0.1 + 0.25 * (ofi > 0.3) + (0.3 * (vpin > 0.7) if early else 0)
+        f = {"micro_ofi_15m": ofi, "micro_vpin": vpin, "px_mcap": rnd.uniform(1e4, 1e6), "px_age_h": rnd.uniform(0, 48),
+             "liq_usd": rnd.uniform(1e3, 1e5)}
+        data.append((f, 0.8 if rnd.random() < p else 0.1, -0.1))
+    rob = {r["feature"]: r for r in deep.robustness(data)}
+    assert rob["micro_ofi_15m"]["trusted"] and rob["micro_ofi_15m"]["ic_test"] > 0
+    assert rob["micro_vpin"]["ic_train"] > 0.1 and not rob["micro_vpin"]["trusted"]
+    tf = deep.trusted({"robustness": list(rob.values())})
+    assert [t["feature"] for t in tf] == ["micro_ofi_15m"] and tf[0]["direction"] == 1
+    store.set_state(conn, "deep", {"robustness": list(rob.values())})
+    assert intel.trusted_features(conn)[0]["feature"] == "micro_ofi_15m"
+
+
+def test_trade_link_against_paper_trades(conn):
+    from intel import deep
+    conn.execute("CREATE TABLE ct_positions (mint TEXT, opened_at INTEGER, pnl_pct REAL, mode TEXT, status TEXT)")
+    rows, snaps = [], []
+    for i in range(30):
+        m, t = f"M{i}", NOW - 86400 + i * 600
+        ofi = i / 30
+        rows.append((m, t, ofi - 0.4, "paper", "closed"))
+        snaps.append({"key": m, "ts": t - 300, "coverage": 1, "features": {"micro_ofi_15m": ofi}})
+    conn.executemany("INSERT INTO ct_positions VALUES (?,?,?,?,?)", rows)
+    rows_late = [("Late", NOW - 3600, 50.0, "paper", "closed")]  # snapshot only after entry: must not count
+    conn.executemany("INSERT INTO ct_positions VALUES (?,?,?,?,?)", rows_late)
+    snaps.append({"key": "Late", "ts": NOW - 3000, "coverage": 1, "features": {"micro_ofi_15m": 0.0}})
+    for s in snaps:
+        store.save_features(conn, "coin", [s], True)
+    out = deep.trade_link(conn, NOW, min_n=20)
+    assert out["n"] == 30 and out["positions"] == 31
+    r = next(x for x in out["features"] if x["feature"] == "micro_ofi_15m")
+    assert r["ic"] == pytest.approx(1.0) and r["win_high"] > r["win_low"]

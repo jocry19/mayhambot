@@ -89,3 +89,26 @@ def network_features(conn, mint, ts=None):
     from intel import network
     f, meta = network.network_features(conn, mint, int(ts or _t.time()))
     return {"features": f, "meta": meta}
+
+
+def trusted_features(conn):
+    """Coin features that carry walk-forward: found on the older 2/3 of the samples (BH q <= 5 %), confirmed with
+    the same direction on the newest 1/3, and not just market cap / age / liquidity. [{feature, label, group,
+    direction, ic_train, ic_test, n}], refreshed every 30 min; [] until the data proves something. Signals and the
+    strategy should weigh only these (everything else is description, not edge)."""
+    from intel import deep
+    return deep.trusted(deep_analysis(conn))
+
+
+def trusted_at(conn, mint, ts=None):
+    """{feature: {"value", "direction"}} of the trusted features for one coin (now, or at ts point in time)."""
+    tf = trusted_features(conn)
+    if not tf:
+        return {}
+    f = features_at("coin", mint, ts, conn)["features"] if ts else (latest(conn, "coin", mint) or {}).get("features") or {}
+    return {t["feature"]: {"value": f.get(t["feature"]), "direction": t["direction"]} for t in tf}
+
+
+def trade_link(conn):
+    """Latest check of the entry features against the copy trader's closed (paper) trades, see deep.trade_link."""
+    return (deep_analysis(conn) or {}).get("trades")

@@ -154,17 +154,36 @@ function Playbook({ pb }) {
   );
 }
 
+function TradeLink({ t }) {
+  if (!t) return <div className="empty">Noch keine Auswertung.</div>;
+  if (!t.features?.length) return <div className="empty">{t.note || "Noch nichts messbar."}</div>;
+  return (
+    <div className="col" style={{ gap: 8 }}>
+      <div className="t2" style={{ padding: "0 14px" }}>{t.n} abgeschlossene Trades mit Zentrale-Stand beim Einstieg, Trefferquote {pct(t.win_rate)}. Je Merkmal: Gewinnquote und mittleres Ergebnis bei niedrigen gegen hohe Werte.</div>
+      <Table rows={t.features} rowKey={(r) => r.feature} cols={[
+        { k: "label", l: "Merkmal", fmt: (r) => <span><span className="b">{r.label}</span> <span className="dim">{r.group}</span></span> },
+        { k: "ic", l: "Korrelation", r: true, fmt: (r) => <span className={sign(r.ic)}>{n(r.ic, 2)}</span> },
+        { k: "win_low", l: "Gewinnquote niedrig / hoch", r: true, sort: false, fmt: (r) => `${pct(r.win_low)} / ${pct(r.win_high)}` },
+        { k: "pnl_low", l: "Ergebnis niedrig / hoch", r: true, sort: false, fmt: (r) => <span><span className={sign(r.pnl_low)}>{pctSigned(r.pnl_low)}</span> / <span className={sign(r.pnl_high)}>{pctSigned(r.pnl_high)}</span></span> },
+        { k: "q", l: "q", r: true, fmt: (r) => pct(r.q, 1) },
+        { k: "n", l: "n", r: true },
+      ]} />
+    </div>
+  );
+}
+
 function Robustness({ dp }) {
-  const rows = (dp?.robustness || []).filter((r) => r.verdict !== "kein Effekt");
+  const rows = (dp?.robustness || []).filter((r) => r.trusted || r.verdict !== "kein Effekt");
   const V = { robust: "good", "nur Größe/Alter": "warn", instabil: "" };
   return (
     <div className="col" style={{ gap: 8 }}>
-      <div className="t2" style={{ padding: "0 14px" }}>Robust heißt: nach Korrektur für viele Tests signifikant (q ≤ 5 %), gleiche Richtung in älterer und neuerer Hälfte, und auch dann wirksam, wenn man Market Cap, Alter und Liquidität herausrechnet.</div>
+      <div className="t2" style={{ padding: "0 14px" }}>„Trägt“ heißt walk-forward: auf den älteren zwei Dritteln gefunden (q ≤ 5 % nach Korrektur für viele Tests), auf dem neuesten Drittel mit gleicher Richtung bestätigt, und nicht bloß Market Cap, Alter oder Liquidität. Nur diese Merkmale gibt die Zentrale an Signale und Strategie weiter.</div>
       <Table rows={rows} rowKey={(r) => r.feature} empty="Noch kein Merkmal mit Effekt" cols={[
         { k: "label", l: "Merkmal", fmt: (r) => <span><span className="b">{r.label}</span> <span className="dim">{r.group_label}</span></span> },
+        { k: "trusted", l: "Walk-forward", fmt: (r) => r.trusted ? <span className="badge good">trägt</span> : <span className="dim">–</span> },
         { k: "verdict", l: "Urteil", fmt: (r) => <span className={`badge ${V[r.verdict] || ""}`}>{r.verdict}</span> },
         { k: "ic", l: "Korrelation", r: true, fmt: (r) => <span className={sign(r.ic)}>{n(r.ic, 3)}</span> },
-        { k: "ic_old", l: "älter / neuer", r: true, sort: false, fmt: (r) => `${n(r.ic_old, 3)} / ${n(r.ic_new, 3)}` },
+        { k: "ic_train", l: "gelernt / getestet", r: true, sort: false, fmt: (r) => `${n(r.ic_train, 3)} / ${n(r.ic_test, 3)}` },
         { k: "partial_ic", l: "ohne Größe/Alter", r: true, fmt: (r) => n(r.partial_ic, 3) },
         { k: "by_phase", l: "je Marktphase", sort: false, fmt: (r) => Object.values(r.by_phase || {}).map((p) => `${p.label} ${n(p.ic, 2)}`).join(" · ") || "–" },
         { k: "q", l: "q", r: true, fmt: (r) => pct(r.q, 1) },
@@ -290,6 +309,10 @@ export default function Zentrale() {
           <Robustness dp={d.deep} />
         </Card>
       </div>
+
+      <Card title="Unsere eigenen Trades" sub="Was die Merkmale beim Einstieg über das spätere Ergebnis der (Papier-)Trades des Copy-Traders sagen" flush>
+        <TradeLink t={d.deep?.trades} />
+      </Card>
 
       <Card title="Taugt das? Messung je Merkmal" sub="Jeder Stand bekommt eine Stunde später sein echtes Ergebnis (Höchststand, Absturz); je Coin und Stunde zählt eine Stichprobe" flush>
         <Evaluation ev={evs} />

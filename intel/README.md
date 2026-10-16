@@ -26,6 +26,13 @@ intel.latest(conn, kind, key) -> dict | None      # jüngster Stand des Dienstes
 intel.FEATURES -> {"coin": {name: (group, label_de, unit)}, "wallet": {...}, "market": {...}}
 intel.evaluation(conn, days=14) -> dict           # Messung je Merkmal (siehe unten)
 intel.view(conn) / intel.coin_view(conn, mint)    # GET /api/intel, /api/intel/coin/<mint>
+intel.trusted_features(conn) -> [{feature, label, group, direction, ic_train, ic_test, n}]
+#  nur Merkmale, die walk-forward tragen: auf den älteren 2/3 gefunden (BH q <= 5 %), auf dem neuesten 1/3 mit
+#  gleicher Richtung bestätigt (|IC| >= 0,03, n >= 50) und nicht bloß Market Cap/Alter/Liquidität. Signale und
+#  Strategie gewichten nur diese; alles andere ist Beschreibung, kein Vorteil. [] solange nichts bewiesen ist.
+intel.trusted_at(conn, mint, ts=None) -> {feature: {value, direction}}
+intel.trade_link(conn) -> {n, win_rate, features [{feature, ic, q, win_low, win_high, pnl_low, pnl_high}]}
+#  Merkmale beim Einstieg gegen das Ergebnis der abgeschlossenen (Papier-)Trades des Copy-Traders
 ```
 
 ## Merkmale je Coin (Gruppen)
