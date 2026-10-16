@@ -172,7 +172,10 @@ def logs(name=None):
 
 def _checks_ok():
     """Tests must pass before a new version goes live."""
-    for cmd in ([PY, "tests/test_logic.py"], [PY, "-m", "pytest", "tests", *[d for d in ("model/tests", "web/tests") if (ROOT / d).exists()], "-q", "-x"]):
+    dirs = ["tests"] + sorted(str(p.relative_to(ROOT)) for p in ROOT.glob("*/tests")
+                              if p.is_dir() and not p.parent.name.startswith(".") and p.parent.name != "node_modules")
+    print("Tests: " + ", ".join(dirs))
+    for cmd in ([PY, "tests/test_logic.py"], [PY, "-m", "pytest", *dirs, "-q", "-x"]):
         if subprocess.call(cmd, cwd=ROOT, stdout=subprocess.DEVNULL) != 0:
             print("Tests rot:", " ".join(cmd[1:]))
             return False
