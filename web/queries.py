@@ -1193,7 +1193,56 @@ def system(conn):
     except OSError:
         size = None
     return {"db_path": path, "db_size": size, "tables": counts, "last": last, "services": services,
-            "tier_source": tier_source(conn), "now": now_ts(), "sol_usd": _f(sol_usd(conn), 2)}
+            "tier_source": tier_source(conn), "now": now_ts(), "sol_usd": _f(sol_usd(conn), 2), "api_usage": api_usage()}
+
+
+# ====================================================================== API budgets (core.http usage files)
+_USAGE_HIST = {}            # (service, group) -> deque[(ts, calls)] sampled whenever the dashboard reads usage
+USAGE_WINDOW_S = 600
+USAGE_STALE_S = 180         # usage files are rewritten every minute; older means the service is not running
+
+
+def api_usage(now=None):
+    """API calls per service and host group from core.http.usage(all_services=True).
+
+    Each row: service, group, calls (since the service started), calls_window and window_s (calls in the last
+    10 min, from samples this process took; shorter window right after the dashboard starts), last_min,
+    budget_per_min, load (last_min / budget), 429, waited_s, ts, stale. Extra numeric fields in a group
+    (e.g. credits_month, credits_cap) are passed through unchanged."""
+    from collections import deque
+    try:
+        from core import http as chttp  # type: ignore
+        raw = chttp.usage(all_services=True) or {}
+    except Exception as e:  # core.http without usage(): older main
+        return {"available": False, "note": f"core.http.usage fehlt: {e}"[:200], "rows": []}
+    now = now or time.time()
+    out = []
+    for svc, d in sorted(raw.items()):
+        ts = d.get("ts")
+        stale = not ts or now - ts > USAGE_STALE_S
+        for g, v in sorted((d.get("groups") or {}).items()):
+            if not isinstance(v, dict):
+                continue
+            calls = v.get("calls") or 0
+            h = _USAGE_HIST.setdefault((svc, g), deque(maxlen=200))
+            if not h or h[-1][0] != ts:
+                if h and calls < h[-1][1]:  # service restarted: counters began again
+                    h.clear()
+                h.append((ts or now, calls))
+            while len(h) > 1 and h[1][0] <= (ts or now) - USAGE_WINDOW_S:
+                h.popleft()
+            base_ts, base_calls = h[0]
+            win = (ts or now) - base_ts
+            b = v.get("budget_per_min")
+            last = v.get("last_min")
+            row = {k: x for k, x in v.items() if isinstance(x, (int, float)) and not isinstance(x, bool)}
+            row.update(service=svc, group=g, pid=d.get("pid"), ts=ts, stale=stale, calls=calls,
+                       calls_window=calls - base_calls if win > 0 else None, window_s=int(win) if win > 0 else 0,
+                       last_min=last, budget_per_min=b, waited_s=_f(v.get("waited_s"), 1),
+                       load=_f(last / b, 3) if b and last is not None and not stale else None)
+            row["429"] = v.get("429") or 0
+            out.append(row)
+    return {"available": True, "rows": out, "window_s": USAGE_WINDOW_S}
 
 
 def search(conn, q, limit=12):

@@ -192,3 +192,36 @@ def test_cli_safety(demo, capsys):
     assert sqlite3.connect(demo).execute("SELECT action FROM safety_overrides WHERE mint=?", (mint,)).fetchone()[0] == "block"
     assert main(["safety", "clear", mint]) == 0
     assert main(["signals", "-n", "3"]) == 0 and main(["positions"]) == 0
+
+
+def test_api_usage(demo, tmp_path, monkeypatch, capsys):
+    import json
+    import time
+
+    from core import http as chttp
+    from web import queries as Q
+
+    monkeypatch.setattr(chttp, "_LOCK_DIR", str(tmp_path))
+    Q._USAGE_HIST.clear()
+    now = int(time.time())
+
+    def write(service, ts, calls, last, extra=None):
+        g = {"helius": {"calls": calls, "429": 2, "waited_s": 12.5, "budget_per_min": 60, "last_min": last, **(extra or {})},
+             "api.dexscreener.com": {"calls": 40, "429": 0, "waited_s": 0, "budget_per_min": None, "last_min": 3}}
+        (tmp_path / f"usage-{service}.json").write_text(json.dumps({"service": service, "pid": 1, "ts": ts, "groups": g}))
+
+    write("safety", now - 300, 100, 20)
+    write("research", now - 4000, 10, 1)
+    c = _client(demo)
+    u = c.get("/api/system").json()["api_usage"]
+    assert u["available"]
+    write("safety", now, 400, 54, {"credits_month": 120000, "credits_cap": 1000000})
+    rows = {(r["service"], r["group"]): r for r in c.get("/api/system").json()["api_usage"]["rows"]}
+    s = rows[("safety", "helius")]
+    assert s["calls_window"] == 300 and s["window_s"] == 300 and s["load"] == 0.9 and s["429"] == 2
+    assert s["credits_month"] == 120000 and s["credits_cap"] == 1000000
+    assert rows[("research", "helius")]["stale"] and rows[("research", "helius")]["load"] is None
+    assert rows[("safety", "api.dexscreener.com")]["load"] is None
+    from cli.report import api_line
+    line = api_line()
+    assert "Helius 54/60" in line and "knapp: safety" in line and "research" not in line

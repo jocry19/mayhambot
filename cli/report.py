@@ -39,6 +39,9 @@ def status() -> None:
     for mode, sm in (s["summary"] or {}).items():
         con.print(f"Copy-Trading {'Papier' if mode == 'paper' else 'Echtgeld'}: [{tone(sm.get('pnl_sol'))}]{sol(sm.get('pnl_sol'), 2, True)}[/] · "
                   f"{sm.get('trades', 0)} Trades · {pct(sm.get('win_rate'))} Gewinner · {sm.get('open', 0)} offen")
+    line = api_line()
+    if line:
+        con.print(line)
     con.print()
     _signals(s["signals"][:8])
     con.print()
@@ -142,3 +145,35 @@ def safety(mint: str | None = None) -> None:
         con.print(f"  [#ec835a]{n(r.get('risk')):>3}[/] {escape(str(r.get('text') or ''))}")
     for p in s.get("positives") or []:
         con.print(f"  [green]  ✓[/] {escape(str(p))}")
+
+
+def api_line() -> str:
+    """One line: calls in the last minute vs budget per host group over all running services, 429s, services above 80 %."""
+    from web import queries as Q
+
+    u = Q.api_usage()
+    rows = [r for r in u.get("rows", []) if not r.get("stale")]
+    if not rows:
+        return ""
+    groups: dict = {}
+    for r in rows:
+        g = groups.setdefault(r["group"], {"last": 0, "budget": 0, "429": 0, "credits": None, "cap": None})
+        g["last"] += r.get("last_min") or 0
+        g["budget"] += r.get("budget_per_min") or 0
+        g["429"] += r.get("429") or 0
+        if r.get("credits_month") is not None:
+            g["credits"], g["cap"] = r["credits_month"], r.get("credits_cap")
+    names = {"helius": "Helius", "geckoterminal": "GeckoTerminal"}
+    parts = []
+    for name, g in sorted(groups.items(), key=lambda kv: -kv[1]["last"])[:4]:
+        txt = f"{escape(names.get(name, name))} {n(g['last'])}"
+        if g["budget"]:
+            ld = g["last"] / g["budget"]
+            txt += f"/{n(g['budget'])} [{'red' if ld >= 1 else 'yellow' if ld >= .8 else 'dim'}]({pct(ld)})[/]"
+        if g["429"]:
+            txt += f" [red]{n(g['429'])}×429[/]"
+        if g["credits"] is not None:
+            txt += f" · Credits {n(g['credits'])}" + (f"/{n(g['cap'])}" if g["cap"] else "")
+        parts.append(txt)
+    hot = [f"{r['service']} {escape(names.get(r['group'], r['group']))} {pct(r['load'])}" for r in rows if (r.get("load") or 0) >= .8]
+    return "API letzte Minute: " + " · ".join(parts) + (f"  [b yellow]knapp: {', '.join(hot)}[/]" if hot else "")

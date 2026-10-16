@@ -132,6 +132,11 @@ class MayhamTUI(App):
     def load(self) -> None:
         try:
             snap = data.snapshot()
+            try:
+                from .report import api_line
+                snap["api_line"] = api_line()
+            except Exception:
+                snap["api_line"] = ""
         except Exception as e:  # DB busy or missing: keep the last picture
             self.call_from_thread(self.notify, f"Daten nicht lesbar: {e}", severity="error")
             return
@@ -150,7 +155,8 @@ class MayhamTUI(App):
             f"[b]mayhambot[/]  {acct}{paused}   Modus 1 Wale: [b]{MODE_SHORT.get(modes.get('whale'), '–')}[/]"
             f"   Modus 2 Signale: [b]{MODE_SHORT.get(modes.get('signal'), '–')}[/]   {mtxt}\n"
             f"[dim]Letzter Trade {ago(s['last_trade_ts'])} · {n(s['trades_24h'])} Trades 24 h · "
-            f"aktualisiert {time.strftime('%H:%M:%S')} · alle {REFRESH_S} s[/]")
+            f"aktualisiert {time.strftime('%H:%M:%S')} · alle {REFRESH_S} s[/]"
+            + (f"\n{s['api_line']}" if s.get("api_line") else ""))
         t = s["tiers"]
         paper = (s["summary"] or {}).get("paper", {})
         self.query_one("#tile-tw", Static).update(
