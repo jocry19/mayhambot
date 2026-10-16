@@ -199,3 +199,17 @@ ROI, consistency (profit not from one lucky hit), scaled by confidence (number o
 - Every signal cycle logs `signal funnel: N coins -> no smart buyer / <2 entities / net <$500 / score < thr / safety / cooldown / fired`.
 - Each cycle evaluates the watchlist plus every coin that had an Ultra or Smart buy inside the signal window (up to 100 coins), whether or not it is watched. The watchlist is ranked by fresh smart buyers first, then recent score. Ranking by score alone kept the same 25 coins for hours: the Mac funnel showed 49 coins evaluated in 10 h, while smart wallets traded 273.
 - `python -m signals.funnel --hours 10` runs the same funnel over the stored `signal_metrics`. It is read only.
+
+## Signal backtest, expected value and reasons (signals/)
+
+- **`python -m signals.backtest --hours 48 [--db copy.db] [--folds 4]`** replays the signal rules over the stored trades.
+  - Tiers are point in time: the `model_tier_history` of the model version active at that moment. The current tiers are used only when no history exists, and the output then says `pit False`.
+  - Outcomes are entry within 5 min, ret_1h, max_ret_1h and a +50 % take profit, each after 6 % round-trip cost.
+  - Walk-forward picks the rule set on earlier folds and judges it on the next fold. The in-sample top list is for orientation only.
+- **`signals/ev.py`** turns the replay into an expected value per signal.
+  - Every 6 h (`SIGNAL_CALIB_EVERY_HOURS`) the signals service replays 72 h (`SIGNAL_CALIB_HOURS`).
+  - It fits mean TP return after costs per bucket (entities 1/2/3+, net <200/<500/>=500, smart sellers 0/1+), shrunk toward the global mean (`SIGNAL_EV_SHRINK` 10).
+  - It fits on the first two thirds and tests the rule "EV > `SIGNAL_MIN_EV`" on the last third. The table goes active only if that out-of-sample run made money with at least 10 signals.
+  - While a table is active, EV > `SIGNAL_MIN_EV` replaces the wallets, net and score minimums. Rug protection still vetoes at a safety factor below 0.6.
+  - Every run is a row in `signal_calibration`.
+- Each signal stores `ev`, `ev_n` and `reason`, a German "Dafür … Dagegen …" text. The Telegram alert shows both.

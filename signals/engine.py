@@ -14,6 +14,7 @@ import time
 
 from core import scoring
 from core.config import settings
+from signals import ev as ev_mod
 
 log = logging.getLogger("mayhambot.signals")
 MANUAL_DEFAULT_SCORE = 70.0
@@ -80,13 +81,50 @@ def _usd(r, sol_usd):
 
 TIER_RANK = {"ultra": 3, "smart": 2, "good": 1}
 last_cluster_stats = {"wallets": 0, "entities": 0}
-FUNNEL_KEYS = ("coins", "no_smart", "few_entities", "low_net", "low_score", "safety_drop", "cooldown", "fired")
+FUNNEL_KEYS = ("coins", "no_smart", "few_entities", "low_net", "low_score", "low_ev", "safety_drop", "cooldown",
+               "fired")
 last_funnel = {}  # per evaluate(): where coins dropped out (first failing condition), see signals.funnel
+
+
+EV_MIN_SAFETY_FACTOR = 0.6  # safety factor 1.0 up to risk 25, 0.2 at 75, 0 blocked: about risk 45 and above vetoes
+
+
+def _eur(x):
+    return f"{x:+.0%}".replace("%", " %")
+
+
+def explain(m, cfg=settings):
+    """Plain German why (and what speaks against it), stored with the signal and shown in alerts."""
+    pro, con = [], []
+    ent = m.get("entities", m["smart_buyers"])
+    pro.append(f"{ent} Smart-Käufer {'kauft' if ent == 1 else 'kaufen'} netto ${m['net_usd']:,.0f}")
+    if m.get("n_ultra"):
+        pro.append(f"{m['n_ultra']} Ultra dabei")
+    if m.get("prediction") is not None:
+        (pro if m["prediction"] >= 0.3 else con).append(f"Modell: {m['prediction'] * 100:.0f} % Chance auf +50 % in 1 h")
+    if m.get("ev") is not None:
+        (pro if m["ev"] > 0 else con).append(
+            f"ähnliche Setups brachten im Schnitt {_eur(m['ev'])} nach Kosten (n={m.get('ev_n') or 0})")
+    if m.get("sellers"):
+        con.append(f"{m['sellers']} Smart-Wallet{' verkauft' if m['sellers'] == 1 else 's verkaufen'} schon")
+    sp = m.get("safety") or {}
+    if sp.get("risk") is not None and sp.get("factor", 1.0) < 1.0:
+        con.append(f"Rug-Risiko {sp['risk']:.0f}" + (f": {sp['reasons'][0]}" if sp.get("reasons") else ""))
+    elif sp.get("checked") is False:
+        con.append("Rug-Check steht noch aus")
+    out = "Dafür: " + "; ".join(pro)
+    if con:
+        out += ". Dagegen: " + "; ".join(con)
+    return out
 
 
 def _reason(m, cfg):
     if m["smart_buyers"] <= 0:
         return "no_smart"
+    if m.get("ev") is not None:  # an out-of-sample-checked EV table replaces wallets / net / score minimums
+        if (m.get("safety") or {}).get("factor", 1.0) < EV_MIN_SAFETY_FACTOR:
+            return "safety_drop"  # rug protection still vetoes: high risk or blocked
+        return None if m["ev"] > ev_mod.MIN_EV else "low_ev"
     if m["smart_buyers"] < cfg.signal_min_wallets:
         return "few_entities"
     if m["net_usd"] < m.get("min_net", cfg.signal_min_net_usd):
@@ -131,6 +169,7 @@ def token_metrics(conn, mint, qc, now=None, cfg=settings):
             ent[d["entity"]] = d["tier"]
     tiers = {t: sum(1 for et in ent.values() if et == t) for t in ("ultra", "smart", "good")}
     sbuyers = [d for d in buyers if d["tier"] in ("ultra", "smart")]
+    n_sellers = sum(1 for d in smart if d["sell_usd"] > d["buy_usd"])
     n_smart_entities = len({d["entity"] for d in sbuyers})
     last_cluster_stats["wallets"] += len(sbuyers)
     last_cluster_stats["entities"] += n_smart_entities
@@ -149,6 +188,7 @@ def token_metrics(conn, mint, qc, now=None, cfg=settings):
     return dict(ts=now, mint=mint, window_min=cfg.signal_window_min, buy_usd=buy, sell_usd=sell, net_usd=net,
                 buy_sol=buy_sol, net_sol=net_sol, smart_buyers=n_smart_entities, avg_quality=avg_q, score=score,
                 n_ultra=tiers["ultra"], n_smart=tiers["smart"], n_good=tiers["good"],
+                entities=n_smart_entities, sellers=n_sellers,
                 contributions=contributions, model_version="core-heuristic-v1",
                 wallets=sorted(buyers, key=lambda d: d["buy_usd"], reverse=True))
 
@@ -319,11 +359,19 @@ def evaluate(conn, mints, cfg=settings, now=None):
     f = last_funnel
     f.clear()
     min_net = min_net_usd(conn, cfg, now)
-    f.update({k: 0 for k in FUNNEL_KEYS}, max_score=0.0, min_score=None, min_net=min_net)
+    ev_table = ev_mod.active_table(conn)
+    f.update({k: 0 for k in FUNNEL_KEYS}, max_score=0.0, min_score=None, min_net=min_net, ev_active=bool(ev_table),
+             max_ev=None)
     for mint in mints:
         tok = conn.execute("SELECT symbol, price_usd, mcap_usd, liquidity_usd FROM tokens WHERE mint=?",
                            (mint,)).fetchone()
         m = apply_market(conn, mint, apply_safety(conn, mint, apply_model(conn, mint, now, token_metrics(conn, mint, qc, now, cfg))), now)
+        m = dict(m, min_net=min_net)
+        if ev_table:
+            e, n, k = ev_mod.predict(ev_table, m.get("entities", m["smart_buyers"]), m["net_usd"], m.get("sellers", 0))
+            m.update(ev=e, ev_n=n, ev_bucket=k)
+            f["max_ev"] = e if f["max_ev"] is None else max(f["max_ev"], e)
+        m["reason"] = explain(m, cfg)
         if "prediction" in m:
             pred, pred_label = m["prediction"], m["prediction_label"]
         else:
@@ -331,14 +379,13 @@ def evaluate(conn, mints, cfg=settings, now=None):
         conn.execute(
             """INSERT OR REPLACE INTO signal_metrics(ts, mint, window_min, buy_usd, sell_usd, net_usd, smart_buyers,
                    avg_quality, score, price_usd, buy_sol, net_sol, mcap_usd, n_ultra, n_smart, n_good, prediction,
-                   contributions_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   contributions_json, ev) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (now, mint, m["window_min"], m["buy_usd"], m["sell_usd"], m["net_usd"], m["smart_buyers"],
              m["avg_quality"], m["score"], tok["price_usd"] if tok else None, m["buy_sol"], m["net_sol"],
              tok["mcap_usd"] if tok else None, m["n_ultra"], m["n_smart"], m["n_good"], pred,
-             json.dumps(m["contributions"])))
+             json.dumps(m["contributions"]), m.get("ev")))
         conn.commit()
 
-        m = dict(m, min_net=min_net)
         f["coins"] += 1
         f["max_score"] = max(f["max_score"], m["score"])
         f["min_score"] = m.get("min_score", cfg.signal_min_score)
@@ -362,14 +409,15 @@ def evaluate(conn, mints, cfg=settings, now=None):
             """INSERT INTO signals(ts, mint, symbol, score, net_usd, buy_usd, smart_buyers, avg_quality, price_usd,
                                    mcap_usd, wallets_json, buy_sol, net_sol, liquidity_usd, n_ultra, n_smart, n_good,
                                    prediction, prediction_label, contributions_json, model_version,
-                                   score_raw, safety_factor, safety_risk, safety_level, safety_reasons_json)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                   score_raw, safety_factor, safety_risk, safety_level, safety_reasons_json,
+                                   ev, ev_n, reason)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (now, mint, tok["symbol"] if tok else "", m["score"], m["net_usd"], m["buy_usd"], m["smart_buyers"],
              m["avg_quality"], tok["price_usd"] if tok else None, tok["mcap_usd"] if tok else None,
              json.dumps(m["wallets"]), m["buy_sol"], m["net_sol"], tok["liquidity_usd"] if tok else None,
              m["n_ultra"], m["n_smart"], m["n_good"], pred, pred_label, contrib, m["model_version"],
              m.get("score_raw", m["score"]), sp.get("factor"), sp.get("risk"), sp.get("level"),
-             json.dumps(sp.get("reasons") or [], ensure_ascii=False)))
+             json.dumps(sp.get("reasons") or [], ensure_ascii=False), m.get("ev"), m.get("ev_n"), explain(m, cfg)))
         new.append(conn.execute("SELECT * FROM signals WHERE id=?", (cur.lastrowid,)).fetchone())
     conn.commit()
     return new

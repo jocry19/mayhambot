@@ -57,6 +57,10 @@ def format_signal(s) -> str:
     ]
     if "prediction" in keys and s["prediction"] is not None:
         lines.append(f"Vorhersage {s['prediction']*100:.0f}% · {html.escape(s['prediction_label'] or '')}")
+    if "ev" in keys and s["ev"] is not None:
+        lines.append(f"Erwartung nach Kosten {s['ev']*100:+.0f} % (aus {s['ev_n'] or 0} ähnlichen Setups)")
+    if "reason" in keys and s["reason"]:
+        lines.append(html.escape(s["reason"]))
     if "contributions_json" in keys and s["contributions_json"]:
         c = json.loads(s["contributions_json"])
         lines.append("Gewichtung: " + " · ".join(f"{k} {v['points']:.0f}" for k, v in c.items()))

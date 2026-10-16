@@ -86,6 +86,10 @@ MIGRATIONS = [
     ("signals", "max_mcap_1h", "REAL"),
     ("signals", "ret_6h", "REAL"),
     ("signals", "max_ret_24h", "REAL"),
+    ("signals", "ev", "REAL"),                      # expected TP return after costs (signals.ev), NULL = no table
+    ("signals", "ev_n", "INTEGER"),                 # replayed setups behind that EV
+    ("signals", "reason", "TEXT"),                  # German plain-text why / why not
+    ("signal_metrics", "ev", "REAL"),
 ]
 
 

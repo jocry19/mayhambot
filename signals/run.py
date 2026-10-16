@@ -183,6 +183,11 @@ def cycle(conn, i):
         bf = backfill(conn, deadline=time.time() + 20)
     db.retry_locked(conn, lambda: scoring.rescore_all(conn))
     engine.last_cluster_stats.update(wallets=0, entities=0)
+    if engine.ev_mod.due(conn):
+        try:
+            engine.ev_mod.calibrate(conn)
+        except Exception:  # noqa: BLE001 - calibration must never stop signals
+            log.exception("signal EV calibration failed, fixed thresholds stay")
     mints = list(dict.fromkeys([r["mint"] for r in watch] + smart_active_mints(conn)))
     sigs = engine.evaluate(conn, mints)
     notifier.notify(conn, sigs)
@@ -200,9 +205,11 @@ def cycle(conn, i):
     fu = engine.last_funnel
     if fu:
         log.info("signal funnel: %d coins -> no smart buyer %d, <%d entities %d, net <$%.0f %d, score < %s %d, "
-                 "safety %d, cooldown %d, fired %d (max score %.1f)", fu["coins"], fu["no_smart"],
-                 settings.signal_min_wallets, fu["few_entities"], fu["min_net"], fu["low_net"],
-                 fu["min_score"], fu["low_score"], fu["safety_drop"], fu["cooldown"], fu["fired"], fu["max_score"])
+                 "EV <= min %d, safety %d, cooldown %d, fired %d (max score %.1f, EV table %s, max EV %s)",
+                 fu["coins"], fu["no_smart"], settings.signal_min_wallets, fu["few_entities"], fu["min_net"],
+                 fu["low_net"], fu["min_score"], fu["low_score"], fu["low_ev"], fu["safety_drop"], fu["cooldown"],
+                 fu["fired"], fu["max_score"], "active" if fu["ev_active"] else "off",
+                 "-" if fu["max_ev"] is None else f"{fu['max_ev']:+.1%}")
     log.info("cycle %d: %d tokens (+%d smart-active evaluated), +%d trades, +%d backfill trades, %d smart wallets, %d signals (%.0fs)",
              i, len(watch), len(mints) - len(watch), new_trades, bf, smart, len(sigs), time.time() - t0)
     return sigs
