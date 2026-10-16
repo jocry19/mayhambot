@@ -164,6 +164,9 @@ class Trader:
             block = self._gate(kind, row["mint"], snap, d, row, raw)
         if block:
             d.enter = False
+            fl = raw.get("flip") or {}
+            log.info("PASS %s %s plan=%s%s: %s", kind, symbol or row["mint"][:6], d.plan,
+                     f" flip={fl['share']:.0%}/{fl['n']}" if fl.get("share") is not None else "", block)
         note = decide.note(kind, raw, symbol, d, block or "")
         src_ts = row["entered_ts"] if kind == "launch" else row["ts"]
         cur = self.conn.execute(

@@ -45,11 +45,12 @@ class Service:
 
     def heartbeat(self, since: float) -> str:
         c = self.conn
-        n, ent = c.execute("SELECT COUNT(*), COALESCE(SUM(decision='enter'),0) FROM brain_opps WHERE ts>=?",
-                           (int(since),)).fetchone()
+        n, ent, held = c.execute("SELECT COUNT(*), COALESCE(SUM(decision='enter'),0), "
+                                 "COALESCE(SUM(decision='skip' AND (wanted=1 OR explore=1)),0) FROM brain_opps WHERE ts>=?",
+                                 (int(since),)).fetchone()
         n_open = c.execute("SELECT COUNT(*) FROM brain_positions WHERE status='open'").fetchone()[0]
         eq = self.trader.equity_snapshot()["equity_sol"]
-        return (f"{n} opportunities, {ent} bought, {n_open} open, equity {eq:.3f} SOL, "
+        return (f"{n} opportunities, {ent} bought, {held} wanted but blocked by a gate, {n_open} open, equity {eq:.3f} SOL, "
                 f"model {self.model.d - 1} tokens / {self.model.n:.0f} outcomes")
 
     def save(self) -> None:
