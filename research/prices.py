@@ -109,6 +109,14 @@ class PriceIndex:
         i = bisect.bisect_right(tss, ts) - 1
         return self.px[mint][i] if i >= 0 else None
 
+    def last_time_before(self, mint, ts):
+        """Time of the last price print at or before ts (None if none)."""
+        tss = self.ts.get(mint)
+        if not tss:
+            return None
+        i = bisect.bisect_right(tss, ts) - 1
+        return tss[i] if i >= 0 else None
+
     def last_ts(self, mint):
         tss = self.ts.get(mint)
         return max(tss[-1], self.hi_ts[mint][-1]) if tss else None

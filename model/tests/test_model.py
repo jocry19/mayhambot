@@ -302,3 +302,14 @@ def test_wash_wallets_and_repeat_early_and_tier_paper():
     db.insert_trades(conn, tr)
     assert set(mining.repeat_early(conn, now=now)) == {"EARLY"}
     assert report.tiers_vs_paper(conn) == {}  # no copytrade tables: empty, no error
+
+
+def test_dead_coin_holdings_count_as_zero():
+    conn = db.connect(os.path.join(tempfile.mkdtemp(), "d.db"))
+    from research.store import ensure_schema
+    ensure_schema(conn)
+    db.insert_trades(conn, [Trade("a", "W", "M", "buy", 1000, 1000, 1, 100, 0.1, "test_pool"),
+                            Trade("b", "X", "M", "buy", 2000, 1000, 1, 100, 0.1, "test_pool")])
+    ds = data.load(conn)
+    assert wallet_stats.compute(ds, 3000, min_position_usd=1)[0]["W"]["total_pnl_usd"] == 0
+    assert wallet_stats.compute(ds, 2000 + 90000, min_position_usd=1)[0]["W"]["total_pnl_usd"] == -100  # stale 25 h

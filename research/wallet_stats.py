@@ -109,6 +109,9 @@ def compute(ds, cutoff, min_position_usd=None, use_flags=True):
         crashed = bool(fpx and lo is not None and lo <= 0.1 * fpx)
         if crashed and px_now and px_now <= 0.15 * fpx:
             px_now = 0.0  # treat as rugged: holdings worth nothing
+        last_print = pidx.last_time_before(m, cutoff - 1)
+        if last_print is None or cutoff - last_print > 86400:
+            px_now = 0.0  # no trade for 24 h: the coin is dead or illiquid, remaining tokens cannot be sold
         unreal = remaining * px_now - avg * remaining
         pnl = realized + unreal
         peak = pidx.max_between(m, fts, cutoff - 1)
