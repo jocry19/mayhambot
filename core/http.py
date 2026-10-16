@@ -476,7 +476,39 @@ def credits_left_today(service=None):
         return None
     day_left = st["credits_day_budget"] * CREDIT_BURST.get(svc, 1.0) - st["credits_today"]
     month_left = st["credits_cap"] - st["credits_month"]
-    return max(0.0, min(day_left, month_left))
+    return max(0.0, min(day_left, month_left), _borrowable(_ledger_read(), svc))
+
+
+def _borrow_pct():
+    try:
+        return max(0.0, float(os.getenv("HELIUS_BORROW_PCT") or 50))
+    except ValueError:
+        return 50.0
+
+
+def _borrowable(led, svc):
+    """Credits `svc` may still take today beyond its own share, lent from what the other services leave
+    unused today (HELIUS_BORROW_PCT of it, default 50 %; 0 turns lending off). Only while the whole plan
+    is not ahead of the calendar (used <= usable * day/days of month), so the lenders' credits stay there."""
+    pct = _borrow_pct()
+    if pct <= 0:
+        return 0.0
+    _, _, days_in_month, mday = _now_parts()
+    credits_month_total, reserve_pct, shares = _credit_cfg()
+    usable = credits_month_total * (1 - reserve_pct / 100)
+    services = set(led.get("services", {})) | set(shares)
+    lend = borrowed = 0.0
+    month_all = 0.0
+    for s in services:
+        st = _svc_stats(led, s)
+        month_all = st["credits_month_all"]
+        budget = st["credits_day_budget"]
+        own = (budget or 0.0) * CREDIT_BURST.get(s, 1.0)
+        borrowed += max(0.0, st["credits_today"] - own)
+        if s != svc and budget:
+            lend += max(0.0, budget - st["credits_today"])
+    pace_left = usable * mday / days_in_month - month_all
+    return max(0.0, min(lend * pct / 100 - borrowed, pace_left))
 
 
 _credit_warned = set()
@@ -493,7 +525,7 @@ def _charge(cost, force=False):
         st = _svc_stats(led, svc)
         if _service and st["credits_day_budget"] is not None and not force:
             day_left = st["credits_day_budget"] * CREDIT_BURST.get(svc, 1.0) - st["credits_today"]
-            if cost > min(day_left, st["credits_cap"] - st["credits_month"]):
+            if cost > min(day_left, st["credits_cap"] - st["credits_month"]) and cost > _borrowable(led, svc):
                 return st, False
         day = _now_parts()[1]
         d = led.setdefault("services", {}).setdefault(svc, {"month": 0, "days": {}})

@@ -164,6 +164,9 @@ http.CreditsExhausted             # raised instead of calling when today's share
   (with 1,000,000 and 10 % reserve: 30,000 credits a day in total, research 15,000, the others 3,750 each).
 - Daily budget = (share − used before today) / days left in the month incl. today, so unused credits carry over.
   safety and sniper may use 1.5x their day budget for events, never more than their month share.
+- Lending: a service past its own day budget may borrow up to `HELIUS_BORROW_PCT` (50 %) of what the other services
+  leave unused today (research usually spends little of its 50 %), only while the whole plan is not ahead of the
+  calendar (used <= usable x day / days in month). The lender's own share is never refused. `HELIUS_BORROW_PCT=0` = off.
 - Used up today: `post_json` sends standard RPC methods (1 credit) to the public RPC instead; DAS / Enhanced calls
   raise `CreditsExhausted` (callers already treat it as a failed request) instead of emptying the month early.
 - DAS + Enhanced: one fixed cross-process spacing of 0.5 s (2 req/s) for api.helius.xyz and DAS methods on any Helius host.
