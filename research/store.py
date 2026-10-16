@@ -1,5 +1,6 @@
 """Tables owned by research/ and model/ (added next to core's schema, columns only ever added)."""
 import json
+import sqlite3
 import time
 
 from core import db
@@ -47,8 +48,21 @@ CREATE INDEX IF NOT EXISTS idx_mp_mint ON model_predictions(mint, ts);
 
 
 def ensure_schema(conn):
-    conn.executescript(SCHEMA)
+    conn.execute("PRAGMA busy_timeout=120000")  # the live app writes concurrently: wait instead of failing
+    retry(lambda: conn.executescript(SCHEMA))
     return conn
+
+
+def retry(fn, tries=8):
+    """Run a DB write, retrying while another process holds the write lock."""
+    for i in range(tries):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) and "busy" not in str(e):
+                raise
+            time.sleep(min(30, 2 ** i))
+    return fn()
 
 
 def connect(path=None):

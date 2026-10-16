@@ -5,12 +5,13 @@ import logging
 
 def main():
     ap = argparse.ArgumentParser(prog="python -m research")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    d = sub.add_parser("discover", help="find and backfill good wallets (early buyers of pumped coins, top traders)")
+    d = sub.add_parser("discover", parents=[common], help="find and backfill good wallets (early buyers of pumped coins, top traders)")
     d.add_argument("--loop", action="store_true")
-    sub.add_parser("report", help="print the latest research report")
-    sub.add_parser("selftest", help="run the whole pipeline on a synthetic market (no network)")
-    ap.add_argument("-v", "--verbose", action="store_true")
+    sub.add_parser("report", parents=[common], help="print the latest research report")
+    sub.add_parser("selftest", parents=[common], help="run the whole pipeline on a synthetic market (no network)")
     a = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
