@@ -107,6 +107,19 @@ def connect(path=None) -> sqlite3.Connection:
     return conn
 
 
+def retry_locked(conn, fn, attempts=4):
+    """Run a write step again if another process held the DB longer than the busy timeout,
+    instead of losing the whole cycle. fn must be safe to repeat (it is rolled back first)."""
+    for i in range(attempts):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) and "busy" not in str(e) or i == attempts - 1:
+                raise
+            conn.rollback()
+            time.sleep(2 * (i + 1))
+
+
 def insert_trades(conn, trades) -> int:
     before = conn.total_changes
     conn.executemany(

@@ -66,7 +66,7 @@ def fetch_trades(conn, watch):
         except Exception as e:  # noqa: BLE001
             log.warning("trades %s failed: %s", r["symbol"], e)
             continue
-        total += db.insert_trades(conn, trades)
+        total += db.retry_locked(conn, lambda: db.insert_trades(conn, trades))
     return total
 
 
@@ -75,7 +75,7 @@ def backfill(conn):
     mints = set()
     for w in wallets.backfill_candidates(conn, settings.backfill_wallets_per_cycle):
         trades = wallet_source.wallet_trades(w, limit=settings.backfill_tx_limit)
-        n += db.insert_trades(conn, trades)
+        n += db.retry_locked(conn, lambda: db.insert_trades(conn, trades))
         mints |= {t.mint for t in trades}
         wallets.mark_backfilled(conn, w)
     known = {r[0] for r in conn.execute("SELECT mint FROM tokens")}
@@ -89,10 +89,10 @@ def cycle(conn, i):
     t0 = time.time()
     watch = refresh_watchlist(conn, i)
     new_trades = fetch_trades(conn, watch)
-    scoring.rescore_all(conn)
+    db.retry_locked(conn, lambda: scoring.rescore_all(conn))
     bf = backfill(conn)
     if bf:
-        scoring.rescore_all(conn)
+        db.retry_locked(conn, lambda: scoring.rescore_all(conn))
     sigs = engine.evaluate(conn, [r["mint"] for r in watch])
     notifier.notify(conn, sigs)
     engine.update_outcomes(conn)

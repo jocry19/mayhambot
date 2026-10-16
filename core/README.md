@@ -25,6 +25,7 @@ db.upsert_tokens(conn, tokens) # list[Token]; also appends a token_prices snapsh
 db.latest_price(conn, mint)    # float | None
 db.trades_for_mint(conn, mint, since_ts=None)    # list[sqlite3.Row]
 db.trades_for_wallet(conn, wallet, since_ts=None)
+db.retry_locked(conn, fn)     # rerun a repeatable write step if the DB stayed locked past the 30 s busy timeout
 ```
 Tables (stable column names; columns are only added via `db.MIGRATIONS`, never removed or renamed):
 
