@@ -84,9 +84,14 @@ def _peak_after(idx, mint, ts):
     return suf[i] if i < len(suf) else None
 
 
-def compute_positions(conn):
-    cur = {r["mint"]: (r["price_usd"] or 0, r["liquidity_usd"] or 0)
-           for r in conn.execute("SELECT mint, price_usd, liquidity_usd FROM tokens")}
+PRICE_DEAD_S = 24 * 3600  # no market refresh and no trade print for a day: a memecoin holding counts as dead
+
+
+def compute_positions(conn, now=None):
+    """now: the data's present (default: the newest trade, so an old DB copy or a test is judged in its own time)."""
+    now = now or conn.execute("SELECT MAX(ts) FROM trades").fetchone()[0] or time.time()
+    cur = {r["mint"]: (r["price_usd"] or 0, r["liquidity_usd"] or 0, r["last_updated"] or 0)
+           for r in conn.execute("SELECT mint, price_usd, liquidity_usd, last_updated FROM tokens")}
     pidx = _price_index(conn)
     agg = {}
     last_price = {}
@@ -111,7 +116,7 @@ def compute_positions(conn):
             a["sell_usd"] += r["usd_amount"] or 0
             a["sell_tokens"] += r["token_amount"] or 0
         if r["price_usd"]:
-            last_price[r["mint"]] = r["price_usd"]
+            last_price[r["mint"]] = (r["price_usd"], r["ts"])
     out = []
     for (wallet, mint), a in agg.items():
         if a["buy_tokens"] <= 0:
@@ -121,8 +126,11 @@ def compute_positions(conn):
         sell_usd = a["sell_usd"] * (sold / a["sell_tokens"]) if a["sell_tokens"] else 0.0
         realized = sell_usd - avg_cost * sold
         remaining = a["buy_tokens"] - sold
-        price, liq = cur.get(mint, (0, 0))
-        price = price or last_price.get(mint, 0)
+        price, liq, updated = cur.get(mint, (0, 0, 0))
+        lp, seen = last_price.get(mint, (0, 0))
+        price = price or lp
+        if now - max(updated, seen) > PRICE_DEAD_S:
+            price = 0.0  # frozen price (no market refresh, nobody trades it for a day): not sellable at that price
         if liq and liq < 1000:
             price = 0.0  # rugged / dead pool: holdings are not sellable
         unrealized = remaining * price - avg_cost * remaining
