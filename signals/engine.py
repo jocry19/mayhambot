@@ -123,12 +123,15 @@ def explain(m, cfg=settings):
     return out
 
 
-def _reason(m, cfg):
+def _reason(m, cfg, strict=False):
+    """First failing condition or None. strict=True after check_before_signal: an unchecked coin is judged by its
+    safety factor too (before that it still gets its quick check instead of an early veto)."""
     if m["smart_buyers"] <= 0:
         return "no_smart"
     if m.get("ev") is not None:  # an out-of-sample-checked EV table replaces wallets / net / score minimums
-        if (m.get("safety") or {}).get("factor", 1.0) < EV_MIN_SAFETY_FACTOR:
-            return "safety_drop"  # rug protection still vetoes: high risk or blocked
+        sp = m.get("safety") or {}
+        if sp.get("factor", 1.0) < EV_MIN_SAFETY_FACTOR and (strict or sp.get("checked") is not False):
+            return "safety_drop"  # rug protection still vetoes: high risk, blocked, or still unchecked
         return None if m["ev"] > ev_mod.MIN_EV else "low_ev"
     if m["smart_buyers"] < cfg.signal_min_wallets:
         return "few_entities"
@@ -400,7 +403,7 @@ def evaluate(conn, mints, cfg=settings, now=None):
             f[why] += 1
             continue
         m = check_before_signal(conn, mint, m)
-        if _reason(m, cfg):
+        if _reason(m, cfg, strict=True):
             f["safety_drop"] += 1
             log.info("signal %s dropped by safety check: %s", mint[:6], (m.get("safety") or {}).get("reasons"))
             continue

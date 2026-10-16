@@ -29,6 +29,9 @@ def test_ev_gate_and_safety_veto():
     assert engine._reason(dict(m, ev=-0.02), cfg) == "low_ev"
     assert engine._reason(dict(m, safety={"factor": 0.3}), cfg) == "safety_drop"
     assert engine._reason(dict(m, smart_buyers=0), cfg) == "no_smart"
+    unchecked = dict(m, safety={"factor": 0.5, "checked": False, "level": "unchecked"})
+    assert engine._reason(unchecked, cfg) is None                       # gets its quick check first
+    assert engine._reason(unchecked, cfg, strict=True) == "safety_drop"   # still unchecked afterwards: blocked
     assert engine._reason(dict(m, ev=None), cfg) == "few_entities"      # no table: fixed thresholds
 
 
