@@ -175,6 +175,8 @@ def summarize(P):
         influence_followers=med_f, influence_usd=med_usd, inflow_lift_usd=med_lift, influence_samples=k, median_entry_rank=med_rank,
         exit_capture=median(caps) if caps else None, median_hold_min=median([p["hold"] for p in P]),
         n_exits=sum(1 for p in P if p["hold"] is not None),
+        wash_share=(sum(1 for p in P if p["hold"] is not None and p["hold"] < 5 and abs(p["roi"]) < 0.03)
+                    / max(1, sum(1 for p in P if p["hold"] is not None))),
         launch_share=(sum(1 for p in P if p.get("launch_s") is not None and 0 <= p["launch_s"] <= 3)
                       / max(1, sum(1 for p in P if p.get("launch_s") is not None))),
         consistency=consistency, rug_rate=rugs / n, components=comps,

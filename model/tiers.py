@@ -15,7 +15,8 @@ def wallet_score(stats, weights=None):
 
 def uncopyable(stats):
     """Wallets nobody can follow: launch/dev bots (buy within 3 s of the pool's creation, or first buyer every
-    time) and second-flippers (median hold under 15 s). They can show great PnL but are not a signal."""
+    time), second-flippers (median hold under 15 s) and wash wallets (most exits within 5 min at |ROI| < 3 %).
+    They can show great PnL or volume but are not a signal."""
     n = stats.get("n_tokens", 0)
     if n >= 3 and (stats.get("launch_share") or 0) >= 0.5:
         return "launch_bot"
@@ -23,6 +24,8 @@ def uncopyable(stats):
         return "launch_bot"
     if (stats.get("n_exits") or 0) >= 3 and stats.get("median_hold_min") is not None and stats["median_hold_min"] < 0.25:
         return "flipper"
+    if (stats.get("n_exits") or 0) >= 4 and (stats.get("wash_share") or 0) >= 0.5:
+        return "wash"  # mostly in-and-out within minutes at ~0 % (volume farming, wash trading)
     return None
 
 

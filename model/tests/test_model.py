@@ -283,3 +283,22 @@ def test_prediction_blobs_are_small_and_models_carry_a_feature_stamp():
     assert len(fj) + len(cj) + len(wj) < 6000
     assert len(_json.loads(cj)["1h"]) == 10 and len(_json.loads(wj)) == 15
     assert len(ev.FEATURE_SET) == 10
+
+
+def test_wash_wallets_and_repeat_early_and_tier_paper():
+    from model.tiers import uncopyable
+    base = dict(n_tokens=8, n_exits=6, median_hold_min=3.0, launch_share=0.0, median_entry_rank=0.3, influence_samples=4)
+    assert uncopyable(dict(base, wash_share=0.7)) == "wash" and uncopyable(dict(base, wash_share=0.1)) is None
+    from research import mining, report
+    from research.store import ensure_schema, store_candles, upsert_research_token
+    conn = ensure_schema(db.connect(os.path.join(tempfile.mkdtemp(), "e.db")))
+    now = 1_800_000_000
+    tr = []
+    for i, m in enumerate(("P1", "P2")):
+        upsert_research_token(conn, m, peak_multiple=10.0)
+        store_candles(conn, m, 60, [(now - 3600, 1.0, 10.0, 1.0, 5.0, 100.0)])
+        tr.append(Trade(f"e{i}", "EARLY", m, "buy", now - 7200, 100, 1, 100, 1.0, "rpc"))
+        tr.append(Trade(f"l{i}", "LATE", m, "buy", now - 3000, 10, 1, 90, 9.0, "rpc"))
+    db.insert_trades(conn, tr)
+    assert set(mining.repeat_early(conn, now=now)) == {"EARLY"}
+    assert report.tiers_vs_paper(conn) == {}  # no copytrade tables: empty, no error

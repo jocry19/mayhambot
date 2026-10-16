@@ -40,9 +40,34 @@ def realized_winners(conn, days=7, min_mult=2.0, min_buy_sol=0.2, limit=300, now
     return dict(sorted(out.items(), key=lambda x: -x[1])[:limit])
 
 
+def repeat_early(conn, min_peak=3.0, entry_share=1 / 3, min_coins=2, days=14, limit=300, now=None):
+    """Wallets that bought several coins that later ran >= min_peak x, each time at <= entry_share of the later
+    peak (early, not chasing). Coins and peaks from research candles; prices in USD at trade time, so it is a
+    candidate filter only: the backfill judges every wallet over its whole history."""
+    now = int(now or time.time())
+    peaks = dict(conn.execute(
+        """SELECT c.mint, MAX(c.h) FROM research_candles c JOIN research_tokens t ON t.mint = c.mint
+           WHERE t.peak_multiple >= ? AND c.ts > ? GROUP BY c.mint""", (min_peak, now - days * 86400)).fetchall())
+    if not peaks:
+        return {}
+    bots = {r[0] for r in conn.execute("SELECT address FROM wallets WHERE is_bot=1")}
+    hits = {}
+    for mint, peak in peaks.items():
+        if not peak:
+            continue
+        for w, px in conn.execute("""SELECT wallet, MIN(price_usd) FROM trades WHERE mint=? AND side='buy'
+                                     AND price_usd > 0 GROUP BY wallet""", (mint,)):
+            if w not in bots and px <= peak * entry_share:
+                hits.setdefault(w, set()).add(mint)
+    out = {w: 5.0 + 2 * len(ms) for w, ms in hits.items() if len(ms) >= min_coins}
+    return dict(sorted(out.items(), key=lambda x: -x[1])[:limit])
+
+
 def run(conn, now=None):
-    """Add realized winners as research candidates. Returns how many."""
+    """Add realized winners and repeat early buyers as research candidates. Returns how many."""
     cand = realized_winners(conn, now=now)
+    for w, p in repeat_early(conn, now=now).items():
+        cand[w] = max(cand.get(w, 0), p)
     by_prio = {}
     for w, p in cand.items():
         by_prio.setdefault(round(min(20.0, p), 1), []).append(w)

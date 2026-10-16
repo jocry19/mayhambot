@@ -90,6 +90,29 @@ def univariate(events, horizon):
     return sorted(out, key=lambda d: -(d["power"] or 0))
 
 
+def tiers_vs_paper(conn, min_n=3):
+    """Copy-trader paper results per tier of the copied wallet (closed positions), and wallets whose copies lose:
+    candidates for a downgrade. The tier itself stays the wallet's own skill; this shows whether copying pays."""
+    try:
+        rows = conn.execute("""SELECT p.wallet, COALESCE(m.tier, 'ohne'), p.pnl_pct, p.pnl_sol FROM ct_positions p
+                               LEFT JOIN model_wallet_stats m ON m.address = p.wallet
+                               WHERE p.status = 'closed' AND p.wallet IS NOT NULL AND p.wallet != ''""").fetchall()
+    except Exception:  # noqa: BLE001  (copytrade tables missing)
+        return {}
+    by_tier, by_wallet = defaultdict(list), defaultdict(list)
+    for w, t, pct, sol in rows:
+        by_tier[t].append((pct or 0.0, sol or 0.0))
+        by_wallet[(w, t)].append((pct or 0.0, sol or 0.0))
+    tiers = [dict(tier=t, n=len(v), win_rate=sum(1 for x in v if x[0] > 0) / len(v),
+                  mean_pct=sum(x[0] for x in v) / len(v), pnl_sol=sum(x[1] for x in v))
+             for t, v in sorted(by_tier.items(), key=lambda kv: ("ultra", "smart", "good", "ohne").index(kv[0])
+                                if kv[0] in ("ultra", "smart", "good", "ohne") else 9)]
+    losers = sorted((dict(address=w, tier=t, n=len(v), mean_pct=sum(x[0] for x in v) / len(v),
+                          pnl_sol=sum(x[1] for x in v)) for (w, t), v in by_wallet.items()
+                     if len(v) >= min_n and t != "ohne" and sum(x[1] for x in v) < 0), key=lambda d: d["pnl_sol"])
+    return dict(tiers=tiers, downgrade=losers[:15])
+
+
 def paper_vs_signals(conn):
     """Per grade: how stored predictions turned out, and the copy-trader's paper P&L on the same coins
     (paper position opened within 30 min after a prediction of that coin)."""
@@ -150,7 +173,7 @@ def build(conn, version_id, bt, tiers_now, weights, weight_info, models, prev=No
                             "weights": sorted(({"feature": f, "label": FEATURE_LABELS[f], "weight": c}
                                                for f, c in zip(FEATURE_NAMES, weights_full(mm))),
                                               key=lambda d: -abs(d["weight"]))} for h, mm in models.items()},
-                selection=m.get("selection", {}), paper=paper_vs_signals(conn),
+                selection=m.get("selection", {}), paper=paper_vs_signals(conn), tier_paper=tiers_vs_paper(conn),
                 n_events=len(evs), n_labelled=sum(1 for e in evs if e["labels"].get(main)),
                 checkpoints=len(bt["checkpoints"]), tier_history=bt["tier_counts"], previous=prev)
     for t in ("ultra", "smart", "good"):
@@ -288,6 +311,19 @@ def render(d):
             for r in pp["paper"]:
                 L.append(f"| {r['mode']} | {r['grade']} | {r['n']} | {_pct(r['win_rate'])} | {100 * r['avg_pnl_pct']:+.1f} % | {r['pnl_sol']:+.3f} |")
             L.append("")
+    tp = d.get("tier_paper") or {}
+    if tp.get("tiers"):
+        L.append("## Stufen gegen Papier-Kopien (was das Kopieren der Wallets gebracht hat)\n")
+        L.append("| Stufe der kopierten Wallet | Trades | Gewinnquote | Ø P&L | P&L gesamt (SOL) |")
+        L.append("|---|---|---|---|---|")
+        for r in tp["tiers"]:
+            L.append(f"| {TIER_LABELS.get(r['tier'], 'ohne Stufe')} | {r['n']} | {_pct(r['win_rate'])} | "
+                     f"{100 * r['mean_pct']:+.1f} % | {r['pnl_sol']:+.3f} |")
+        if tp.get("downgrade"):
+            L.append("\n**Vorschlag zum Abstufen** (≥ 3 Kopien, zusammen im Minus): " + ", ".join(
+                f"`{r['address'][:6]}…` {TIER_LABELS.get(r['tier'], r['tier'])} ({r['n']} Trades, {r['pnl_sol']:+.3f} SOL)"
+                for r in tp["downgrade"]) + "\n")
+        L.append("")
     bt = d["backtest"]
     if any(v.get("n") for v in bt.values()):
         L.append("## Walk-Forward-Backtest (jede Vorhersage nur mit Daten von davor)\n")
