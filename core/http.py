@@ -482,15 +482,16 @@ def credits_left_today(service=None):
 _credit_warned = set()
 
 
-def _charge(cost):
-    """Book `cost` credits for this service; raise CreditsExhausted when today's share is used up."""
+def _charge(cost, force=False):
+    """Book `cost` credits for this service; raise CreditsExhausted when today's share is used up
+    (force=True books without refusing: sending and confirming an own transaction never waits for tomorrow)."""
     if cost <= 0:
         return
     svc = _service or "other"
 
     def book(led):
         st = _svc_stats(led, svc)
-        if _service and st["credits_day_budget"] is not None:
+        if _service and st["credits_day_budget"] is not None and not force:
             day_left = st["credits_day_budget"] * CREDIT_BURST.get(svc, 1.0) - st["credits_today"]
             if cost > min(day_left, st["credits_cap"] - st["credits_month"]):
                 return st, False
@@ -515,12 +516,20 @@ def _charge(cost):
                                f"{(st['credits_day_budget'] or 0):.0f}); retry tomorrow or use the public RPC")
 
 
+# Sending and confirming an own transaction: always the configured (Helius) RPC, booked even when the day's
+# share is used up and never held back by the per-minute budget; a public node lands transactions worse.
+TX_METHODS = {"sendTransaction", "simulateTransaction", "getSignatureStatuses", "getLatestBlockhash"}
+
+
 def rpc_url(method="", helius_url=None):
     """RPC endpoint for a JSON-RPC `method`: the Helius URL while this service has credits left today,
-    else the public RPC for standard methods (DAS / Helius-only methods keep Helius and may raise)."""
+    else the public RPC for standard methods (DAS / Helius-only methods keep Helius and may raise;
+    TX_METHODS always keep Helius)."""
     url = helius_url or os.getenv("SOLANA_RPC_URL") or ""
     if group_of(urlparse(url).netloc) != CREDIT_GROUP:
         return url or pick_public_rpc()
+    if method in TX_METHODS:
+        return url
     cost = credit_cost(url, {"json": {"method": method}})
     left = credits_left_today()
     if left is not None and left < cost and cost == 1:
@@ -647,8 +656,11 @@ def throttle(host, interval=None, cost=None, das=False, priority="bulk", method=
     DAS calls (das=True) and api.helius.xyz also wait for the fixed 2 req/s DAS + Enhanced spacing.
     priority='live' for time-critical reads (copying a fresh buy), 'bulk' (default) for backfills."""
     lane = priority if priority in LANE_RANK else "bulk"
-    _charge(credit_cost(f"https://{host}/") if cost is None else cost)
-    _take_budget(host)
+    tx = method in TX_METHODS
+    c = credit_cost(f"https://{host}/") if cost is None else cost
+    _charge(c, force=True) if tx else _charge(c)
+    if not tx:  # an own transaction never queues behind this service's wallet polling
+        _take_budget(host)
     t0 = time.time()
     if das or host == "api.helius.xyz":
         _shared_spacing(DAS_ENHANCED_SPACING, HOST_INTERVAL[DAS_ENHANCED_SPACING])
@@ -998,7 +1010,8 @@ def _pool_result(host, ok, ms=None, status=None, method=None):
 def _request(method, url, retries=4, timeout=20, priority="bulk", **kw):
     host = urlparse(url).netloc
     cost = credit_cost(url, kw)
-    if cost == 1 and method == "POST" and kw.get("public_fallback", True):
+    if cost == 1 and method == "POST" and kw.get("public_fallback", True) \
+            and not (isinstance(kw.get("json"), dict) and kw["json"].get("method") in TX_METHODS):
         left = credits_left_today()
         if left is not None and left < cost:  # today's Helius share used up: standard RPC goes to the public node
             url, host, cost = PUBLIC_RPC, urlparse(PUBLIC_RPC).netloc, 0
