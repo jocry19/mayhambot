@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS signals (
     ret_5m REAL, ret_15m REAL, ret_1h REAL, max_ret_1h REAL
 );
 CREATE INDEX IF NOT EXISTS idx_signals_mint ON signals(mint, ts);
+CREATE INDEX IF NOT EXISTS idx_signal_metrics_mint_ts ON signal_metrics(mint, ts);
 """
 
 # columns added after the first release: (table, column, type). Applied on connect, idempotent.
