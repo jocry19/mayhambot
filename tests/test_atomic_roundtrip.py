@@ -20,3 +20,21 @@ def test_same_sig_buy_and_sell_is_not_a_position():
     pos = {p["wallet"]: p for p in scoring.compute_positions(conn)}
     assert "BOT" not in pos
     assert round(pos["HOLDER"]["realized_pnl_usd"], 6) == 100.0
+
+
+def test_frozen_price_of_a_dead_coin_is_not_held_at_entry(tmp_path):
+    """A coin nobody refreshed or traded for a day is valued at 0, not at the last (often the wallet's own) print."""
+    from core import db, scoring
+    from core.models import Trade
+    conn = db.connect(str(tmp_path / "d.db"))
+    day = scoring.PRICE_DEAD_S
+    db.insert_trades(conn, [
+        Trade("a", "W", "DEAD", "buy", 1000, 100.0, 1.0, 100.0, 1.0, "t"),
+        Trade("b", "W", "LIVE", "buy", 1000, 100.0, 1.0, 100.0, 1.0, "t"),
+        Trade("c", "X", "LIVE", "buy", 1000 + 2 * day, 100.0, 1.0, 150.0, 1.5, "t"),
+    ])
+    conn.execute("INSERT INTO tokens(mint, price_usd, liquidity_usd, last_updated) VALUES ('DEAD', 1.0, 50000, 1000)")
+    conn.commit()
+    pos = {(p["wallet"], p["mint"]): p for p in scoring.compute_positions(conn)}
+    assert pos[("W", "DEAD")]["unrealized_pnl_usd"] == -100.0  # frozen at entry for two days: worth 0
+    assert pos[("W", "LIVE")]["unrealized_pnl_usd"] == 50.0  # still traded: last print 1.5
