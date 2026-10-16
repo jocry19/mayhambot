@@ -195,7 +195,7 @@ def test_health_check_detects_crash_loop(repo, monkeypatch):
     ok, detail = autoupdate.health_check(window=0.02, interval=0.01)
     assert not ok and "b" in detail
     monkeypatch.setattr(autoupdate, "_pids", lambda names: {"a": 1, "b": 2})
-    assert autoupdate.health_check(window=0.02, interval=0.005)[0]
+    assert autoupdate.health_check(window=0.2, interval=0.01)[0]
 
 
 def test_lock_count_reads_only_new_log_lines(repo):
@@ -300,15 +300,21 @@ def test_planned_restart_is_no_crash(repo, monkeypatch):
     work, push, head, alerts = repo
     monkeypatch.setattr(autoupdate, "_services_now", lambda: ["a", "b"])
     monkeypatch.setattr(ops, "check_dashboard", lambda: True)
-    monkeypatch.setattr(autoupdate, "PLANNED_GRACE_S", 0.03)
+    monkeypatch.setattr(autoupdate, "PLANNED_GRACE_S", 0.4)
     _plan(work, "b", time.time())
-    seq = iter([{"a": 1, "b": 2}, {"a": 1, "b": None}] + [{"a": 1, "b": 3}] * 50)
-    monkeypatch.setattr(autoupdate, "_pids", lambda names: next(seq))
-    ok, detail = autoupdate.health_check(window=0.02, interval=0.005)
-    assert ok and "b: geplanter Neustart nach Modellwechsel" in detail
+    # pid sequence by call count, not by time: a slow machine (the Intel Mac) must not change the outcome
+    calls = []
+    seq = [{"a": 1, "b": 2}, {"a": 1, "b": None}]
+
+    def pids(names):
+        calls.append(1)
+        return seq[len(calls) - 1] if len(calls) <= len(seq) else {"a": 1, "b": 3}
+    monkeypatch.setattr(autoupdate, "_pids", pids)
+    ok, detail = autoupdate.health_check(window=0.2, interval=0.01)
+    assert ok and "b: geplanter Neustart nach Modellwechsel" in detail, detail
     _plan(work, "b", time.time() + 1)           # a second one in the same window is a restart loop
-    seq = iter([{"a": 1, "b": 3}, {"a": 1, "b": 4}, {"a": 1, "b": 5}] * 50)
-    assert not autoupdate.health_check(window=0.02, interval=0.005)[0]
+    monkeypatch.setattr(autoupdate, "_pids", lambda names: {"a": 1, "b": len(calls.append(1) or calls)})
+    assert not autoupdate.health_check(window=0.2, interval=0.01)[0]
 
 
 def test_watchdog_reports_planned_restart_once(tmp_path, monkeypatch):
