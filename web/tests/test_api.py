@@ -581,3 +581,13 @@ def test_wallet_copy_edge(demo):
     e = c.get(f"/api/wallets/{a}").json()["edge"]
     assert e["copy"]["n"] == with_edge[0]["copy_edge"]["n"] and e["verdict"]
     assert e["copy"]["proven"] == (e["copy"]["lower"] > 0)
+
+
+def test_live_buy_capped(demo, monkeypatch):
+    from web import server
+    c = _client(demo)
+    free = next(s for s in c.get("/api/signals").json() if not s["open_position_id"])
+    monkeypatch.setattr(server, "_buy_preview", lambda conn, mint: {"account": "live", "size_sol": 0.5, "preset": "x"})
+    monkeypatch.setenv("LIVE_MAX_TRADE_SOL", "1")
+    r = c.post("/api/buy", json={"mint": free["mint"], "size_sol": 5})
+    assert r.status_code == 409 and "LIVE_MAX_TRADE_SOL" in r.json()["detail"]

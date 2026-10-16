@@ -507,6 +507,14 @@ def sell(pid: int):
     return _done("Verkauf beauftragt, der Bot führt ihn in wenigen Sekunden aus", command_id=cid)
 
 
+def _live_max_trade_sol() -> float:
+    """Hard cap for one manual real-money buy from the dashboard (env LIVE_MAX_TRADE_SOL, default 1 SOL)."""
+    try:
+        return float(os.getenv("LIVE_MAX_TRADE_SOL") or 1.0)
+    except ValueError:
+        return 1.0
+
+
 @app.post("/api/buy")
 async def buy(request: Request):
     b = await request.json()
@@ -521,6 +529,10 @@ async def buy(request: Request):
     pv = _buy_preview(conn, mint)
     if pv.get("blocked"):
         raise HTTPException(409, pv["blocked"])
+    cap = _live_max_trade_sol()
+    eff = float(size) if size else float(pv.get("size_sol") or 0)
+    if pv.get("account") == "live" and eff > cap:
+        raise HTTPException(409, f"Echtgeld-Kauf über {cap:g} SOL nicht erlaubt (LIVE_MAX_TRADE_SOL)")
     cid = control.request_buy(conn, mint, float(size) if size else None, strategy=strategy)
     acct = "Echtgeld" if pv.get("account") == "live" else "Papier"
     return _done(f"Kauf beauftragt ({acct}, Preset {pv.get('preset')}); der Bot führt ihn in Sekunden aus", command_id=cid,
