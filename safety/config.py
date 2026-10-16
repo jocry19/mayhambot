@@ -132,6 +132,10 @@ class SafetySettings:
     refresh_budget_sec: int = field(default_factory=lambda: _i("SAFETY_REFRESH_BUDGET_SEC", 30))
     refresh_every_sec: int = field(default_factory=lambda: _i("SAFETY_REFRESH_EVERY_SEC", 60))
     refresh_max_tokens: int = field(default_factory=lambda: _i("SAFETY_REFRESH_MAX_TOKENS", 8))
+    # pre-check coins tracked wallets are buying (copy candidates) so buys find a result
+    active_window_sec: int = field(default_factory=lambda: _i("SAFETY_ACTIVE_WINDOW_SEC", 1800))
+    active_min_wallets: int = field(default_factory=lambda: _i("SAFETY_ACTIVE_MIN_WALLETS", 2))
+    active_max: int = field(default_factory=lambda: _i("SAFETY_ACTIVE_MAX", 30))
     exchanges_file: str = field(default_factory=lambda: os.getenv("SAFETY_EXCHANGES_FILE") or str(HERE / "exchanges.txt"))
 
 

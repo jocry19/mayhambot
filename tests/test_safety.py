@@ -669,3 +669,29 @@ def test_dexscreener_batch_serves_the_whole_pass(monkeypatch):
     assert f.dexscreener_pairs("B2")[0]["dexId"] == "pumpswap" and f.dexscreener_pairs("M3") == []
     assert f.calls == 0 and len(calls) == 2                                # answered from the batch
     sources._PAIRS.clear()
+
+
+def test_unknown_checks_do_not_score_and_active_coins_are_prechecked():
+    cfg = SafetySettings()
+    unk = checks.CheckResult("liquidity", "l", status="unknown", reasons=[(15, "kein Paar auf DexScreener")]).finish()
+    soc = checks.CheckResult("socials", "s", reasons=[(15, "keine Socials")]).finish()
+    a = engine.combine(MINT, [unk, soc], cfg)
+    assert a.score == 15.0 and a.level == "low"        # was 27.8 'erhöht' for every fresh launch
+    c = conn()
+    c.executemany("INSERT INTO trades(sig, wallet, mint, side, ts, usd_amount) VALUES (?,?,?,?,?,?)",
+                  [(f"s{i}", f"w{i}", "HOTCOIN", "buy", NOW - 60, 100) for i in range(3)]
+                  + [("x1", "w1", "LONELY", "buy", NOW - 60, 100), ("x2", "w9", "OLDCOIN", "buy", NOW - 7200, 100),
+                     ("x3", "w8", "OLDCOIN", "buy", NOW - 7200, 100)])
+    c.commit()
+    assert engine.active_mints(c, cfg) == ["HOTCOIN"]
+    assert "HOTCOIN" in engine.candidates(c, cfg=cfg)
+
+
+def test_backtest_treats_blind_launches_as_unseen_and_calibration_stays_bounded():
+    from safety import backtest
+    blind = backtest._clean({"bundle_pct": 0, "n_buyers": 0, "fast_buyers": 0, "top10_pct": 3.0})
+    seen = backtest._clean({"bundle_pct": 0, "n_buyers": 12, "fast_buyers": 0, "top10_pct": 3.0})
+    assert blind["bundle_pct"] is None and blind["top10_pct"] == 3.0 and seen["bundle_pct"] == 0
+    # perfectly separable hold-out: Newton must not run away
+    a, b = backtest._platt([0.0] * 50 + [1.0] * 50, [0] * 50 + [1] * 50, -2.0)
+    assert -6 <= a <= 6 and 0 <= b <= 3

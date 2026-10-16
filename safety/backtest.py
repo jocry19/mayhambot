@@ -61,7 +61,22 @@ def load(conn):
     want = [c for c in ["mint", "decided_ts", "rugged", "max_ret_60m", "risk", *FEATURES] if c in cols]
     rows = conn.execute(f"SELECT {', '.join(want)} FROM sniper_launches WHERE done=1 AND rugged IS NOT NULL "
                         "AND decided_ts IS NOT NULL ORDER BY decided_ts").fetchall()
-    return [dict(zip(want, r)) for r in rows]
+    return [_clean(dict(zip(want, r))) for r in rows]
+
+
+TRADE_FEATURES = ("bundle_pct", "unseen_pct", "fast_buyers", "n_buyers", "bundle_wallets", "known_bad")
+
+
+def _clean(r):
+    """A launch the sniper decided on without seeing any trade (its trade stream was blind or the decision came
+    before the first buyer) records 0 for every trade-based field. That 0 means 'not seen', not 'clean': those
+    fields become None so they do not count as reassurance (the 12,865-launch backtest flipped on exactly this)."""
+    if not any(r.get(f) for f in ("n_buyers", "fast_buyers", "bundle_wallets", "bundle_pct", "unseen_pct")):
+        r = dict(r)
+        for f in TRADE_FEATURES:
+            r[f] = None
+        r["blind"] = 1
+    return r
 
 
 def _bin(edges, x):
@@ -126,7 +141,7 @@ def _logloss(model, rows):
 
 
 def _platt(zs, ys, off, ridge=1.0):
-    """Logistic fit y ~ off + a + b*z (Newton, light ridge pulling a->0, b->1)."""
+    """Logistic fit y ~ off + a + b*z (damped Newton, light ridge pulling a->0, b->1, b kept in [0, 3])."""
     a, b = 0.0, 1.0
     for _ in range(50):
         haa, hab, hbb = ridge, 0.0, ridge
@@ -145,7 +160,10 @@ def _platt(zs, ys, off, ridge=1.0):
             break
         da = (hbb * ga - hab * gb) / det
         db = (haa * gb - hab * ga) / det
-        a, b = a - da, b - db
+        step = max(abs(da), abs(db))
+        if step > 1.0:              # damped Newton: near-separable hold-outs made it run away (b ~ 2700)
+            da, db = da / step, db / step
+        a, b = max(-6.0, min(6.0, a - da)), max(0.0, min(3.0, b - db))
         if abs(da) + abs(db) < 1e-7:
             break
     return round(a, 4), round(b, 4)
@@ -307,7 +325,7 @@ def rug_probability(conn, feats, max_age=86400 * 2):
     model = store.cache_get(conn, "launch_model", max_age)
     if not model:
         return None
-    return round(predict(model, feats), 4)
+    return round(predict(model, _clean(feats)), 4)
 
 
 def report_text(rep):

@@ -49,7 +49,7 @@ among each other are combined as independent dangers ("noisy OR"):
 So one 50 and one 50 give 75, not 100, and many small warnings add up slowly. A **hard flag** lifts the score to
 at least `SAFETY_HARD_FLAG_FLOOR` (90) and always blocks. Checks that had no data (`unknown`), ran out of budget
 (`skipped`) or failed (`error`) add nothing but lower `coverage`; such results are re-checked after a third of the
-normal TTL.
+normal TTL. (Their reasons are still listed, with no effect on the score.)
 
 | Score | level | effect |
 |---|---|---|
@@ -102,7 +102,8 @@ no SOL account (an emptied wallet) counts as a person, not as a program.
   dev buy/sold, fast buyers, buyers, bundle wallets, dev launches, wallets of earlier rugs) on the older half,
   recalibrates on the newest 30 % of that half, and judges on the newer half only: AUC, Brier, calibration table
   and the hit rate when at most 5/10/20 % of doublers may be flagged, next to safety's own ramps and the sniper's
-  `risk`. The full-history model is in `safety_cache` key `launch_model`;
+  `risk`. Launches the sniper decided on without seeing a single trade record 0 in every trade field; those zeros
+  count as "not seen" (None), not as clean. The full-history model is in `safety_cache` key `launch_model`;
   `safety.backtest.rug_probability(conn, feats)` gives a launch's rug probability within 60 min.
 
 - `python -m safety audit` (`safety/audit.py`, also in the learn report under `buys`, last 7 days): every buy of the
@@ -138,6 +139,9 @@ Enhanced API. Jupiter, DexScreener and RugCheck are keyless and not Helius.
   `safety_cache` and shared by every process, 10 min (`SAFETY_HOLDERS_TTL_SEC`), 2 min for hot coins
   (`SAFETY_HOLDERS_TTL_HOT_SEC`); on top an own bucket per endpoint for this method, 30/min and ≥1.7 s apart
   (`SAFETY_LARGEST_PER_MIN`, `SAFETY_LARGEST_SPACING_SEC`), i.e. at most 6 per 10 s per endpoint over all processes.
+- **Pre-check of copy candidates**: `candidates()` also takes coins that ≥ `SAFETY_ACTIVE_MIN_WALLETS`=2 tracked wallets
+  bought in the last `SAFETY_ACTIVE_WINDOW_SEC`=30 min (max `SAFETY_ACTIVE_MAX`=30, from the `trades` table, no
+  network), so a copy or signal buy finds a result instead of `unchecked`. Same per-minute budget as before.
 - **DexScreener**: one request per 30 mints for the whole refresh pass (`sources.prefetch_pairs`, kept 60 s); single requests only for live paths.
 - **Cache**: results per mint with TTL 15 min (pair < 6 h), 2 h (older), 6 h (blocked); launch forever, wallet
   profiles a day. `refresh` runs every `SAFETY_REFRESH_EVERY_SEC`=60 s, at most `SAFETY_REFRESH_MAX_TOKENS`=8 coins and

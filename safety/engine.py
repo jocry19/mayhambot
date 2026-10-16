@@ -63,7 +63,9 @@ def combine(mint, results, cfg, calls=0, override=None, weights=None):
     hard flags always block whatever the weight."""
     weights = weights or {}
     done = [r for r in results if r.status == "ok"]
-    score = checks.noisy_or(min(100.0, r.risk * weights.get(r.name, 1.0)) for r in results)
+    # only answered checks score: an 'unknown' (no pair on DexScreener yet, no Jupiter route) is missing data,
+    # which the coverage gate handles; scoring it put every fresh launch at 'erhöht' 27.8 (liquidity 15 + socials 15)
+    score = checks.noisy_or(min(100.0, r.risk * weights.get(r.name, 1.0)) for r in results if r.status == "ok")
     hard = [text for r in results if r.hard for risk, text in r.reasons if risk >= 50]
     if hard:
         score = max(score, cfg.hard_flag_floor)
@@ -318,7 +320,8 @@ def deep_due(a, cfg=None):
 def candidates(conn, extra=(), cfg=None):
     """Coins worth checking, most urgent first: hot coins (open positions, recent signals, `extra`) that are
     unchecked, past the young TTL or due for their deep check, then never-checked coins, then coins due by
-    TTL. Sources: ct_positions, signals of the last 24 h, tracked coins, plus `extra`."""
+    TTL. Sources: ct_positions, signals of the last 24 h, coins tracked wallets are buying right now (what the
+    copy trader is about to copy), tracked coins, plus `extra`."""
     cfg = cfg or default_settings
     store.ensure_schema(conn)
     since = int(time.time()) - 86400
@@ -326,6 +329,7 @@ def candidates(conn, extra=(), cfg=None):
     mints = list(dict.fromkeys(
         hot
         + [r[0] for r in conn.execute("SELECT DISTINCT mint FROM signals WHERE ts>=? ORDER BY ts DESC", (since,))]
+        + active_mints(conn, cfg)
         + [r[0] for r in conn.execute("SELECT mint FROM tokens WHERE tracked=1 ORDER BY last_updated DESC LIMIT 60")]))
     urgent, never, due = [], [], []
     for m in mints:
@@ -338,6 +342,26 @@ def candidates(conn, extra=(), cfg=None):
         elif is_due(a, cfg):
             due.append((a.ts, m))
     return urgent + never + [m for _, m in sorted(due)]
+
+
+SKIP_MINTS = {"So11111111111111111111111111111111111111112", "EPjFWdd5AufLSLx1yqTxE1HbKgbASLuZ4Dpw4YeDDYM8",
+              "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"}
+
+
+def active_mints(conn, cfg=None):
+    """Coins that at least SAFETY_ACTIVE_MIN_WALLETS tracked wallets bought in the last SAFETY_ACTIVE_WINDOW_SEC,
+    most wallets first: the copy trader and signals buy from exactly this pool, so checking it ahead of time means
+    the buy finds a result instead of 'unchecked' (backup: 28 of 57 whale copies had none, though the coins had
+    traded for hours)."""
+    cfg = cfg or default_settings
+    try:
+        rows = conn.execute("SELECT mint, COUNT(DISTINCT wallet) n FROM trades WHERE side='buy' AND ts>=? "
+                            "GROUP BY mint HAVING n>=? ORDER BY n DESC LIMIT ?",
+                            (int(time.time()) - cfg.active_window_sec, cfg.active_min_wallets,
+                             cfg.active_max)).fetchall()
+    except Exception:  # noqa: BLE001 - no trades table (tests, fresh install)
+        return []
+    return [r[0] for r in rows if r[0] not in SKIP_MINTS]
 
 
 def open_positions(conn):
