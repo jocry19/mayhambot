@@ -338,3 +338,30 @@ def test_tracker_gap_marks_unknown_whale_exits():
     assert not learn._sell_unknown(gaps, t, [t + 900])         # sold before the outage: every exit is known
     assert learn._sell_unknown(gaps, t, [t + 3 * 3600])        # first sell only after it: one may be missing
     assert not learn._sell_unknown(gaps, t + 6 * 3600, [])     # horizon starts after the outage
+
+
+def test_landing_drift_sets_paper_slippage_from_the_tape():
+    import sqlite3
+    from copytrade import execution, learn, store
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(store.SCHEMA)
+    conn.execute("CREATE TABLE trades (sig TEXT, wallet TEXT, mint TEXT, side TEXT, ts INTEGER, token_amount REAL, "
+                 "sol_amount REAL, usd_amount REAL, price_usd REAL, source TEXT)")
+    assert learn.landing_drift(conn)["adverse"] == learn.LAND_MAX  # nothing measured: keep the cautious 2 %
+    for i in range(40):
+        t = 10_000 * (i + 1)
+        conn.execute("INSERT INTO ct_positions(mode, mint, opened_at, closed_at) VALUES ('paper', ?, ?, ?)",
+                     (f"M{i}", t, t + 600))
+        for ts, px in ((t - 5, 1.0), (t + 2, 1.003), (t + 595, 2.0), (t + 602, 1.99)):
+            conn.execute("INSERT INTO trades VALUES ('s','w',?,'buy',?,1,1,1,?,'gt')", (f"M{i}", ts, px))
+    d = learn.landing_drift(conn)
+    assert d["n_buys"] == d["n_sells"] == 40 and abs(d["buy"] - 0.003) < 1e-6 and abs(d["sell"] - 0.005) < 1e-6
+    assert abs(d["adverse"] - 0.01) < 1e-6  # worse side 0.5 % + 0.5 % buffer
+    old = execution.paper_adverse()
+    try:
+        learn.calibrate_fills(conn)
+        assert abs(execution.paper_adverse() - 0.01) < 1e-6
+    finally:
+        execution.set_paper_adverse(old)

@@ -386,6 +386,10 @@ class Strategy:
         safe = (meta or {}).get("safety") or {}
         meta = {**(meta or {}), "fill_source": fill.source, "impact": fill.price_impact,
                 "liq_usd": snap.liquidity_usd, "fdv": snap.fdv, "dex": snap.dex_id}
+        if ex.mode == "paper":
+            from .execution import paper_adverse
+
+            meta["adverse"] = paper_adverse()  # lets learn.extra_cost compare fills made under different settings
         cur = self.conn.execute(
             """INSERT INTO ct_positions(mode, strategy, managed, wallet, mint, symbol, whale_sig, whale_ts,
                  whale_price_sol, signal_id, opened_at, entry_price_sol, entry_price_usd, entry_mcap_usd, size_sol,

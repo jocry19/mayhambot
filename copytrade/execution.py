@@ -24,6 +24,18 @@ from .config import SOL_MINT, Settings
 log = logging.getLogger("copytrade.exec")
 
 PAPER_ADVERSE_SLIPPAGE = float(os.getenv("CT_PAPER_ADVERSE_SLIPPAGE", "0.02"))
+_adverse = PAPER_ADVERSE_SLIPPAGE  # replaced by the measured value from learn.landing_drift unless .env pins it
+
+
+def paper_adverse() -> float:
+    return _adverse
+
+
+def set_paper_adverse(x: float) -> None:
+    """Adverse slippage per side for paper fills (price move between quote and landing). Ignored if .env sets it."""
+    global _adverse
+    if "CT_PAPER_ADVERSE_SLIPPAGE" not in os.environ:
+        _adverse = x
 DEX_FEE_FALLBACK = 0.0035  # Raydium/Meteora ~0.25%, pump.fun 1% -> blended guess when no quote
 
 
@@ -68,7 +80,7 @@ class PaperExecutor:
             impact = _cp_impact(spend, snap, market.sol_usd(self.s))
             tokens = spend / snap.price_sol * (1 - impact) * (1 - DEX_FEE_FALLBACK) if snap.price_sol else 0
             src = "liquidity_estimate"
-        tokens *= 1 - PAPER_ADVERSE_SLIPPAGE
+        tokens *= 1 - _adverse
         if tokens <= 0:
             return Fill(False, error="no price")
         return Fill(True, tokens=tokens, sol=size_sol, price_sol=size_sol / tokens, price_impact=impact,
@@ -88,7 +100,7 @@ class PaperExecutor:
             impact = _cp_impact(value, snap, market.sol_usd(self.s)) if snap else 0.1
             gross = value * (1 - impact) * (1 - DEX_FEE_FALLBACK)
             src = "liquidity_estimate"
-        gross *= 1 - PAPER_ADVERSE_SLIPPAGE
+        gross *= 1 - _adverse
         net = max(0.0, gross - fees)
         return Fill(True, tokens=tokens, sol=net, price_sol=net / tokens if tokens else 0, price_impact=impact,
                     fees_sol=fees, tx=f"paper-{int(time.time() * 1000)}", source=src)

@@ -253,7 +253,13 @@ Im manuellen Modus wird nur das gelernte Kursziel im Hinweis gezeigt.
 
 Kauf/Verkauf werden über ein echtes Jupiter-Quote für genau diese Größe bewertet (echte Route, echter Price Impact);
 ohne Quote per Constant-Product-Schätzung aus der DexScreener-Liquidität plus DEX-Gebühr. Dazu kommen
-`CT_PAPER_ADVERSE_SLIPPAGE` (Standard 2 %, für Latenz im Ansturm) sowie Netzwerk- und Priority-Fee.
+`CT_PAPER_ADVERSE_SLIPPAGE` (Kursbewegung gegen uns zwischen Quote und Landung) sowie Netzwerk- und Priority-Fee.
+
+Diese Gegenbewegung wird gemessen statt geschätzt (`learn.landing_drift`, jede Lernrunde): am echten Trade-Band des
+Coins 3 s nach jedem eigenen Kauf und Verkauf. Verwendet wird die schlechtere Seite plus 0,5 % Puffer für Sandwich-Bots,
+begrenzt auf 0,75–2 %; unter 30 gemessenen Fills bleibt es bei 2 %. Erste Messung (10/2026, 54 Käufe / 50 Verkäufe):
++0,2 % / −0,3 %, über 2–10 s stabil, also 0,75 % statt 2 % je Seite. Wer per `.env` einen Wert setzt, behält ihn.
+Die Kosten-Kalibrierung (`extra_cost`) rechnet alte Fills auf den aktuellen Wert um.
 
 ## Live-Modus (echtes Geld)
 

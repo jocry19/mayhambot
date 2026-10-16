@@ -377,13 +377,26 @@ def extra_cost(conn, strategy: str) -> float:
     """Cost the 1-minute simulation misses, measured on our own closed trades: median(simulated - actual).
 
     The grid assumes sim.ROUNDTRIP_COST (3 %); real paper fills (Jupiter quote, adverse slippage both ways,
-    priority fees) cost more (10/2026: 6.8 % for a buy sold one second later). 0 until CALIB_MIN_TRADES."""
+    priority fees) cost more (10/2026: 6.8 % for a buy sold one second later). 0 until CALIB_MIN_TRADES.
+    Paper fills made with another adverse slippage than today's (see landing_drift) are put on today's footing.
+    """
+    from .execution import paper_adverse
+
+    now_adv = paper_adverse()
     try:
-        rows = conn.execute("SELECT sim_actual - actual_gain FROM ct_evals WHERE kind='trade' AND strategy=? "
-                            "AND actual_gain IS NOT NULL AND sim_actual IS NOT NULL", (strategy,)).fetchall()
+        rows = conn.execute("SELECT e.sim_actual - e.actual_gain, p.meta FROM ct_evals e LEFT JOIN ct_positions p "
+                            "ON e.kind='trade' AND p.id=CAST(e.ref AS INTEGER) WHERE e.kind='trade' AND e.strategy=? "
+                            "AND e.actual_gain IS NOT NULL AND e.sim_actual IS NOT NULL", (strategy,)).fetchall()
     except Exception:
         return 0.0
-    gaps = sorted(r[0] for r in rows)
+
+    def used(meta):
+        try:
+            return float(json.loads(meta or "{}").get("adverse", LAND_MAX))
+        except (TypeError, ValueError):
+            return LAND_MAX
+
+    gaps = sorted(r[0] - 2 * (used(r[1]) - now_adv) for r in rows)
     if len(gaps) < CALIB_MIN_TRADES:
         return 0.0
     mid = len(gaps) // 2
@@ -595,6 +608,57 @@ def tune(conn, s: Settings) -> dict:
     return out
 
 
+LAND_S = 3  # quote to on-chain landing with a priority fee
+LAND_MIN_N = 30
+LAND_BUFFER = 0.005  # sandwich / MEV allowance on top of the measured drift (not visible in the tape)
+LAND_MIN, LAND_MAX = 0.0075, 0.02
+
+
+def landing_drift(conn, land_s: int = LAND_S) -> dict:
+    """How far the market moved against our paper fills in the seconds a real swap needs to land, measured on the
+    coin's real trade tape (GeckoTerminal trades) around our own entries and exits. Returns per-side means and the
+    adverse slippage to use for paper fills: mean adverse move + buffer, clamped to 0.75..2 %; the old fixed 2 %
+    until LAND_MIN_N fills are measured."""
+    def px(mint, t):
+        r = conn.execute("SELECT price_usd, ts FROM trades WHERE mint=? AND ts<=? AND price_usd>0 ORDER BY ts DESC "
+                         "LIMIT 1", (mint, int(t))).fetchone()
+        return (r[0], t - r[1]) if r else (None, None)
+
+    buys, sells = [], []
+    try:
+        rows = conn.execute("SELECT mint, opened_at, closed_at FROM ct_positions WHERE mode='paper' "
+                            "ORDER BY opened_at DESC LIMIT 400").fetchall()
+        for mint, op, cl in rows:
+            for t, out, sign in ((op, buys, 1), (cl, sells, -1)):
+                if not t:
+                    continue
+                a, age = px(mint, t)
+                b, _ = px(mint, t + land_s)
+                if a and b and age < 60:
+                    out.append(sign * (b / a - 1))  # >0 = moved against us
+    except Exception as e:  # no trade tape (signals/ not running)
+        log.debug("landing drift: %s", e)
+    n = min(len(buys), len(sells))
+    res = {"n_buys": len(buys), "n_sells": len(sells),
+           "buy": round(sum(buys) / len(buys), 4) if buys else None,
+           "sell": round(sum(sells) / len(sells), 4) if sells else None}
+    if n >= LAND_MIN_N:
+        side = max(res["buy"], res["sell"], 0.0)
+        res["adverse"] = round(min(LAND_MAX, max(LAND_MIN, side + LAND_BUFFER)), 4)
+    else:
+        res["adverse"] = LAND_MAX
+    return res
+
+
+def calibrate_fills(conn) -> dict:
+    from . import execution, store
+
+    d = landing_drift(conn)
+    execution.set_paper_adverse(d["adverse"])
+    store.set_state(conn, "paper_adverse", json.dumps(d))
+    return d
+
+
 def run(conn, s: Settings) -> dict:
     """One learning round (called by the maintenance loop): evaluate new entries, then tune."""
     init(conn)
@@ -602,6 +666,10 @@ def run(conn, s: Settings) -> dict:
          "signals": evaluate_signals(conn, s)}
     n["rolled_back"] = rollback(conn)
     n["tuned"] = tune(conn, s)
+    try:
+        n["fills"] = calibrate_fills(conn)
+    except Exception as e:
+        log.warning("fill calibration failed: %s", e)
     return n
 
 
