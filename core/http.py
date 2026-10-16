@@ -1,5 +1,6 @@
 """Shared HTTP helper: per-host rate limit, retries on 429/5xx, JSON in/out."""
 import logging
+import os
 import re
 import threading
 import time
@@ -48,8 +49,63 @@ _last = {}
 _lock = threading.Lock()
 
 
+# Hosts whose limit is shared by every mayhambot process (signals, copytrade, research run separately).
+# Their spacing is coordinated through a lock file, so together they stay under the free-tier limit.
+SHARED_HOSTS = {"api.geckoterminal.com"}
+_LOCK_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "ratelimit")
+
+
+def throttle(host, interval=None):
+    """Block until this process may call `host`. Cross-process for SHARED_HOSTS (fcntl lock file)."""
+    iv = interval if interval is not None else HOST_INTERVAL.get(host, DEFAULT_INTERVAL)
+    if host not in SHARED_HOSTS:
+        return _wait_local(host, iv)
+    try:
+        import fcntl
+    except ImportError:  # Windows: fall back to per-process spacing
+        return _wait_local(host, iv)
+    os.makedirs(_LOCK_DIR, exist_ok=True)
+    with open(os.path.join(_LOCK_DIR, host + ".lock"), "a+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.seek(0)
+            try:
+                last = float(f.read().strip() or 0)
+            except ValueError:
+                last = 0.0
+            delay = last + iv - time.time()
+            if delay > 0:
+                time.sleep(delay)
+            f.seek(0)
+            f.truncate()
+            f.write(repr(time.time()))
+            f.flush()
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def penalize(host, seconds):
+    """After a 429: push the shared next-call time back for every process."""
+    if host not in SHARED_HOSTS:
+        return
+    try:
+        import fcntl
+        os.makedirs(_LOCK_DIR, exist_ok=True)
+        with open(os.path.join(_LOCK_DIR, host + ".lock"), "a+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            f.seek(0)
+            f.truncate()
+            f.write(repr(time.time() + seconds))
+            fcntl.flock(f, fcntl.LOCK_UN)
+    except (ImportError, OSError):
+        pass
+
+
 def _wait(host):
-    iv = HOST_INTERVAL.get(host, DEFAULT_INTERVAL)
+    throttle(host)
+
+
+def _wait_local(host, iv):
     with _lock:
         now = time.monotonic()
         nxt = _last.get(host, 0) + iv
@@ -74,6 +130,8 @@ def _request(method, url, retries=4, timeout=20, **kw):
             if attempt == retries:
                 raise requests.HTTPError(f"{r.status_code} for {redact(r.url)}")
             delay = float(r.headers.get("Retry-After") or 0) or (2 ** attempt) * 2
+            if r.status_code == 429:
+                penalize(host, delay)
             log.warning("%s %s -> %s, sleeping %.1fs", method, host, r.status_code, delay)
             time.sleep(min(delay, 60))
             continue

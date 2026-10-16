@@ -142,7 +142,7 @@ def pool_trades(token: Token) -> list:
     """Latest swaps (up to 300, last 24h) of the token's pool. Wallet = transaction signer."""
     if not token.pool_address:
         return []
-    j = get_json(f"{GT}/networks/solana/pools/{token.pool_address}/trades", headers=GT_HEADERS)
+    j = get_json(f"{GT}/networks/solana/pools/{token.pool_address}/trades", headers=GT_HEADERS, retries=1)
     sol_usd = sol_price_usd()
     out = []
     for d in j.get("data") or []:

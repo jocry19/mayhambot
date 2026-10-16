@@ -51,8 +51,15 @@ def _row_token(r):
 
 
 def fetch_trades(conn, watch):
-    total = 0
-    for r in watch:
+    """Fetch pool trades, least recently fetched first, within TRADES_BUDGET_SECONDS per cycle,
+    so a rate-limited API never blocks the cycle (the rest is fetched next cycle)."""
+    total, t0, done = 0, time.time(), 0
+    for r in sorted(watch, key=lambda r: r["last_trades_fetch"] or 0):
+        if time.time() - t0 > settings.trades_budget_seconds:
+            log.info("trades budget used after %d/%d tokens, rest next cycle", done, len(watch))
+            break
+        done += 1
+        conn.execute("UPDATE tokens SET last_trades_fetch=? WHERE mint=?", (int(time.time()), r["mint"]))
         try:
             trades = market.pool_trades(_row_token(r))
         except Exception as e:  # noqa: BLE001

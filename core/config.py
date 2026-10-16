@@ -38,6 +38,7 @@ class Settings:
     max_mcap_usd: float
     max_tracked_tokens: int
     cycle_seconds: int
+    trades_budget_seconds: int
     discover_every_cycles: int
     # wallet scoring
     smart_min_score: float
@@ -79,6 +80,7 @@ def load_settings() -> Settings:
         max_mcap_usd=_f("MAX_MCAP_USD", 50_000_000),
         max_tracked_tokens=_i("MAX_TRACKED_TOKENS", 25),
         cycle_seconds=_i("CYCLE_SECONDS", 90),
+        trades_budget_seconds=_i("TRADES_BUDGET_SECONDS", 150),
         discover_every_cycles=_i("DISCOVER_EVERY_CYCLES", 5),
         smart_min_score=_f("SMART_MIN_SCORE", 55),
         smart_min_tokens=_i("SMART_MIN_TOKENS", 2),
