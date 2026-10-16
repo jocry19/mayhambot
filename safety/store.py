@@ -20,6 +20,18 @@ CREATE TABLE IF NOT EXISTS safety_wallets (
     address TEXT PRIMARY KEY, n_txs INTEGER, complete INTEGER, first_ts INTEGER, last_ts INTEGER,
     funder TEXT, funded_sol REAL, checked_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS safety_risks (
+    mint TEXT, ts INTEGER, risks_json TEXT, PRIMARY KEY (mint, ts)
+);
+CREATE TABLE IF NOT EXISTS safety_outcomes (
+    mint TEXT PRIMARY KEY, assessed_ts INTEGER, score REAL, level TEXT, risks_json TEXT, price0 REAL,
+    liq0 REAL, min_ret REAL, ret_end REAL, liq_drop REAL, n_points INTEGER, rugged INTEGER, labelled_at INTEGER,
+    rug_after_min REAL, max_ret REAL
+);
+CREATE TABLE IF NOT EXISTS safety_weights (
+    check_name TEXT PRIMARY KEY, weight REAL, n_flagged INTEGER, rug_rate_flagged REAL, rug_rate_clean REAL,
+    base_rate REAL, lift REAL, ts INTEGER
+);
 CREATE TABLE IF NOT EXISTS safety_cache (
     key TEXT PRIMARY KEY, ts INTEGER, json TEXT
 );
@@ -35,7 +47,7 @@ MIGRATIONS = [("safety_tokens", "deep_ts", "INTEGER")]
 
 
 def ensure_schema(conn):
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='safety_cache'").fetchone() is None:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='safety_weights'").fetchone() is None:
         db.retry_locked(conn, lambda: conn.executescript(SCHEMA))
     for table, col, typ in MIGRATIONS:
         if col not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
@@ -64,6 +76,9 @@ def save_assessment(conn, a):
             (a.mint, a.ts, a.score, a.level, int(a.blocked), a.coverage, _j(a.hard_flags), _j(a.reasons),
              _j(a.positives), _j(a.checks), a.creator, a.pair_created_at, a.version, a.calls, a.error, a.deep_ts))
         conn.execute("INSERT OR REPLACE INTO safety_history VALUES (?,?,?,?)", (a.mint, a.ts, a.score, a.level))
+        # per-check risks at that time, for learning (own table: others insert into safety_history positionally)
+        conn.execute("INSERT OR REPLACE INTO safety_risks VALUES (?,?,?)", (a.mint, a.ts, _j(
+            {n: c.get("risk") for n, c in a.checks.items() if c.get("status") == "ok"})))
         conn.commit()
     db.retry_locked(conn, write)
 
@@ -138,3 +153,11 @@ def cache_put(conn, key, value):
         conn.execute("DELETE FROM safety_cache WHERE ts < ?", (int(time.time()) - 86400,))
         conn.commit()
     db.retry_locked(conn, write)
+
+
+def weights(conn):
+    """Learned multiplier per check (1.0 = untouched), see safety/learn.py."""
+    try:
+        return {r["check_name"]: r["weight"] for r in conn.execute("SELECT check_name, weight FROM safety_weights")}
+    except Exception:  # noqa: BLE001
+        return {}

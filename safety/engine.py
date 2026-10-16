@@ -58,9 +58,12 @@ def level_for(score, cfg):
     return "low"
 
 
-def combine(mint, results, cfg, calls=0, override=None):
+def combine(mint, results, cfg, calls=0, override=None, weights=None):
+    """weights: learned multiplier per check (safety/learn.py). It scales the check's share of the score;
+    hard flags always block whatever the weight."""
+    weights = weights or {}
     done = [r for r in results if r.status == "ok"]
-    score = checks.noisy_or(r.risk for r in results)
+    score = checks.noisy_or(min(100.0, r.risk * weights.get(r.name, 1.0)) for r in results)
     hard = [text for r in results if r.hard for risk, text in r.reasons if risk >= 50]
     if hard:
         score = max(score, cfg.hard_flag_floor)
@@ -78,6 +81,7 @@ def combine(mint, results, cfg, calls=0, override=None):
         coverage=round(len(done) / len(results), 2) if results else 0.0, hard_flags=hard, reasons=reasons,
         positives=[p for r in results for p in r.positives],
         checks={r.name: {"label": r.label, "status": r.status, "risk": r.risk, "hard": r.hard, "data": r.data,
+                         "weight": round(weights.get(r.name, 1.0), 3),
                          "reasons": [list(x) for x in r.reasons], "positives": r.positives} for r in results},
         creator=creator, calls=calls, override=override)
 
@@ -151,7 +155,8 @@ def assess(mint, conn=None, deep=True, force=False, fetcher=None, cfg=None, prio
                 if old_r is not None:
                     by_name[name] = old_r
         results = [by_name[n] for n in QUICK_NAMES + DEEP_NAMES if n in by_name]
-        a = combine(mint, results, cfg, calls=getattr(f, "calls", 0), override=store.override(conn, mint))
+        a = combine(mint, results, cfg, calls=getattr(f, "calls", 0), override=store.override(conn, mint),
+                    weights=store.weights(conn))
         a.deep_ts = int(time.time()) if deep_ran else (prev.deep_ts if prev else None)
         pair = ctx._memo.get("pair") or {}
         if pair.get("pairCreatedAt"):
@@ -333,6 +338,11 @@ def refresh(conn=None, extra=(), budget_sec=None, max_tokens=None, cfg=None, fet
     limit = cfg.refresh_max_tokens if max_tokens is None else max_tokens
     t0, done = time.time(), []
     try:
+        try:
+            from safety import learn
+            learn.maybe_learn(conn, cfg)   # no network, once per SAFETY_LEARN_EVERY_SEC
+        except Exception as e:  # noqa: BLE001 - learning must never stop the checks
+            log.warning("safety learn failed: %s", e)
         if fetcher_factory is None and offline():
             return done
         hot = set(hot_mints(conn, extra, cfg))

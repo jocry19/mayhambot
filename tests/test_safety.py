@@ -1,4 +1,5 @@
 """safety/ on fixture data (no network): a clean coin, an insider/bundle rug and hard flags."""
+import json
 import os
 import sys
 import tempfile
@@ -395,3 +396,67 @@ def test_holder_snapshot_cached_and_largest_accounts_capped(monkeypatch):
         assert got == [1, 1, 1, 1, None]   # 2 per endpoint and minute: public twice, then Helius twice
     finally:
         _cleanup(hel, pub, f"{hel}_getTokenLargestAccounts", f"{pub}_getTokenLargestAccounts")
+
+
+def test_learning_from_outcomes_reweights_checks():
+    from safety import learn, store
+    c = conn()
+    store.ensure_schema(c)
+    t0 = NOW - 3 * 86400
+    cfg = SafetySettings()
+    cfg.learn_min_flagged, cfg.learn_shrink_n = 5, 0
+    rows, prices = [], []
+    for i in range(40):
+        m = f"M{i}"
+        rug = i < 10                       # 10 of 40 rug
+        risks = {"bundles": 60 if rug else 0,          # bundles warned exactly on the rugs
+                 "socials": 15 if i % 2 == 0 else 30}  # socials warns on every other coin, no signal
+        rows.append((m, t0, 50.0, "high" if rug else "low", json.dumps(risks)))
+        for k in range(6):
+            p = 1.0 if k == 0 else (0.02 if rug else 1.1)
+            prices.append((m, t0 - 60 + k * 3600, p, 100_000, 50_000 if not rug or k == 0 else 1_000))
+    c.executemany("INSERT INTO safety_history VALUES (?,?,?,?)", [r[:4] for r in rows])
+    c.executemany("INSERT INTO safety_risks VALUES (?,?,?)", [(r[0], r[1], r[4]) for r in rows])
+    c.executemany("INSERT INTO token_prices VALUES (?,?,?,?,?)", prices)
+    c.commit()
+    rep = learn.learn(c, cfg)
+    assert rep["new_labels"] == 40 and abs(rep["base_rug_rate"] - 0.25) < 1e-9
+    w = store.weights(c)
+    assert w["bundles"] == cfg.learn_weight_max and 0.5 <= w["socials"] <= 1.0
+    assert rep["levels"]["high"]["rug_rate"] == 1.0 and rep["levels"]["low"]["rug_rate"] == 0.0
+    assert "gerugged" in learn.report_text(rep)
+    assert learn.label_outcomes(c, cfg) == 0           # labelled once
+    # the learned weight changes the score of a new coin with a bundle warning
+    res = [checks.CheckResult("bundles", "b", reasons=[(40, "x")]).finish()]
+    assert engine.combine(MINT, res, cfg, weights=w).score > engine.combine(MINT, res, cfg).score
+
+
+def test_wash_like_sycamore_is_penalised_and_heavy_wash_blocks():
+    for share, blocked in ((0.38, False), (0.6, True)):
+        c = conn()
+        trades, n = [], 40
+        for i in range(n):  # wallet A trades back and forth (share of volume), the rest are one-way buyers
+            if i < int(n * share):
+                trades.append(Trade(f"a{i}", "A", MINT, "buy" if i % 2 else "sell", NOW - 60 * i, 1, 0.1, 100, 1, "t"))
+            else:
+                trades.append(Trade(f"b{i}", f"B{i}", MINT, "buy", NOW - 60 * i, 1, 0.1, 100, 1, "t"))
+        db.insert_trades(c, trades)
+        a = safety.assess(MINT, c, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
+        assert a.blocked == blocked, (share, a.reasons)
+        assert safety.signal_penalty(c, MINT, CFG)["factor"] < 0.8
+
+
+def test_sweep_and_launch_evaluation():
+    from safety import learn
+    c = conn()
+    c.execute("CREATE TABLE sniper_launches (mint TEXT, done INTEGER, safety_risk REAL, rugged INTEGER, max_ret_60m REAL)")
+    rows = [(f"r{i}", 1, 80, 1, -0.95) for i in range(8)] + [(f"m{i}", 1, 30, 1, -0.9) for i in range(2)] \
+        + [(f"d{i}", 1, 10, 0, 1.5) for i in range(9)] + [("dx", 1, 80, 0, 2.0)]
+    c.executemany("INSERT INTO sniper_launches VALUES (?,?,?,?,?)", rows)
+    c.commit()
+    ev = learn.evaluate_launches(c, CFG)
+    blk = ev["thresholds"]["gesperrt"]
+    assert ev["n"] == 20 and blk["rugs_caught"] == 8 and blk["recall"] == 0.8
+    assert blk["doublers_flagged"] == 1 and blk["false_alarm_rate"] == 0.1
+    rep = learn.learn(c, CFG)
+    assert "Sniper-Launches (20, davon 10 Rugs)" in learn.report_text(rep)

@@ -80,8 +80,9 @@ class SafetySettings:
     # wash trading (from the pool trades signals/ already stores)
     wash_window_min: int = field(default_factory=lambda: _i("SAFETY_WASH_WINDOW_MIN", 120))
     wash_min_trades: int = field(default_factory=lambda: _i("SAFETY_WASH_MIN_TRADES", 20))
-    wash_roundtrip_warn: float = field(default_factory=lambda: _f("SAFETY_WASH_ROUNDTRIP_WARN", 0.35))
-    wash_top3_warn: float = field(default_factory=lambda: _f("SAFETY_WASH_TOP3_WARN", 0.5))
+    wash_roundtrip_warn: float = field(default_factory=lambda: _f("SAFETY_WASH_ROUNDTRIP_WARN", 0.25))
+    wash_block_roundtrip: float = field(default_factory=lambda: _f("SAFETY_WASH_BLOCK_ROUNDTRIP", 0.5))   # hard flag
+    wash_top3_warn: float = field(default_factory=lambda: _f("SAFETY_WASH_TOP3_WARN", 0.4))
 
     # external keyless cross-check
     use_rugcheck: bool = field(default_factory=lambda: _b("SAFETY_USE_RUGCHECK", True))
@@ -105,6 +106,15 @@ class SafetySettings:
     deep_signal_window_sec: int = field(default_factory=lambda: _i("SAFETY_DEEP_SIGNAL_WINDOW_SEC", 7200))
     deep_on_top10_change_pp: float = field(default_factory=lambda: _f("SAFETY_DEEP_ON_TOP10_CHANGE_PP", 10))
     launch_max_age_h: float = field(default_factory=lambda: _f("SAFETY_LAUNCH_MAX_AGE_H", 6))
+    # learning from outcomes (safety/learn.py)
+    learn_every_sec: int = field(default_factory=lambda: _i("SAFETY_LEARN_EVERY_SEC", 3600))
+    outcome_horizon_h: float = field(default_factory=lambda: _f("SAFETY_OUTCOME_HORIZON_H", 24))
+    rug_drop_pct: float = field(default_factory=lambda: _f("SAFETY_RUG_DROP_PCT", 90))
+    learn_flag_risk: float = field(default_factory=lambda: _f("SAFETY_LEARN_FLAG_RISK", 25))
+    learn_min_flagged: int = field(default_factory=lambda: _i("SAFETY_LEARN_MIN_FLAGGED", 15))
+    learn_shrink_n: float = field(default_factory=lambda: _f("SAFETY_LEARN_SHRINK_N", 30))
+    learn_weight_min: float = field(default_factory=lambda: _f("SAFETY_LEARN_WEIGHT_MIN", 0.5))
+    learn_weight_max: float = field(default_factory=lambda: _f("SAFETY_LEARN_WEIGHT_MAX", 1.5))
     refresh_budget_sec: int = field(default_factory=lambda: _i("SAFETY_REFRESH_BUDGET_SEC", 30))
     refresh_every_sec: int = field(default_factory=lambda: _i("SAFETY_REFRESH_EVERY_SEC", 60))
     refresh_max_tokens: int = field(default_factory=lambda: _i("SAFETY_REFRESH_MAX_TOKENS", 8))

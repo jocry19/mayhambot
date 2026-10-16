@@ -672,13 +672,21 @@ def check_wash(ctx):
     c = ctx.cfg
     r.data.update(n_trades=len(rows), n_wallets=len(vol), roundtrip_share=round(roundtrip, 3), top3_share=round(top3, 3),
                   window_min=c.wash_window_min)
-    r.add(ramp(roundtrip, c.wash_roundtrip_warn, 0.85, 20, 65),
-          f"{100 * roundtrip:.0f} % des Volumens sind Hin-und-her-Trades derselben Wallets (Kauf und Verkauf): künstliches Volumen.")
+    # SYCAMORE (Oct 2026): 37-40 % round trips scored only ~23 and the copy trader lost 81 % of its paper loss
+    # there. Fake volume fakes exactly the pumps copy trading and signals react to, so it weighs heavily now.
+    if roundtrip >= c.wash_block_roundtrip:
+        r.hard = True
+        r.add(80, f"{100 * roundtrip:.0f} % des Volumens sind Hin-und-her-Trades derselben Wallets: das Volumen ist "
+                  f"überwiegend künstlich, Pumps hier sind nicht echt (gesperrt ab {100 * c.wash_block_roundtrip:.0f} %).")
+    else:
+        r.add(ramp(roundtrip, c.wash_roundtrip_warn, c.wash_block_roundtrip, 30, 70),
+              f"{100 * roundtrip:.0f} % des Volumens sind Hin-und-her-Trades derselben Wallets (Kauf und Verkauf): "
+              f"künstliches Volumen.")
     r.add(ramp(top3, c.wash_top3_warn, 0.9, 15, 50),
           f"Nur 3 Wallets machen {100 * top3:.0f} % des Volumens der letzten {c.wash_window_min} Minuten.")
     if not r.reasons:
         r.positives.append(f"Volumen echt verteilt: {len(vol)} Wallets, {len(rows)} Trades.")
-    return r.finish(cap=75)
+    return r.finish(cap=90)
 
 
 def check_socials(ctx):
