@@ -249,7 +249,8 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
     log(f"deploy {head[:7]} -> {subject}")
     st["last_deploy"] = now
     _save(st)
-    r = subprocess.run([_python(), "mayham.py", "update"], cwd=ROOT, capture_output=True, text=True, timeout=1800)
+    r = subprocess.run([_python(), "mayham.py", "update"], cwd=ROOT, capture_output=True, text=True, timeout=1800,
+                       env=dict(os.environ, MAYHAM_SKIP_BACKUP="1"))  # fresh backup above, a second costs minutes
     log((r.stdout + r.stderr).strip()[-4000:])
     if r.returncode != 0 or "Update ok" not in r.stdout:
         # crashed (e.g. pip) or the gate failed: never leave a new checkout behind the old running processes

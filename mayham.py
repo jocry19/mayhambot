@@ -235,8 +235,8 @@ def update():
             subprocess.call(pip, cwd=ROOT)  # back to the packages the running version was tested with
             print(f"Update abgebrochen, zurück auf {old[:7]}. Die laufende Version bleibt aktiv.")
         return False
-    if (ROOT / "deploy" / "ops.py").exists():
-        subprocess.call([PY, "deploy/ops.py", "backup"], cwd=ROOT)
+    if (ROOT / "deploy" / "ops.py").exists() and not os.environ.get("MAYHAM_SKIP_BACKUP"):
+        subprocess.call([PY, "deploy/ops.py", "backup"], cwd=ROOT)  # the auto-updater backs up before the pull
     if PLIST.exists():
         # never bootout/unlink here: kickstart a loaded agent, load it if it got unloaded
         restart() if _agent_loaded() else start()

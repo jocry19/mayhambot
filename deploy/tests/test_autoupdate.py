@@ -330,3 +330,17 @@ def test_setup_telegram_skips_get_updates_when_chat_id_set(monkeypatch):
     sent = []
     monkeypatch.setattr(ops, "send_alert", lambda m: sent.append(m) or True)
     assert ops.setup_telegram(types.SimpleNamespace(neu=False)) == 0 and len(sent) == 1
+
+
+def test_send_alert_rereads_env_for_late_chat_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(ops, "ROOT", tmp_path)
+    (tmp_path / ".env").write_text("TELEGRAM_BOT_TOKEN=t\nTELEGRAM_CHAT_ID=42\n")
+    seen = []
+
+    class Resp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(ops.urllib.request, "urlopen", lambda url, data, timeout: seen.append(data) or Resp())
+    monkeypatch.setitem(sys.modules, "signals.notifier", None)    # force the stdlib path
+    assert ops.send_alert("x") and seen and b"chat_id=42" in seen[0]

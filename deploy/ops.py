@@ -87,6 +87,7 @@ def load_env() -> dict:
 
 
 ENV = load_env()
+_BOOT_ENV = ENV  # send_alert re-reads .env only while ENV is the one loaded from disk (tests swap it)
 
 
 def cfg(name, default):
@@ -263,24 +264,32 @@ def collect() -> dict:
 # ---------------------------------------------------------------- alerts
 def send_alert(text: str) -> bool:
     """Telegram via the app's notifier when importable, else plain urllib (same bot/chat from .env)."""
-    token, chat = cfg("TELEGRAM_BOT_TOKEN", ""), cfg("TELEGRAM_CHAT_ID", "")
+    # .env is re-read here: the auto-updater runs for many minutes and the chat id may be set meanwhile
+    fresh = load_env() if ENV is _BOOT_ENV else {}
+    token = fresh.get("TELEGRAM_BOT_TOKEN") or cfg("TELEGRAM_BOT_TOKEN", "")
+    chat = fresh.get("TELEGRAM_CHAT_ID") or cfg("TELEGRAM_CHAT_ID", "")
     print(f"[alert] {text}")
     if not (token and chat):
+        print("[alert] nur Konsole (Telegram nicht eingerichtet)")
         return True   # nothing configured: console only, don't keep retrying
     text = f"🛠 <b>mayhambot Betrieb</b> ({platform.node()})\n{text}"
+    ok = None
     try:
         sys.path.insert(0, str(ROOT))
         from signals.notifier import TelegramNotifier  # noqa: PLC0415
-        return TelegramNotifier(token, chat).send(text) is not False
+        ok = TelegramNotifier(token, chat).send(text) is not False
     except Exception:  # noqa: BLE001 - app venv missing/broken: fall back to stdlib
         pass
-    try:
-        data = urllib.parse.urlencode({"chat_id": chat, "text": text, "parse_mode": "HTML"}).encode()
-        with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data, timeout=15) as r:
-            return r.status == 200
-    except Exception as e:  # noqa: BLE001
-        print(f"[alert] telegram failed: {e}")
-        return False
+    if ok is None:
+        try:
+            data = urllib.parse.urlencode({"chat_id": chat, "text": text, "parse_mode": "HTML"}).encode()
+            with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data, timeout=15) as r:
+                ok = r.status == 200
+        except Exception as e:  # noqa: BLE001 - the message names no URL, so the token never reaches a log
+            print(f"[alert] telegram failed: {type(e).__name__}")
+            ok = False
+    print("[alert] Telegram zugestellt" if ok else "[alert] Telegram NICHT zugestellt")
+    return ok
 
 
 # ---------------------------------------------------------------- restart
