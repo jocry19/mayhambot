@@ -259,10 +259,11 @@ def test_jupiter_quotes_macro_attention(conn):
             return {"bitcoin": {"usd": 60000, "usd_24h_change": -3.0}, "ethereum": {"usd": 3000, "usd_24h_change": 1.0},
                     "solana": {"usd": 150, "usd_24h_change": 2.0}}
         return {"data": [{"value": "22", "value_classification": "Extreme Fear"}]}
-    store.save_features(conn, "coin", [{"key": MINT, "ts": NOW, "coverage": 1, "features": {"vol_usd_60m": 1.0}}], False)
+    store.save_features(conn, "coin", [{"key": MINT, "ts": NOW, "coverage": 1,
+                                        "features": {"vol_usd_60m": 1.0, "flow_smart_entities_60m": 2}}], False)
     cfg = config.IntelSettings()
     cfg.quote_coins = 3
-    assert sources.quote_round(conn, NOW, cfg, get) == 3
+    assert sources.quote_round(conn, NOW, cfg, get) == 1  # smart-money coin: one size only
     f = coin.coin_features(conn, MINT, NOW + 60)["features"]
     assert f["exec_q_0_25"] == pytest.approx(0.06, abs=1e-6) and f["exec_q_noroute"] == 0
     assert coin.coin_features(conn, MINT, NOW - 60)["features"]["exec_q_0_25"] is None  # quote is from later
@@ -347,3 +348,48 @@ def test_network_features_on_demand(conn):
     conn.commit()
     r = intel.network_features(conn, MINT, NOW)
     assert r["features"]["net_dev_launches"] == 1 and r["features"]["net_dev_rug_rate"] == 1.0 and r["meta"]["creator"] == "D"
+
+
+def test_quote_round_spares_jupiter(conn):
+    """Only what a later stage needs, each only when its last measurement is stale, and a throttle pauses quoting."""
+    from intel import config, sources
+    sources.ensure(conn)
+    conn.execute("CREATE TABLE ct_positions (mint TEXT, status TEXT)")
+    conn.execute("INSERT INTO ct_positions VALUES (?, 'open')", (MINT,))
+    conn.execute("INSERT INTO signals(ts, mint) VALUES (?, ?)", (NOW - 600, OTHER))
+    conn.commit()
+    calls = []
+    mode = {"fail": None}
+
+    def get(url, params=None):
+        calls.append(params["inputMint"])
+        if mode["fail"]:
+            raise RuntimeError(mode["fail"])
+        if params["inputMint"] == sources.SOL_MINT:
+            return {"outAmount": str(params["amount"] * 1000), "priceImpactPct": "0.01", "routePlan": [{}]}
+        return {"outAmount": str(int(params["amount"] / 1000 * 0.95)), "priceImpactPct": "0.01", "routePlan": [{}]}
+    cfg = config.IntelSettings()
+    cfg.quote_max_calls = 12
+    assert sources.quote_round(conn, NOW, cfg, get) == 4  # position: 3 sizes, signal: 0.25 SOL
+    assert len(calls) == 8
+    calls.clear()
+    assert sources.quote_round(conn, NOW + 300, cfg, get) == 0 and calls == []  # still fresh
+    assert sources.quote_round(conn, NOW + 700, cfg, get) == 3  # the position is due again, the candidate is not
+    calls.clear()
+    mode["fail"] = "429 for https://lite-api.jup.ag/swap/v1/quote"
+    assert sources.quote_round(conn, NOW + 2000, cfg, get) == 0 and len(calls) == 1  # first throttle ends the round
+    bo = store.get_state(conn, "quotes_backoff")
+    assert bo["n"] == 1 and bo["until"] == NOW + 2000 + 2 * cfg.quotes_every_sec
+    calls.clear()
+    assert sources.quote_round(conn, NOW + 2100, cfg, get) == 0 and calls == []  # paused
+    mode["fail"] = None
+    assert sources.quote_round(conn, bo["until"], cfg, get) > 0
+    assert store.get_state(conn, "quotes_backoff") == {}
+    cfg.quote_max_calls = 3
+    calls.clear()
+    assert sources.quote_round(conn, NOW + 9000, cfg, get) == 1 and len(calls) == 2  # hard cap per round
+
+
+def test_time_indexes(conn):
+    assert "idx_trades_ts" in store.ensure_indexes(conn)
+    assert store.ensure_indexes(conn) == []

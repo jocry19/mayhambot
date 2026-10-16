@@ -70,6 +70,10 @@ def entity(cl, wallet):
 
 
 def sol_usd_at(conn, ts):
+    return _cached(("sol", int(ts) // 60), 600, lambda: _sol_usd_at(conn, int(ts)))
+
+
+def _sol_usd_at(conn, ts):
     if has(conn, "market_sol"):
         r = conn.execute("SELECT price_usd FROM market_sol WHERE ts<=? AND ts>=? ORDER BY ts DESC LIMIT 1",
                          (ts, ts - 6 * 3600)).fetchone()

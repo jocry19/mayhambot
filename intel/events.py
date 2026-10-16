@@ -75,8 +75,7 @@ def detect(conn, now, cfg=default_cfg, lookback=900):
                            text=f"{len(buyers)} unabhängige Smart-Money-Personen kaufen netto {_fmt(net)} in 15 min.",
                            data={"entities": len(buyers), "net_usd": net}, dedup=f"se:{m}:{now // 7200}"))
     # smart exits and rotation from the last 6 h of smart trades
-    rows6 = conn.execute("SELECT wallet, mint, side, ts, usd_amount, sol_amount FROM trades WHERE ts>? AND ts<=? ORDER BY ts",
-                         (now - 6 * 3600, now)).fetchall()
+    rows6 = trades_of(conn, smart, now - 6 * 3600, now)
     b6, s6, last_sell = defaultdict(lambda: defaultdict(float)), defaultdict(lambda: defaultdict(float)), defaultdict(int)
     for w, m, side, t, u, s in rows6:
         if w not in smart:
@@ -100,6 +99,19 @@ def detect(conn, now, cfg=default_cfg, lookback=900):
     return ev
 
 
+def trades_of(conn, wallets, since, until):
+    """[(wallet, mint, side, ts, usd, sol)] of these wallets in (since, until], oldest first. Uses the (wallet, ts)
+    index, so it costs what the smart wallets traded, not what the whole market traded."""
+    ws = sorted(wallets)
+    out = []
+    for i in range(0, len(ws), 400):
+        part = ws[i:i + 400]
+        out += conn.execute(f"SELECT wallet, mint, side, ts, usd_amount, sol_amount FROM trades WHERE wallet IN "
+                            f"({','.join('?' * len(part))}) AND ts>? AND ts<=?", (*part, since, until)).fetchall()
+    out.sort(key=lambda r: r[3])
+    return out
+
+
 def rotation_edges(conn, now, hours=6, smart=None, sol=None, rows=None, window=1800, min_usd=None, cfg=default_cfg):
     """[(wallet, from_mint, to_mint, sell_ts, buy_ts, sell_usd, buy_usd)]: a smart wallet's sell followed by a buy of
     another coin within `window` seconds. The sell is the money's source, the buy its destination."""
@@ -108,8 +120,7 @@ def rotation_edges(conn, now, hours=6, smart=None, sol=None, rows=None, window=1
         smart = {w for w, t in tiers.items() if t in ("ultra", "smart")}
     sol = sol if sol is not None else base.sol_usd_at(conn, now)
     if rows is None:
-        rows = conn.execute("SELECT wallet, mint, side, ts, usd_amount, sol_amount FROM trades WHERE ts>? AND ts<=? ORDER BY ts",
-                            (now - hours * 3600, now)).fetchall()
+        rows = trades_of(conn, smart, now - hours * 3600, now)
     min_usd = cfg.rotation_min_usd if min_usd is None else min_usd
     by_w = defaultdict(list)
     for w, m, side, t, u, s in rows:

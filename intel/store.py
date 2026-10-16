@@ -133,3 +133,21 @@ def prune(conn, keep_days, now=None):
         conn.execute("DELETE FROM intel_latest WHERE ts<?", (cut,))
         conn.commit()
     db.retry_locked(conn, write)
+
+
+# Time-range reads of shared tables the Zentrale does every minute. Without them SQLite scans the whole table
+# (trades has only (mint, ts) and (wallet, ts)), which is what showed up as CPU spikes on the Mac.
+INDEXES = (("trades", "idx_trades_ts", "ts"), ("token_prices", "idx_token_prices_ts", "ts"),
+           ("safety_tokens", "idx_safety_tokens_ts", "ts"))
+
+
+def ensure_indexes(conn):
+    made = []
+    for table, name, cols in INDEXES:
+        if has(conn, table) and not conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", (name,)).fetchone():
+            def write(table=table, name=name, cols=cols):
+                conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {table}({cols})")
+                conn.commit()
+            db.retry_locked(conn, write)
+            made.append(name)
+    return made

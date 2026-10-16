@@ -36,7 +36,7 @@ intel.view(conn) / intel.coin_view(conn, mint)    # GET /api/intel, /api/intel/c
 | flow | Kaufdruck 15 min, Netto 15/60 min, Käufer und Beschleunigung, Wal-Anteil, Kleinanleger, Smart Money netto nach Personen, Smart-Käufer die aussteigen, Verkäufe von Dev/Bundle/Insider | `trades`, Stufen, Cluster, `sniper_launch_wallets` |
 | micro | Order-Flow-Imbalance 5/15 min, Kyle's Lambda (log-Kursänderung je $1.000 Netto-Fluss pro Minute), VPIN (20 Volumen-Buckets), Absorption (Kaufdruck ohne Kursreaktion), Kauftempo (< 1 = Erschöpfung) | `trades` |
 | liq | Liquidität, 7-Tage-Hoch, Abstand, Änderung 15/60 min, Liquidität/MC | `token_prices` |
-| exec | Kosten hin und zurück für 0,1/0,25/0,5 SOL: Pool-Modell (AMM: Impact size/(Seite+size); pump.fun-Curve aus MC) plus Gebühren; Stufe 3 misst mit Jupiter | `token_prices` |
+| exec | Kosten hin und zurück für 0,1/0,25/0,5 SOL: Pool-Modell (AMM: Impact size/(Seite+size); pump.fun-Curve aus MC) plus Gebühren; Stufe 3 misst mit Jupiter (offene Positionen alle 10 min in 3 Größen, Kandidaten alle 30 min in 0,25 SOL, höchstens `INTEL_QUOTE_MAX_CALLS` = 12 Anfragen je Runde, nach 429 doppelt so lange Pause) | `token_prices`, `intel_quotes` |
 | hold | Top-10, Top-1, Insider, Dev, Launch-Bundle, Änderung über 1 h, Rug-Risiko | `intel_holders` (Kopie jedes Rug-Checks) |
 | px | Kurs und realisierte Volatilität 5/15/60 min, Abstand zum 24-h-Hoch, Alter, MC | `token_prices`, `tokens` |
 | mkt | Marktphase, Sektor- und Narrativ-Hitze, Stärke ggü. Sektor | `market.features` |

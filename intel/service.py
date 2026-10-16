@@ -75,8 +75,10 @@ class Service:
         self.errors = 0
         self.last_error = None
         self.counts = {}
+        self.timings = {}  # seconds of the last run of each step (heartbeat), to see where the CPU goes
 
     def step(self, name, fn):
+        t0 = time.time()
         try:
             return fn()
         except Exception as e:  # noqa: BLE001 - one failing part never stops the others
@@ -84,6 +86,8 @@ class Service:
             self.last_error = f"{name}: {e}"[:200]
             log.exception("intel %s failed", name)
             return None
+        finally:
+            self.timings[name] = round(time.time() - t0, 2)
 
     def coins(self, now, persist):
         mints = universe(self.conn, now, self.cfg.universe_max)
@@ -111,6 +115,11 @@ class Service:
         t0 = time.time()
         base.clear_cache()
         c = self.counts
+        if now - self.last.get("indexes", 0) >= 3600:
+            made = self.step("indexes", lambda: store.ensure_indexes(self.conn)) or []
+            if made:
+                log.info("intel: Indizes angelegt: %s", ", ".join(made))
+            self.last["indexes"] = now
         hs = self.step("holders", lambda: holder_rows(self.conn, self.holders_since)) or []
         if hs:
             store.save_holders(self.conn, hs)
@@ -155,10 +164,11 @@ class Service:
         store.set_state(self.conn, "service_status", {
             "ts": now, "pid": os.getpid(), "rounds": self.rounds, "round_s": took, "counts": self.counts,
             "errors": self.errors, "last_error": self.last_error, "every_sec": self.cfg.every_sec,
-            "holders_since": self.holders_since, "last": self.last})
+            "holders_since": self.holders_since, "last": self.last, "timings": self.timings,
+            "quotes_backoff": store.get_state(self.conn, "quotes_backoff")})
 
     def run(self, rounds=None):
-        log.info("intel service (Zentrale): alle %d s, Coins alle %d s, Wallets alle %d s, keine Netz-Abfragen",
+        log.info("intel service (Zentrale): alle %d s, Coins alle %d s, Wallets alle %d s",
                  self.cfg.every_sec, self.cfg.coins_every_sec, self.cfg.wallets_every_sec)
         done = 0
         while rounds is None or done < rounds:

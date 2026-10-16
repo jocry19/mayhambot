@@ -10,7 +10,7 @@ STAGES = [
         "Liquidität, Kursregime, Holder-Verlauf, geschätzte Ausführungskosten; Live-Ticker; Messung je Merkmal", "live"),
     (2, "Holder- und Insider-Struktur im Zeitverlauf", "Bestände aus dem Swap-Strom zwischen den Rug-Checks: Halter, Top-10, "
         "Insider- und Smart-Money-Bestand, Verteilung großer Halter an neue, jeweils mit Änderung über 1 h", "live"),
-    (3, "Liquidität und Markttiefe", "Echte Jupiter-Quotes hin und zurück für 0,1 / 0,25 / 0,5 SOL bei den heißesten Coins, "
+    (3, "Liquidität und Markttiefe", "Echte Jupiter-Quotes hin und zurück: offene Positionen in 0,1 / 0,25 / 0,5 SOL, Kandidaten in 0,25 SOL, sparsam, "
         "kein Verkaufsweg, Liquidität, die kommt und sofort wieder geht", "live"),
     (4, "Makro und Aufmerksamkeit", "BTC, ETH, SOL, Fear & Greed, Verlauf der DexScreener-Boosts je Coin", "live"),
     (5, "Netzwerk der Devs und Bundler", "Bilanz des Devs und seines Geldgeber-Netzes, Launch-Wallets aus früheren Rugs "

@@ -1,7 +1,8 @@
 """Stages 3 and 4: the only network calls of the Zentrale, all keyless and budgeted per minute.
 
-Stage 3, market depth: Jupiter quotes SOL -> token -> SOL for 0.1 / 0.25 / 0.5 SOL on the hottest coins (open
-positions first). The round-trip loss is the real execution cost (price impact both ways + pool fees), the
+Stage 3, market depth: Jupiter quotes SOL -> token -> SOL, 0.1 / 0.25 / 0.5 SOL for open positions and 0.25 SOL
+for entry candidates, each only when stale, capped per round and paused after a throttle (Jupiter is shared with the
+trading services, which come first). The round-trip loss is the real execution cost (price impact both ways + pool fees), the
 on-chain counterpart of the spread a market maker charges (Glosten-Milgrom). Table intel_quotes.
 Stage 4, macro and attention: BTC / ETH / SOL with 24 h change (CoinGecko simple/price), Crypto Fear & Greed
 (alternative.me), and the DexScreener boost level of each coin over time (from market_tokens, no call). Tables
@@ -39,7 +40,7 @@ def ensure(conn):
 
 
 def _get(url, params=None):
-    return http.get_json(url, params=params, retries=1)
+    return http.get_json(url, params=params, retries=0)  # never sleep on a 429: quote_round backs off
 
 
 def quote(mint, size_sol, jupiter_url, get=_get):
@@ -123,39 +124,105 @@ def save(conn, table, rows):
     return len(rows)
 
 
+QUOTE_TTL = {"position": 600, "candidate": 1800, "smart": 3600}  # seconds a measurement stays good enough
+NOROUTE_TTL = 6 * 3600   # a coin without a route is asked again only after this long
+
+
 def hot_mints(conn, now, n):
-    """Coins whose real execution cost matters most: open positions, recent signals and sniper entries, then the
-    coins with the most smart money in the live view."""
+    """[(mint, why)] whose real execution cost a later stage uses: open positions (the exit), recent signals and
+    sniper entries (the entry decision), then live coins with at least two smart entities (the next candidates)."""
     out = []
     if store.has(conn, "ct_positions"):
-        out += [r[0] for r in conn.execute("SELECT DISTINCT mint FROM ct_positions WHERE status='open'")]
-    out += [r[0] for r in conn.execute("SELECT mint FROM signals WHERE ts>? ORDER BY ts DESC LIMIT 10", (now - 3 * 3600,))]
+        out += [(r[0], "position") for r in conn.execute("SELECT DISTINCT mint FROM ct_positions WHERE status='open'")]
+    if store.has(conn, "signals"):
+        out += [(r[0], "candidate") for r in conn.execute("SELECT mint FROM signals WHERE ts>? ORDER BY ts DESC LIMIT 10",
+                                                          (now - 3 * 3600,))]
     if store.has(conn, "sniper_launches"):
-        out += [r[0] for r in conn.execute("SELECT mint FROM sniper_launches WHERE decision='enter' AND decided_ts>? LIMIT 10",
-                                           (now - 3 * 3600,))]
+        out += [(r[0], "candidate") for r in conn.execute(
+            "SELECT mint FROM sniper_launches WHERE decision='enter' AND decided_ts>? ORDER BY decided_ts DESC LIMIT 10",
+            (now - 3 * 3600,))]
     import json
-    rows = conn.execute("SELECT key, features_json FROM intel_latest WHERE kind='coin' AND ts>?", (now - 900,)).fetchall()
-    ranked = sorted(rows, key=lambda r: -((json.loads(r[1]).get("flow_smart_entities_60m") or 0) * 1e6
-                                          + (json.loads(r[1]).get("vol_usd_60m") or 0)))
-    out += [r[0] for r in ranked]
-    return list(dict.fromkeys(out))[:n]
+    smart = []
+    for k, fj in conn.execute("SELECT key, features_json FROM intel_latest WHERE kind='coin' AND ts>?", (now - 900,)):
+        f = json.loads(fj)
+        if (f.get("flow_smart_entities_60m") or 0) >= 2:
+            smart.append((-(f.get("flow_smart_entities_60m") * 1e6 + (f.get("vol_usd_60m") or 0)), k))
+    out += [(k, "smart") for _, k in sorted(smart)]
+    seen, res = set(), []
+    for m, why in out:
+        if m and m not in seen:
+            seen.add(m)
+            res.append((m, why))
+    return res[:n]
+
+
+def _last_quotes(conn, mints):
+    """{mint: (ts of the newest measurement, its sizes, had_no_route)}"""
+    if not mints or not store.has(conn, "intel_quotes"):
+        return {}
+    q = ",".join("?" * len(mints))
+    out = {}
+    for m, t, sizes, noroute in conn.execute(
+            f"SELECT q.mint, q.ts, GROUP_CONCAT(q.size_sol), MAX(q.error LIKE '%route%') FROM intel_quotes q JOIN "
+            f"(SELECT mint, MAX(ts) t FROM intel_quotes WHERE mint IN ({q}) AND (rt_cost IS NOT NULL OR error LIKE '%route%') "
+            f"GROUP BY mint) l ON q.mint=l.mint AND q.ts=l.t GROUP BY q.mint", tuple(mints)):
+        out[m] = (t, {float(x) for x in str(sizes).split(",")}, bool(noroute))
+    return out
 
 
 def quote_round(conn, now, cfg, get=_get):
-    mints = hot_mints(conn, now, cfg.quote_coins)
-    rows = []
-    for m in mints:
-        for s in SIZES:
-            r = quote(m, s, cfg.jupiter_url, get)
+    """Ask Jupiter only for what is due: every size for open positions (the exit), one size (0.25 SOL) for entry
+    candidates and smart-money coins, each only once its last measurement is older than QUOTE_TTL. At most
+    cfg.quote_max_calls requests per round; the first throttle (429 / 5xx / timeout) ends the round and pauses
+    quoting with a doubling back-off (state intel_state 'quotes_backoff'), so trading services keep the API."""
+    bo = store.get_state(conn, "quotes_backoff") or {}
+    if now < (bo.get("until") or 0):
+        return 0
+    plan = hot_mints(conn, now, cfg.quote_coins)
+    last = _last_quotes(conn, [m for m, _ in plan])
+    jobs = []
+    for m, why in plan:
+        sizes = SIZES if why == "position" else (0.25,)
+        prev = last.get(m)
+        if prev:
+            t, have, noroute = prev
+            if noroute and now - t < NOROUTE_TTL:
+                continue
+            if now - t < QUOTE_TTL[why] and set(sizes) <= have:
+                continue
+        jobs.append((m, sizes))
+    rows, throttled = [], None
+    calls = [0]
+
+    def counted(url, params=None):
+        calls[0] += 1
+        return get(url, params)
+    for m, sizes in jobs:
+        for s in sizes:
+            if calls[0] + 2 > cfg.quote_max_calls:
+                break
+            r = quote(m, s, cfg.jupiter_url, counted)
             r["ts"] = now
-            rows.append(r)
             if r["error"] and "route" not in r["error"]:
-                break  # the API is down or throttled: no point in asking the other sizes
+                throttled = r["error"]
+                break
+            rows.append(r)
+            if r["error"]:
+                break  # no route at this size: the bigger ones will not have one either
+        if throttled or calls[0] + 2 > cfg.quote_max_calls:
+            break
     save(conn, "intel_quotes", rows)
+    if throttled:
+        n = int(bo.get("n") or 0) + 1
+        wait = min(3600, cfg.quotes_every_sec * 2 ** n)
+        store.set_state(conn, "quotes_backoff", {"until": now + wait, "n": n, "why": throttled[:60]})
+        log.info("intel quotes: Jupiter throttled (%s), pausing %d s", throttled[:60], wait)
+    elif bo:
+        store.set_state(conn, "quotes_backoff", {})
     return len(rows)
 
 
-def measured_cost(conn, mint, ts, max_age=1800):
+def measured_cost(conn, mint, ts, max_age=3600):
     """{exec_q_0_1, exec_q_0_25, exec_q_0_5, exec_q_age_s} from the newest quotes <= ts (None when not measured)."""
     out = {"exec_q_0_1": None, "exec_q_0_25": None, "exec_q_0_5": None, "exec_q_noroute": None}
     if not store.has(conn, "intel_quotes"):

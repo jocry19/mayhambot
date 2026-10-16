@@ -31,9 +31,10 @@ class IntelSettings:
     wallets_max: int = field(default_factory=lambda: _i("INTEL_WALLETS_MAX", 400))
     # ---- network (stages 3 and 4, keyless): 0 disables
     quotes_every_sec: int = field(default_factory=lambda: _i("INTEL_QUOTES_EVERY_SEC", 300))
-    quote_coins: int = field(default_factory=lambda: _i("INTEL_QUOTE_COINS", 8))     # x 3 sizes x 2 calls
+    quote_coins: int = field(default_factory=lambda: _i("INTEL_QUOTE_COINS", 8))     # candidates looked at per round
+    quote_max_calls: int = field(default_factory=lambda: _i("INTEL_QUOTE_MAX_CALLS", 12))  # Jupiter requests per round
     jupiter_url: str = field(default_factory=lambda: (os.getenv("JUPITER_API_URL") or "https://lite-api.jup.ag").rstrip("/"))
-    jupiter_per_min: int = field(default_factory=lambda: _i("INTEL_JUPITER_PER_MIN", 20))
+    jupiter_per_min: int = field(default_factory=lambda: _i("INTEL_JUPITER_PER_MIN", 6))
     macro_every_sec: int = field(default_factory=lambda: _i("INTEL_MACRO_EVERY_SEC", 900))
     coingecko_per_min: int = field(default_factory=lambda: _i("INTEL_COINGECKO_PER_MIN", 2))
     # ---- outcomes: same pump definition as model/ (max within 1 h >= +50 %)

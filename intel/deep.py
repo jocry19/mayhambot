@@ -196,7 +196,10 @@ def robustness(data, cfg=default_cfg, min_n=100):
     return rows
 
 
-def redundancy(data, names, min_n=150, thr=0.8, max_pairs=40):
+def redundancy(data, names, min_n=150, thr=0.8, max_pairs=40, max_samples=2000):
+    """Feature pairs that say the same (|rank corr| >= thr). A strided subsample keeps it cheap (rho is stable)."""
+    if len(data) > max_samples:
+        data = data[::-(-len(data) // max_samples)]
     pairs = []
     for a, b in combinations(names, 2):
         pts = [(f[a], f[b]) for f, _, _ in data if f.get(a) is not None and f.get(b) is not None]
@@ -280,7 +283,7 @@ def run(conn, now=None, days=14, cfg=default_cfg):
     data = evaluate.samples(conn, days, now)
     base_rate = (sum(1 for _, mx, _ in data if mx >= cfg.hit_ret) / len(data)) if data else None
     rob = robustness(data, cfg) if data else []
-    names = [r["feature"] for r in sorted(rob, key=lambda r: r["q"]) if r["n"] >= 150][:40]
+    names = [r["feature"] for r in sorted(rob, key=lambda r: r["q"]) if r["n"] >= 150][:24]
     return {"ts": now, "n": len(data), "base_rate": base_rate,
             "events": event_study(conn, now, cfg=cfg, base_rate=base_rate) if store.has(conn, "intel_events") else [],
             "robustness": rob, "redundancy": redundancy(data, names) if data else [],
