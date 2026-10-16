@@ -4,19 +4,16 @@ PaperExecutor  fills from real market data: a Jupiter quote for the exact size
                (real route, real price impact) when reachable, otherwise a
                constant-product estimate from DexScreener liquidity; then adds
                adverse slippage for latency plus network and priority fees.
-LiveExecutor   real swaps through the Jupiter swap API, signed locally with the
-               key from .env / keyfile. Only used when LIVE_TRADING=true and a key
-               is configured.
+live executor  live.GuardedLiveExecutor (live/README.md): real swaps through Jupiter, signed
+               locally, behind hard limits and a kill switch. Only with LIVE_TRADING=true and
+               a key; LIVE_DRY_RUN (default on) rehearses without sending.
 """
 from __future__ import annotations
 
-import base64
-import json
 import logging
 import os
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 from . import chain, market
 from .config import SOL_MINT, Settings
@@ -120,95 +117,30 @@ class PaperExecutor:
         conn.commit()
 
 
-class LiveExecutor(PaperExecutor):
-    mode = "live"
+def _live(settings: Settings, rpc: chain.Rpc):
+    """The guarded live executor from live/ (hard limits, kill switch, dry run, landing checks), or None.
+    live/ also returns a sell-only executor while real positions are open after live was switched off."""
+    try:
+        from live import make_executor as make_live  # type: ignore
 
-    def __init__(self, settings: Settings, rpc: chain.Rpc):
-        super().__init__(settings, rpc)
-        if not settings.live_ready:
-            raise RuntimeError("live trading needs LIVE_TRADING=true and SOLANA_PRIVATE_KEY or SOLANA_KEYPAIR_PATH")
-        self.keypair = _load_keypair(settings)
-        self.pubkey = str(self.keypair.pubkey())
-
-    def _swap(self, input_mint: str, output_mint: str, amount_raw: int) -> tuple[str, dict]:
-        from solders.transaction import VersionedTransaction  # type: ignore
-
-        q = market.jupiter_quote(self.s, input_mint, output_mint, amount_raw)
-        if not q:
-            raise RuntimeError("no Jupiter quote")
-        raw = base64.b64decode(market.jupiter_swap_tx(self.s, q, self.pubkey))
-        unsigned = VersionedTransaction.from_bytes(raw)
-        signed = VersionedTransaction(unsigned.message, [self.keypair])
-        sig = self.rpc.send_raw(base64.b64encode(bytes(signed)).decode())
-        for _ in range(40):  # ~60 s
-            time.sleep(1.5)
-            st = self.rpc.signature_status(sig)
-            if st and st.get("confirmationStatus") in ("confirmed", "finalized"):
-                if st.get("err"):
-                    raise RuntimeError(f"swap failed on chain: {st['err']}")
-                return sig, q
-        raise RuntimeError(f"swap {sig} not confirmed")
-
-    def _actual(self, sig: str) -> chain.Swap | None:
-        for _ in range(5):
-            tx = self.rpc.transaction(sig, main=True)
-            if tx:
-                return chain.extract_swap(tx, self.pubkey, market.sol_usd(self.s))
-            time.sleep(2)
+        return make_live(settings, rpc)
+    except Exception as e:
+        log.error("live executor unavailable: %s", e)
         return None
-
-    def buy(self, mint: str, size_sol: float, snap: market.PairSnapshot) -> Fill:
-        try:
-            sig, q = self._swap(SOL_MINT, mint, int(size_sol * 1e9))
-        except Exception as e:
-            return Fill(False, error=str(e))
-        sw = self._actual(sig)
-        dec = chain.token_decimals(self.rpc, mint)
-        tokens = sw.token_amount if sw else int(q["outAmount"]) / 10 ** dec
-        spent = sw.sol_amount if sw else size_sol
-        return Fill(True, tokens=tokens, sol=spent, price_sol=spent / tokens, tx=sig,
-                    price_impact=float(q.get("priceImpactPct") or 0), source="live")
-
-    def sell(self, mint: str, tokens: float, decimals: int, snap, last_price_sol: float) -> Fill:
-        try:
-            sig, q = self._swap(mint, SOL_MINT, int(tokens * 10 ** decimals))
-        except Exception as e:
-            return Fill(False, error=str(e))
-        sw = self._actual(sig)
-        got = sw.sol_amount if sw else int(q["outAmount"]) / 1e9
-        return Fill(True, tokens=tokens, sol=got, price_sol=got / tokens if tokens else 0, tx=sig,
-                    price_impact=float(q.get("priceImpactPct") or 0), source="live")
-
-    def balance(self, conn) -> float:
-        return self.rpc.balance_sol(self.pubkey)
-
-    def adjust_balance(self, conn, delta: float) -> None:
-        pass  # the chain is the source of truth
-
-
-def _load_keypair(s: Settings):
-    from solders.keypair import Keypair  # type: ignore
-
-    if s.keypair_path:
-        data = json.loads(Path(os.path.expanduser(s.keypair_path)).read_text())
-        return Keypair.from_bytes(bytes(data))
-    key = s.private_key.strip()
-    if key.startswith("["):
-        return Keypair.from_bytes(bytes(json.loads(key)))
-    return Keypair.from_base58_string(key)
 
 
 def make_executor(settings: Settings, rpc: chain.Rpc):
-    return LiveExecutor(settings, rpc) if settings.live_ready else PaperExecutor(settings, rpc)
+    return _live(settings, rpc) or PaperExecutor(settings, rpc)
 
 
 def make_executors(settings: Settings, rpc: chain.Rpc) -> dict:
     """Paper always; live only when .env has LIVE_TRADING=true and a key (the master switch).
-    Which strategy actually trades live is chosen per strategy in control (ct_control live:<strategy>)."""
+    Which strategy actually trades live is chosen per strategy in control (ct_control live:<strategy>).
+    While LIVE_DRY_RUN is on (default) the live executor has mode 'dry': everything up to the signature,
+    nothing sent, positions booked as mode 'dry' (live/README.md)."""
     exs: dict = {"paper": PaperExecutor(settings, rpc), "live": None}
-    if settings.live_ready:
-        try:
-            exs["live"] = LiveExecutor(settings, rpc)
-        except Exception as e:
-            log.error("live executor unavailable: %s", e)
+    ex = _live(settings, rpc)
+    if ex is not None:
+        exs["live"] = ex
+        exs[ex.mode] = ex  # 'dry' positions find their executor for the sell
     return exs

@@ -268,11 +268,10 @@ Die Kosten-Kalibrierung (`extra_cost`) rechnet alte Fills auf den aktuellen Wert
 
 ## Live-Modus (echtes Geld)
 
-Nur wenn **beides** gesetzt ist: `LIVE_TRADING=true` und ein Schlüssel (`SOLANA_KEYPAIR_PATH=/pfad/keypair.json`
-empfohlen, oder `SOLANA_PRIVATE_KEY` in `.env`). Dann zusätzlich `pip install solders`. Swaps laufen über die
-Jupiter-Swap-API, signiert lokal; die echten Mengen werden aus der bestätigten Transaktion gelesen.
-Limits: `CT_POSITION_SIZE_SOL`, `CT_MAX_OPEN_POSITIONS`, `CT_MAX_DAILY_LOSS_SOL`, `CT_STOP_LOSS`.
-Live folgt nur bewerteten Walen. Teste erst mit kleiner Größe.
+Läuft über `live/` (siehe `live/README.md`): `LIVE_TRADING=true` plus Schlüssel (`SOLANA_KEYPAIR_PATH`, Schlüsselbund
+oder `SOLANA_PRIVATE_KEY`) startet zuerst nur den Dry-Run (`LIVE_DRY_RUN=true`, Positionen als mode `dry`). Echte
+Sends erst mit `LIVE_DRY_RUN=false` und bestandener Go-Live-Prüfung (`python -m live check`). Harte Grenzen je Stufe
+(`LIVE_STAGE`) gelten zusätzlich zu den Presets, Not-Aus per Telegram `/notaus`.
 
 ## Einstellungen (`.env`)
 

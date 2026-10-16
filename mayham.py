@@ -32,6 +32,7 @@ SERVICES = {
     "safety": [PY, "-m", "safety", "run"],  # rug/honeypot/insider refresher, every SAFETY_REFRESH_EVERY_SEC  # the dashboard (FastAPI + built frontend); the old Streamlit dashboard/ is no longer started
     "sniper": [PY, "-m", "sniper", "run"],  # launch sniper with bundle check, paper mode only (sniper/README.md)
     "market": [PY, "-m", "market", "run"],  # market phase, sectors, narratives; keyless, no Helius (market/README.md)
+    "live": [PY, "-m", "live", "run"],  # Echtgeld-Wächter: Not-Aus per Telegram, unklare Orders, Datenausfall; public RPC only (live/README.md)
     "intel": [PY, "-m", "intel", "run"],  # Zentrale: point-in-time features, ticker, source evaluation; DB only (intel/README.md)
 }
 # research + retraining loop from model/ (other thread), started only once it exists
