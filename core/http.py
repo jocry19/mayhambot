@@ -522,7 +522,38 @@ def rpc_url(method="", helius_url=None):
 # Solana public RPC (docs "Clusters and public RPC endpoints"): 100 requests / 10 s per IP, 40 / 10 s per single
 # method, 40 concurrent connections. We keep a margin; live calls (a fresh whale buy) may use the whole window,
 # bulk calls (backfills) only (1 - LIVE_SHARE) of it, and bulk pauses while live calls are waiting.
-WINDOW_LIMITS = {"api.mainnet-beta.solana.com": {"window": 10.0, "total": 90, "per_method": 36}}
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name) or default)
+    except ValueError:
+        return default
+
+
+# Below the documented 100 / 40: other traffic from the same IP (copytrade websockets, browser) counts too,
+# and 429s at 90 / 36 showed up on the Mac. Tune with PUBLIC_RPC_WINDOW_TOTAL / PUBLIC_RPC_WINDOW_PER_METHOD.
+WINDOW_LIMITS = {"api.mainnet-beta.solana.com": {"window": 10.0, "total": _env_int("PUBLIC_RPC_WINDOW_TOTAL", 60),
+                                                 "per_method": _env_int("PUBLIC_RPC_WINDOW_PER_METHOD", 24)}}
+HALVE_SECONDS = 60  # after a 429 the endpoint's window is halved for this long
+
+
+def _parse_map(env, default):
+    """'a=b,c=d' -> dict (values int if numeric)."""
+    raw = os.getenv(env)
+    if not raw:
+        return dict(default)
+    out = {}
+    for part in raw.split(","):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[k.strip()] = int(v) if v.strip().isdigit() else v.strip()
+    return out
+
+
+# Methods with a tighter limit on an endpoint, per 10 s: 'method@host=n' (PUBLIC_RPC_METHOD_LIMITS).
+# mainnet-beta rejected a third of getTokenLargestAccounts at low volume on the Mac.
+METHOD_LIMITS = _parse_map("PUBLIC_RPC_METHOD_LIMITS", {"getTokenLargestAccounts@api.mainnet-beta.solana.com": 6})
+# Methods that should go to one endpoint first: 'method=host' (PUBLIC_RPC_PREFER).
+METHOD_PREFER = _parse_map("PUBLIC_RPC_PREFER", {"getTokenLargestAccounts": "solana-rpc.publicnode.com"})
 LIVE_MARKER_SECONDS = 2.0
 
 
@@ -561,14 +592,17 @@ def _window_wait(host, method, priority):
                 calls = [c for c in calls if c[0] > now - lim["window"]]
                 total = len(calls)
                 same = sum(1 for c in calls if c[1] == (method or ""))
-                cap = lim["total"] if live else int(lim["total"] * (1 - live_share()))
+                total_cap = lim["total"] // 2 if _halved(host, now) else lim["total"]
+                per_method = METHOD_LIMITS.get(f"{method}@{host}", lim["per_method"])
+                per_method = max(1, per_method // 2) if _halved(host, now) else per_method
+                cap = total_cap if live else int(total_cap * (1 - live_share()))
                 live_waiting = False
                 if not live:
                     try:
                         live_waiting = now - os.path.getmtime(marker) < LIVE_MARKER_SECONDS
                     except OSError:
                         pass
-                ok = total < cap and same < lim["per_method"] and not live_waiting
+                ok = total < cap and same < per_method and not live_waiting
                 if ok:
                     calls.append([now, method or "", "L" if live else "B"])
                     f.seek(0)
@@ -812,6 +846,9 @@ def _healthy(now=None, probe=None):
             else:
                 fields.update(disabled_until=now + POOL_COOLDOWN, reason="probe failed")
                 log.warning("public RPC %s left the pool for %d min: probe failed", h, POOL_COOLDOWN // 60)
+            if not ok and u == public_rpc_urls()[-1] and not good:
+                fields.update(disabled_until=0, reason="probe failed, kept as last endpoint")
+                ok = True
             _pool_update(h, **fields)
             if not ok:
                 continue
@@ -831,10 +868,16 @@ def _window_load(host):
     return sum(1 for c in calls if c[0] > now - lim["window"]) / lim["total"] if lim else 0.0
 
 
-def pick_public_rpc(priority="bulk", probe=None):
-    """One keyless public RPC URL: 'live' = fastest measured endpoint, 'bulk' = the one with most free window."""
+def pick_public_rpc(priority="bulk", probe=None, method=None):
+    """One keyless public RPC URL: the endpoint preferred for `method` (METHOD_PREFER) while it is healthy and
+    not full, else 'live' = fastest measured endpoint, 'bulk' = the one with most free window."""
     _pool_hosts()
     urls = _healthy(probe=probe) or public_rpc_urls()[:1]
+    pref = METHOD_PREFER.get(method or "")
+    if pref:
+        for u in urls:
+            if urlparse(u).netloc == pref and _window_load(pref) < 0.9:
+                return u
     if priority == "live":
         st = _pool_state()
         return min(urls, key=lambda u: _latency.get(urlparse(u).netloc)
@@ -842,18 +885,43 @@ def pick_public_rpc(priority="bulk", probe=None):
     return min(urls, key=lambda u: (_window_load(urlparse(u).netloc), _latency.get(urlparse(u).netloc) or 1e9))
 
 
+_halved_cache = {}
+
+
+def _halved(host, now=None):
+    now = now or time.time()
+    c = _halved_cache.get(host)
+    if c is None or now - c[0] > 2:  # re-read the shared state at most every 2 s
+        _halved_cache[host] = c = (now, _pool_state().get(host, {}).get("halved_until", 0))
+    return c[1] > now
+
+
 def _pool_result(host, ok, ms=None, status=None):
-    """Book a pool call: latency EWMA, consecutive failures -> leave the rotation for POOL_COOLDOWN."""
+    """Book a pool call. 429 = back off (shared slowdown in _request, plus this endpoint's window halved for
+    HALVE_SECONDS), never a reason to drop it. Timeouts / 5xx: POOL_FAILS_TO_DISABLE in a row take it out for
+    POOL_COOLDOWN, unless it is the last healthy endpoint."""
     if ok:
         _pool_fail[host] = 0
         if ms is not None:
             _latency[host] = ms if host not in _latency else 0.8 * _latency[host] + 0.2 * ms
             _count(host, "latency_ms_sum", ms)
         return
+    if status == 429:
+        until = time.time() + HALVE_SECONDS
+        _pool_update(host, halved_until=until)
+        _halved_cache[host] = (time.time(), until)
+        return
     _pool_fail[host] = _pool_fail.get(host, 0) + 1
     if _pool_fail[host] >= POOL_FAILS_TO_DISABLE:
         _pool_fail[host] = 0
-        _pool_update(host, disabled_until=time.time() + POOL_COOLDOWN, reason=f"{status or 'errors'} x3")
+        now = time.time()
+        st = _pool_state()
+        others = [u for u in public_rpc_urls() if urlparse(u).netloc != host
+                  and st.get(urlparse(u).netloc, {}).get("disabled_until", 0) <= now]
+        if not others:
+            log.warning("public RPC %s failing (%s) but it is the last healthy endpoint, keeping it", host, status)
+            return
+        _pool_update(host, disabled_until=now + POOL_COOLDOWN, reason=f"{status or 'errors'} x3")
         log.warning("public RPC %s left the pool for %d min (%s)", host, POOL_COOLDOWN // 60, status or "errors")
 
 
@@ -873,7 +941,7 @@ def _request(method, url, retries=4, timeout=20, priority="bulk", **kw):
     pooled = method == "POST" and host in _pool_hosts()
     for attempt in range(retries + 1):
         if pooled:  # any call to a pool endpoint may go to whichever endpoint has room (failover on retry)
-            url = pick_public_rpc(priority)
+            url = pick_public_rpc(priority, method=rpc_method)
             host = urlparse(url).netloc
         throttle(host, cost=cost, das=das, priority=priority, method=rpc_method)
         t_req = time.time()
@@ -896,8 +964,10 @@ def _request(method, url, retries=4, timeout=20, priority="bulk", **kw):
             if r.status_code == 429:
                 delay = max(delay, MIN_PENALTY_SECONDS.get(host, DEFAULT_MIN_PENALTY))
                 penalize(host, delay)
-                log.warning("429 %s %s (slowdown x%.2f), sleeping %.1fs", method, _endpoint(url, kw),
-                            slowdown(host), delay)
+                log.warning("429 %s %s (slowdown x%.2f, window %.0f%% of %s/10s%s), sleeping %.1fs", method,
+                            _endpoint(url, kw), slowdown(host), 100 * _window_load(host) if host in WINDOW_LIMITS
+                            else 0, (WINDOW_LIMITS.get(host) or {}).get("total", "-"),
+                            ", halved" if host in WINDOW_LIMITS and _halved(host) else "", delay)
             else:
                 log.warning("%s %s -> %s, sleeping %.1fs", method, _endpoint(url, kw), r.status_code, delay)
             time.sleep(min(delay, 60))

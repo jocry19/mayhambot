@@ -213,8 +213,9 @@ def test_bulk_leaves_room_for_live(monkeypatch, tmp_path):
     http._marker_times.clear()
     clock = _clock(monkeypatch)
     monkeypatch.setenv("PUBLIC_RPC_LIVE_SHARE", "0.4")
-    for i in range(54):  # bulk may use 60 % of 90 per 10 s
-        http._window_wait(PUB, f"m{i % 5}", "bulk")
+    lim = http.WINDOW_LIMITS[PUB]
+    for i in range(int(lim["total"] * 0.6)):  # bulk may use 60 % of the window
+        http._window_wait(PUB, f"m{i % 9}", "bulk")
     t = clock["t"]
     http._window_wait(PUB, "getTransaction", "live")  # live passes at once
     assert clock["t"] == t
@@ -226,7 +227,7 @@ def test_per_method_cap(monkeypatch, tmp_path):
     _fresh(monkeypatch, tmp_path)
     http._marker_times.clear()
     clock = _clock(monkeypatch)
-    for _ in range(36):
+    for _ in range(http.WINDOW_LIMITS[PUB]["per_method"]):
         http._window_wait(PUB, "getTransaction", "live")
     t = clock["t"]
     http._window_wait(PUB, "getAccountInfo", "live")  # another method is not starved
@@ -305,14 +306,14 @@ def test_pool_failover_and_latency(monkeypatch, tmp_path):
 
     class R:
         def __init__(self, code):
-            self.status_code, self.headers = code, {}
+            self.status_code, self.headers, self.url = code, {}, "https://x"
 
         def json(self):
             return {"result": "ok"}
 
     def req(method, url, **kw):
         calls.append(url)
-        return R(429 if "a.example" in url else 200)
+        return R(503 if "a.example" in url else 200)
     monkeypatch.setattr(http._session, "request", req)
     monkeypatch.setattr(http, "_latency", {"a.example": 1.0, "c.example": 99.0})
     for _ in range(3):
@@ -320,3 +321,41 @@ def test_pool_failover_and_latency(monkeypatch, tmp_path):
     assert http.pool_status()["a.example"].get("disabled_until", 0) > http.time.time()  # 3 failures -> out
     assert calls[-1] == "https://c.example"
     assert http.usage()["c.example"]["latency_ms"] is not None
+
+
+def test_429_backs_off_but_never_drops_endpoint(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    monkeypatch.setenv("PUBLIC_RPC_URLS", "https://a.example,https://c.example")
+    monkeypatch.setattr(http, "_halved_cache", {})
+    for _ in range(10):
+        http._pool_result("a.example", False, status=429)
+    st = http.pool_status()["a.example"]
+    assert st.get("disabled_until", 0) == 0 and st["halved_until"] > http.time.time()
+    assert http._halved("a.example")
+
+
+def test_last_healthy_endpoint_is_kept(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    monkeypatch.setenv("PUBLIC_RPC_URLS", "https://a.example,https://c.example")
+    for _ in range(3):
+        http._pool_result("a.example", False, status=503)
+    assert http.pool_status()["a.example"]["disabled_until"] > http.time.time()
+    for _ in range(3):
+        http._pool_result("c.example", False, status=503)
+    assert http.pool_status()["c.example"].get("disabled_until", 0) == 0
+
+
+def test_method_limit_and_preference(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    http._marker_times.clear()
+    clock = _clock(monkeypatch)
+    monkeypatch.setattr(http, "_halved_cache", {})
+    for _ in range(6):
+        http._window_wait(PUB, "getTokenLargestAccounts", "live")
+    t = clock["t"]
+    http._window_wait(PUB, "getTokenLargestAccounts", "live")
+    assert clock["t"] > t  # 6 per 10 s on mainnet-beta
+    monkeypatch.setenv("PUBLIC_RPC_URLS", "https://api.mainnet-beta.solana.com,https://solana-rpc.publicnode.com")
+    ok = lambda u: (True, 10.0)  # noqa: E731
+    assert http.pick_public_rpc("bulk", probe=ok, method="getTokenLargestAccounts") == \
+        "https://solana-rpc.publicnode.com"

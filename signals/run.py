@@ -104,8 +104,12 @@ def fetch_trades(conn, watch):
 def backfill(conn):
     n = 0
     mints = set()
+    from core.sources.wallet_history import SkipForNow
     for w in wallets.backfill_candidates(conn, settings.backfill_wallets_per_cycle):
-        trades = wallet_source.wallet_trades(w, limit=settings.backfill_tx_limit)
+        try:
+            trades = wallet_source.wallet_trades(w, limit=settings.backfill_tx_limit)
+        except SkipForNow:
+            break  # rate limited: keep the remaining wallets for the next cycle, unmarked
         n += db.retry_locked(conn, lambda: db.insert_trades(conn, trades))
         mints |= {t.mint for t in trades}
         wallets.mark_backfilled(conn, w)

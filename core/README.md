@@ -107,8 +107,16 @@ http.throttle(host, priority="live", method="getTransaction")   # own HTTP clien
 
 Solana public RPC (api.mainnet-beta.solana.com; limits per the Solana docs on public cluster endpoints, from
 memory, not re-checked online: 100 requests / 10 s per IP, 40 / 10 s per single method, 40 connections) gets a
-cross-process sliding window in `WINDOW_LIMITS`: at most 90 calls per 10 s in total and 36 per method, so one
-method (getTransaction) never starves the others.
+cross-process sliding window in `WINDOW_LIMITS`: at most 60 calls per 10 s in total and 24 per method
+(`PUBLIC_RPC_WINDOW_TOTAL`, `PUBLIC_RPC_WINDOW_PER_METHOD`), so one method never starves the others.
+Tighter limits per method and endpoint: `PUBLIC_RPC_METHOD_LIMITS` (`method@host=n,...`, default
+getTokenLargestAccounts@api.mainnet-beta.solana.com=6); preferred endpoint per method: `PUBLIC_RPC_PREFER`
+(`method=host,...`, default getTokenLargestAccounts=solana-rpc.publicnode.com).
+A 429 never removes an endpoint: it slows the host down (shared slowdown) and halves that endpoint's window for
+60 s. Only timeouts / 5xx (3 in a row) or a failed probe take an endpoint out for 10 min, and never the last
+healthy one. 429 log lines show the method, the window fill and whether the window is halved.
+- `core.sources.wallet_source.wallet_trades` raises `SkipForNow` on a public-RPC 429 (retry the wallet later)
+  instead of falling back to Helius Enhanced; Enhanced fallbacks are capped at 10 per hour per process.
 - `priority="bulk"` (default, backfills, research) may use only `(1 - PUBLIC_RPC_LIVE_SHARE)` of the window
   (share default 0.4, so 54 of 90) and pauses while a live call is waiting (`data/ratelimit/<host>.live` marker).
 - `priority="live"` (copytrade, safety, sniper) may use the whole window and skips the plain spacing queue.

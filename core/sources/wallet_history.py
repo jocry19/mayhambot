@@ -3,6 +3,7 @@
 USD values of historical trades use the current SOL price (approximation; memecoin trades are SOL-quoted).
 """
 import logging
+import time
 from collections import defaultdict
 
 from core.config import settings
@@ -163,18 +164,46 @@ def _helius_wallet_trades(wallet, limit):
     return out
 
 
+ENHANCED_FALLBACKS_PER_HOUR = 10
+_enhanced_used = []
+
+
+def _enhanced_allowed():
+    now = time.time()
+    _enhanced_used[:] = [t for t in _enhanced_used if t > now - 3600]
+    if len(_enhanced_used) >= ENHANCED_FALLBACKS_PER_HOUR:
+        return False
+    _enhanced_used.append(now)
+    return True
+
+
 def wallet_trades(wallet, limit=60, enhanced_fallback=True) -> list:
-    """A wallet's recent swaps. Public RPC first (0 Helius credits); only if that fails, Helius Enhanced
-    (100 credits, within this service's daily credit share) or the configured RPC."""
+    """A wallet's recent swaps. Public RPC pool first (0 Helius credits). A rate limit (429) there skips the
+    wallet for now (it is retried later); only other failures fall back to Helius Enhanced (100 credits),
+    at most ENHANCED_FALLBACKS_PER_HOUR per process."""
     try:
         return _rpc_wallet_trades(wallet, limit, PUBLIC_RPC)
     except Exception as e:  # noqa: BLE001
+        if str(e).startswith("429"):
+            log.info("wallet history %s: public RPC rate limited, skipped this cycle", wallet[:6])
+            raise SkipForNow(str(e)) from None
         log.info("wallet history %s via public RPC failed (%s), trying Helius", wallet[:6], e)
     try:
         if settings.helius_api_key and enhanced_fallback:
+            if not _enhanced_allowed():
+                log.info("wallet history %s: Helius Enhanced fallback cap (%d/h) reached, skipped",
+                         wallet[:6], ENHANCED_FALLBACKS_PER_HOUR)
+                raise SkipForNow("enhanced cap")
+            log.info("wallet history %s via Helius Enhanced (100 credits)", wallet[:6])
             return _helius_wallet_trades(wallet, limit)
         if settings.rpc_url != PUBLIC_RPC:
             return _rpc_wallet_trades(wallet, limit)
+    except SkipForNow:
+        raise
     except Exception as e:  # noqa: BLE001 - incl. core.http.CreditsExhausted
         log.warning("wallet history %s failed: %s", wallet[:6], e)
     return []
+
+
+class SkipForNow(Exception):
+    """History not fetched now (rate limit / fallback cap); the caller should retry the wallet later."""
