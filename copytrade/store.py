@@ -100,8 +100,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def event(conn: sqlite3.Connection, kind: str, message: str, level: str = "info", data: Any = None) -> None:
+    from .http import redact
+
     conn.execute("INSERT INTO ct_events VALUES (?,?,?,?,?)",
-                 (int(time.time()), level, kind, message, json.dumps(data) if data is not None else None))
+                 (int(time.time()), level, kind, redact(message),
+                  redact(json.dumps(data)) if data is not None else None))
     conn.commit()
 
 

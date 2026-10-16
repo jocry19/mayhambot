@@ -10,6 +10,28 @@ import requests
 
 log = logging.getLogger("copytrade.http")
 
+try:  # core.http installs a log-record factory that strips api keys from every log line
+    from core.http import redact  # type: ignore
+except Exception:  # copytrade without core: same rule locally
+    import re
+
+    _SECRET_RE = re.compile(r"((?:api[-_]?key|apikey|token)=)[^&\s'\"]+", re.I)
+
+    def redact(text) -> str:
+        return _SECRET_RE.sub(r"\1***", str(text))
+
+    _old_factory = logging.getLogRecordFactory()
+
+    def _redacting_factory(*a, **kw):
+        rec = _old_factory(*a, **kw)
+        if rec.args:
+            rec.msg = rec.getMessage()
+            rec.args = None
+        rec.msg = redact(rec.msg)
+        return rec
+
+    logging.setLogRecordFactory(_redacting_factory)
+
 _session = requests.Session()
 _session.headers["User-Agent"] = "mayhambot-copytrade/1.0"
 
@@ -67,7 +89,8 @@ def request_json(
             if resp is not None and 400 <= resp.status_code < 500 and resp.status_code != 429:
                 break
             time.sleep(min(2 ** attempt, 16))
-    raise RuntimeError(f"{method} {url.split('?')[0]} failed: {last}")
+    # requests puts the full URL (with any api-key) into its exception text: never pass it on raw
+    raise RuntimeError(redact(f"{method} {url.split('?')[0]} failed: {last}"))
 
 
 def get_json(url: str, **kw: Any) -> Any:

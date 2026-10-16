@@ -222,3 +222,33 @@ def test_presets_and_live_switch(env):
     control.set_live(conn, "signal", True)
     st = strategy.Strategy(conn, s, {"paper": ex, "live": None})
     assert st.executor("signal").mode == "paper"  # no live executor without .env master switch
+
+
+# ---------------------------------------------------------------- secrets never reach logs
+def test_failing_request_never_logs_api_key(monkeypatch, caplog, tmp_path):
+    import logging
+
+    import requests
+
+    from copytrade import http as cthttp
+
+    secret = "SuperSecretKey123"
+    url = f"https://mainnet.helius-rpc.com/?api-key={secret}"
+
+    def boom(*a, **k):
+        raise requests.ConnectionError(f"HTTPSConnectionPool: Max retries exceeded with url: /?api-key={secret}")
+
+    monkeypatch.setattr(cthttp._session, "request", boom)
+    monkeypatch.setattr(cthttp.time, "sleep", lambda s: None)
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(RuntimeError) as ei:
+        cthttp.post_json(url, {"x": 1}, retries=2)
+    assert secret not in str(ei.value)
+    logging.getLogger("copytrade.chain").warning("rpc failed: %s at %s", ei.value, url)
+    assert secret not in caplog.text and "api-key=***" in caplog.text
+
+    s = Settings(db_path=tmp_path / "t.db", rpc_url=url)
+    conn = store.connect(s)
+    store.event(conn, "error", f"call {url} failed", data={"url": url})
+    row = conn.execute("SELECT message, data FROM ct_events").fetchone()
+    assert secret not in row[0] and secret not in row[1]
