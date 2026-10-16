@@ -27,7 +27,8 @@ class Client:
         scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": method,
                  "scheme": "http", "path": u.path, "raw_path": u.path.encode(), "query_string": u.query.encode(),
                  "root_path": "", "server": ("testserver", 80), "client": self.client,
-                 "headers": [(b"host", b"testserver"), (b"content-length", str(len(body)).encode()), *headers]}
+                 "headers": [*([] if any(k == b"host" for k, _ in headers) else [(b"host", b"127.0.0.1:8600")]),
+                             (b"content-length", str(len(body)).encode()), *headers]}
         sent = {"done": False}
         status, chunks = [0], []
 
