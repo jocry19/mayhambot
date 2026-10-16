@@ -378,3 +378,42 @@ def test_retry_after_429_books_credits_once(monkeypatch, tmp_path):
     before = http.credits("research")["credits_month"]
     http.get_json(url)
     assert http.credits("research")["credits_month"] - before == http.credit_cost(url, {})
+
+
+def test_endpoint_refusing_one_method_is_avoided_for_it(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    monkeypatch.setenv("PUBLIC_RPC_URLS", "https://a.example,https://c.example")
+    monkeypatch.setattr(http.time, "sleep", lambda s: None)
+    monkeypatch.setattr(http, "_method_429", {})
+    monkeypatch.setattr(http, "_method_stats", {})
+    monkeypatch.setattr(http, "_latency", {"a.example": 1.0, "c.example": 99.0})  # a is the fastest
+    calls = []
+
+    class R:
+        def __init__(self, code):
+            self.status_code, self.headers, self.url = code, {}, "https://x"
+
+        def json(self):
+            return {"result": "ok"}
+
+    def req(method, url, json=None, **kw):
+        calls.append((url, json["method"]))
+        return R(429 if "a.example" in url and json["method"] == "getTransaction" else 200)
+    monkeypatch.setattr(http._session, "request", req)
+    tx = {"method": "getTransaction"}
+    assert http.post_json("https://a.example", tx, priority="live") == {"result": "ok"}
+    assert calls == [("https://a.example", "getTransaction"), ("https://c.example", "getTransaction")]
+    calls.clear()
+    for _ in range(3):  # a stays out for getTransaction: no more 429s, no Helius
+        http.post_json("https://a.example", tx, priority="live")
+    assert calls == [("https://c.example", "getTransaction")] * 3
+    http.post_json("https://a.example", {"method": "getSlot"}, priority="live")  # other methods still go to a
+    assert calls[-1] == ("https://a.example", "getSlot")
+    st = http.method_stats()["a.example"]["getTransaction"]
+    assert st["429"] == 1 and st["avoided"] == 4  # the retry plus three calls
+    # backoff doubles per 429 in a row and a success clears it
+    http._pool_result("a.example", False, status=429, method="getTransaction")
+    away = http.pool_status()["a.example"]["avoid"]["getTransaction"] - http.time.time()
+    assert 2 * http.METHOD_AVOID_BASE - 1 < away <= 2 * http.METHOD_AVOID_BASE
+    http._pool_result("a.example", True, 5.0, 200, method="getTransaction")
+    assert "getTransaction" not in http.pool_status()["a.example"]["avoid"]
