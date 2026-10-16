@@ -64,6 +64,20 @@ Telegram einrichten (einmalig, 2 Minuten):
    eine Testnachricht plus den ersten Bericht. Danach `.venv/bin/python mayham.py restart`, damit auch die
    Signale über Telegram kommen.
 
+## Helius-Credits und neuer Key
+
+Der Bot nutzt den kostenlosen Helius-Plan (1.000.000 Credits pro Monat). Der stündliche Bericht zeigt
+"Helius-Credits: heute a von b, Monat c von 1.000.000". Bei 80 % und bei 100 % kommt je einmal eine
+Telegram-Meldung (pro Monat und Key). Ist das Kontingent leer, läuft der Bot über öffentliche RPCs weiter,
+nur langsamer.
+
+Neuen Key eintragen (nur du, nie in einen Chat oder ins Repo):
+1. Auf helius.dev einen neuen kostenlosen Key anlegen.
+2. `open -e ~/Documents/WALLET/mayhambot/.env` und `HELIUS_API_KEY=<neuer Key>` setzen. Steht dort auch
+   `SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=...`, den Key dort ebenfalls ersetzen (oder die Zeile leeren).
+3. Speichern, dann `.venv/bin/python mayham.py stop` und `.venv/bin/python mayham.py start`.
+   Der Credit-Zähler startet für den neuen Key neu ("Helius key changed, credit ledger reset" im Log).
+
 ## Alarme (Telegram)
 
 Ein Problem muss in zwei Runden hintereinander auftauchen (≈4 min), dann kommt 🔴, bei Neustart 🔁,

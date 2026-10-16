@@ -23,7 +23,8 @@ Settings (optional, in .env):
   ALERT_REPEAT_HOURS    repeat an unresolved alert every N hours (default 6)
   WATCHDOG_RUNTIME      local (default) | docker   (docker: the host watches the container)
   WATCHDOG_RESTART_CMD  override the restart command
-  SUMMARY_EVERY_HOURS   Telegram status report interval (default 1, 0 = off)
+  SUMMARY_EVERY_HOURS   Telegram status report interval (default 1, 0 = off); includes Helius credits,
+                        plus one alert at 80 % / 100 % of HELIUS_CREDITS_MONTH per month and key
   LOG_MAX_MB            rotate logs/*.log above this size (default 20), keeps 5 compressed
 """
 from __future__ import annotations
@@ -334,6 +335,11 @@ def watchdog(args) -> int:
                 send_alert(f"🟢 Wieder OK (war: {seen[key].get('msg', key)})")
             del seen[key]
 
+    try:
+        check_credit_alerts(st)
+    except Exception as e:  # noqa: BLE001
+        print(f"credit alerts: {e}")
+
     every = cfg("SUMMARY_EVERY_HOURS", 1.0) * 3600
     if every > 0 and now - st.get("last_summary", 0) >= every:
         if send_alert(build_summary()):
@@ -564,6 +570,80 @@ def setup_telegram(args) -> int:
     return 0 if ok else 1
 
 
+# ---------------------------------------------------------------- helius credits
+def helius_credits() -> dict | None:
+    """Month/day totals of the shared Helius credit ledger (core.http), None when there is no ledger yet."""
+    import hashlib  # noqa: PLC0415
+    month = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m")
+    stats, led = None, {}
+    try:
+        sys.path.insert(0, str(ROOT))
+        from core import http as core_http  # noqa: PLC0415
+        stats = core_http.credits()
+    except Exception:  # noqa: BLE001 - app venv missing: read the ledger file directly
+        pass
+    f = ROOT / "data" / "ratelimit" / "credits-helius.json"
+    try:
+        led = json.loads(f.read_text() or "{}")
+    except (OSError, ValueError):
+        led = {}
+    if not stats and led.get("month") != month:
+        return None
+    limit = float(cfg("HELIUS_CREDITS_MONTH", 1_000_000.0))
+    if stats:
+        any_st = next(iter(stats.values()), {})
+        month_used = any_st.get("credits_month_all", sum(v.get("credits_month", 0) for v in stats.values()))
+        limit = any_st.get("credits_month_limit") or limit
+        today = sum(v.get("credits_today", 0) for v in stats.values())
+        budget = sum(v["credits_day_budget"] for v in stats.values() if v.get("credits_day_budget") is not None)
+    else:
+        svcs = led.get("services", {}).values()
+        day = dt.datetime.now(dt.timezone.utc).strftime("%d")  # ledger keys days by day of month
+        month_used = sum(v.get("month", 0) for v in svcs)
+        today = sum((v.get("days") or {}).get(day, 0) for v in svcs)
+        budget = None
+    # identifies the key without ever storing it: ledger key-change stamp if present, else a short hash
+    key = led.get("key_changed_at") or hashlib.sha256(cfg("HELIUS_API_KEY", "").encode()).hexdigest()[:8]
+    return {"month": month, "month_used": month_used, "month_limit": limit, "today": today,
+            "day_budget": budget, "key": str(key), "warn_level": led.get("warn_level")}
+
+
+def _fmt_int(x) -> str:
+    return f"{x:,.0f}".replace(",", ".")
+
+
+def credits_line(c: dict) -> str:
+    day = f"heute {_fmt_int(c['today'])}" + (f" von {_fmt_int(c['day_budget'])}" if c["day_budget"] else "")
+    return f"Helius-Credits: {day}, Monat {_fmt_int(c['month_used'])} von {_fmt_int(c['month_limit'])}"
+
+
+def check_credit_alerts(st: dict):
+    """One Telegram message at 80 % and at 100 % of the monthly Helius quota, once per month and key."""
+    c = helius_credits()
+    if not c or not c["month_limit"]:
+        return
+    pct = 100 * c["month_used"] / c["month_limit"]
+    sent = st.setdefault("credit_alerts", [])
+    for level in (80, 100):
+        tag = f"{c['month']}:{c['key']}:{level}"
+        if pct < level or tag in sent:
+            continue
+        if level == 80 and pct >= 100:   # jumped straight past 80 %: only the 100 % message
+            sent.append(tag)
+            continue
+        if level == 100:
+            text = (f"🔴 Helius-Kontingent aufgebraucht ({pct:.0f} %). Der Bot läuft über öffentliche RPCs weiter, "
+                    "etwas langsamer. Für volle Geschwindigkeit einen neuen kostenlosen Helius-Key in die .env "
+                    "eintragen (HELIUS_API_KEY), dann mayham.py stop und start.")
+        else:
+            text = (f"🟡 Helius-Credits bei {pct:.0f} % des Monats ({_fmt_int(c['month_used'])} von "
+                    f"{_fmt_int(c['month_limit'])}). Bei 100 % läuft der Bot über öffentliche RPCs weiter; "
+                    "dann kann ein neuer Key in die .env.")
+        if send_alert(text):
+            sent.append(tag)
+    st["credit_alerts"] = sent[-12:]
+
+
 # ---------------------------------------------------------------- hourly summary
 def _q(conn, sql, args=(), default=None):
     try:
@@ -622,6 +702,12 @@ def build_summary() -> str:
             c.close()
         except sqlite3.Error as e:
             lines.append(f"DB nicht lesbar: {e}")
+    try:
+        c = helius_credits()
+        if c:
+            lines.append(credits_line(c))
+    except Exception as e:  # noqa: BLE001 - never let the report fail on the credit ledger
+        lines.append(f"Helius-Credits: nicht lesbar ({type(e).__name__})")
     if r["problems"]:
         lines.append("Probleme: " + "; ".join(r["problems"].values()))
     lines.append(f"Dashboard: {dashboard_url()}")
