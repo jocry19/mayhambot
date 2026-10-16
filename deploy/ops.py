@@ -139,13 +139,30 @@ def check_processes() -> dict:
     return out
 
 
-def check_dashboard(timeout=5) -> bool:
-    port = cfg("DASHBOARD_PORT", "8501")
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/_stcore/health", timeout=timeout) as r:
-            return r.status == 200
-    except Exception:  # noqa: BLE001
-        return False
+def dashboards() -> list[tuple[str, str]]:
+    """(name, health URL) for each UI the launcher runs: FastAPI 'web' and/or the old Streamlit 'dashboard'."""
+    out = []
+    if "web" in SERVICES or not SERVICES:
+        out.append(("web", f"http://127.0.0.1:{cfg('WEB_PORT', '8600')}/api/system"))
+    if "dashboard" in SERVICES:
+        out.append(("dashboard", f"http://127.0.0.1:{cfg('DASHBOARD_PORT', '8501')}/_stcore/health"))
+    return out
+
+
+def dashboard_url() -> str:
+    return " / ".join(u.split("/api/")[0].split("/_stcore/")[0].replace("127.0.0.1", "localhost")
+                      for _, u in dashboards())
+
+
+def check_dashboard(timeout=10) -> bool:
+    for _, url in dashboards():
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                if r.status != 200:
+                    return False
+        except Exception:  # noqa: BLE001
+            return False
+    return True
 
 
 HEARTBEATS = {  # name -> SQL returning the newest unix ts of fresh data
@@ -547,7 +564,7 @@ def build_summary() -> str:
             lines.append(f"DB nicht lesbar: {e}")
     if r["problems"]:
         lines.append("Probleme: " + "; ".join(r["problems"].values()))
-    lines.append(f"Dashboard: http://localhost:{cfg('DASHBOARD_PORT', '8501')}")
+    lines.append(f"Dashboard: {dashboard_url()}")
     return "📊 <b>Stündlicher Bericht</b>\n" + "\n".join(lines)
 
 
@@ -577,7 +594,7 @@ def status(args) -> int:
     print("mayhambot Status", dt.datetime.now().strftime("%d.%m.%Y %H:%M"))
     if r["processes"]:
         print("Prozesse:   " + "  ".join(f"{n} {yes(ok)}" for n, ok in r["processes"].items()))
-    print(f"Dashboard:  {yes(r['dashboard'])}  http://localhost:{cfg('DASHBOARD_PORT', '8501')}")
+    print(f"Dashboard:  {yes(r['dashboard'])}  {dashboard_url()}")
     for k, ts in r["feed"].items():
         print(f"{k + ':':22s}{ago(ts)}")
     if IS_MAC:

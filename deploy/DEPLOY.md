@@ -101,7 +101,7 @@ Neustart höchstens alle 15 min. Geprüft wird:
 Alles liegt bereit, falls der Bot einmal auch bei ausgeschaltetem Mac laufen soll (kleiner Linux-VPS, 2 GB RAM):
 
 - `deploy/docker/Dockerfile` + `compose.yml`: ein Befehl `docker compose -f deploy/docker/compose.yml up -d --build`.
-  Daten in `data/`, Dashboard nur auf `127.0.0.1:8501` (Zugriff: `ssh -L 8501:localhost:8501 user@server`).
+  Daten in `data/`, Dashboard nur auf `127.0.0.1:8600` (Zugriff: `ssh -L 8600:localhost:8600 user@server`).
 - `deploy/linux/`: systemd-Units (App, Watchdog alle 2 min, Backup stündlich) und `server-setup.sh`
   (Docker, Firewall nur SSH, Swap, automatische Sicherheitsupdates).
 - Umzug ohne Datenverlust: `bash deploy/push-to-server.sh user@server --with-data` überträgt Code und ein

@@ -8,11 +8,14 @@ services:
     env_file: ../../.env
     environment:
       MAYHAM_DB_PATH: /app/data/mayhambot.db
+      WEB_HOST: 0.0.0.0                    # im Container; nach außen nur 127.0.0.1 (ports)
+      DASHBOARD_HOST: 0.0.0.0
     volumes:
       - ../../data:/app/data
       - ../../logs:/app/logs
       - ../../secrets:/app/secrets:ro      # Keypair für Live-Trading: SOLANA_KEYPAIR_PATH=/app/secrets/id.json
     ports:
-      - "127.0.0.1:8501:8501"              # nur lokal; Zugriff per SSH-Tunnel (siehe DEPLOY.md)
+      - "127.0.0.1:8600:8600"              # Web-Dashboard, nur lokal; Zugriff per SSH-Tunnel (siehe DEPLOY.md)
+      - "127.0.0.1:8501:8501"              # altes Streamlit-Dashboard, falls noch aktiv
     stop_grace_period: 30s
     logging: { driver: json-file, options: { max-size: "20m", max-file: "5" } }
