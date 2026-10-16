@@ -199,3 +199,86 @@ def test_microstructure(conn):
     assert f["micro_lambda"] > 0
     assert 0.5 < f["micro_vpin"] <= 1
     assert f["micro_absorption"] is not None and f["micro_absorption"] < f["micro_ofi_15m"]
+
+
+def test_tape_structure_insiders_and_distribution(conn):
+    conn.execute("INSERT INTO sniper_launch_wallets(mint, wallet, role, ts, tokens) VALUES (?, 'Dev', 'dev', ?, 1000)", (MINT, NOW - 7000))
+    trade(conn, "d0", "Dev", MINT, "buy", NOW - 7000, 100, price=0.1, tok=1000)
+    for i in range(20):
+        trade(conn, f"e{i}", f"Early{i}", MINT, "buy", NOW - 6000 + i, 50, price=0.1, tok=500)
+    trade(conn, "sm", S1, MINT, "buy", NOW - 5000, 50, price=0.1, tok=500)
+    # in the last hour the dev and half the early wallets sell to newcomers
+    trade(conn, "d1", "Dev", MINT, "sell", NOW - 600, 80, price=0.1, tok=800)
+    for i in range(10):
+        trade(conn, f"x{i}", f"Early{i}", MINT, "sell", NOW - 500 + i, 50, price=0.1, tok=500)
+        trade(conn, f"n{i}", f"New{i}", MINT, "buy", NOW - 400 + i, 50, price=0.1, tok=500)
+    conn.commit()
+    f = coin.coin_features(conn, MINT, NOW)["features"]
+    assert f["tape_insider_held"] == pytest.approx(0.2) and f["tape_insider_sold_1h"] == pytest.approx(0.8)
+    assert f["tape_new_holders_1h"] == 10 and f["tape_holders_chg_1h"] == 0
+    assert f["tape_distribution"] > 0.3
+    assert f["tape_smart_held"] == pytest.approx(500 / f_total(conn))
+
+
+def f_total(conn):
+    return conn.execute("SELECT SUM(CASE side WHEN 'buy' THEN token_amount ELSE -token_amount END) FROM trades WHERE mint=?",
+                        (MINT,)).fetchone()[0]
+
+
+def test_network_dev_record_and_sandwich(conn):
+    conn.execute("INSERT INTO sniper_launches(mint, creator, created_ts) VALUES (?, 'Rugger', ?)", (MINT, NOW - 600))
+    for i in range(4):
+        conn.execute("INSERT INTO sniper_launches(mint, creator, created_ts, rugged, max_ret_60m) VALUES (?, 'Rugger', ?, ?, ?)",
+                     (f"Old{i}", NOW - 86400 + i, 1 if i < 3 else 0, 1.5 if i == 3 else -0.9))
+    conn.execute("INSERT INTO sniper_launches(mint, creator, created_ts, rugged) VALUES ('Fresh', 'Rugger', ?, 1)", (NOW - 100,))
+    conn.execute("INSERT INTO sniper_launch_wallets(mint, wallet, role) VALUES ('Old0', 'BadBundler', 'bundle')")
+    conn.execute("INSERT INTO sniper_launch_wallets(mint, wallet, role, ts) VALUES (?, 'BadBundler', 'bundle', ?)", (MINT, NOW - 590))
+    for i in range(10):
+        trade(conn, f"q{i}", f"Q{i}", MINT, "buy", NOW - 1000 + 10 * i, 20)
+    trade(conn, "sa", "MEV", MINT, "buy", NOW - 300, 500)
+    trade(conn, "vb", "Victim", MINT, "buy", NOW - 300, 100)
+    trade(conn, "sb", "MEV", MINT, "sell", NOW - 299, 510)
+    conn.commit()
+    f = coin.coin_features(conn, MINT, NOW)["features"]
+    assert f["net_dev_launches"] == 4  # the launch from 100 s ago has no known outcome yet
+    assert f["net_dev_rug_rate"] == pytest.approx(0.75) and f["net_dev_hit2x_rate"] == pytest.approx(0.25)
+    assert f["net_early_bad"] == 1
+    assert f["net_sandwich_60m"] >= 1 and f["net_bot_share_60m"] > 0.5
+
+
+def test_jupiter_quotes_macro_attention(conn):
+    from intel import config, sources
+    sources.ensure(conn)
+
+    def get(url, params=None):
+        if "quote" in url:
+            if params["inputMint"] == sources.SOL_MINT:
+                return {"outAmount": str(params["amount"] * 1000), "priceImpactPct": "0.01", "routePlan": [{}]}
+            return {"outAmount": str(int(params["amount"] / 1000 * 0.94)), "priceImpactPct": "0.02", "routePlan": [{}]}
+        if "coingecko" in url:
+            return {"bitcoin": {"usd": 60000, "usd_24h_change": -3.0}, "ethereum": {"usd": 3000, "usd_24h_change": 1.0},
+                    "solana": {"usd": 150, "usd_24h_change": 2.0}}
+        return {"data": [{"value": "22", "value_classification": "Extreme Fear"}]}
+    store.save_features(conn, "coin", [{"key": MINT, "ts": NOW, "coverage": 1, "features": {"vol_usd_60m": 1.0}}], False)
+    cfg = config.IntelSettings()
+    cfg.quote_coins = 3
+    assert sources.quote_round(conn, NOW, cfg, get) == 3
+    f = coin.coin_features(conn, MINT, NOW + 60)["features"]
+    assert f["exec_q_0_25"] == pytest.approx(0.06, abs=1e-6) and f["exec_q_noroute"] == 0
+    assert coin.coin_features(conn, MINT, NOW - 60)["features"]["exec_q_0_25"] is None  # quote is from later
+    assert sources.macro_round(conn, NOW, get) == 1
+    m = intel.features_at("market", "solana", NOW + 10, conn)["features"]
+    assert m["m_btc_chg_24h"] == pytest.approx(-0.03) and m["m_fng"] == 22
+    conn.execute("INSERT INTO market_tokens(mint, boosted, n_socials, source, updated_at) VALUES (?, 50, 2, 'boost', ?)", (MINT, NOW))
+    conn.commit()
+    assert sources.save(conn, "intel_attention", sources.attention_rows(conn, NOW)) == 1
+    assert sources.attention_rows(conn, NOW + 60) == []  # unchanged: no new row
+    a = coin.coin_features(conn, MINT, NOW + 3700)["features"]
+    assert a["att_boost"] == 50 and a["att_promoted_h"] == pytest.approx(3700 / 3600)
+
+
+def test_liquidity_flash(conn):
+    prices(conn, MINT, [(NOW - 3000, 1.0, 20_000), (NOW - 2000, 1.1, 60_000), (NOW - 600, 1.0, 21_000), (NOW - 60, 1.0, 20_500)])
+    conn.commit()
+    f = coin.coin_features(conn, MINT, NOW)["features"]
+    assert f["liq_flash_60m"] == pytest.approx(2.0)

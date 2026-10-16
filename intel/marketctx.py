@@ -19,6 +19,9 @@ FEATURES = {
     "m_smart_net_usd": ("market", "Smart Money netto 1 h", "usd"),
     "m_top_sector_heat": ("market", "Hitze des heißesten Sektors", "n"),
     "m_top_term_heat": ("market", "Hitze des heißesten Narrativs", "n"),
+    "m_btc_chg_24h": ("market", "Bitcoin 24 h", "pct"),
+    "m_eth_chg_24h": ("market", "Ethereum 24 h", "pct"),
+    "m_fng": ("market", "Fear & Greed (0 Angst … 100 Gier)", "n"),
     "m_sector_rotation": ("market", "Kapitalrotation (größte Anteilsverschiebung)", "pts"),
 }
 COLS = {"m_phase": "score", "m_volume_h1_usd": "volume_h1_usd", "m_volume_ratio": "volume_ratio",
@@ -48,6 +51,11 @@ def market_features(conn, ts, max_age=1800):
             if has(conn, "market_terms"):
                 t = conn.execute("SELECT MAX(heat) FROM market_terms WHERE ts=?", (s["ts"],)).fetchone()
                 out["m_top_term_heat"] = t[0] if t else None
+    from intel import sources
+    mac = sources.macro_at(conn, ts)
+    if mac:
+        out["m_btc_chg_24h"], out["m_eth_chg_24h"], out["m_fng"] = mac.get("btc_chg_24h"), mac.get("eth_chg_24h"), mac.get("fng")
+        meta.update(fng_label=mac.get("fng_label"), btc_usd=mac.get("btc_usd"))
     known = sum(v is not None for v in out.values())
     cov = round(known / len(out), 3)
     return {"features": out, "coverage": {"market": cov, "all": cov}, "meta": meta}

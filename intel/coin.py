@@ -9,6 +9,8 @@ Groups (coverage = share of the group's features that are known):
   px     price regime: returns and realized volatility 5 / 15 / 60 min, distance from the 24 h high, age
   micro  microstructure on AMM swaps: order flow imbalance, Kyle's lambda (price impact per $1k net flow), VPIN over
          volume buckets, absorption (buy pressure without price reaction), buy momentum (exhaustion when < 1)
+  tape   holder structure rebuilt from the swap tape between rug checks (stage 2, intel/structure.py)
+  net    dev / funder / launch-wallet record and bot volume (stage 5, intel/network.py)
   mkt    market phase, sector and narrative heat of the coin (market/)
 """
 import math
@@ -43,9 +45,17 @@ FEATURES = {
     "liq_chg_15m": ("liq", "Liquidität 15 min", "pct"),
     "liq_chg_60m": ("liq", "Liquidität 60 min", "pct"),
     "liq_mcap": ("liq", "Liquidität / Market Cap", "pct"),
+    "liq_flash_60m": ("liq", "Liquidität kam und ging (60 min)", "pct"),
+    "att_boost": ("att", "DexScreener-Boost jetzt", "n"),
+    "att_boost_chg_1h": ("att", "Boost-Änderung 1 h", "n"),
+    "att_promoted_h": ("att", "Seit erster Bewerbung", "h"),
     "exec_rt_0_1": ("exec", "Kosten hin und zurück 0,1 SOL", "pct"),
     "exec_rt_0_25": ("exec", "Kosten hin und zurück 0,25 SOL", "pct"),
     "exec_rt_0_5": ("exec", "Kosten hin und zurück 0,5 SOL", "pct"),
+    "exec_q_0_1": ("exec", "Gemessen (Jupiter) 0,1 SOL", "pct"),
+    "exec_q_0_25": ("exec", "Gemessen (Jupiter) 0,25 SOL", "pct"),
+    "exec_q_0_5": ("exec", "Gemessen (Jupiter) 0,5 SOL", "pct"),
+    "exec_q_noroute": ("exec", "Kein Verkaufsweg (1 = ja)", "n"),
     "hold_top10": ("hold", "Top-10-Holder", "pct"),
     "hold_top1": ("hold", "Größter Holder", "pct"),
     "hold_insider": ("hold", "Insider-Anteil", "pct"),
@@ -75,7 +85,13 @@ FEATURES = {
     "mkt_rs_sector_h1": ("mkt", "Stärke ggü. Sektor 1 h", "pts"),
     "mkt_sector_share_chg": ("mkt", "Kapitalzufluss Sektor", "pts"),
 }
-GROUPS = {"vol": "Echtes Volumen", "flow": "Orderfluss", "micro": "Mikrostruktur", "liq": "Liquidität", "exec": "Ausführungskosten",
+from intel import network as _network  # noqa: E402
+from intel import structure as _structure  # noqa: E402
+
+FEATURES.update(_structure.FEATURES)
+FEATURES.update(_network.FEATURES)
+GROUPS = {"vol": "Echtes Volumen", "flow": "Orderfluss", "micro": "Mikrostruktur", "tape": "Halter laut Swaps",
+          "net": "Netzwerk: Dev, Geldgeber, Bots", "att": "Aufmerksamkeit", "liq": "Liquidität", "exec": "Ausführungskosten",
           "hold": "Holder-Struktur", "px": "Kursregime", "mkt": "Markt und Narrativ"}
 SMART = ("ultra", "smart")
 INSIDER_ROLES = ("bundle", "insider", "dev")
@@ -249,6 +265,10 @@ def liquidity_price(conn, mint, ts, cfg=default_cfg):
             out[k] = (liq / ago - 1) if ago else None
         if last[2]:
             out["liq_mcap"] = liq / last[2]
+        hour = [p[3] for p in liqs if p[0] > ts - 3600]
+        if len(hour) >= 3:
+            start, top = hour[0], max(hour)
+            out["liq_flash_60m"] = (top / start - 1) if top >= 1.5 * start and liq <= 1.1 * start else 0.0
     if fresh and last[1]:
         p_now = last[1]
         for w, k in ((300, "px_ret_5m"), (900, "px_ret_15m"), (3600, "px_ret_60m")):
@@ -344,6 +364,14 @@ def coin_features(conn, mint, ts, cfg=default_cfg):
     f.update(microstructure(conn, mint, ts))
     f.update(lp)
     f.update(hd)
+    tp, m4 = _structure.tape_structure(conn, mint, ts)
+    nw, m5 = _network.network_features(conn, mint, ts)
+    f.update(tp)
+    f.update(nw)
+    from intel import sources as _src
+    f.update(_src.measured_cost(conn, mint, ts))
+    f.update(_src.attention(conn, mint, ts))
+    meta.update(m4, **m5)
     f.update(market_part(conn, mint, ts))
     meta.update(m1, **m2, **m3)
     return {"features": f, "coverage": coverage(f), "meta": meta}

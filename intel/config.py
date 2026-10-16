@@ -28,6 +28,13 @@ class IntelSettings:
     keep_days: int = field(default_factory=lambda: _i("INTEL_KEEP_DAYS", 21))
     universe_max: int = field(default_factory=lambda: _i("INTEL_UNIVERSE_MAX", 150))
     wallets_max: int = field(default_factory=lambda: _i("INTEL_WALLETS_MAX", 400))
+    # ---- network (stages 3 and 4, keyless): 0 disables
+    quotes_every_sec: int = field(default_factory=lambda: _i("INTEL_QUOTES_EVERY_SEC", 300))
+    quote_coins: int = field(default_factory=lambda: _i("INTEL_QUOTE_COINS", 8))     # x 3 sizes x 2 calls
+    jupiter_url: str = field(default_factory=lambda: (os.getenv("JUPITER_API_URL") or "https://lite-api.jup.ag").rstrip("/"))
+    jupiter_per_min: int = field(default_factory=lambda: _i("INTEL_JUPITER_PER_MIN", 20))
+    macro_every_sec: int = field(default_factory=lambda: _i("INTEL_MACRO_EVERY_SEC", 900))
+    coingecko_per_min: int = field(default_factory=lambda: _i("INTEL_COINGECKO_PER_MIN", 2))
     # ---- outcomes: same pump definition as model/ (max within 1 h >= +50 %)
     hit_ret: float = field(default_factory=lambda: _f("INTEL_HIT_RET", 0.5))
     # ---- events

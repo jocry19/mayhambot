@@ -137,6 +137,8 @@ export default function Zentrale() {
         <Tile label="Ereignisse 24 h" value={n(Object.values(ec).reduce((a, b) => a + b, 0))} sub={`Einstiege ${n((ec.smart_entry || 0) + (ec.ultra_buy || 0))} · Ausstiege/Warnungen ${n((ec.smart_exit || 0) + (ec.insider_sell || 0) + (ec.liq_drop || 0) + (ec.risk_jump || 0))}`} />
         <Tile label="Coins im Blick" value={n(d.coins.length)} sub={`Merkmale je Coin ${n(Object.keys(d.feature_labels).length)}`} />
         <Tile label="Hilfreiche Merkmale" value={evs?.n ? `${n(clear)} von ${n((evs.features || []).length)}` : "–"} sub={evs?.n ? `${n(evs.n)} Stichproben` : "Messung startet"} />
+        <Tile label="Bitcoin / Ethereum 24 h" value={<span className={sign(mf.m_btc_chg_24h)}>{pctSigned(mf.m_btc_chg_24h)}</span>} sub={`ETH ${pctSigned(mf.m_eth_chg_24h)}`} />
+        <Tile label="Fear & Greed" value={n(mf.m_fng)} sub={d.market?.meta?.fng_label || "0 Angst … 100 Gier"} />
         <Tile label="Datenquellen" value={`${n(srcOk)} / ${n(d.sources.length)}`} sub={srcOk === d.sources.length ? "alle frisch" : "einige veraltet"} cls={srcOk === d.sources.length ? "up" : ""} />
       </div>
 
@@ -153,7 +155,9 @@ export default function Zentrale() {
             { k: "flow_buy_ratio_15m", l: "Kaufdruck", r: true, fmt: (r) => pct(r.flow_buy_ratio_15m) },
             { k: "vol_roundtrip_60m", l: "Wash", r: true, fmt: (r) => pct(r.vol_roundtrip_60m) },
             { k: "liq_usd", l: "Liquidität", r: true, fmt: (r) => usd(r.liq_usd) },
-            { k: "exec_rt_0_25", l: "Kosten 0,25 SOL", r: true, title: "hin und zurück, geschätzt aus dem Pool", fmt: (r) => pct(r.exec_rt_0_25, 1) },
+            { k: "exec_rt_0_25", l: "Kosten 0,25 SOL", r: true, sort: (r) => r.exec_q_0_25 ?? r.exec_rt_0_25, title: "hin und zurück: gemessen mit Jupiter (fett) oder geschätzt aus dem Pool", fmt: (r) => (r.exec_q_0_25 != null ? <b>{pct(r.exec_q_0_25, 1)}</b> : <span className="t2">{pct(r.exec_rt_0_25, 1)}</span>) },
+            { k: "tape_insider_held", l: "Insider halten", r: true, title: "Anteil ihres Launch-Kaufs, laut Swaps", fmt: (r) => pct(r.tape_insider_held) },
+            { k: "net_dev_rug_rate", l: "Dev-Rugs", r: true, fmt: (r) => pct(r.net_dev_rug_rate) },
             { k: "micro_vpin", l: "VPIN", r: true, title: "Toxizität: wie einseitig der Fluss über Volumen-Buckets ist", fmt: (r) => pct(r.micro_vpin) },
             { k: "hold_top10", l: "Top-10", r: true, fmt: (r) => pct(r.hold_top10) },
             { k: "px_ret_15m", l: "15 min", r: true, fmt: (r) => <span className={sign(r.px_ret_15m)}>{pctSigned(r.px_ret_15m)}</span> },

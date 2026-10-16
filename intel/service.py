@@ -8,7 +8,8 @@ import logging
 import os
 import time
 
-from intel import base, coin, evaluate, events, marketctx, store, wallet
+from core import http
+from intel import base, coin, evaluate, events, marketctx, sources, store, wallet
 from intel.config import settings as default_cfg
 
 log = logging.getLogger("intel")
@@ -57,10 +58,17 @@ def holder_rows(conn, since):
 
 
 class Service:
-    def __init__(self, cfg=default_cfg, db_path=None):
+    def __init__(self, cfg=default_cfg, db_path=None, net=None):
         self.cfg = cfg
         self.conn = store.connect(db_path)
-        self.last = {"coins": 0, "persist": 0, "wallets": 0, "label": 0, "prune": 0}
+        sources.ensure(self.conn)
+        if not os.getenv("MAYHAM_SERVICE"):
+            http.set_service("intel")
+        http.set_budget(cfg.jupiter_url.split("/")[2], cfg.jupiter_per_min)
+        http.set_budget("api.coingecko.com", cfg.coingecko_per_min)
+        http.set_budget("api.alternative.me", 2)
+        self.net = ("PYTEST_CURRENT_TEST" not in os.environ) if net is None else net  # tests never call out
+        self.last = {"coins": 0, "persist": 0, "wallets": 0, "label": 0, "prune": 0, "quotes": 0, "macro": 0}
         st = store.get_state(self.conn, "service_status") or {}
         self.holders_since = int(st.get("holders_since") or 0)
         self.rounds = 0
@@ -108,6 +116,10 @@ class Service:
             store.save_holders(self.conn, hs)
             self.holders_since = max(h["safety_ts"] for h in hs)
         c["holders"] = len(hs)
+        c["attention"] = self.step("attention", lambda: sources.save(self.conn, "intel_attention", sources.attention_rows(self.conn, now)))
+        if self.net and self.cfg.macro_every_sec and now - self.last["macro"] >= self.cfg.macro_every_sec:
+            self.step("macro", lambda: sources.macro_round(self.conn, now))
+            self.last["macro"] = now
         c["events"] = self.step("events", lambda: store.add_events(self.conn, events.detect(self.conn, now, self.cfg))) or 0
         if now - self.last["coins"] >= self.cfg.coins_every_sec:
             persist = now - self.last["persist"] >= self.cfg.persist_every_sec
@@ -115,6 +127,9 @@ class Service:
             self.last["coins"] = now
             if persist:
                 self.last["persist"] = now
+        if self.net and self.cfg.quotes_every_sec and now - self.last["quotes"] >= self.cfg.quotes_every_sec:
+            c["quotes"] = self.step("quotes", lambda: sources.quote_round(self.conn, now, self.cfg))
+            self.last["quotes"] = now
         if now - self.last["wallets"] >= self.cfg.wallets_every_sec:
             c["wallets"] = self.step("wallets", lambda: self.wallets(now))
             self.last["wallets"] = now

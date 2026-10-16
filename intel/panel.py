@@ -8,10 +8,13 @@ from intel import base, coin, events, marketctx, store, wallet
 STAGES = [
     (1, "Geld- und Orderfluss", "Wer kauft und verkauft was, nach Personen; Smart-Money-Rotation; Insider-Verkäufe; "
         "Liquidität, Kursregime, Holder-Verlauf, geschätzte Ausführungskosten; Live-Ticker; Messung je Merkmal", "live"),
-    (2, "Holder- und Insider-Struktur im Zeitverlauf", "Häufigere Holder-Stände für heiße Coins, Verteilung an Käufer erkennen", "next"),
-    (3, "Liquidität und Markttiefe", "Jupiter-Quotes hin und zurück für 0,1 / 0,25 / 0,5 SOL statt Pool-Modell", "planned"),
-    (4, "Makro und Aufmerksamkeit", "BTC, ETH, Fear & Greed, Verlauf von DexScreener-Trends und Boosts", "planned"),
-    (5, "Netzwerk der Devs und Bundler", "Wer finanziert wen, Serien-Rugger, Launches aus guten oder schlechten Netzwerken", "planned"),
+    (2, "Holder- und Insider-Struktur im Zeitverlauf", "Bestände aus dem Swap-Strom zwischen den Rug-Checks: Halter, Top-10, "
+        "Insider- und Smart-Money-Bestand, Verteilung großer Halter an neue, jeweils mit Änderung über 1 h", "live"),
+    (3, "Liquidität und Markttiefe", "Echte Jupiter-Quotes hin und zurück für 0,1 / 0,25 / 0,5 SOL bei den heißesten Coins, "
+        "kein Verkaufsweg, Liquidität, die kommt und sofort wieder geht", "live"),
+    (4, "Makro und Aufmerksamkeit", "BTC, ETH, SOL, Fear & Greed, Verlauf der DexScreener-Boosts je Coin", "live"),
+    (5, "Netzwerk der Devs und Bundler", "Bilanz des Devs und seines Geldgeber-Netzes, Launch-Wallets aus früheren Rugs "
+        "oder 2x-Launches, Bot- und Sandwich-Volumen", "live"),
 ]
 
 
@@ -60,6 +63,28 @@ def flags(f):
         out.append(("warn", "Einseitiger Fluss (VPIN)"))
     if g("micro_absorption") is not None and g("micro_absorption") >= 0.5:
         out.append(("warn", "Käufe werden absorbiert"))
+    if g("exec_q_noroute") == 1:
+        out.append(("bad", "Kein Verkaufsweg"))
+    if g("exec_q_0_25") is not None and g("exec_q_0_25") >= 0.06:
+        out.append(("warn", f"Gemessen {100 * g('exec_q_0_25'):.0f} % hin und zurück"))
+    if g("net_dev_rug_rate") is not None and (g("net_dev_launches") or 0) >= 2 and g("net_dev_rug_rate") >= 0.5:
+        out.append(("bad", f"Dev rugte {100 * g('net_dev_rug_rate'):.0f} % seiner Launches"))
+    if g("net_funder_rug_rate") is not None and (g("net_funder_launches") or 0) >= 3 and g("net_funder_rug_rate") >= 0.5:
+        out.append(("bad", "Geldgeber-Netz rugt oft"))
+    if (g("net_early_bad") or 0) >= 2:
+        out.append(("bad", f"{g('net_early_bad'):.0f} bekannte Rug-Wallets dabei"))
+    if (g("net_early_good") or 0) >= 2:
+        out.append(("good", f"{g('net_early_good'):.0f} Wallets aus 2x-Launches"))
+    if g("net_bot_share_60m") is not None and g("net_bot_share_60m") >= 0.4:
+        out.append(("warn", f"Bots {100 * g('net_bot_share_60m'):.0f} % des Volumens"))
+    if g("tape_insider_sold_1h") is not None and g("tape_insider_sold_1h") >= 0.25:
+        out.append(("bad", "Insider bauen ab"))
+    if g("tape_distribution") is not None and g("tape_distribution") >= 0.15:
+        out.append(("warn", "Große Halter verteilen an Neue"))
+    if g("liq_flash_60m") is not None and g("liq_flash_60m") >= 0.5:
+        out.append(("warn", "Liquidität kam und ging"))
+    if g("att_boost_chg_1h") is not None and g("att_boost_chg_1h") > 0:
+        out.append(("", "Neu beworben"))
     if g("hold_top10") is not None and g("hold_top10") >= 0.5:
         out.append(("warn", f"Top-10 halten {100 * g('hold_top10'):.0f} %"))
     if g("hold_top10_chg_1h") is not None and g("hold_top10_chg_1h") <= -10:
@@ -91,7 +116,7 @@ def view(conn, now=None):
                           "flow_buy_ratio_15m", "flow_buyers_15m", "flow_buyers_accel", "flow_smart_entities_60m",
                           "flow_smart_net_usd_60m", "flow_smart_exit_share", "flow_whale_share_60m", "flow_insider_sell_usd_60m",
                           "vol_usd_60m", "vol_entities_60m", "vol_roundtrip_60m", "hold_top10", "hold_insider", "hold_safety",
-                          "exec_rt_0_25", "micro_vpin", "micro_lambda", "micro_ofi_15m", "px_ret_15m", "px_ret_60m", "px_vol_15m", "px_off_high_24h", "px_age_h",
+                          "exec_rt_0_25", "exec_q_0_25", "tape_insider_held", "tape_top10", "net_dev_rug_rate", "net_bot_share_60m", "att_boost", "micro_vpin", "micro_lambda", "micro_ofi_15m", "px_ret_15m", "px_ret_60m", "px_vol_15m", "px_off_high_24h", "px_age_h",
                           "mkt_sector_heat", "mkt_term_heat")}})
     coins.sort(key=lambda c: (-(c["flow_smart_entities_60m"] or 0), -(c["flow_net_usd_60m"] or 0)))
     mk = _latest(conn, "market", 3600, now)
@@ -202,12 +227,18 @@ def sources(conn, now):
          "last": _count(conn, "SELECT MAX(ts) FROM market_snapshots"), "cost": "schon vorhanden"},
         {"key": "copy", "label": "Wal-Swaps des Copy-Traders", "n_1h": _count(conn, "SELECT COUNT(*) FROM ct_swaps WHERE seen_at>?", (h,)),
          "last": _count(conn, "SELECT MAX(seen_at) FROM ct_swaps"), "cost": "schon vorhanden"},
+        {"key": "quotes", "label": "Jupiter-Quotes (Stufe 3)", "n_1h": _count(conn, "SELECT COUNT(*) FROM intel_quotes WHERE ts>?", (h,)),
+         "last": _count(conn, "SELECT MAX(ts) FROM intel_quotes"), "cost": "Jupiter, kostenlos"},
+        {"key": "macro", "label": "BTC, ETH, Fear & Greed (Stufe 4)", "n_1h": _count(conn, "SELECT COUNT(*) FROM intel_macro WHERE ts>?", (h,)),
+         "last": _count(conn, "SELECT MAX(ts) FROM intel_macro"), "cost": "CoinGecko, alternative.me, kostenlos"},
+        {"key": "attention", "label": "Boosts und Bewerbung (Stufe 4)", "n_1h": _count(conn, "SELECT COUNT(*) FROM intel_attention WHERE ts>?", (h,)),
+         "last": _count(conn, "SELECT MAX(ts) FROM intel_attention"), "cost": "schon vorhanden"},
         {"key": "model", "label": "Wallet-Stufen (Modell)", "n_1h": _count(conn, "SELECT COUNT(*) FROM model_wallet_stats WHERE tier IS NOT NULL"),
          "last": _count(conn, "SELECT MAX(ts) FROM model_versions"), "cost": "schon vorhanden"},
     ]
     for s in out:
         s["age_s"] = None if not s["last"] else now - int(s["last"])
-        s["ok"] = s["age_s"] is not None and s["age_s"] <= (3 * 3600 if s["key"] == "model" else 1800)
+        s["ok"] = s["age_s"] is not None and s["age_s"] <= (3 * 3600 if s["key"] in ("model", "macro", "attention") else 1800)
     return out
 
 
@@ -235,5 +266,5 @@ def coin_view(conn, mint, now=None, hours=24):
             "history": hist, "events": ev, "meta": {k: v for k, v in meta.items() if k != "coverage"}}
 
 
-HISTORY = ("flow_net_usd_15m", "flow_smart_net_usd_60m", "flow_smart_entities_60m", "vol_roundtrip_60m", "liq_usd",
+HISTORY = ("tape_holders", "tape_top10", "tape_insider_held", "tape_smart_held", "exec_q_0_25", "flow_net_usd_15m", "flow_smart_net_usd_60m", "flow_smart_entities_60m", "vol_roundtrip_60m", "liq_usd",
            "hold_top10", "hold_insider", "exec_rt_0_25", "px_vol_15m", "flow_buy_ratio_15m")
