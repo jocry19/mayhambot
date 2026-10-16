@@ -45,7 +45,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 IS_MAC = platform.system() == "Darwin"
 APP_LABEL = "de.mayhambot.app"
-SERVICES = ("signals", "copytrade", "dashboard")
+
+
+def _services():
+    """Service names from the launcher (mayham.py SERVICES), so new services are watched automatically."""
+    try:
+        sys.path.insert(0, str(ROOT))
+        import mayham  # noqa: PLC0415 - stdlib-only module, no side effects on import
+        return tuple(mayham.SERVICES)
+    except Exception:  # noqa: BLE001
+        return ("signals", "copytrade", "dashboard", "model")
+
+
+SERVICES = _services()
 CONFIRM_RUNS = 2          # a problem must be seen in 2 consecutive rounds before restart/alert
 RESTART_COOLDOWN = 15 * 60
 SECRET_KEYS = ("SOLANA_PRIVATE_KEY",)   # never written into backups
