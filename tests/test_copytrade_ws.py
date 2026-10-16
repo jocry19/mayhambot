@@ -577,3 +577,54 @@ def test_look_alike_trade_events_from_other_programs_are_ignored():
              _trade_log(mint=bytes(32 * [7])), "Program JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUJoi5QNyVTaV4 success"]
     sw = chain.swap_from_logs(inner, WHALE, "s")  # routed through Jupiter: pump.fun's own event counts, the
     assert sw and sw.mint == PMINT                # look-alike printed by the router does not
+
+
+def test_subscriptions_are_paced_best_first_and_capped_after_a_limit_close(monkeypatch):
+    closed = []
+    a, b = FakeNode(), FakeNode()
+    monkeypatch.setattr(ws.WalletStream, "SUBS_PER_SEC", 8.0)
+    monkeypatch.setattr(ws.WalletStream, "MIN_CAP", 1)
+    monkeypatch.setattr(ws.WalletStream, "caps", {})
+    monkeypatch.setattr(ws.WalletStream, "rest_until", {})
+    wallets = [f"Wal{i}" for i in range(6)]
+    ua, ub = f"ws://127.0.0.1:{a.port}", f"ws://127.0.0.1:{b.port}"
+    st = ws.WalletStream(Settings(), url=[ua, ub])
+    st.set_wallets(wallets)
+
+    def watch_a():
+        # play the node's limit: after 3 confirmed subscriptions close the client with 1013
+        while not closed:
+            if len(a.subs) >= 3 and a.clients:
+                sock = a.clients[-1]
+                asyncio.run_coroutine_threadsafe(sock.close(1013, "Too many subscriptions attempted"),
+                                                 a.loop).result(5)
+                closed.append(True)
+            time.sleep(0.02)
+
+    threading.Thread(target=watch_a, daemon=True).start()
+    st.start()
+    try:
+        assert _wait(lambda: closed and len(st.covered()) == 6 and st.url == ub)
+        assert ws.WalletStream.caps[ua] <= 3 and ws.WalletStream.rest_until[ua] > time.time()
+        assert st.stats["limited"] == 1
+        assert list(a.subs)[:3] == wallets[:3]  # best wallets subscribed first, in order
+    finally:
+        st.stop()
+
+
+def test_whale_sells_do_not_take_the_entry_lock():
+    from copytrade import watch
+
+    got = []
+
+    class Strat:
+        def on_whale_sell(self, sw):
+            got.append(watch.ENTRY_LOCK.locked())
+
+        def on_whale_buy(self, sw):
+            got.append(watch.ENTRY_LOCK.locked())
+
+    sw = chain.Swap("s", W, 0, "sell", MINT, 1, 1, 1)
+    watch.handle_swap(Strat(), sw)
+    watch.handle_swap(Strat(), chain.Swap("s", W, 0, "buy", MINT, 1, 1, 1))
+    assert got == [False, True]

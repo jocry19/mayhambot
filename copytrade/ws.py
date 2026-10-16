@@ -35,7 +35,15 @@ class WalletStream:
     events: queue of (wallet, signature, received_at) for successful transactions mentioning the wallet.
     """
 
-    SUBSCRIBE_BATCH = 25  # new subscriptions per 5-s sync (no burst of 150 requests on a fresh connection)
+    # public nodes limit subscription *attempts* per connection/IP and close with 1013 "Too many subscriptions
+    # attempted": requests are paced by a token bucket, best wallets first, and an endpoint that closed with
+    # 1013 gets a lower cap (80 % of what it held) and a 10-minute rest while the stream uses the next one
+    SUBS_PER_SEC = 2.0
+    REST_AFTER_LIMIT_S = 600
+    MIN_CAP = 20
+    # shared by all streams in the process (the limit is per IP, not per connection): url -> cap / rest-until
+    caps: dict[str, int] = {}
+    rest_until: dict[str, float] = {}
 
     def __init__(self, s: Settings, url: str | list[str] | None = None, events: queue.Queue | None = None,
                  name: str = "wallet-ws"):
@@ -52,7 +60,9 @@ class WalletStream:
         # signature -> (received_at, wallet) of recent notifications, so the watcher can compare streams
         self.recent: "collections.OrderedDict[str, tuple[float, str]]" = collections.OrderedDict()
         self._kick: str | None = None
-        self._wanted: set[str] = set()
+        self._tokens, self._tok_at = 1.0, 0.0
+        self.stats["limited"] = 0
+        self._wanted: list[str] = []  # best first (manual, Ultra, Smart, rank)
         self._subs: dict[str, int] = {}  # wallet -> subscription id
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -61,7 +71,7 @@ class WalletStream:
     # ------------------------------------------------------------------ API for the engine
     def set_wallets(self, wallets) -> None:
         with self._lock:
-            self._wanted = set(list(wallets)[: self.max_wallets])
+            self._wanted = list(dict.fromkeys(wallets))[: self.max_wallets]
 
     def covered(self) -> set[str]:
         """Wallets with a confirmed subscription on a live connection (their polling can slow down)."""
@@ -87,6 +97,16 @@ class WalletStream:
             self._kick = reason
             self.stats["kicks"] += 1
 
+    def _allow(self) -> bool:
+        """Token bucket: SUBS_PER_SEC subscription requests per second, no bursts."""
+        now = time.time()
+        self._tokens = min(1.0, self._tokens + (now - (self._tok_at or now)) * self.SUBS_PER_SEC)
+        self._tok_at = now
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return True
+        return False
+
     def saw(self, sig: str) -> bool:
         return sig in self.recent
 
@@ -101,6 +121,10 @@ class WalletStream:
         while not self._stop.is_set():
             url = self.url
             self._kick = None
+            if self.rest_until.get(url, 0) > time.time() and any(
+                    self.rest_until.get(u, 0) <= time.time() for u in self.urls):
+                self._idx = (self._idx + 1) % len(self.urls)  # resting after a subscription limit: next one
+                continue
             try:
                 async with websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=2 ** 22,
                                               open_timeout=15) as sock:
@@ -111,7 +135,18 @@ class WalletStream:
                     await self._session(sock)
             except Exception as e:
                 self.stats["errors"] += 1
-                log.info("wallet websocket %s dropped: %s", url.split("?")[0], str(e)[:120])
+                txt = str(e)
+                if "1013" in txt or "Too many subscriptions" in txt:
+                    with self._lock:
+                        held = len(self._subs)
+                    cap = max(self.MIN_CAP, int(held * 0.8))
+                    self.caps[url] = min(cap, self.caps.get(url, cap))
+                    self.rest_until[url] = time.time() + self.REST_AFTER_LIMIT_S
+                    self.stats["limited"] += 1
+                    log.info("wallet websocket %s: subscription limit at %d wallets, cap %d, resting %d min",
+                             url.split("?")[0], held, self.caps[url], self.REST_AFTER_LIMIT_S // 60)
+                else:
+                    log.info("wallet websocket %s dropped: %s", url.split("?")[0], txt[:120])
             finally:
                 self.connected = False
                 with self._lock:
@@ -132,12 +167,17 @@ class WalletStream:
         while not self._stop.is_set():
             if self._kick:
                 raise ConnectionError(f"stale stream: {self._kick}")
-            if time.time() - last_sync > 5:
+            if time.time() - last_sync > 0.25:
                 last_sync = time.time()
+                cap = self.caps.get(self.url, self.max_wallets)
                 with self._lock:
-                    want, have = set(self._wanted), dict(self._subs)
+                    want_list, have = list(self._wanted)[:cap], dict(self._subs)
+                want = set(want_list)
                 busy = {w for _, w in pending.values()}
-                for w in sorted(want - set(have) - busy)[: self.SUBSCRIBE_BATCH]:
+                for w in [w for w in want_list if w not in have and w not in busy]:
+                    if len(have) + len(busy) >= cap or not self._allow():
+                        break
+                    busy.add(w)
                     req_id += 1
                     pending[req_id] = ("sub", w)
                     await sock.send(json.dumps({"jsonrpc": "2.0", "id": req_id, "method": "logsSubscribe",
@@ -148,7 +188,7 @@ class WalletStream:
                     await sock.send(json.dumps({"jsonrpc": "2.0", "id": req_id, "method": "logsUnsubscribe",
                                                 "params": [have[w]]}))
             try:
-                raw = await asyncio.wait_for(sock.recv(), timeout=5)
+                raw = await asyncio.wait_for(sock.recv(), timeout=0.25)
             except asyncio.TimeoutError:
                 continue
             self._handle(json.loads(raw), pending, sub_wallet)

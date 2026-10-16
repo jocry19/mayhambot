@@ -25,11 +25,13 @@ ENTRY_LOCK = threading.Lock()
 
 
 def handle_swap(strat, sw) -> None:
-    with ENTRY_LOCK:
-        if sw.side == "buy":
+    if sw.side == "buy":
+        with ENTRY_LOCK:
             strat.on_whale_buy(sw)
-        else:
-            strat.on_whale_sell(sw)
+    else:
+        # exits are claimed in the database (status 'closing'), so a sell needs no process lock and never
+        # blocks a parallel whale buy while its swap runs
+        strat.on_whale_sell(sw)
 
 
 class Watcher:
