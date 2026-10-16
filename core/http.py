@@ -74,6 +74,9 @@ _LOCK_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 # Adaptive spacing for shared hosts: every 429 stretches the interval for all processes (x1.5, up to
 # x4), every successful call shrinks it again slowly (x0.98), so the bots settle just under the real limit.
 SLOWDOWN_ON_429, SLOWDOWN_MAX, SLOWDOWN_DECAY = 1.5, 4.0, 0.98
+POOL_SLOWDOWN_MAX = 2.0     # public RPC pool: the windows already limit; a 429 must not stall all services
+POOL_MAX_SLEEP_429 = 3.0    # public RPC pool: sleep after a 429 at most this long (then retry, maybe elsewhere)
+POOL_TIMEOUT = 8            # seconds per public RPC call (a slow endpoint fails over instead of blocking 20 s)
 MIN_PENALTY_SECONDS = {"api.geckoterminal.com": 20.0}  # their 429 window is about a minute
 DEFAULT_MIN_PENALTY = 5.0
 
@@ -88,6 +91,10 @@ def _read_state(f):
     except ValueError:
         last, factor = 0.0, 1.0
     return last, min(max(factor, 1.0), SLOWDOWN_MAX)
+
+
+def _max_slowdown(host):
+    return POOL_SLOWDOWN_MAX if host in WINDOW_LIMITS else SLOWDOWN_MAX
 
 
 def _write_state(f, last, factor):
@@ -176,8 +183,8 @@ def _count(group, key, n=1):
     with _budget_lock:
         for d in (_usage, _usage_window):
             d.setdefault(group, {"calls": 0, "429": 0, "waited_s": 0.0, "credits": 0, "refused": 0,
-                                 "live_calls": 0, "bulk_calls": 0, "live_waited_s": 0.0,
-                                 "bulk_waited_s": 0.0, "latency_ms_sum": 0.0})[key] += n
+                                 "live_calls": 0, "normal_calls": 0, "bulk_calls": 0, "live_waited_s": 0.0,
+                                 "normal_waited_s": 0.0, "bulk_waited_s": 0.0, "latency_ms_sum": 0.0})[key] += n
 
 
 def _take_budget(host):
@@ -555,6 +562,7 @@ METHOD_LIMITS = _parse_map("PUBLIC_RPC_METHOD_LIMITS", {"getTokenLargestAccounts
 # Methods that should go to one endpoint first: 'method=host' (PUBLIC_RPC_PREFER).
 METHOD_PREFER = _parse_map("PUBLIC_RPC_PREFER", {"getTokenLargestAccounts": "solana-rpc.publicnode.com"})
 LIVE_MARKER_SECONDS = 2.0
+LANE_RANK = {"live": 2, "normal": 1, "bulk": 0}  # waiting order: live before normal before bulk
 
 
 def live_share():
@@ -576,8 +584,9 @@ def _window_wait(host, method, priority):
         return 0.0
     os.makedirs(_LOCK_DIR, exist_ok=True)
     path = os.path.join(_LOCK_DIR, host + ".window")
-    marker = os.path.join(_LOCK_DIR, host + ".live")
-    live = priority == "live"
+    rank = LANE_RANK.get(priority, 0)
+    live = rank == 2
+    markers = {r: os.path.join(_LOCK_DIR, f"{host}.{name}") for name, r in LANE_RANK.items() if r > 0}
     waited, t0 = 0.0, time.time()
     while True:
         with open(path, "a+") as f:
@@ -595,16 +604,18 @@ def _window_wait(host, method, priority):
                 total_cap = lim["total"] // 2 if _halved(host, now) else lim["total"]
                 per_method = METHOD_LIMITS.get(f"{method}@{host}", lim["per_method"])
                 per_method = max(1, per_method // 2) if _halved(host, now) else per_method
-                cap = total_cap if live else int(total_cap * (1 - live_share()))
-                live_waiting = False
-                if not live:
-                    try:
-                        live_waiting = now - os.path.getmtime(marker) < LIVE_MARKER_SECONDS
-                    except OSError:
-                        pass
+                # live: whole window; normal (service cycles): all but half the live share; bulk: no live share
+                cap = total_cap if live else int(total_cap * (1 - live_share() * (0.5 if rank == 1 else 1.0)))
+                live_waiting = False  # a higher lane is waiting -> step aside
+                for r, mk in markers.items():
+                    if r > rank:
+                        try:
+                            live_waiting = live_waiting or now - os.path.getmtime(mk) < LIVE_MARKER_SECONDS
+                        except OSError:
+                            pass
                 ok = total < cap and same < per_method and not live_waiting
                 if ok:
-                    calls.append([now, method or "", "L" if live else "B"])
+                    calls.append([now, method or "", "LNB"[2 - rank]])
                     f.seek(0)
                     f.truncate()
                     json.dump(calls, f)
@@ -615,10 +626,10 @@ def _window_wait(host, method, priority):
                 wait = (min(rel) + lim["window"] - now) if rel and not live_waiting else 0.2
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
-        if live:  # tell bulk callers in every process to step aside
+        if rank > 0:  # tell lower lanes in every process to step aside
             try:
-                with open(marker, "a"):
-                    os.utime(marker, None)
+                with open(markers[rank], "a"):
+                    os.utime(markers[rank], None)
             except OSError:
                 pass
         time.sleep(max(0.05, min(wait, 2.0)))
@@ -632,7 +643,7 @@ def throttle(host, interval=None, cost=None, das=False, priority="bulk", method=
     then the window limits (WINDOW_LIMITS) in the 'live' or 'bulk' lane.
     DAS calls (das=True) and api.helius.xyz also wait for the fixed 2 req/s DAS + Enhanced spacing.
     priority='live' for time-critical reads (copying a fresh buy), 'bulk' (default) for backfills."""
-    lane = "live" if priority == "live" else "bulk"
+    lane = priority if priority in LANE_RANK else "bulk"
     _charge(credit_cost(f"https://{host}/") if cost is None else cost)
     _take_budget(host)
     t0 = time.time()
@@ -659,6 +670,7 @@ def _shared_spacing(host, interval=None):
         return _wait_local(host, iv)
     try:
         last, factor = _read_state(f)
+        factor = min(factor, _max_slowdown(host))
         delay = last + iv * factor - time.time()
         if delay > 0:
             time.sleep(delay)
@@ -678,7 +690,7 @@ def penalize(host, seconds):
         return
     try:
         last, factor = _read_state(f)
-        _write_state(f, max(last, time.time() + seconds), min(factor * SLOWDOWN_ON_429, SLOWDOWN_MAX))
+        _write_state(f, max(last, time.time() + seconds), min(factor * SLOWDOWN_ON_429, _max_slowdown(host)))
     finally:
         _unlock(f)
 
@@ -734,7 +746,8 @@ def _wait_local(host, iv):
 # getTransaction jsonParsed v1) and dead or keyed ones leave the rotation for POOL_COOLDOWN seconds.
 # Verified keyless on the Mac 2026-10-16; drpc.org and ankr (needs a key) failed the probe. More via PUBLIC_RPC_URLS.
 DEFAULT_PUBLIC_RPC_URLS = ["https://api.mainnet-beta.solana.com", "https://solana-rpc.publicnode.com"]
-POOL_COOLDOWN = 600
+POOL_COOLDOWN = 600          # after a failed probe
+POOL_ERROR_COOLDOWN = 120    # after POOL_FAILS_TO_DISABLE timeouts / 5xx in a row
 POOL_FAILS_TO_DISABLE = 3
 PROBE_ADDRESS = "So11111111111111111111111111111111111111112"
 _latency = {}   # host -> EWMA ms (this process)
@@ -921,8 +934,8 @@ def _pool_result(host, ok, ms=None, status=None):
         if not others:
             log.warning("public RPC %s failing (%s) but it is the last healthy endpoint, keeping it", host, status)
             return
-        _pool_update(host, disabled_until=now + POOL_COOLDOWN, reason=f"{status or 'errors'} x3")
-        log.warning("public RPC %s left the pool for %d min (%s)", host, POOL_COOLDOWN // 60, status or "errors")
+        _pool_update(host, disabled_until=now + POOL_ERROR_COOLDOWN, reason=f"{status or 'errors'} x3")
+        log.warning("public RPC %s left the pool for %d s (%s)", host, POOL_ERROR_COOLDOWN, status or "errors")
 
 
 def _request(method, url, retries=4, timeout=20, priority="bulk", **kw):
@@ -946,14 +959,14 @@ def _request(method, url, retries=4, timeout=20, priority="bulk", **kw):
         throttle(host, cost=cost, das=das, priority=priority, method=rpc_method)
         t_req = time.time()
         try:
-            r = _session.request(method, url, timeout=timeout, **kw)
+            r = _session.request(method, url, timeout=min(timeout, POOL_TIMEOUT) if pooled else timeout, **kw)
         except requests.RequestException as e:
             if pooled:
                 _pool_result(host, False, status="error")
             if attempt == retries:
                 raise requests.RequestException(redact(e)) from None
             log.warning("%s %s failed (%s), retry", method, host, e)
-            time.sleep(2 ** attempt)
+            time.sleep(min(2 ** attempt, POOL_MAX_SLEEP_429) if pooled else 2 ** attempt)
             continue
         if pooled:
             _pool_result(host, r.status_code < 400, (time.time() - t_req) * 1000, r.status_code)
@@ -963,6 +976,8 @@ def _request(method, url, retries=4, timeout=20, priority="bulk", **kw):
             delay = float(r.headers.get("Retry-After") or 0) or (2 ** attempt) * 2
             if r.status_code == 429:
                 delay = max(delay, MIN_PENALTY_SECONDS.get(host, DEFAULT_MIN_PENALTY))
+                if pooled:
+                    delay = min(delay, POOL_MAX_SLEEP_429)
                 penalize(host, delay)
                 log.warning("429 %s %s (slowdown x%.2f, window %.0f%% of %s/10s%s), sleeping %.1fs", method,
                             _endpoint(url, kw), slowdown(host), 100 * _window_load(host) if host in WINDOW_LIMITS

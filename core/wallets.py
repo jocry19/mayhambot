@@ -30,12 +30,22 @@ def smart_wallets(conn, min_score=None):
     return conn.execute(q + " ORDER BY score DESC", args).fetchall()
 
 
-def backfill_candidates(conn, limit):
-    """Wallets worth fetching full history for: early, profitable entries, not bots, not recently backfilled."""
+def _has_table(conn, name):
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+
+def backfill_candidates(conn, limit, skip_research=True):
+    """Wallets worth fetching full history for: early, profitable entries, not bots, not recently backfilled.
+    skip_research: leave out wallets research/ already loads (research_wallets) or the model scored."""
+    skip = ""
+    if skip_research:
+        for t in ("research_wallets", "model_wallet_stats"):
+            if _has_table(conn, t):
+                skip += f" AND NOT EXISTS (SELECT 1 FROM {t} x WHERE x.address = w.address)"
     return [r[0] for r in conn.execute(
-        """SELECT w.address FROM wallets w
+        f"""SELECT w.address FROM wallets w
            JOIN wallet_positions p ON p.wallet = w.address
-           WHERE w.is_bot=0 AND w.backfilled_at < ? AND p.buy_usd >= ?
+           WHERE w.is_bot=0 AND w.backfilled_at < ? AND p.buy_usd >= ?{skip}
            GROUP BY w.address
            ORDER BY w.manual DESC, MAX(COALESCE(p.peak_multiple,0)) * (SUM(p.roi > 0) + 1) DESC
            LIMIT ?""", (int(time.time()) - 6 * 3600, settings.min_position_usd, limit))]

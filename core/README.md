@@ -117,6 +117,12 @@ A 429 never removes an endpoint: it slows the host down (shared slowdown) and ha
 healthy one. 429 log lines show the method, the window fill and whether the window is halved.
 - `core.sources.wallet_source.wallet_trades` raises `SkipForNow` on a public-RPC 429 (retry the wallet later)
   instead of falling back to Helius Enhanced; Enhanced fallbacks are capped at 10 per hour per process.
+- Three lanes, waiting order live > normal > bulk: `"live"` uses the whole window, `"normal"` (service cycles)
+  all but half the live share, `"bulk"` (default) no live share; lower lanes step aside while a higher one waits.
+- Pool calls: timeout 8 s, after a 429 at most 3 s sleep, slowdown at most x2; 3 timeouts / 5xx in a row take an
+  endpoint out for 2 min (failed probe: 10 min), never the last healthy one.
+- `wallet_trades(..., helius_rpc=True)`: paid Helius RPC lane first (1 credit per call, within the daily share),
+  public pool as fallback.
 - `priority="bulk"` (default, backfills, research) may use only `(1 - PUBLIC_RPC_LIVE_SHARE)` of the window
   (share default 0.4, so 54 of 90) and pauses while a live call is waiting (`data/ratelimit/<host>.live` marker).
 - `priority="live"` (copytrade, safety, sniper) may use the whole window and skips the plain spacing queue.

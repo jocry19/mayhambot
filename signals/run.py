@@ -101,15 +101,20 @@ def fetch_trades(conn, watch):
     return total
 
 
-def backfill(conn):
+def backfill(conn, deadline=None):
+    """History for wallets research/ does not cover yet, via the paid Helius RPC lane (public pool as fallback).
+    Stops at `deadline` (time.time() value); unfinished wallets stay unmarked for the next round."""
     n = 0
     mints = set()
     from core.sources.wallet_history import SkipForNow
     for w in wallets.backfill_candidates(conn, settings.backfill_wallets_per_cycle):
+        if deadline and time.time() > deadline:
+            break
         try:
-            trades = wallet_source.wallet_trades(w, limit=settings.backfill_tx_limit)
+            trades = wallet_source.wallet_trades(w, limit=settings.backfill_tx_limit, enhanced_fallback=False,
+                                                 helius_rpc=True)
         except SkipForNow:
-            break  # rate limited: keep the remaining wallets for the next cycle, unmarked
+            break  # rate limited: keep the remaining wallets for the next round, unmarked
         n += db.retry_locked(conn, lambda: db.insert_trades(conn, trades))
         mints |= {t.mint for t in trades}
         wallets.mark_backfilled(conn, w)
@@ -120,14 +125,47 @@ def backfill(conn):
     return n
 
 
+class Backfiller:
+    """Runs backfill() in its own thread with its own DB connection, so a slow or rate-limited RPC never
+    holds up the signal cycle (market data, scoring, signals). The cycle only reads the counter."""
+
+    def __init__(self, every=60):
+        import threading
+        self.every, self.total, self.last_error = every, 0, None
+        self._t = threading.Thread(target=self._loop, name="backfill", daemon=True)
+
+    def start(self):
+        self._t.start()
+        return self
+
+    def take(self):
+        n, self.total = self.total, 0
+        return n
+
+    def _loop(self):
+        conn = db.connect()
+        while True:
+            t0 = time.time()
+            try:
+                self.total += backfill(conn, deadline=t0 + 120)
+            except Exception as e:  # noqa: BLE001
+                self.last_error = e
+                log.warning("backfill round failed: %s", e)
+            time.sleep(max(5, self.every - (time.time() - t0)))
+
+
+_backfiller = None
+
+
 def cycle(conn, i):
     t0 = time.time()
     watch = refresh_watchlist(conn, i)
     new_trades = fetch_trades(conn, watch)
+    if _backfiller is not None:  # history arrives in the background; picked up by this rescore
+        bf = _backfiller.take()
+    else:  # --once / tests: inline, but with a hard time cap
+        bf = backfill(conn, deadline=time.time() + 20)
     db.retry_locked(conn, lambda: scoring.rescore_all(conn))
-    bf = backfill(conn)
-    if bf:
-        db.retry_locked(conn, lambda: scoring.rescore_all(conn))
     engine.last_cluster_stats.update(wallets=0, entities=0)
     sigs = engine.evaluate(conn, [r["mint"] for r in watch])
     notifier.notify(conn, sigs)
@@ -176,6 +214,9 @@ def main():
         for n in ns:
             n.send("mayhambot: Telegram-Test ✅")
         return
+    global _backfiller
+    if not a.once:
+        _backfiller = Backfiller().start()
     i = 0
     while True:
         try:

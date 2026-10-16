@@ -177,10 +177,26 @@ def _enhanced_allowed():
     return True
 
 
-def wallet_trades(wallet, limit=60, enhanced_fallback=True) -> list:
-    """A wallet's recent swaps. Public RPC pool first (0 Helius credits). A rate limit (429) there skips the
-    wallet for now (it is retried later); only other failures fall back to Helius Enhanced (100 credits),
-    at most ENHANCED_FALLBACKS_PER_HOUR per process."""
+def _helius_rpc():
+    from urllib.parse import urlparse
+    if urlparse(settings.rpc_url).netloc.endswith("helius-rpc.com"):
+        return settings.rpc_url
+    return settings.helius_rpc_url
+
+
+def wallet_trades(wallet, limit=60, enhanced_fallback=True, helius_rpc=False) -> list:
+    """A wallet's recent swaps. helius_rpc=True: the paid Helius RPC lane first (1 credit per call, within this
+    service's daily share), then the public RPC pool. Otherwise the public pool first (0 credits). A rate limit
+    (429) on the public pool skips the wallet for now (retried later); only other failures fall back to Helius
+    Enhanced (100 credits), at most ENHANCED_FALLBACKS_PER_HOUR per process."""
+    from core import http
+    url = _helius_rpc() if helius_rpc and settings.helius_api_key else ""
+    left = http.credits_left_today()
+    if url and (left is None or left >= limit + 1):
+        try:
+            return _rpc_wallet_trades(wallet, limit, url)
+        except Exception as e:  # noqa: BLE001 - incl. CreditsExhausted: go public
+            log.info("wallet history %s via Helius RPC failed (%s), public RPC instead", wallet[:6], e)
     try:
         return _rpc_wallet_trades(wallet, limit, PUBLIC_RPC)
     except Exception as e:  # noqa: BLE001
