@@ -1,10 +1,12 @@
 # core + signals
 requests>=2.31
 python-dotenv>=1.0
-# dashboard (python -m web) and terminal (python -m cli)
-fastapi>=0.110
-uvicorn>=0.29
-textual>=0.80
+# dashboard (python -m web) and terminal (python -m cli), pinned to the tested versions.
+# web/tests call the ASGI app directly: no httpx or httpx2 package is needed.
+fastapi==0.143.2
+starlette==1.8.0
+uvicorn==0.54.0
+textual==8.2.8
 rich>=13
 # old Streamlit dashboard/ (no longer started; kept until it is removed)
 streamlit>=1.50

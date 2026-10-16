@@ -22,13 +22,12 @@ GET = ["/api/overview", "/api/signals", "/api/signals/performance", "/api/coins"
 def _client(db: str):
     os.environ["MAYHAM_DB_PATH"] = db
     os.environ.pop("WEB_PASSWORD", None)
-    from fastapi.testclient import TestClient
-
     from web import db as wdb
     from web.server import app
+    from web.tests.asgi import Client
 
     wdb.cache.clear()
-    return TestClient(app, client=("127.0.0.1", 5000))
+    return Client(app, client=("127.0.0.1", 5000))
 
 
 @pytest.fixture(scope="module")
@@ -96,12 +95,11 @@ def test_controls_write_config_only(demo):
 
 
 def test_writes_refused_from_lan(demo):
-    from fastapi.testclient import TestClient
-
     from web.server import app
+    from web.tests.asgi import Client
 
     os.environ["MAYHAM_DB_PATH"] = demo
-    c = TestClient(app, client=("192.168.1.20", 5000))
+    c = Client(app, client=("192.168.1.20", 5000))
     assert c.post("/api/control/pause", json={"on": True}).status_code in (401, 403)
 
 

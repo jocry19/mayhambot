@@ -1,5 +1,6 @@
-# web dashboard + terminal (python -m web, python -m cli)
-fastapi>=0.110
-uvicorn>=0.29
-textual>=0.80
+# same pins as the root requirements.txt
+fastapi==0.143.2
+starlette==1.8.0
+uvicorn==0.54.0
+textual==8.2.8
 rich>=13

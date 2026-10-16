@@ -68,7 +68,7 @@ async def auth(request: Request, call_next):
                 good = False
         if not good:
             return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="mayhambot"'})
-    elif request.method not in ("GET", "HEAD") and request.client and request.client.host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+    elif request.method not in ("GET", "HEAD") and request.client and request.client.host not in ("127.0.0.1", "::1", "localhost"):
         return Json({"detail": "Schreiben nur von localhost oder mit WEB_PASSWORD"}, status_code=403)
     return await call_next(request)
 
