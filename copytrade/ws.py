@@ -34,8 +34,10 @@ class WalletStream:
     events: queue of (wallet, signature, received_at) for successful transactions mentioning the wallet.
     """
 
-    def __init__(self, s: Settings, url: str | None = None):
-        self.url = url or s.ws_url
+    def __init__(self, s: Settings, url: str | list[str] | None = None):
+        urls = [url] if isinstance(url, str) else (url or [u for u in s.ws_urls if u != "off"])
+        self.urls = urls
+        self._idx = 0
         self.max_wallets = s.ws_max_wallets
         self.events: queue.Queue = queue.Queue()
         self.connected = False
@@ -70,27 +72,37 @@ class WalletStream:
         self._stop.set()
 
     # ------------------------------------------------------------------ internals
+    @property
+    def url(self) -> str:
+        """Endpoint in use (or tried next)."""
+        return self.urls[self._idx % len(self.urls)]
+
     async def _main(self) -> None:
         backoff = 1.0
         while not self._stop.is_set():
+            url = self.url
             try:
-                async with websockets.connect(self.url, ping_interval=20, ping_timeout=20, max_size=2 ** 22,
+                async with websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=2 ** 22,
                                               open_timeout=15) as sock:
                     self.connected = True
                     self.stats["connects"] += 1
                     backoff = 1.0
-                    log.info("wallet websocket connected (%s)", self.url.split("?")[0])
+                    log.info("wallet websocket connected (%s)", url.split("?")[0])
                     await self._session(sock)
             except Exception as e:
                 self.stats["errors"] += 1
-                log.info("wallet websocket dropped: %s (reconnect in %.0fs)", str(e)[:120], backoff)
+                log.info("wallet websocket %s dropped: %s", url.split("?")[0], str(e)[:120])
             finally:
                 self.connected = False
                 with self._lock:
                     self._subs.clear()
-            if self._stop.wait(backoff):
+            # next endpoint right away; after a full round through the list wait with growing backoff
+            self._idx = (self._idx + 1) % len(self.urls)
+            wait = backoff if self._idx == 0 else 0.5
+            if self._idx == 0:
+                backoff = min(backoff * 2, 60.0)
+            if self._stop.wait(wait):
                 break
-            backoff = min(backoff * 2, 60.0)
 
     async def _session(self, sock) -> None:
         req_id = 0

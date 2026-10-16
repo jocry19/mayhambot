@@ -126,6 +126,7 @@ def test_covered_wallets_are_only_polled_as_safety_net(env):
 def test_rpc_reads_public_first_live_paths_on_main(monkeypatch):
     from copytrade import http as cthttp
     urls = []
+    monkeypatch.setattr(chain, "_core_http", None)  # without core's endpoint pool (tested below)
     monkeypatch.setattr(cthttp, "post_json", lambda url, p, **k: urls.append((url.split("?")[0], p["method"]))
                         or prios.append((k["priority"], k["rpc_method"])) or {"result": {"value": 1}})
     prios = []
@@ -145,3 +146,44 @@ def test_rpc_reads_public_first_live_paths_on_main(monkeypatch):
     assert urls[-1][0] == chain.PUBLIC_RPC
     u = rpc.usage()
     assert u["public:getTransaction"] == 1 and u["helius:getBalance"] == 1 and u["public:getBalance"] == 1
+
+
+def test_public_reads_rotate_over_core_endpoint_pool(monkeypatch):
+    import types
+    sent = []
+    pool = types.SimpleNamespace(
+        public_rpc_urls=lambda: ["https://api.mainnet-beta.solana.com", "https://solana-rpc.publicnode.com"],
+        pick_public_rpc=lambda prio: "https://solana-rpc.publicnode.com" if prio == "live"
+        else "https://api.mainnet-beta.solana.com",
+        post_json=lambda url, p, **k: sent.append((url, p["method"], k["priority"], k["retries"])) or {"result": 7})
+    monkeypatch.setattr(chain, "_core_http", pool)
+    rpc = chain.Rpc(Settings(rpc_url="https://mainnet.helius-rpc.com/?api-key=k", poll_rpc_url=""))
+    assert rpc.public.pooled and not rpc.pooled
+    assert rpc.transaction("s", priority="live") == 7
+    rpc.signatures(W)
+    assert sent == [("https://solana-rpc.publicnode.com", "getTransaction", "live", 1),
+                    ("https://api.mainnet-beta.solana.com", "getSignaturesForAddress", "bulk", 3)]
+    assert rpc.endpoints() == {"solana-rpc.publicnode.com": 1, "api.mainnet-beta.solana.com": 1}
+
+
+def test_stream_switches_endpoint_after_a_drop():
+    node = FakeNode()
+    dead = "ws://127.0.0.1:1"  # nothing listens: connection refused
+    st = ws.WalletStream(Settings(), url=[dead, f"ws://127.0.0.1:{node.port}"]).start()
+    try:
+        st.set_wallets([W])
+        assert _wait(lambda: W in st.covered())
+        assert st.url.endswith(str(node.port)) and st.stats["errors"] >= 1
+        node.kick()  # drop -> next endpoint (the dead one), then back round to the live one
+        assert _wait(lambda: st.stats["connects"] >= 2 and W in st.covered(), 15)
+    finally:
+        st.stop()
+
+
+def test_ws_urls_setting(monkeypatch):
+    monkeypatch.setenv("CT_WS_URLS", "wss://a, wss://b")
+    assert Settings().ws_urls == ["wss://a", "wss://b"] and Settings().ws_url == "wss://a"
+    monkeypatch.setenv("CT_WS_URLS", "off")
+    assert Settings().ws_url == "off"
+    monkeypatch.delenv("CT_WS_URLS")
+    assert len(Settings().ws_urls) == 3

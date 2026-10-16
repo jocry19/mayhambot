@@ -140,7 +140,9 @@ slippage_bps` (Anteile: 0.2 = 20 %; `min_score`, `min_smart_buyers`, `max_signal
 - Abfrage-Takt pro Wallet: letzter Swap < 6 h alle `CT_WALLET_POLL_SECONDS`, < 48 h alle `CT_POLL_WARM_SECONDS` (60),
   sonst alle `CT_POLL_COLD_SECONDS` (300); manuelle Wallets immer schnell.
 - **Websocket:** Für die heißen Wallets (letzter Swap < 6 h, manuelle) hält der Bot eine `logsSubscribe`-Subscription
-  je Wallet auf `CT_WS_URL` (Standard: öffentlicher Mainnet-Websocket, `off` = nur Polling, max. `CT_WS_MAX_WALLETS`=40).
+  je Wallet auf dem ersten erreichbaren Endpunkt aus `CT_WS_URLS` (Standard: api.mainnet-beta.solana.com,
+  solana-rpc.publicnode.com, solana.drpc.org; nach einem Abbruch geht es zum nächsten; `off` = nur Polling,
+  max. `CT_WS_MAX_WALLETS`=40). Die Stundenzeile nennt den aktiven Endpunkt.
   Ein Wal-Kauf ist damit nach ~1 s bekannt statt beim nächsten Poll. Abbrüche: Neuverbindung mit Backoff 1→60 s.
   Abgedeckte Wallets werden nur noch als Netz im 60-s-Takt gepollt; jede Transaktion wird nur einmal gehandelt.
   Einmal pro Stunde eine Logzeile: Swaps per Websocket (mit mittlerer Zeit Meldung → erkannter Swap) vs. per Polling,
@@ -150,7 +152,8 @@ slippage_bps` (Anteile: 0.2 = 20 %; `min_score`, `min_smart_buyers`, `max_signal
   getBalance, sendTransaction, getSignatureStatuses), `bulk` für Backfill, Wal-Suche und die 60-s-Netzpolls;
   die Methode wird immer mitgegeben.
 - **RPC:** Lesen (`getSignaturesForAddress`, `getTransaction`, `getTokenSupply`) für Polls, Websocket-Treffer,
-  Wal-Suche und Backfill geht zuerst an `CT_POLL_RPC_URL` (Standard: öffentliches Mainnet-RPC, wenn `SOLANA_RPC_URL`
+  Wal-Suche und Backfill geht zuerst an den Endpunkt-Pool von core.http (`http.pick_public_rpc`: live = schnellster,
+  bulk = meister freier Platz; ohne core an `CT_POLL_RPC_URL`, Standard: öffentliches Mainnet-RPC, wenn `SOLANA_RPC_URL`
   Helius ist; `off` = alles über Helius), Helius nur als Fallback. Helius bleibt für Live-Pfade (`getBalance`,
   `sendTransaction`, `getSignatureStatuses`, eigene Swap-Bestätigung). Ist copytrades Helius-Tagesanteil
   (core.http, 15 %) verbraucht, leitet core auch diese Standard-Aufrufe an das öffentliche RPC.
@@ -243,7 +246,7 @@ CT_POLL_WARM_SECONDS=60
 CT_POLL_COLD_SECONDS=300
 CT_POLL_RPC_URL=                      # leer = öffentliches RPC für Polls, wenn Helius das Haupt-RPC ist; off = Helius
 CT_DISCOVER_EVERY_SECONDS=1800
-CT_WS_URL=wss://api.mainnet-beta.solana.com   # off = nur Polling
+CT_WS_URLS=wss://api.mainnet-beta.solana.com,wss://solana-rpc.publicnode.com,wss://solana.drpc.org   # off = nur Polling
 CT_WS_MAX_WALLETS=40
 CT_MIN_WHALE_BUY_SOL=2
 

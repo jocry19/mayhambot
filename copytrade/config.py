@@ -70,7 +70,16 @@ class Settings:
     # is only used for real transactions. Default: public mainnet when SOLANA_RPC_URL is Helius; "off" = same RPC.
     poll_rpc_url: str = field(default_factory=lambda: os.getenv("CT_POLL_RPC_URL", ""))
     # real-time detection: logsSubscribe per hot wallet on this websocket ("off" = polling only)
-    ws_url: str = field(default_factory=lambda: os.getenv("CT_WS_URL", "wss://api.mainnet-beta.solana.com"))
+    # CT_WS_URLS: comma list, tried in order, next one after a drop; CT_WS_URL (single) still works; "off" = none
+    ws_urls: list[str] = field(default_factory=lambda: [u.strip() for u in (
+        os.getenv("CT_WS_URLS") or os.getenv("CT_WS_URL")
+        or "wss://api.mainnet-beta.solana.com,wss://solana-rpc.publicnode.com,wss://solana.drpc.org").split(",")
+        if u.strip()])
+
+    @property
+    def ws_url(self) -> str:
+        return "off" if not self.ws_urls or self.ws_urls[0] == "off" else self.ws_urls[0]
+
     ws_max_wallets: int = field(default_factory=lambda: _i("CT_WS_MAX_WALLETS", 40))
     discover_every_s: float = field(default_factory=lambda: _f("CT_DISCOVER_EVERY_SECONDS", 1800))
     poll_warm_seconds: float = field(default_factory=lambda: _f("CT_POLL_WARM_SECONDS", 60))

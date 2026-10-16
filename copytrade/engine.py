@@ -122,13 +122,18 @@ class Engine:
         line = (f"detection last hour: {tracker.DETECTED['ws']} swaps via websocket"
                 + (f" (mean {sum(lat) / len(lat):.2f}s notification->swap)" if lat else "")
                 + f", {tracker.DETECTED['poll']} via polling; websocket {'connected' if st and st.connected else 'off/disconnected'}"
-                + (f" ({len(st.covered())} wallets, {st.stats['connects']} connects)" if st else "")
-                + f"; rpc calls public {pub}, helius {hel}, fallbacks {self.rpc.fallbacks}")
+                + (f" to {st.url.split('?')[0]} ({len(st.covered())} wallets, {st.stats['connects']} connects)"
+                   if st else "")
+                + f"; rpc calls public {pub}"
+                + (f" ({', '.join(f'{h} {n}' for h, n in sorted(self.rpc.endpoints().items(), key=lambda x: -x[1]))})"
+                   if self.rpc.endpoints() else "")
+                + f", helius {hel}, fallbacks {self.rpc.fallbacks}")
         tracker.DETECTED.update(ws=0, poll=0)
         tracker.WS_LATENCY.clear()
         self.rpc.counts.clear()
         if self.rpc.public:
             self.rpc.public.counts.clear()
+            self.rpc.public.hosts.clear()
         log.info(line)
         return line
 
@@ -173,7 +178,7 @@ class Engine:
         tracker.load_manual(self.conn, self.s)
         threading.Thread(target=price_loop, name="positions", daemon=True).start()
         threading.Thread(target=maint_loop, name="maintenance", daemon=True).start()
-        if self.s.ws_url and self.s.ws_url != "off" and ws.available():
+        if self.s.ws_url != "off" and ws.available():
             self.stream = ws.WalletStream(self.s).start()
             self.stream.set_wallets(tracker.hot_wallets(self.conn, self.s))
         while not self._stop.is_set():

@@ -23,6 +23,20 @@ try:  # Helius credit ledger shared by all mayhambot processes (core/README.md "
     from core.http import CreditsExhausted, rpc_url as _core_rpc_url  # type: ignore
 except Exception:  # copytrade without core
     _core_rpc_url = None
+try:  # pool of keyless public endpoints with probe, failover and per-endpoint lanes (core/README.md)
+    from core import http as _core_http  # type: ignore
+
+    if not hasattr(_core_http, "pick_public_rpc"):
+        _core_http = None
+except Exception:
+    _core_http = None
+
+
+def _is_pool_url(url: str) -> bool:
+    if not _core_http:
+        return False
+    host = urlparse(url).netloc
+    return host in {urlparse(u).netloc for u in _core_http.public_rpc_urls()} or url.rstrip("/") == PUBLIC_RPC
 
     class CreditsExhausted(Exception):  # type: ignore[no-redef]
         pass
@@ -46,6 +60,8 @@ class Rpc:
         self.poller = self.public  # old name
         self.fallbacks = 0
         self.counts: dict[str, int] = {}  # "public:getTransaction" -> n (hourly usage log)
+        self.pooled = url is not None and _is_pool_url(self.url)  # rotate over core's public endpoint pool
+        self.hosts: dict[str, int] = {}  # public endpoint host -> calls (hourly usage log)
 
     @property
     def poll_fallbacks(self) -> int:
@@ -54,13 +70,24 @@ class Rpc:
     def call(self, method: str, params: list[Any], priority: str = "live") -> Any:
         """priority 'live' (default: own trades, fresh whale buys) or 'bulk' (backfill, discovery, net polls)."""
         self._id += 1
+        payload = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params}
+        if self.pooled:  # core picks the endpoint (live: fastest, bulk: most room), books latency and failures
+            url = _core_http.pick_public_rpc(priority)
+            host = urlparse(url).netloc
+            self.hosts[host] = self.hosts.get(host, 0) + 1
+            self.counts[f"public:{method}"] = self.counts.get(f"public:{method}", 0) + 1
+            live = priority == "live"
+            d = _core_http.post_json(url, payload, priority=priority, retries=1 if live else 3,
+                                     timeout=10 if live else 20)
+            if "error" in d:
+                raise RuntimeError(f"rpc {method}: {d['error']}")
+            return d.get("result")
         url = _core_rpc_url(method, self.url) if _core_rpc_url and "helius" in self.url else self.url
         if not self.shared:  # Helius / public RPC: core.http.throttle() spaces calls across all processes
             self.lim.wait()
         kind = "public" if url != self.url or "helius" not in url else "helius"
         self.counts[f"{kind}:{method}"] = self.counts.get(f"{kind}:{method}", 0) + 1
-        d = http.post_json(url, {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params},
-                           priority=priority, rpc_method=method)
+        d = http.post_json(url, payload, priority=priority, rpc_method=method)
         if "error" in d:
             raise RuntimeError(f"rpc {method}: {d['error']}")
         return d.get("result")
@@ -78,6 +105,10 @@ class Rpc:
                 log.debug("public rpc %s failed, using main rpc: %s", method, e)
             self.fallbacks += 1
         return self.call(method, params, priority)
+
+    def endpoints(self) -> dict[str, int]:
+        """Public endpoint host -> calls since the last reset."""
+        return dict(self.public.hosts) if self.public else dict(self.hosts)
 
     def usage(self) -> dict[str, int]:
         out = dict(self.counts)

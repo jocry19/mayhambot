@@ -423,6 +423,7 @@ def test_wallet_polls_use_free_rpc_and_fall_back(monkeypatch):
             raise RuntimeError("429")
         return {"result": [{"signature": "x"}]}
 
+    monkeypatch.setattr(chain, "_core_http", None)  # without core's endpoint pool
     monkeypatch.setattr(cthttp, "post_json", fake_post)
     rpc = chain.Rpc(Settings(rpc_url="https://mainnet.helius-rpc.com/?api-key=k", poll_rpc_url=""))
     assert rpc.poll_signatures(W) == [{"signature": "x"}]
