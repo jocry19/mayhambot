@@ -63,10 +63,11 @@ def analyze(st, cfg, enr=None, tiers=None, now=None):
 
     # ------------------------------------------------------------ bundles (creation slot / second)
     early = [e for e in enr.get("early") or [] if e.get("wallet")]
-    create_slot = enr.get("create_slot")
+    create_slot = enr.get("create_slot") or getattr(st, "create_slot", None)
     if create_slot is None and early:
+        # only the creation transaction itself fixes the slot; the oldest trade we happen to have is not it
         cs = [e.get("slot") for e in early if e.get("sig") == st.create_sig and e.get("slot") is not None]
-        create_slot = cs[0] if cs else min((e["slot"] for e in early if e.get("slot") is not None), default=None)
+        create_slot = cs[0] if cs else None
     bundle = {}
     if early and create_slot is not None:
         src = "slot"
@@ -232,10 +233,8 @@ def analyze(st, cfg, enr=None, tiers=None, now=None):
             a.positives.append("Socials: " + ", ".join(socials) + ".")
         else:
             a.add("socials", 15, "Keine Website und keine Socials hinterlegt.")
-    auth = enr.get("authorities") or {}
-    if auth.get("mint_authority") or auth.get("freeze_authority"):
-        a.hard = True
-        a.add("authorities", 90, "Mint- oder Freeze-Authority ist noch aktiv.")
+    # mint/freeze authorities: pump.fun revokes both at creation; for every buy candidate the safety gate below
+    # (safety.assess) checks them on chain and blocks, so no separate stage-2 call is spent here
     saf = enr.get("safety")
     factor = 1.0
     if saf:
@@ -280,7 +279,7 @@ def analyze(st, cfg, enr=None, tiers=None, now=None):
              top3_share=round(top3, 3), curve_progress=round(prog, 4) if prog is not None else None,
              age_sec=round(now - st.created_ts, 1), mcap_sol=round(st.mcap_sol, 2),
              mcap_growth=round(st.mcap_sol / st.mcap0_sol - 1, 3) if st.mcap0_sol else None,
-             drawdown=round(1 - st.mcap_sol / st.max_mcap_sol, 3) if st.max_mcap_sol else None,
+             drawdown=round(1 - st.mcap_sol / st.peak_mcap_sol, 3) if st.peak_mcap_sol else None,
              n_ultra=sum(1 for t in smart.values() if t == "ultra"),
              n_smart=sum(1 for t in smart.values() if t == "smart"),
              n_good=sum(1 for t in smart.values() if t == "good"))

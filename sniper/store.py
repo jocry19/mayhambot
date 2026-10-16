@@ -42,6 +42,10 @@ CREATE TABLE IF NOT EXISTS sniper_positions (
 );
 CREATE INDEX IF NOT EXISTS idx_sniper_pos_status ON sniper_positions(status);
 CREATE TABLE IF NOT EXISTS sniper_state (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS sniper_paths (
+    mint TEXT PRIMARY KEY, created_ts INTEGER, decided_ts INTEGER, base_mcap_sol REAL, n_points INTEGER,
+    points_json TEXT
+);
 """
 
 
@@ -118,6 +122,32 @@ def save_curve(conn, mint, points):
                          [(mint, int(p[0]), p[1], p[2], p[3]) for p in points])
         conn.commit()
     db.retry_locked(conn, write)
+
+
+def save_path(conn, mint, created_ts, decided_ts, base_mcap_sol, points):
+    """Bucketed mcap path ([[sec after creation, last, low, high], ...]) of a finished launch."""
+    if not points or len(points) < 2:
+        return
+
+    def write():
+        conn.execute("INSERT OR REPLACE INTO sniper_paths VALUES (?,?,?,?,?,?)",
+                     (mint, int(created_ts or 0), int(decided_ts or 0), base_mcap_sol, len(points),
+                      json.dumps(points, separators=(",", ":"))))
+        conn.commit()
+    db.retry_locked(conn, write)
+
+
+def load_paths(conn, mints=None):
+    """{mint: points} for the given mints (all when None)."""
+    if mints is None:
+        rows = conn.execute("SELECT mint, points_json FROM sniper_paths").fetchall()
+    else:
+        rows, mints = [], list(mints)
+        for i in range(0, len(mints), 500):
+            part = mints[i:i + 500]
+            rows += conn.execute(f"SELECT mint, points_json FROM sniper_paths WHERE mint IN ({','.join('?' * len(part))})",
+                                 part).fetchall()
+    return {r[0]: json.loads(r[1]) for r in rows}
 
 
 def get_state(conn, key, default=None):
@@ -217,6 +247,7 @@ def prune(conn, keep_days, now=None):
 
     def write():
         conn.execute("DELETE FROM sniper_curve WHERE ts < ?", (cut,))
+        conn.execute("DELETE FROM sniper_paths WHERE created_ts < ?", (cut,))
         # stage-1 skips are many and small; stage 2 and entries are kept for learning
         conn.execute("DELETE FROM sniper_launches WHERE decided_ts < ? AND stage = 1", (cut,))
         conn.commit()

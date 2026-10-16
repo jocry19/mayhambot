@@ -160,6 +160,7 @@ class LogStream:
         self.mode = "mints" if self.auto else mode
         self.program = program
         self.want, self.subs = set(), {}       # account -> subscription id
+        self.want_ts = {}                      # account -> when it was first wanted
         self.pending = {}                      # request id -> account
         self.next_id = 1
         self.connected = False
@@ -171,11 +172,26 @@ class LogStream:
         self.ws = None
         self._tokens, self._last = 0.0, None
 
-    def subscribe(self, mints):
+    def subscribe(self, mints, now=None):
+        import time as _t
+        now = now or _t.time()
+        for m in set(mints) - self.want:
+            self.want_ts[m] = now
         self.want |= set(mints)
 
     def unsubscribe(self, mints):
         self.want -= set(mints)
+        for m in mints:
+            self.want_ts.pop(m, None)
+
+    def is_live(self, mint):
+        """Trades of this mint actually arrive (its own subscription, or the program-wide one, is confirmed)."""
+        return (self.program in self.subs) if self.mode == "program" else (mint in self.subs)
+
+    def not_live(self, now, grace=30):
+        """Mints wanted for longer than `grace` seconds without a confirmed subscription (refused, over the
+        subscription limit, or the connection is down)."""
+        return [m for m in list(self.want_ts) if now - self.want_ts[m] > grace and not self.is_live(m)]
 
     def active_subs(self):
         return len(self.subs)
@@ -266,7 +282,8 @@ class LogStream:
                                 else:
                                     self.rejects += 1
                                     log.warning("logsSubscribe abgelehnt: %s", str(m.get("error"))[:160])
-                                    self.want.discard(acc)
+                                    if self.mode != "program":
+                                        self.want.discard(acc)   # want_ts stays: the service sees it as not live
                                 continue
                             self.deliver(m)
                             if stop.is_set():

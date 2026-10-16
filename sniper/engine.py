@@ -11,7 +11,7 @@ import logging
 import threading
 import time
 
-from sniper import store
+from sniper import research, store
 from sniper.analyze import analyze
 from sniper.paper import PaperBook
 from sniper.state import LaunchState
@@ -80,7 +80,11 @@ class Engine:
         self.lock = threading.RLock()
         self.to_sub, self.to_unsub = set(), set()
         self.tiers = {}
-        self.trades_live = True    # the service clears it while launches arrive without any trades (blind stream)
+        if not store.get_state(self.conn, "outcome_fix_ts"):
+            # from here on max/min_ret_60m start at the decision price; research trusts them only after this
+            store.set_state(self.conn, "outcome_fix_ts", str(int(time.time())))
+        self.trades_live = True
+        self.learned = None        # accepted rule from sniper.research (refreshed by the service), None = fixed rules    # the service clears it while launches arrive without any trades (blind stream)
         self.stream_pools = None   # pools whose trades we receive (None = all); the RPC log stream decodes pump only
         self.book = PaperBook(cfg, conn)
         self.counters = {"creates": 0, "trades": 0, "migrations": 0, "stage1": 0, "stage2": 0, "entries": 0}
@@ -115,7 +119,12 @@ class Engine:
                          create_sig=r["create_sig"] or "")
         st.stage, st.decision, st.decided_ts = r["stage"] or 1, r["decision"] or "skip", r["decided_ts"]
         st.base_mcap_sol = r["mcap_decide_sol"]
-        st.mcap_sol = st.max_mcap_sol = st.min_mcap_sol = r["mcap_max_sol"] or r["mcap_decide_sol"] or 0.0
+        # no live price after a restart: 0 until a trade or DexScreener delivers one (the stored high as current
+        # price sold open positions at a fake take-profit on the first tick)
+        st.mcap_sol = 0.0
+        base = st.base_mcap_sol or 0.0
+        st.max_mcap_sol = base * (1 + r["max_ret_60m"]) if base and r["max_ret_60m"] is not None else base
+        st.min_mcap_sol = base * (1 + r["min_ret_60m"]) if base and r["min_ret_60m"] is not None else base
         st.migrated = bool(r["migrated"])
         for h in self.cfg.horizons_min:
             v = r[f"ret_{h}m"]
@@ -248,6 +257,7 @@ class Engine:
     def _stage1(self, st, now):
         st.decided_ts, st.stage = now, 1
         st.base_mcap_sol = st.current_mcap_sol()
+        st.max_mcap_sol = st.min_mcap_sol = st.base_mcap_sol   # outcome extremes start at the decision price
         self.counters["stage1"] += 1
         if st.source != "pumpportal":
             a = analyze(st, self.cfg, None, self.tiers, now)
@@ -268,6 +278,8 @@ class Engine:
             reason = "no_stream"
         elif F["dev_sold_pct"] >= 50:
             reason = "dev_sold"
+        elif self.learned and research.matches(self.learned, dict(F, mcap_decide_sol=st.base_mcap_sol, risk=a.risk)):
+            st.learned = True   # the accepted research rule picks it; stage 2 still checks bundles and safety
         elif F["n_buyers"] < self.cfg.min_buyers or F["net_sol"] < self.cfg.min_inflow_sol \
                 or a.momentum < self.cfg.prescore_min:
             reason = "activity"
@@ -289,6 +301,8 @@ class Engine:
             if h in st.outcomes or now < st.decided_ts + h * 60:
                 continue
             v = st.current_mcap_sol()
+            if not v:      # no price yet (restarted stub): wait for one instead of recording a total loss
+                continue
             st.outcomes[h] = v
             if base:
                 upd[f"ret_{h}m"] = round(v / base - 1, 4)
@@ -309,6 +323,8 @@ class Engine:
             upd["rugged"] = int(r60 is not None and (r60 <= -0.8 or (dump and r60 <= -0.5)))
             if st.stage >= 2:
                 store.save_curve(self.conn, st.mint, [p for p in st.curve if p[0] - st.created_ts <= 900])
+            if st.n_seen or st.external_ts:   # a path with movement: replays of exit rules need it
+                store.save_path(self.conn, st.mint, st.created_ts, st.decided_ts, base, st.path.points())
         store.update_launch(self.conn, st.mint, **upd)
 
     def due_external(self, now=None, ahead=None):
@@ -335,14 +351,26 @@ class Engine:
                 st = self.launches.get(m)
                 if st and v:
                     st.external_mcap_sol, st.external_ts = v, now
-                    st.max_mcap_sol = max(st.max_mcap_sol, v)
-                    st.min_mcap_sol = min(st.min_mcap_sol or v, v)
+                    st.path.add(now, v)
+                    if st.decided_ts is not None:
+                        st.max_mcap_sol = max(st.max_mcap_sol, v)
+                        st.min_mcap_sol = min(st.min_mcap_sol or v, v)
             for m in list(self.book.open):
                 st = self.launches.get(m)
                 if st and (st.migrated or not st.subscribed):
                     check.append(st)
-        for st in check:  # Jupiter quotes for the sell happen here, outside the lock (caller's thread)
-            self.book.check(conn or self.conn, st, now, self.quote_fn)
+        for st in check:
+            # the Jupiter quote is fetched here, outside the lock (network); the exit itself runs under the lock,
+            # because the stream thread checks and sells the same positions (lost updates, double sells)
+            p = self.book.open.get(st.mint)
+            if not p:
+                continue
+            n = p["remaining"]
+            q = self.quote_fn(st.mint, n, "sell") if self.quote_fn and n > 0 else None
+            qf = (lambda _m, tokens, _side, q=q, n=n: dict(q, out=q["out"] * tokens / n)) if q and q.get("out") else None
+            with self.lock:
+                if st.mint in self.book.open:
+                    self.book.check(conn or self.conn, st, now, qf)
 
     # ------------------------------------------------------------------ stage 2
     def skip_budget(self, st, now=None):
@@ -362,6 +390,8 @@ class Engine:
             a = analyze(st, self.cfg, enr, self.tiers, now)
             st.insiders.update(a.insiders)
             reason = a.skip_reason(self.cfg)
+            if reason == "score" and st.learned:
+                reason = None   # the accepted rule replaces the momentum score; bundles, insiders, risk still block
             if reason is None and self.cfg.require_launch_data and st.source == "pumpportal" \
                     and not enr.get("early") and not enr.get("replay"):
                 reason = "unverified"
@@ -373,7 +403,8 @@ class Engine:
             enr["safety"] = safety_res
             with self.lock:
                 a = analyze(st, self.cfg, enr, self.tiers, now)
-                reason = market_gate(conn, st, a, a.skip_reason(self.cfg), self.cfg, now)
+                r2 = a.skip_reason(self.cfg)
+                reason = market_gate(conn, st, a, None if (r2 == "score" and st.learned) else r2, self.cfg, now)
                 if reason is None and safety_res.get("blocked"):
                     reason = "safety"
         qf = None
@@ -383,7 +414,9 @@ class Engine:
         with self.lock:
             pos = None
             if reason is None:
-                pos, why = self.book.enter(conn, st, a.score, now, qf, self.sol_usd_fn() or 0.0)
+                learned = self.learned if getattr(st, "learned", False) else None
+                pos, why = self.book.enter(conn, st, a.score, now, qf, self.sol_usd_fn() or 0.0,
+                                           dict(learned["exit"], learned=True) if learned else None)
                 if pos is None:
                     reason = "no_price" if why and "Preis" in why else "capacity"
                     a.positives.append(f"Nicht gekauft: {why}.")

@@ -284,7 +284,14 @@ class Enricher:
         if not sigs:
             return
         slot_of = {s["signature"]: s for s in sigs}
-        cs = (slot_of.get(st.create_sig) or {}).get("slot") or min(s["slot"] for s in sigs)
+        cs = (slot_of.get(st.create_sig) or {}).get("slot") or getattr(st, "create_slot", None)
+        if cs is None and len(sigs) < 1000:
+            cs = min(s["slot"] for s in sigs)   # the whole history fits in one page: its oldest tx is the creation
+        if cs is None:
+            # more than 1000 transactions and the creation is not among them: the oldest one here is not the
+            # creation slot, so ordinary buyers would be counted as a bundle
+            enr.setdefault("errors", []).append("create_slot_unknown")
+            return
         enr["create_slot"] = cs
         seen = {t.sig: t for t in st.trades}
         early = []
@@ -325,5 +332,10 @@ class Enricher:
             safety.assess(mint, conn, deep=self.cfg.safety_deep, force=True, priority=True)
         except Exception as e:  # noqa: BLE001 - a failed check must not open a position
             log.warning("safety.assess %s failed: %s", mint, e)
-            return {"factor": 1.0, "blocked": False, "risk": None, "level": "unchecked", "reasons": [], "error": str(e)}
-        return safety.signal_penalty(conn, mint)
+            return {"factor": 0.0, "blocked": True, "risk": None, "level": "unchecked",
+                    "reasons": ["Sicherheitsprüfung fehlgeschlagen: ungeprüft wird nicht gekauft"], "error": str(e)}
+        res = safety.signal_penalty(conn, mint)
+        if not res.get("checked", True):   # assess produced nothing: unchecked must block, not pass
+            res = dict(res, blocked=True, factor=0.0,
+                       reasons=list(res.get("reasons") or []) + ["Sicherheitsprüfung ohne Ergebnis"])
+        return res

@@ -65,6 +65,11 @@ def main(argv=None):
     p = sub.add_parser("wallet")
     p.add_argument("address")
     p.add_argument("--db")
+    p = sub.add_parser("research", help="Merkmale, Ausstiege, Risiko-Schwellen und Regelsuche an echten Ausgängen")
+    p.add_argument("--hours", type=float, default=0, help="nur die letzten Stunden (0 = alle)")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--save", action="store_true", help="Bericht und angenommene Regel speichern (wie der Dienst)")
+    p.add_argument("--db")
     p = sub.add_parser("reset-paper")
     p.add_argument("--db")
     a = ap.parse_args(argv)
@@ -118,6 +123,10 @@ def main(argv=None):
             for r in st.wallet_history(conn, a.address):
                 print(f"{r['mint'][:8]} {r['symbol'] or '':<10} {r['role']:<8} 60m {_pct(r['ret_60m'])} "
                       f"{'RUG' if r['rugged'] else ''}")
+        elif a.cmd == "research":
+            from sniper import research
+            rep = research.run(conn, settings, hours=a.hours, save=a.save)
+            print(json.dumps(rep, indent=1) if a.json else research.summary(rep, top=12))
         elif a.cmd == "reset-paper":
             conn.execute("DELETE FROM sniper_positions")
             conn.execute("DELETE FROM sniper_state WHERE key='paper_balance_sol'")

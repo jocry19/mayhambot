@@ -19,6 +19,11 @@ class PaperBook:
             p = dict(r)
             p["events"] = json.loads(p.get("events_json") or "[]")
             p["insider_base"] = {}
+            try:
+                prm = json.loads(p.get("params_json") or "{}")
+            except ValueError:
+                prm = {}
+            p["exit"] = prm if prm.get("learned") else None
             self.open[p["mint"]] = p
 
     # ---- balance
@@ -77,7 +82,8 @@ class PaperBook:
         return max(0.0, gross - self._fees()), src
 
     # ---- open / close
-    def enter(self, conn, st, score, now, quote_fn=None, sol_usd=0.0):
+    def enter(self, conn, st, score, now, quote_fn=None, sol_usd=0.0, exit_params=None):
+        """exit_params: exits of a learned rule (sniper.research) for this position instead of the settings."""
         why = self.capacity(conn, now)
         if why:
             return None, why
@@ -90,7 +96,8 @@ class PaperBook:
              "entry_mcap_sol": st.current_mcap_sol(), "entry_mcap_usd": st.current_mcap_sol() * sol_usd if sol_usd else None,
              "size_sol": size, "tokens": tokens, "remaining": tokens, "fees_sol": self._fees(), "fill_src": src,
              "score": score, "peak_price_sol": price, "last_price_sol": price, "tp1_done": 0, "realized_sol": 0.0,
-             "status": "open", "params_json": store.j(self.cfg.exit_params()),
+             "status": "open", "exit": exit_params,
+             "params_json": store.j(dict(self.cfg.exit_params(), **exit_params) if exit_params else self.cfg.exit_params()),
              "events": [{"ts": int(now), "kind": "buy", "sol": size, "tokens": tokens, "price": price,
                          "impact": round(impact, 4), "src": src}]}
         p["insider_base"] = dict(st.insider_sold)
@@ -150,6 +157,10 @@ class PaperBook:
         if not p or st is None:
             return None
         c = self.cfg
+        ep = p.get("exit") or {}
+        stop_pct, tp1_pct = ep.get("stop_pct", c.stop_pct), ep.get("tp1_pct", c.tp1_pct)
+        tp1_frac, trail_pct = ep.get("tp1_frac", c.tp1_frac), ep.get("trail_pct", c.trail_pct)
+        time_stop, max_hold = ep.get("time_stop_min", c.time_stop_min), ep.get("max_hold_min", c.max_hold_min)
         mcap = st.current_mcap_sol()
         if mcap <= 0:
             return None
@@ -164,15 +175,15 @@ class PaperBook:
         if c.exit_on_insider_sell and any(100 * (s - base.get(w, 0.0)) >= c.insider_sell_min_pct
                                           for w, s in st.insider_sold.items()):
             reason = "insider_sell"
-        elif price <= entry * (1 - c.stop_pct / 100):
+        elif price <= entry * (1 - stop_pct / 100):
             reason = "stop"
-        elif not p["tp1_done"] and price >= entry * (1 + c.tp1_pct / 100):
-            reason, frac = "tp1", c.tp1_frac
-        elif p["tp1_done"] and price <= p["peak_price_sol"] * (1 - c.trail_pct / 100):
+        elif not p["tp1_done"] and price >= entry * (1 + tp1_pct / 100):
+            reason, frac = "tp1", tp1_frac
+        elif p["tp1_done"] and price <= p["peak_price_sol"] * (1 - trail_pct / 100):
             reason = "trail"
-        elif not p["tp1_done"] and held >= c.time_stop_min:
+        elif not p["tp1_done"] and held >= time_stop:
             reason = "time"
-        elif held >= c.max_hold_min:
+        elif held >= max_hold:
             reason = "max_hold"
         if not reason:
             return None

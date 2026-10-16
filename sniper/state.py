@@ -14,6 +14,41 @@ def f(v, default=0.0):
         return default
 
 
+class PricePath:
+    """Market-cap path of one launch from its creation, for exact replays of exit rules (which came first, the
+    stop or the take-profit). Buckets of 5 s for the first 15 minutes, 30 s after, up to 65 minutes; each bucket
+    keeps last, low and high, so no extreme between two samples gets lost."""
+    FINE_SEC, FINE_UNTIL, COARSE_SEC, MAX_SEC = 5, 900, 30, 3900
+
+    def __init__(self, t0):
+        self.t0, self.b = t0, {}
+
+    def key(self, dt):
+        if dt < self.FINE_UNTIL:
+            return int(dt // self.FINE_SEC) * self.FINE_SEC
+        return self.FINE_UNTIL + int((dt - self.FINE_UNTIL) // self.COARSE_SEC) * self.COARSE_SEC
+
+    def add(self, now, mcap):
+        if not mcap or mcap <= 0:
+            return
+        dt = max(0.0, now - self.t0)
+        if dt > self.MAX_SEC:
+            return
+        k = self.key(dt)
+        e = self.b.get(k)
+        if e is None:
+            self.b[k] = [mcap, mcap, mcap]
+        else:
+            e[0], e[1], e[2] = mcap, min(e[1], mcap), max(e[2], mcap)
+
+    def points(self):
+        """[[seconds after creation, last, low, high], ...] in time order (mcap in SOL)."""
+        return [[k, round(v[0], 4), round(v[1], 4), round(v[2], 4)] for k, v in sorted(self.b.items())]
+
+    def __len__(self):
+        return len(self.b)
+
+
 def curve_buy(v_sol, v_tok, sol_in, fee_pct):
     """Tokens out for sol_in on a constant-product curve (fee taken from the input)."""
     if v_sol <= 0 or v_tok <= 0 or sol_in <= 0:
@@ -85,8 +120,9 @@ class LaunchState:
     decided_ts: float | None = None
     base_mcap_sol: float | None = None                # mcap at decision (outcomes are measured from here)
     outcomes: dict = field(default_factory=dict)      # horizon min -> mcap_sol
-    max_mcap_sol: float = 0.0
+    max_mcap_sol: float = 0.0                         # high/low after the decision (outcomes; set to base there)
     min_mcap_sol: float = 0.0
+    peak_mcap_sol: float = 0.0                        # high since creation (drawdown feature before the decision)
     insiders: dict = field(default_factory=dict)      # wallet -> role (bundle/insider/dev) for exit rules
     insider_sold: dict = field(default_factory=dict)  # wallet -> share of its buy sold after the decision
     curve: list = field(default_factory=list)         # (ts, mcap_sol, v_sol, n_trades), 2 s resolution
@@ -100,12 +136,20 @@ class LaunchState:
     seen_net_tokens: float = 0.0                      # tokens bought minus sold by the trades we saw
     n_seen: int = 0
     max_trades: int = 3000
+    learned: bool = False                             # picked by the accepted research rule (sniper.research)
+    create_slot: int | None = None                    # slot of the creation (RPC create stream), bundle reference
+    path: PricePath | None = None                     # bucketed mcap path for exit replays (sniper_paths)
+
+    def __post_init__(self):
+        if self.path is None:
+            self.path = PricePath(self.created_ts)
 
     # ---- stream updates
     def apply_create(self, m, now):
         self.symbol, self.name, self.uri = m.get("symbol") or "", m.get("name") or "", m.get("uri") or ""
         self.creator = m.get("traderPublicKey") or ""
         self.create_sig = m.get("signature") or ""
+        self.create_slot = m.get("slot") or None
         self.pool = m.get("pool") or "pump"
         self.dev_tokens = f(m.get("initialBuy") or m.get("tokenAmount"))
         if self.pool != "pump" and (self.dev_tokens >= 0.9 * self.supply or not m.get("vTokensInBondingCurve")):
@@ -114,12 +158,13 @@ class LaunchState:
         self.v_sol = self.v_sol0 = f(m.get("vSolInBondingCurve"))
         self.v_tok = self.v_tok0 = f(m.get("vTokensInBondingCurve"))
         self.mcap_sol = self.mcap0_sol = f(m.get("marketCapSol")) or self.price_sol * self.supply
-        self.max_mcap_sol = self.min_mcap_sol = self.mcap_sol
+        self.max_mcap_sol = self.min_mcap_sol = self.peak_mcap_sol = self.mcap_sol
         if self.creator and self.dev_tokens > 0:
             self.balances[self.creator] = self.dev_tokens
             self.bought[self.creator] = self.dev_tokens
             self.first_buy_ts[self.creator] = now
         self.curve.append((int(now), self.mcap_sol, self.v_sol, 0))
+        self.path.add(now, self.mcap_sol)
 
     def apply_trade(self, m, now):
         side = (m.get("txType") or "").lower()
@@ -139,7 +184,9 @@ class LaunchState:
         if t.v_sol > 0 and t.v_tok > 0:
             self.v_sol, self.v_tok = t.v_sol, t.v_tok
         self.mcap_sol = t.mcap_sol or (self.price_sol * self.supply)
-        if self.decided_ts is None or now - self.decided_ts <= 3600:
+        self.peak_mcap_sol = max(self.peak_mcap_sol, self.mcap_sol)
+        # only after the decision: a dump before it must not count as upside of an entry at the decision price
+        if self.decided_ts is not None and now - self.decided_ts <= 3600:
             self.max_mcap_sol = max(self.max_mcap_sol, self.mcap_sol)
             self.min_mcap_sol = min(self.min_mcap_sol or self.mcap_sol, self.mcap_sol)
         if t.wallet:
@@ -156,6 +203,7 @@ class LaunchState:
                 got = self.bought[t.wallet]
                 self.insider_sold[t.wallet] = min(1.0, self.insider_sold.get(t.wallet, 0.0) + t.tokens / got)
         self.last_trade_ts = now
+        self.path.add(now, self.mcap_sol)
         if not self.curve or now - self.curve[-1][0] >= 2:
             self.curve.append((int(now), self.mcap_sol, self.v_sol, self.n_seen))
         return t

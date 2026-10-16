@@ -5,6 +5,7 @@ import logging
 import time
 
 from core import http
+from core.models import QUOTE_MINTS
 from sniper.state import PUMP_DECIMALS, PUMP_SUPPLY
 
 log = logging.getLogger("sniper.feed")
@@ -54,11 +55,12 @@ def dex_prices(mints, sol_usd):
             if m in chunk and ((p.get("liquidity") or {}).get("usd") or 0) >= (best.get(m, {}).get("liq") or 0):
                 quote = (p.get("quoteToken") or {}).get("address")
                 mcap = None
-                if quote == SOL_MINT and p.get("priceNative"):
-                    mcap = float(p["priceNative"]) * PUMP_SUPPLY if p.get("marketCap") is None or not sol_usd \
-                        else float(p["marketCap"]) / sol_usd
-                elif sol_usd and (p.get("marketCap") or p.get("fdv")):
-                    mcap = float(p.get("marketCap") or p.get("fdv")) / sol_usd
+                # fdv first, the same measure GeckoTerminal's new pools give as base (fdv_usd): mixing fdv with a
+                # circulating market cap produced returns of up to 286,700x
+                if sol_usd and (p.get("fdv") or p.get("marketCap")):
+                    mcap = float(p.get("fdv") or p.get("marketCap")) / sol_usd
+                elif quote == SOL_MINT and p.get("priceNative"):
+                    mcap = float(p["priceNative"]) * PUMP_SUPPLY
                 if mcap:
                     best[m] = {"liq": (p.get("liquidity") or {}).get("usd") or 0, "mcap": mcap}
         out.update({m: v["mcap"] for m, v in best.items()})
@@ -81,8 +83,8 @@ def new_pools(sol_usd):
         dex = ((rel.get("dex") or {}).get("data") or {}).get("id") or ""
         base = ((rel.get("base_token") or {}).get("data") or {}).get("id") or ""
         mint = base.split("_", 1)[1] if "_" in base else base
-        if not mint or dex in SKIP_DEX or mint == SOL_MINT:
-            continue
+        if not mint or dex in SKIP_DEX or mint in QUOTE_MINTS:
+            continue   # stablecoins and SOL appear as the base token of some pools; they are no launches
         created = at.get("pool_created_at")
         try:
             from datetime import datetime
@@ -91,7 +93,7 @@ def new_pools(sol_usd):
             created = None
         m5 = ((at.get("transactions") or {}).get("m5") or {})
         vol = float(((at.get("volume_usd") or {}).get("m5")) or 0)
-        mcap_usd = float(at.get("market_cap_usd") or at.get("fdv_usd") or 0)
+        mcap_usd = float(at.get("fdv_usd") or at.get("market_cap_usd") or 0)
         buyers = int(m5.get("buyers") or 0)
         momentum = min(100.0, 40 * min(1.0, buyers / 40) + 40 * min(1.0, vol / 20000)
                        + 20 * (m5.get("buys", 0) / max(1, m5.get("buys", 0) + m5.get("sells", 0))))

@@ -201,11 +201,33 @@ class Service:
             self.logs.subscribe(pump - unsub)
             self.logs.unsubscribe(unsub)
 
+    def demote_dead_subs(self, now=None):
+        """Coins whose RPC trade subscription never got confirmed (refused, over the limit) would keep a frozen
+        curve price and exit on it: they fall back to DexScreener prices like unsubscribed coins."""
+        if self.trades_via != "rpc" or not self.logs.connected:
+            return []
+        now = now or time.time()
+        dead = self.logs.not_live(now)
+        if not dead:
+            return []
+        with self.engine.lock:
+            for m in dead:
+                st = self.engine.launches.get(m)
+                if st and st.subscribed:
+                    st.subscribed = False
+            self.engine.counters["subs_lost"] = self.engine.counters.get("subs_lost", 0) + len(dead)
+        self.logs.unsubscribe(dead)
+        return dead
+
     async def sub_loop(self):
+        n = 0
         while not self.stop.is_set():
             await asyncio.sleep(0.25)
+            n += 1
             try:
                 await self.route_subs()
+                if n % 20 == 0:
+                    self.demote_dead_subs()
             except Exception as e:  # noqa: BLE001 - PumpPortal socket closed mid-send; ws_loop reconnects
                 log.debug("Abo-Weitergabe: %s", e)
 
@@ -311,6 +333,24 @@ class Service:
         return {"launch_sources": rates, "active_launch_source": active,
                 "launches_per_min": round(sum(r["first_per_min"] for r in rates.values()), 1)}
 
+    def research_round(self):
+        """Hourly: research on the real outcomes (own DB connection, CPU only, no network); an accepted rule is
+        handed to the engine, a rule that no longer holds is withdrawn."""
+        from sniper import research
+        conn = store.connect(self.db_path)
+        try:
+            rep = research.run(conn, self.cfg, hours=self.cfg.research_hours, save=True)
+            rule = research.learned_rule(conn) if self.cfg.use_learned_rule else None
+        finally:
+            conn.close()
+        with self.engine.lock:
+            changed = (rule or {}).get("conditions") != (self.engine.learned or {}).get("conditions")
+            self.engine.learned = rule
+        for line in research.summary(rep, top=5).splitlines():
+            log.info("Forschung: %s", line)
+        if changed:
+            log.warning("Gelernte Regel %s", "AKTIV (Papier): " + json.dumps(rule["conditions"]) if rule else "aus")
+
     def prune_round(self):
         store.prune(self.conn, self.cfg.keep_days)
 
@@ -347,6 +387,7 @@ class Service:
                  asyncio.create_task(self.every(self.cfg.dex_every_sec, self.dex_round, 10)),
                  asyncio.create_task(self.every(600, self.tiers_round, 600)),
                  asyncio.create_task(self.every(3600, self.prune_round, 120)),
+                 asyncio.create_task(self.every(3600, self.research_round, 300)),
                  asyncio.create_task(self.every(300 if duration is None else 60, self.report, 60))]
         if self.cfg.use_geckoterminal:
             tasks.append(asyncio.create_task(self.every(self.cfg.gt_every_sec, self.gt_round, 30)))
