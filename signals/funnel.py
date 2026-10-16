@@ -126,7 +126,8 @@ def write_report(conn, path=None, now=None):
             cal = dict(ts=r[0], active=bool(r[1]), n_all=r[2], oos=json.loads(r[3] or "{}"), notes=r[4])
     except Exception:  # noqa: BLE001 - no calibration yet
         pass
-    rep = dict(ts=now, funnel_4h=funnel(conn, 4, now=now), funnel_24h=funnel(conn, 24, now=now),
+    from signals import engine
+    rep = dict(ts=now, last_cycle=dict(engine.last_funnel), funnel_4h=funnel(conn, 4, now=now), funnel_24h=funnel(conn, 24, now=now),
                outcomes_24h=outcomes(conn, 24, now=now), outcomes_7d=outcomes(conn, 168, now=now), calibration=cal,
                recent_signals=[dict(r) for r in conn.execute(
                    "SELECT ts, symbol, score, ev, ev_n, smart_buyers, net_usd, ret_1h, max_ret_1h, outcome_flag, reason "

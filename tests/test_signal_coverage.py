@@ -85,3 +85,16 @@ def test_net_minimum_follows_real_smart_buy_size(tmp_path):
     assert engine.min_net_usd(c, cfg, now) == 280                      # 2 x median Smart buy
     assert engine.min_net_usd(c, dataclasses.replace(cfg, signal_min_net_usd=200), now) == 200   # capped
     assert engine.min_net_usd(c, dataclasses.replace(cfg, signal_net_floor_usd=300), now) == 300  # floor
+
+
+def test_backfill_leaves_helius_reserve(monkeypatch):
+    from core import http
+    monkeypatch.setattr(http, "_service", "signals", raising=False)
+    monkeypatch.setattr(http, "credits", lambda svc: {"credits_day_budget": 1000})
+    monkeypatch.setattr(http, "CREDIT_BURST", {})
+    monkeypatch.setattr(http, "credits_left_today", lambda service=None: 500)
+    assert run.helius_ok()
+    monkeypatch.setattr(http, "credits_left_today", lambda service=None: 150)
+    assert not run.helius_ok()
+    monkeypatch.setattr(http, "credits_left_today", lambda service=None: None)
+    assert run.helius_ok()

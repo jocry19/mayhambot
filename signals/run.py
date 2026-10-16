@@ -117,18 +117,38 @@ def fetch_trades(conn, watch):
     return total
 
 
+HELIUS_RESERVE = 0.2  # keep the last 20 % of today's Helius share for live work (quick safety checks)
+
+
+def helius_ok():
+    """Backfill may use the paid Helius lane only while more than HELIUS_RESERVE of today's share is left;
+    below that it reads the public RPC pool only (slower, free)."""
+    from core import http
+    left = http.credits_left_today()
+    if left is None:
+        return True
+    st = http.credits(http._service) or {}
+    budget = (st.get("credits_day_budget") or 0) * http.CREDIT_BURST.get(http._service, 1.0)
+    ok = not budget or left > HELIUS_RESERVE * budget
+    if not ok:
+        log.info("backfill on the public RPC only: %.0f Helius credits left today (reserve %.0f%%)",
+                 left, HELIUS_RESERVE * 100)
+    return ok
+
+
 def backfill(conn, deadline=None):
     """History for wallets research/ does not cover yet, via the paid Helius RPC lane (public pool as fallback).
     Stops at `deadline` (time.time() value); unfinished wallets stay unmarked for the next round."""
     n = 0
     mints = set()
     from core.sources.wallet_history import SkipForNow
+    use_helius = helius_ok()
     for w in wallets.backfill_candidates(conn, settings.backfill_wallets_per_cycle):
         if deadline and time.time() > deadline:
             break
         try:
             trades = wallet_source.wallet_trades(w, limit=settings.backfill_tx_limit, enhanced_fallback=False,
-                                                 helius_rpc=True)
+                                                 helius_rpc=use_helius)
         except SkipForNow:
             break  # rate limited: keep the remaining wallets for the next round, unmarked
         n += db.retry_locked(conn, lambda: db.insert_trades(conn, trades))
@@ -200,6 +220,7 @@ def cycle(conn, i):
     sigs = engine.evaluate(conn, mints)
     notifier.notify(conn, sigs)
     engine.update_outcomes(conn)
+    db.retry_locked(conn, lambda: engine.prune_metrics(conn))
     smart = conn.execute("SELECT COUNT(*) FROM wallets WHERE is_smart=1").fetchone()[0]
     ts = scoring.last_tier_sync
     cs = engine.last_cluster_stats
@@ -218,6 +239,10 @@ def cycle(conn, i):
                  fu["low_net"], fu["min_score"], fu["low_score"], fu["low_ev"], fu["safety_drop"], fu["cooldown"],
                  fu["fired"], fu["max_score"], "active" if fu["ev_active"] else "off",
                  "-" if fu["max_ev"] is None else f"{fu['max_ev']:+.1%}")
+        mg = fu.get("model") or {}
+        if mg.get("fallbacks"):
+            log.warning("model fallbacks this cycle: %d of %d coins used the heuristic (%s)", mg["fallbacks"],
+                        mg["calls"], "; ".join(f"{k} x{n}" for k, n in mg["top_errors"]))
     log.info("cycle %d: %d tokens (+%d smart-active evaluated), +%d trades, +%d backfill trades, %d smart wallets, %d signals (%.0fs)",
              i, len(watch), len(mints) - len(watch), new_trades, bf, smart, len(sigs), time.time() - t0)
     return sigs
@@ -254,11 +279,15 @@ def main():
         return
     global _backfiller
     if not a.once:
+        engine.model_guard.start(conn)
         _backfiller = Backfiller().start()
     i = 0
     while True:
         try:
             cycle(conn, i)
+        except engine.ModelCodeStale as e:  # the supervisor (mayham.py run) restarts us with fresh code
+            log.error("restarting the signals service: %s", e)
+            raise SystemExit(3)
         except Exception:  # noqa: BLE001
             log.exception("cycle %d failed", i)
         if a.once:

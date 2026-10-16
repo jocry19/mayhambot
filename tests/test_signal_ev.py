@@ -68,3 +68,38 @@ def test_blend_weights_bucket_by_evidence():
     assert ev.blend(0.10, 30, None) == 0.10
     assert ev.blend(0.10, 0, -0.05, shrink=10) == -0.05            # no bucket evidence: the model decides
     assert ev.blend(0.10, 30, -0.05, shrink=10) == round(0.75 * 0.10 + 0.25 * -0.05, 4)
+
+
+def test_model_guard_restarts_only_after_a_retrain(tmp_path):
+    c = db.connect(str(tmp_path / "t.db"))
+    c.execute("CREATE TABLE IF NOT EXISTS model_versions (id INTEGER PRIMARY KEY, ts INTEGER, active INTEGER)")
+    c.execute("INSERT INTO model_versions VALUES (4, 1, 1)")
+    g = engine.ModelGuard()
+    g.start(c)
+    for _ in range(6):
+        g.record(False, IndexError("list index out of range"))
+    g.check(c)                                                     # same version: data problem, keep running
+    assert g.stats()["fallbacks"] == 6 and "IndexError" in g.stats()["top_errors"][0][0]
+    c.execute("INSERT INTO model_versions VALUES (5, 2, 1)")
+    try:
+        g.check(c)
+        raise AssertionError("expected ModelCodeStale")
+    except engine.ModelCodeStale as e:
+        assert "v5" in str(e) and "v4" in str(e)
+    g.reset()
+    g.record(True)
+    for _ in range(6):
+        g.record(False, IndexError("x"))
+    g.check(c)                                                     # the model still works for some coins: no restart
+    g.reset()
+    for _ in range(9):
+        g.record(False, type("ModelNotTrained", (Exception,), {})("no version"))
+    assert g.fallbacks == 0
+
+
+def test_tokenized_stocks_are_not_memecoins():
+    assert engine.not_a_memecoin(dict(name="NVIDIA xStock", symbol="NVDAx", mcap_usd=44e6))
+    assert engine.not_a_memecoin(dict(name="", symbol="TSLAx", mcap_usd=20e6))
+    assert not engine.not_a_memecoin(dict(name="dogwifhat", symbol="WIF", mcap_usd=2e9))
+    assert not engine.not_a_memecoin(dict(name="Bonkx", symbol="BONKx", mcap_usd=50_000))
+    assert not engine.not_a_memecoin(None)

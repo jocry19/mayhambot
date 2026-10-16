@@ -10,6 +10,7 @@ smart just because this very coin pumped.
 import json
 import logging
 import math
+import re
 import time
 
 from core import scoring
@@ -92,6 +93,18 @@ EV_MIN_SAFETY_FACTOR = 0.6  # safety factor 1.0 up to risk 25, 0.2 at 75, 0 bloc
 
 def _eur(x):
     return f"{x:+.0%}".replace("%", " %")
+
+
+_XSTOCK = re.compile(r"^[A-Z]{1,6}x$")
+
+
+def not_a_memecoin(tok):
+    """Tokenized stocks (Backed xStocks such as NVDAx, 'NVIDIA xStock') trade on Solana DEXes but are not what
+    smart memecoin money signals: excluded from signals."""
+    if not tok:
+        return False
+    name, sym = (tok["name"] or ""), (tok["symbol"] or "")
+    return "xstock" in name.lower().replace(" ", "") or bool(_XSTOCK.match(sym) and (tok["mcap_usd"] or 0) > 5e6)
 
 
 def explain(m, cfg=settings):
@@ -212,16 +225,92 @@ def _load_model():
 _score_token = _load_model()
 
 
+class ModelCodeStale(RuntimeError):
+    """A newer model version is active and this process's (older) model code keeps failing on it."""
+
+
+class ModelGuard:
+    """Counts heuristic fallbacks per cycle (shown in the funnel and the hourly report) and notices a retrain.
+    If the active model version changed since this process started and at least STALE_MIN calls in a cycle failed
+    with a non-'not trained' error, the code in memory no longer fits the model files: raise ModelCodeStale so
+    the service restarts with the code on disk instead of silently scoring with the heuristic."""
+    STALE_MIN = 5
+
+    def __init__(self):
+        self.started_version = None
+        self.armed = False
+        self.reset()
+
+    def start(self, conn):
+        self.started_version = self._version(conn)
+        self.armed = True
+
+    @staticmethod
+    def _version(conn):
+        try:
+            r = conn.execute("SELECT MAX(id) FROM model_versions WHERE active=1").fetchone()
+            return r[0] if r else None
+        except Exception:  # noqa: BLE001 - no model tables
+            return None
+
+    def reset(self):
+        self.calls = self.used = self.fallbacks = 0
+        self.errors = {}
+
+    def record(self, ok, err=None):
+        self.calls += 1
+        if ok:
+            self.used += 1
+        elif err is not None and type(err).__name__ != "ModelNotTrained":
+            self.fallbacks += 1
+            k = f"{type(err).__name__}: {str(err)[:80]}"
+            self.errors[k] = self.errors.get(k, 0) + 1
+
+    def check(self, conn):
+        if not self.armed or self.fallbacks < self.STALE_MIN or self.used:
+            return
+        now_v = self._version(conn)
+        if now_v is not None and now_v != self.started_version:
+            top = max(self.errors, key=self.errors.get) if self.errors else "?"
+            raise ModelCodeStale(f"model v{now_v} active since start (was v{self.started_version}), "
+                                 f"{self.fallbacks} fallbacks this cycle, e.g. {top}")
+
+    def stats(self):
+        return dict(calls=self.calls, used=self.used, fallbacks=self.fallbacks,
+                    top_errors=sorted(self.errors.items(), key=lambda kv: -kv[1])[:3])
+
+
+model_guard = ModelGuard()
+
+
+_tm_cache = {"at": 0.0, "map": None}
+
+
+def _model_tier_map(conn, ttl=60):
+    """model.tier_map once a minute instead of per coin (it scans model_wallet_stats). None lets score_token load it."""
+    if time.time() - _tm_cache["at"] > ttl:
+        try:
+            from model.tiers import tier_map
+            _tm_cache.update(at=time.time(), map=tier_map(conn))
+        except Exception:  # noqa: BLE001 - model/ absent
+            _tm_cache.update(at=time.time(), map=None)
+    return _tm_cache["map"]
+
+
 def apply_model(conn, mint, now, m):
     """Replace score / tiers / prediction / contributions with model.score_token when available."""
     if not _score_token:
         return m
     try:
-        r = _score_token(mint, now=now, conn=conn, store=True)
+        r = _score_token(mint, now=now, conn=conn, store=True, tiers=_model_tier_map(conn))
+        if r is None:
+            raise ValueError("no model features for this coin")
     except Exception as e:  # noqa: BLE001 - incl. model.predict.ModelNotTrained before the first retrain
-        (log.debug if type(e).__name__ == "ModelNotTrained" else log.warning)(
+        model_guard.record(False, e if type(e).__name__ != "ValueError" else None)
+        (log.debug if type(e).__name__ in ("ModelNotTrained", "ValueError") else log.warning)(
             "model.score_token %s not used, heuristic instead: %s", mint[:6], e)
         return m
+    model_guard.record(True)
     tiers = r.get("tiers") or {}
     h1 = (r.get("horizons") or {}).get("1h") or {}
     contrib = {}
@@ -360,6 +449,30 @@ def calibrated_prediction(conn, score, min_n=8):
     return round(p, 3), f"Chance auf +50% in 1h, aus {len(rows)} ähnlichen Signalen"
 
 
+def top_contributions(c, k=10):
+    """The k largest contributions by |points| (model versions carry ~50 features, ~7 KB per row)."""
+    if len(c) <= k:
+        return c
+    return dict(sorted(c.items(), key=lambda kv: -abs((kv[1] or {}).get("points") or 0))[:k])
+
+
+METRICS_KEEP_DAYS = 3
+_last_prune = {"at": 0.0}
+
+
+def prune_metrics(conn, now=None, days=METRICS_KEEP_DAYS):
+    """signal_metrics is a per-cycle log (funnel, report); older rows go once an hour. Signals themselves stay."""
+    now = now or int(time.time())
+    if time.time() - _last_prune["at"] < 3600:
+        return 0
+    _last_prune["at"] = time.time()
+    n = conn.execute("DELETE FROM signal_metrics WHERE ts < ?", (now - days * 86400,)).rowcount
+    conn.commit()
+    if n:
+        log.info("pruned %d signal_metrics rows older than %d days", n, days)
+    return n
+
+
 def evaluate(conn, mints, cfg=settings, now=None):
     """Compute + store metrics for each mint; create signals that pass thresholds. Returns new signal rows."""
     now = now or int(time.time())
@@ -371,9 +484,13 @@ def evaluate(conn, mints, cfg=settings, now=None):
     ev_table = ev_mod.active_table(conn)
     f.update({k: 0 for k in FUNNEL_KEYS}, max_score=0.0, min_score=None, min_net=min_net, ev_active=bool(ev_table),
              max_ev=None)
+    model_guard.reset()
     for mint in mints:
-        tok = conn.execute("SELECT symbol, price_usd, mcap_usd, liquidity_usd FROM tokens WHERE mint=?",
+        tok = conn.execute("SELECT symbol, name, price_usd, mcap_usd, liquidity_usd FROM tokens WHERE mint=?",
                            (mint,)).fetchone()
+        if not_a_memecoin(tok):
+            f["excluded"] = f.get("excluded", 0) + 1
+            continue
         m = apply_market(conn, mint, apply_safety(conn, mint, apply_model(conn, mint, now, token_metrics(conn, mint, qc, now, cfg))), now)
         m = dict(m, min_net=min_net)
         if ev_table:
@@ -393,7 +510,7 @@ def evaluate(conn, mints, cfg=settings, now=None):
             (now, mint, m["window_min"], m["buy_usd"], m["sell_usd"], m["net_usd"], m["smart_buyers"],
              m["avg_quality"], m["score"], tok["price_usd"] if tok else None, m["buy_sol"], m["net_sol"],
              tok["mcap_usd"] if tok else None, m["n_ultra"], m["n_smart"], m["n_good"], pred,
-             json.dumps(m["contributions"]), m.get("ev"), m.get("model_exp_net")))
+             json.dumps(top_contributions(m["contributions"])), m.get("ev"), m.get("model_exp_net")))
         conn.commit()
 
         f["coins"] += 1
@@ -430,6 +547,8 @@ def evaluate(conn, mints, cfg=settings, now=None):
              json.dumps(sp.get("reasons") or [], ensure_ascii=False), m.get("ev"), m.get("ev_n"), explain(m, cfg)))
         new.append(conn.execute("SELECT * FROM signals WHERE id=?", (cur.lastrowid,)).fetchone())
     conn.commit()
+    f["model"] = model_guard.stats()
+    model_guard.check(conn)
     return new
 
 

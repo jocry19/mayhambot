@@ -104,3 +104,18 @@ def test_report_file(tmp_path):
     p = funnel.write_report(c, path=tmp_path / "r" / "signals_report.json", now=10_000)
     rep = json.loads(p.read_text())
     assert set(rep) >= {"funnel_4h", "funnel_24h", "outcomes_24h", "outcomes_7d", "calibration", "recent_signals"}
+
+
+def test_metrics_trimmed_and_pruned(tmp_path):
+    from signals import engine
+    c = conn_with(None, tmp_path)
+    big = {f"f{i}": {"points": i} for i in range(40)}
+    top = engine.top_contributions(big)
+    assert len(top) == 10 and "f39" in top and "f0" not in top
+    now = 1_000_000
+    c.execute("INSERT INTO signal_metrics(ts, mint, score) VALUES (?, 'OLD', 1)", (now - 4 * 86400,))
+    c.execute("INSERT INTO signal_metrics(ts, mint, score) VALUES (?, 'NEW', 1)", (now - 3600,))
+    c.commit()
+    engine._last_prune["at"] = 0
+    assert engine.prune_metrics(c, now=now) == 1
+    assert [r[0] for r in c.execute("SELECT mint FROM signal_metrics")] == ["NEW"]
