@@ -177,7 +177,7 @@ def _count(group, key, n=1):
         for d in (_usage, _usage_window):
             d.setdefault(group, {"calls": 0, "429": 0, "waited_s": 0.0, "credits": 0, "refused": 0,
                                  "live_calls": 0, "bulk_calls": 0, "live_waited_s": 0.0,
-                                 "bulk_waited_s": 0.0})[key] += n
+                                 "bulk_waited_s": 0.0, "latency_ms_sum": 0.0})[key] += n
 
 
 def _take_budget(host):
@@ -220,7 +220,8 @@ def usage(all_services=False):
     with _budget_lock:
         now = time.time()
         out = {g: dict(v, budget_per_min=budget(g),
-                       last_min=sum(1 for t in _recent.get(g, ()) if t > now - 60))
+                       last_min=sum(1 for t in _recent.get(g, ()) if t > now - 60),
+                       latency_ms=round(_latency[g], 1) if g in _latency else None)
                for g, v in _usage.items()}
     if CREDIT_GROUP in out and _service:
         st = credits(_service) or {}
@@ -509,11 +510,11 @@ def rpc_url(method="", helius_url=None):
     else the public RPC for standard methods (DAS / Helius-only methods keep Helius and may raise)."""
     url = helius_url or os.getenv("SOLANA_RPC_URL") or ""
     if group_of(urlparse(url).netloc) != CREDIT_GROUP:
-        return url or PUBLIC_RPC
+        return url or pick_public_rpc()
     cost = credit_cost(url, {"json": {"method": method}})
     left = credits_left_today()
     if left is not None and left < cost and cost == 1:
-        return PUBLIC_RPC
+        return pick_public_rpc()
     return url
 
 
@@ -694,6 +695,168 @@ def _wait_local(host, iv):
         _last[host] = time.monotonic()
 
 
+# ---------------- pool of keyless public Solana RPC endpoints ----------------
+# Candidates (not verifiable from the build machine): each is probed once (getSignaturesForAddress +
+# getTransaction jsonParsed v1) and dead or keyed ones leave the rotation for POOL_COOLDOWN seconds.
+DEFAULT_PUBLIC_RPC_URLS = ["https://api.mainnet-beta.solana.com", "https://solana-rpc.publicnode.com",
+                           "https://solana.drpc.org", "https://rpc.ankr.com/solana"]
+POOL_COOLDOWN = 600
+POOL_FAILS_TO_DISABLE = 3
+PROBE_ADDRESS = "So11111111111111111111111111111111111111112"
+_latency = {}   # host -> EWMA ms (this process)
+_pool_fail = {}  # host -> consecutive failures (this process)
+
+
+def public_rpc_urls():
+    raw = os.getenv("PUBLIC_RPC_URLS")
+    urls = [u.strip().rstrip("/") for u in raw.split(",")] if raw else list(DEFAULT_PUBLIC_RPC_URLS)
+    return [u for u in urls if u]
+
+
+def _pool_hosts():
+    hosts = [urlparse(u).netloc for u in public_rpc_urls()]
+    for h in hosts:  # every pool endpoint gets its own shared spacing and window
+        SHARED_HOSTS.add(h)
+        HOST_INTERVAL.setdefault(h, 0.11)
+        WINDOW_LIMITS.setdefault(h, dict(WINDOW_LIMITS["api.mainnet-beta.solana.com"]))
+    return hosts
+
+
+def _pool_state_path():
+    return os.path.join(_LOCK_DIR, "rpc-pool.json")
+
+
+def _pool_state():
+    import json
+    try:
+        with open(_pool_state_path()) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _pool_update(host, **fields):
+    import json
+    try:
+        os.makedirs(_LOCK_DIR, exist_ok=True)
+        with open(_pool_state_path(), "a+") as f:
+            try:
+                import fcntl
+                fcntl.flock(f, fcntl.LOCK_EX)
+            except ImportError:
+                pass
+            f.seek(0)
+            try:
+                st = json.loads(f.read() or "{}")
+            except ValueError:
+                st = {}
+            st.setdefault(host, {}).update(fields)
+            f.seek(0)
+            f.truncate()
+            json.dump(st, f)
+    except OSError:
+        pass
+
+
+def _probe(url):
+    """True if the endpoint answers getSignaturesForAddress and getTransaction(jsonParsed, v1) without a key."""
+    try:
+        t0 = time.time()
+        r = _session.post(url, json={"jsonrpc": "2.0", "id": 1, "method": "getSignaturesForAddress",
+                                     "params": [PROBE_ADDRESS, {"limit": 1}]}, timeout=10)
+        sigs = r.json().get("result") if r.status_code == 200 else None
+        if not sigs:
+            return False, None
+        r = _session.post(url, json={"jsonrpc": "2.0", "id": 1, "method": "getTransaction", "params": [
+            sigs[0]["signature"], {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 1}]}, timeout=10)
+        ok = r.status_code == 200 and isinstance(r.json().get("result"), dict)
+        return ok, (time.time() - t0) * 500  # two calls -> per call
+    except Exception:  # noqa: BLE001
+        return False, None
+
+
+def pool_status():
+    """{host: {url, ok, disabled_until, latency_ms, checked_at, reason}} shared by all processes."""
+    st = _pool_state()
+    out = {}
+    for u in public_rpc_urls():
+        h = urlparse(u).netloc
+        d = dict(st.get(h, {}))
+        d["url"] = u
+        if h in _latency:
+            d["latency_ms"] = round(_latency[h], 1)
+        out[h] = d
+    return out
+
+
+def _healthy(now=None, probe=None):
+    """Pool URLs usable now; endpoints never checked (or checked > POOL_COOLDOWN ago) are probed first."""
+    now = now or time.time()
+    if probe is None and (os.getenv("PYTEST_CURRENT_TEST") or os.getenv("PUBLIC_RPC_PROBE") == "0"):
+        probe = lambda u: (True, None)  # noqa: E731 - tests stay offline
+    probe = probe or _probe
+    st = _pool_state()
+    good = []
+    for u in public_rpc_urls():
+        h = urlparse(u).netloc
+        d = st.get(h, {})
+        if d.get("disabled_until", 0) > now:
+            continue
+        if now - d.get("checked_at", 0) > POOL_COOLDOWN:
+            ok, ms = probe(u)
+            fields = dict(checked_at=now, ok=ok)
+            if ok:
+                fields.update(latency_ms=ms, disabled_until=0, reason="")
+                if ms:
+                    _latency.setdefault(h, ms)
+            else:
+                fields.update(disabled_until=now + POOL_COOLDOWN, reason="probe failed")
+                log.warning("public RPC %s left the pool for %d min: probe failed", h, POOL_COOLDOWN // 60)
+            _pool_update(h, **fields)
+            if not ok:
+                continue
+        good.append(u)
+    return good
+
+
+def _window_load(host):
+    import json
+    lim = WINDOW_LIMITS.get(host)
+    try:
+        with open(os.path.join(_LOCK_DIR, host + ".window")) as f:
+            calls = json.loads(f.read() or "[]")
+    except (OSError, ValueError):
+        return 0.0
+    now = time.time()
+    return sum(1 for c in calls if c[0] > now - lim["window"]) / lim["total"] if lim else 0.0
+
+
+def pick_public_rpc(priority="bulk", probe=None):
+    """One keyless public RPC URL: 'live' = fastest measured endpoint, 'bulk' = the one with most free window."""
+    _pool_hosts()
+    urls = _healthy(probe=probe) or public_rpc_urls()[:1]
+    if priority == "live":
+        st = _pool_state()
+        return min(urls, key=lambda u: _latency.get(urlparse(u).netloc)
+                   or st.get(urlparse(u).netloc, {}).get("latency_ms") or 1e9)
+    return min(urls, key=lambda u: (_window_load(urlparse(u).netloc), _latency.get(urlparse(u).netloc) or 1e9))
+
+
+def _pool_result(host, ok, ms=None, status=None):
+    """Book a pool call: latency EWMA, consecutive failures -> leave the rotation for POOL_COOLDOWN."""
+    if ok:
+        _pool_fail[host] = 0
+        if ms is not None:
+            _latency[host] = ms if host not in _latency else 0.8 * _latency[host] + 0.2 * ms
+            _count(host, "latency_ms_sum", ms)
+        return
+    _pool_fail[host] = _pool_fail.get(host, 0) + 1
+    if _pool_fail[host] >= POOL_FAILS_TO_DISABLE:
+        _pool_fail[host] = 0
+        _pool_update(host, disabled_until=time.time() + POOL_COOLDOWN, reason=f"{status or 'errors'} x3")
+        log.warning("public RPC %s left the pool for %d min (%s)", host, POOL_COOLDOWN // 60, status or "errors")
+
+
 def _request(method, url, retries=4, timeout=20, priority="bulk", **kw):
     host = urlparse(url).netloc
     cost = credit_cost(url, kw)
@@ -707,16 +870,25 @@ def _request(method, url, retries=4, timeout=20, priority="bulk", **kw):
         isinstance(it, dict) and it.get("method") in DAS_METHODS
         for it in (payload if isinstance(payload, list) else [payload]))
     rpc_method = payload.get("method") if isinstance(payload, dict) else ("batch" if payload else None)
+    pooled = method == "POST" and host in _pool_hosts()
     for attempt in range(retries + 1):
+        if pooled:  # any call to a pool endpoint may go to whichever endpoint has room (failover on retry)
+            url = pick_public_rpc(priority)
+            host = urlparse(url).netloc
         throttle(host, cost=cost, das=das, priority=priority, method=rpc_method)
+        t_req = time.time()
         try:
             r = _session.request(method, url, timeout=timeout, **kw)
         except requests.RequestException as e:
+            if pooled:
+                _pool_result(host, False, status="error")
             if attempt == retries:
                 raise requests.RequestException(redact(e)) from None
             log.warning("%s %s failed (%s), retry", method, host, e)
             time.sleep(2 ** attempt)
             continue
+        if pooled:
+            _pool_result(host, r.status_code < 400, (time.time() - t_req) * 1000, r.status_code)
         if r.status_code == 429 or r.status_code >= 500:
             if attempt == retries:
                 raise requests.HTTPError(f"{r.status_code} for {redact(r.url)}")

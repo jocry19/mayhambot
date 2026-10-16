@@ -158,8 +158,8 @@ def test_public_rpc_fallback_when_used_up(monkeypatch, tmp_path):
     monkeypatch.setattr(http._session, "request", lambda m, url, **kw: calls.append(url) or R())
     monkeypatch.setattr(http.time, "sleep", lambda s: None)
     http.post_json("https://beta.helius-rpc.com/?api-key=k", {"method": "getSlot"})
-    assert calls == [http.PUBLIC_RPC]
-    assert http.rpc_url("getSlot", "https://beta.helius-rpc.com/?api-key=k") == http.PUBLIC_RPC
+    assert len(calls) == 1 and calls[0] in http.public_rpc_urls()
+    assert http.rpc_url("getSlot", "https://beta.helius-rpc.com/?api-key=k") in http.public_rpc_urls()
     try:
         http.post_json("https://beta.helius-rpc.com/?api-key=k", {"method": "getAsset"})
     except http.CreditsExhausted:
@@ -282,3 +282,41 @@ def test_stale_process_with_old_key_does_not_flip_back(monkeypatch, tmp_path):
     http._charge(1)
     st = http.credits_status()
     assert st["used"] == 6 and len(st["history"]) == 1
+
+
+def test_pool_probe_drops_dead_endpoints(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    monkeypatch.setenv("PUBLIC_RPC_URLS", "https://a.example,https://b.example,https://c.example")
+    probe = lambda u: (u != "https://b.example", 50.0 if u.endswith("a.example") else 20.0)  # noqa: E731
+    assert http._healthy(probe=probe) == ["https://a.example", "https://c.example"]
+    assert http.pool_status()["b.example"]["disabled_until"] > http.time.time()
+    # live takes the fastest, bulk the emptiest window
+    assert http.pick_public_rpc("live", probe=probe) == "https://c.example"
+    for _ in range(5):
+        http._window_wait("c.example", "getTransaction", "bulk")
+    assert http.pick_public_rpc("bulk", probe=probe) == "https://a.example"
+
+
+def test_pool_failover_and_latency(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    monkeypatch.setenv("PUBLIC_RPC_URLS", "https://a.example,https://c.example")
+    monkeypatch.setattr(http.time, "sleep", lambda s: None)
+    calls = []
+
+    class R:
+        def __init__(self, code):
+            self.status_code, self.headers = code, {}
+
+        def json(self):
+            return {"result": "ok"}
+
+    def req(method, url, **kw):
+        calls.append(url)
+        return R(429 if "a.example" in url else 200)
+    monkeypatch.setattr(http._session, "request", req)
+    monkeypatch.setattr(http, "_latency", {"a.example": 1.0, "c.example": 99.0})
+    for _ in range(3):
+        assert http.post_json("https://a.example", {"method": "getSlot"}, priority="live") == {"result": "ok"}
+    assert http.pool_status()["a.example"].get("disabled_until", 0) > http.time.time()  # 3 failures -> out
+    assert calls[-1] == "https://c.example"
+    assert http.usage()["c.example"]["latency_ms"] is not None

@@ -114,6 +114,20 @@ method (getTransaction) never starves the others.
 - `priority="live"` (copytrade, safety, sniper) may use the whole window and skips the plain spacing queue.
 - `usage()` shows `live_calls`, `bulk_calls`, `live_waited_s`, `bulk_waited_s` per group.
 
+### Pool of public RPC endpoints
+
+`PUBLIC_RPC_URLS` (comma list, keyless) defaults to api.mainnet-beta.solana.com, solana-rpc.publicnode.com,
+solana.drpc.org, rpc.ankr.com/solana (candidates; not verifiable from the build machine). Every POST to any pool
+URL (also `http.PUBLIC_RPC` and the Helius fallback) goes to the pool:
+- Each endpoint is probed (getSignaturesForAddress + getTransaction jsonParsed v1, no key) before first use and
+  every 10 min; failing endpoints, and endpoints with 3 failures (429/5xx/errors) in a row, leave the rotation for
+  10 min (shared state `data/ratelimit/rpc-pool.json`). `PUBLIC_RPC_PROBE=0` skips probing.
+- Each endpoint has its own spacing and window (90 / 10 s, 36 per method) and its own live/bulk lanes.
+- `priority="live"` takes the endpoint with the lowest measured response time, `"bulk"` the one with the most
+  free window; a retry may go to another endpoint.
+- `http.pick_public_rpc(priority)` returns a pool URL for own clients; `http.pool_status()` = {host: {url, ok,
+  disabled_until, latency_ms, checked_at, reason}}; `usage()` has calls, 429 and latency_ms per endpoint host.
+
 ### Helius monthly credits
 
 Checked in the Helius docs on 2026-10-16 (docs.helius.xyz/docs/billing/credits.md, helius.dev/docs/billing/plans-and-rate-limits):
