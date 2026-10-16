@@ -339,3 +339,11 @@ def test_no_future_in_cobuys_and_tiers(conn):
         assert pit and tiers == {"Live": "ultra"}
         base.clear_cache()
         assert base.tiers_at(conn, NOW - 6000)[1] is False  # v2 was still training then
+
+
+def test_network_features_on_demand(conn):
+    conn.execute("INSERT INTO sniper_launches(mint, creator, created_ts) VALUES (?, 'D', ?)", (MINT, NOW - 30))
+    conn.execute("INSERT INTO sniper_launches(mint, creator, created_ts, rugged, max_ret_60m) VALUES ('P', 'D', ?, 1, -0.9)", (NOW - 9000,))
+    conn.commit()
+    r = intel.network_features(conn, MINT, NOW)
+    assert r["features"]["net_dev_launches"] == 1 and r["features"]["net_dev_rug_rate"] == 1.0 and r["meta"]["creator"] == "D"

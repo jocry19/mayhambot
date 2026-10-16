@@ -78,3 +78,14 @@ def setups(conn, mint, ts=None):
     if not f:
         f = features_at("coin", mint, __import__("time").time(), conn)["features"]
     return [{"kind": k, "text": t, "lift": lift} for k, t, lift in deep.matching(f, book)]
+
+
+def network_features(conn, mint, ts=None):
+    """Stage 5 features of one coin computed on demand (DB only, ~10 ms): net_dev_launches, net_dev_rug_rate,
+    net_dev_hit2x_rate, net_funder_launches, net_funder_rug_rate, net_early_bad, net_early_good, net_bot_share_60m,
+    net_sandwich_60m. For callers that need them in the first minutes after a launch, before the coin enters the
+    service's 5-minute universe (intel.latest)."""
+    import time as _t
+    from intel import network
+    f, meta = network.network_features(conn, mint, int(ts or _t.time()))
+    return {"features": f, "meta": meta}
