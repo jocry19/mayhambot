@@ -62,19 +62,21 @@ def _agent():
     return f"gui/{os.getuid()}/{LABEL}"
 
 
-def _agent_loaded():
-    if not PLIST.exists():
-        return False
+def _agent_present():
     return subprocess.call(["launchctl", "print", _agent()], stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL) == 0
+
+
+def _agent_loaded():
+    return PLIST.exists() and _agent_present()
 
 
 def start():
     if PLIST.exists():
         # autostart owns the services: load/kick the agent instead of spawning a second copy
         _stop_detached(quiet=True)
-        if not _agent_loaded():
-            subprocess.call(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST)])
+        if not _agent_present():
+            _bootstrap()
         subprocess.call(["launchctl", "kickstart", _agent()])
         print(f"mayhambot läuft über Autostart ({LABEL}). Dashboard: http://localhost:{PORT}")
         return
@@ -91,6 +93,7 @@ def stop():
     if _agent_loaded():
         # unload only; the plist stays, so autostart is back at next login or with `start`
         subprocess.call(["launchctl", "bootout", _agent()])
+        _wait_unloaded()
         print("Autostart-Agent angehalten (bleibt eingerichtet; `start` oder nächster Login startet ihn wieder)")
     _stop_detached()
 
@@ -215,10 +218,8 @@ def update_loop(every):
         time.sleep(every)
 
 
-def install_autostart():
-    LOGS.mkdir(exist_ok=True)
-    PLIST.parent.mkdir(parents=True, exist_ok=True)
-    PLIST.write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
+def _plist_text():
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>{LABEL}</string>
@@ -229,9 +230,43 @@ def install_autostart():
   <key>StandardOutPath</key><string>{LOGS / 'launchd.log'}</string>
   <key>StandardErrorPath</key><string>{LOGS / 'launchd.log'}</string>
 </dict></plist>
-""")
-    subprocess.call(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], stderr=subprocess.DEVNULL)
-    subprocess.check_call(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST)])
+"""
+
+
+def _wait_unloaded(timeout=30):
+    """launchd tears an agent down asynchronously after bootout; bootstrap before that fails (exit 5)."""
+    end = time.time() + timeout
+    while _agent_present() and time.time() < end:
+        time.sleep(0.5)
+    return not _agent_present()
+
+
+def _bootstrap(attempts=3, pause=3):
+    for i in range(attempts):
+        rc = subprocess.call(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST)])
+        if rc == 0 or _agent_present():
+            return True
+        print(f"launchctl bootstrap exit {rc}, neuer Versuch in {pause} s")
+        time.sleep(pause)
+        _wait_unloaded(10)
+    return False
+
+
+def install_autostart():
+    LOGS.mkdir(exist_ok=True)
+    PLIST.parent.mkdir(parents=True, exist_ok=True)
+    text = _plist_text()
+    if PLIST.exists() and PLIST.read_text() == text and _agent_present():
+        print(f"Autostart ist schon an und unverändert. Dashboard: http://localhost:{PORT}")
+        return
+    PLIST.write_text(text)
+    if _agent_present():
+        subprocess.call(["launchctl", "bootout", _agent()], stderr=subprocess.DEVNULL)
+        if not _wait_unloaded():
+            sys.exit("Autostart-Agent lässt sich nicht entladen; bitte später erneut versuchen.")
+    if not _bootstrap():
+        sys.exit("Autostart konnte nicht geladen werden (launchctl bootstrap). Der Plist bleibt; "
+                 "`mayham.py start` versucht es erneut.")
     print(f"Autostart an. Dashboard: http://localhost:{PORT}")
 
 
