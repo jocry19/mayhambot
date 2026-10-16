@@ -17,7 +17,7 @@ FEATURES = {
     "net_funder_rug_rate": ("net", "Rug-Rate des Geldgeber-Netzes", "pct"),
     "net_early_bad": ("net", "Launch-Wallets aus früheren Rugs", "n"),
     "net_early_good": ("net", "Launch-Wallets aus früheren 2x-Launches", "n"),
-    "net_bot_share_60m": ("net", "Volumen von Bots 60 min", "pct"),
+    "net_bot_share_60m": ("net", "Volumen von Sandwich-/Roundtrip-Bots 60 min", "pct"),
     "net_sandwich_60m": ("net", "Sandwich-Muster 60 min", "n"),
 }
 DONE_AFTER = 3600  # a launch's outcome (60 min) is known one hour after creation
@@ -32,11 +32,13 @@ def _rates(rows):
     return n, rug, hit
 
 
-def _funder(conn, wallet):
+def _funder(conn, wallet, ts):
+    """Funder of a wallet as known at ts (the lookup was done at checked_at)."""
     for t in ("research_funding", "safety_wallets"):
         if has(conn, t):
             col = "wallet" if t == "research_funding" else "address"
-            r = conn.execute(f"SELECT funder FROM {t} WHERE {col}=? AND funder IS NOT NULL", (wallet,)).fetchone()
+            r = conn.execute(f"SELECT funder FROM {t} WHERE {col}=? AND funder IS NOT NULL AND COALESCE(checked_at, 0)<=?",
+                             (wallet, ts)).fetchone()
             if r and r[0]:
                 return r[0]
     return None
@@ -59,13 +61,14 @@ def network_features(conn, mint, ts):
             out["net_dev_launches"], out["net_dev_rug_rate"], out["net_dev_hit2x_rate"] = _rates(rows)
             if not rows:
                 out["net_dev_rug_rate"] = out["net_dev_hit2x_rate"] = None
-            f = _funder(conn, creator)
+            f = _funder(conn, creator, ts)
             if f:
                 meta["funder"] = f
                 sibs = set()
                 for t, col in (("research_funding", "wallet"), ("safety_wallets", "address")):
                     if has(conn, t):
-                        sibs.update(r[0] for r in conn.execute(f"SELECT {col} FROM {t} WHERE funder=? LIMIT 500", (f,)))
+                        sibs.update(r[0] for r in conn.execute(
+                            f"SELECT {col} FROM {t} WHERE funder=? AND COALESCE(checked_at, 0)<=? LIMIT 500", (f, ts)))
                 sibs.add(creator)
                 q = ",".join("?" * len(sibs))
                 frows = conn.execute(f"SELECT rugged, max_ret_60m FROM sniper_launches WHERE creator IN ({q}) AND mint<>? "
@@ -74,8 +77,9 @@ def network_features(conn, mint, ts):
                 out["net_funder_launches"], rr, _ = _rates(frows)
                 out["net_funder_rug_rate"] = rr
         if has(conn, "sniper_launch_wallets"):
-            ws = [r[0] for r in conn.execute("SELECT DISTINCT wallet FROM sniper_launch_wallets WHERE mint=? AND (ts IS NULL OR ts<=?)",
-                                             (mint, ts))]
+            ws = [r[0] for r in conn.execute(
+                "SELECT DISTINCT lw.wallet FROM sniper_launch_wallets lw LEFT JOIN sniper_launches l ON l.mint=lw.mint "
+                "WHERE lw.mint=? AND COALESCE(l.decided_ts, lw.ts, 0)<=?", (mint, ts))]
             if ws:
                 bad, good = set(), set()
                 for i in range(0, len(ws), 400):
@@ -94,8 +98,9 @@ def network_features(conn, mint, ts):
 
 
 def bots(conn, mint, ts):
-    rows = conn.execute("SELECT t.wallet, t.side, t.ts, t.usd_amount, COALESCE(w.is_bot,0) FROM trades t LEFT JOIN wallets w "
-                        "ON w.address=t.wallet WHERE t.mint=? AND t.ts>? AND t.ts<=? ORDER BY t.ts", (mint, ts - 3600, ts)).fetchall()
+    # wallets.is_bot is today's verdict (not point in time), so only the pattern itself counts
+    rows = conn.execute("SELECT wallet, side, ts, usd_amount, 0 FROM trades WHERE mint=? AND ts>? AND ts<=? ORDER BY ts",
+                        (mint, ts - 3600, ts)).fetchall()
     if len(rows) < 10:
         return {}
     total = sum(float(r[3] or 0) for r in rows)

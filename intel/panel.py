@@ -168,7 +168,7 @@ def rotation(conn, now, hours=6):
 def flows(conn, now, minutes=60, sym_cache=None):
     """Smart money (Ultra/Smart) net USD per coin in the last hour, entities counted once, plus the whole tape split by tier."""
     tiers, pit = base.tiers_at(conn, now)
-    cl = base.clusters(conn)
+    cl = base.clusters(conn, now)
     sol = base.sol_usd_at(conn, now)
     per = defaultdict(lambda: {"net": 0.0, "buy": 0.0, "sell": 0.0, "ents": set(), "ultra": 0.0})
     tape = defaultdict(lambda: {"buy": 0.0, "sell": 0.0, "n": 0})

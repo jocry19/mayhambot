@@ -41,7 +41,7 @@ def wallet_features(conn, wallet, ts, days=30):
     out = {k: None for k in FEATURES}
     rows = conn.execute("SELECT mint, side, ts, usd_amount, token_amount, price_usd FROM trades WHERE wallet=? AND ts>? AND ts<=? "
                         "ORDER BY ts", (wallet, ts - days * 86400, ts)).fetchall()
-    cl = base.clusters(conn)
+    cl = base.clusters(conn, ts)
     cid = cl.get(wallet)
     if cid:
         out["w_cluster_size"] = sum(1 for c in cl.values() if c == cid)
@@ -85,22 +85,22 @@ def wallet_features(conn, wallet, ts, days=30):
         for ph in PHASES:
             if len(caps[ph]) >= 2:
                 out[f"w_exit_capture_{ph}"] = statistics.median(caps[ph])
-        out.update(cobuys(conn, wallet, [r for r in rows if r[1] == "buy"][-150:]))
+        out.update(cobuys(conn, wallet, [r for r in rows if r[1] == "buy"][-150:], ts))
     out.update(latency(conn, wallet, ts))
     known = sum(v is not None for v in out.values())
     return {"features": out, "coverage": {"wallet": round(known / len(out), 3), "all": round(known / len(out), 3)},
             "meta": {"cluster_id": cid, "n_trades": len(rows)}}
 
 
-def cobuys(conn, wallet, buys):
-    """Other wallets that bought the same coin within 60 s of this wallet's buys."""
+def cobuys(conn, wallet, buys, ts):
+    """Other wallets that bought the same coin within 60 s of this wallet's buys (never after ts)."""
     if not buys:
         return {}
     partners = Counter()
     with_any = 0
     for m, _, t, *_ in buys:
         ws = {r[0] for r in conn.execute("SELECT DISTINCT wallet FROM trades WHERE mint=? AND side='buy' AND ts>=? AND ts<=? "
-                                         "AND wallet<>?", (m, t - 60, t + 60, wallet))}
+                                         "AND wallet<>?", (m, t - 60, min(t + 60, ts), wallet))}
         with_any += bool(ws)
         partners.update(ws)
     return {"w_cobuy_share": with_any / len(buys), "w_cobuy_partners": sum(1 for c in partners.values() if c >= 2)}

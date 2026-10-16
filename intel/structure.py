@@ -81,8 +81,9 @@ def tape_structure(conn, mint, ts, days=7):
             out["tape_smart_held_chg_1h"] = 100 * (out["tape_smart_held"] - so)
     if has(conn, "sniper_launch_wallets"):
         ins = {r[0]: float(r[1] or 0) for r in conn.execute(
-            "SELECT wallet, MAX(tokens) FROM sniper_launch_wallets WHERE mint=? AND role IN ('dev','bundle','insider') "
-            "AND (ts IS NULL OR ts<=?) GROUP BY wallet", (mint, ts))}
+            "SELECT lw.wallet, MAX(lw.tokens) FROM sniper_launch_wallets lw LEFT JOIN sniper_launches l ON l.mint=lw.mint "
+            "WHERE lw.mint=? AND lw.role IN ('dev','bundle','insider') AND COALESCE(l.decided_ts, lw.ts, 0)<=? GROUP BY lw.wallet",
+            (mint, ts))}
         start = sum(ins.values())
         if start > 0:
             sold = defaultdict(float)

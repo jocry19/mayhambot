@@ -319,3 +319,23 @@ def test_event_study(conn):
     r = ev[0]
     assert r["kind"] == "smart_entry" and r["n"] == 1  # three events within 30 min on one coin count once
     assert r["med_max"] == pytest.approx(0.6) and r["hit_rate"] == 1
+
+
+def test_no_future_in_cobuys_and_tiers(conn):
+    from research import store as rstore
+    rstore.ensure_schema(conn)
+    trade(conn, "a", U1, MINT, "buy", NOW - 30, 100)
+    trade(conn, "b", R, MINT, "buy", NOW + 20, 100)  # co-buy after ts: invisible at ts
+    conn.commit()
+    assert wallet.wallet_features(conn, U1, NOW)["features"]["w_cobuy_share"] == 0
+    assert wallet.wallet_features(conn, U1, NOW + 60)["features"]["w_cobuy_share"] == 1
+    if store.has(conn, "model_versions"):
+        conn.execute("INSERT INTO model_versions(id, ts, active) VALUES (1, ?, 0)", (NOW - 7200,))  # trained, never went live
+        conn.execute("INSERT INTO model_versions(id, ts, active) VALUES (2, ?, 1)", (NOW - 7000,))
+        conn.execute("INSERT INTO model_tier_history VALUES (2, 'Live', 'ultra', 80)")
+        conn.commit()
+        base.clear_cache()
+        tiers, pit = base.tiers_at(conn, NOW)
+        assert pit and tiers == {"Live": "ultra"}
+        base.clear_cache()
+        assert base.tiers_at(conn, NOW - 6000)[1] is False  # v2 was still training then

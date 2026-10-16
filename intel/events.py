@@ -49,7 +49,7 @@ def detect(conn, now, cfg=default_cfg, lookback=900):
     now = int(now)
     sym = {}
     tiers, _ = base.tiers_at(conn, now)
-    cl = base.clusters(conn)
+    cl = base.clusters(conn, now)
     sol = base.sol_usd_at(conn, now)
     ev = []
     smart = {w for w, t in tiers.items() if t in ("ultra", "smart")}

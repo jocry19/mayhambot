@@ -118,7 +118,7 @@ def volume_flow(conn, mint, ts, cfg=default_cfg):
         return out, {"n_trades": 0}
     sol_usd = base.sol_usd_at(conn, ts)
     tiers, pit = base.tiers_at(conn, ts)
-    cl = base.clusters(conn)
+    cl = base.clusters(conn, ts)
     buy, sell = defaultdict(float), defaultdict(float)
     ent_buy = set()
     whale = retail_buyers = 0.0
@@ -176,8 +176,8 @@ def volume_flow(conn, mint, ts, cfg=default_cfg):
         out["flow_smart_exit_share"] = (sum(1 for e in bought if s6[e] >= 0.5 * b6[e]) / len(bought)) if bought else None
     if has(conn, "sniper_launch_wallets"):
         roles = {r[0] for r in conn.execute(
-            f"SELECT wallet FROM sniper_launch_wallets WHERE mint=? AND (ts IS NULL OR ts<=?) "
-            f"AND role IN ({','.join('?' * len(INSIDER_ROLES))})", (mint, ts, *INSIDER_ROLES))}
+            f"SELECT lw.wallet FROM sniper_launch_wallets lw LEFT JOIN sniper_launches l ON l.mint=lw.mint WHERE lw.mint=? "
+            f"AND COALESCE(l.decided_ts, lw.ts, 0)<=? AND lw.role IN ({','.join('?' * len(INSIDER_ROLES))})", (mint, ts, *INSIDER_ROLES))}
         if roles:
             out["flow_insider_sell_usd_60m"] = sum(sell[w] for w in roles)
     return out, {"n_trades": len(rows), "tier_pit": pit}

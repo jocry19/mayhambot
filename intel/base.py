@@ -6,6 +6,7 @@ import time
 from intel.store import has
 
 TIERS = ("ultra", "smart", "good")
+ACTIVATION_LAG_S = 3600  # model_versions.ts is the retrain start; activation follows after the backtest
 _CACHE = {}
 
 
@@ -28,7 +29,10 @@ def tiers_at(conn, ts):
     current wallets.tier (flag pit=False: the tier may contain knowledge from after ts)."""
     def load():
         if has(conn, "model_versions") and has(conn, "model_tier_history"):
-            v = conn.execute("SELECT id FROM model_versions WHERE ts<=? ORDER BY ts DESC LIMIT 1", (ts,)).fetchone()
+            # only versions that went live (their tiers were written to model_tier_history), and only once the
+            # retrain that started at model_versions.ts could have finished (ACTIVATION_LAG_S, conservative)
+            v = conn.execute("SELECT id FROM model_versions WHERE ts<=? AND id IN (SELECT DISTINCT version FROM model_tier_history) "
+                             "ORDER BY ts DESC LIMIT 1", (ts - ACTIVATION_LAG_S,)).fetchone()
             if v:
                 rows = conn.execute("SELECT address, tier FROM model_tier_history WHERE version=? AND tier IS NOT NULL",
                                     (v[0],)).fetchall()
@@ -40,8 +44,15 @@ def tiers_at(conn, ts):
     return _cached(("tiers", ts // 600), 300, load)
 
 
-def clusters(conn):
-    """{wallet: cluster_id} from the active model (same funder or repeated co-buys within 60 s = one entity)."""
+def clusters(conn, ts=None):
+    """{wallet: cluster_id} from the active model (same funder or repeated co-buys within 60 s = one entity).
+    Point in time: with ts, only when the active version could already have been live at ts, else {} (every
+    wallet is its own entity, a weaker but honest count)."""
+    if ts is not None and has(conn, "model_versions"):
+        v = conn.execute("SELECT MAX(ts) FROM model_versions WHERE active=1").fetchone()
+        if not v or not v[0] or v[0] > ts - ACTIVATION_LAG_S:
+            return {}
+
     def load():
         out = {}
         if has(conn, "model_wallet_stats") and "cluster_id" in {r[1] for r in conn.execute("PRAGMA table_info(model_wallet_stats)")}:
