@@ -1650,17 +1650,81 @@ def overview(conn):
                     eq = eq[:: len(eq) // 300 + 1] + [eq[-1]]
                 ct[mode]["equity"] = eq
                 ct[mode]["equity_now"] = eq[-1]["equity_sol"] if eq else None
+    sn, mdl = sniper_summary(conn, now), model_active(conn)
     return {
-        "now": now, "tier_source": tier_source(conn), "tiers": tiers, "sniper": sniper_summary(conn, now),
+        "now": now, "tier_source": tier_source(conn), "tiers": tiers, "sniper": sn,
         "wallets_total": scalar(conn, "SELECT COUNT(*) FROM wallets", default=0),
         "tokens_tracked": scalar(conn, "SELECT COUNT(*) FROM tokens WHERE tracked=1", default=0),
         "trades_24h": sum(f["n"] for f in flows),  # same 24 h window flow_series already read
         "signals_24h": len(sigs),
         "net_tiered_24h": _f(net_24, 0), "flows": flows, "signal_perf": {k: perf[k] for k in ("n", "hits", "hit_rate", "pump_threshold", "median_max_1h")},
         "feed": sigs[:25], "top_coins": coins(conn, sort="strength", limit=12),
-        "copytrade": ct, "control": control_state(conn), "model": model_active(conn),
+        "copytrade": ct, "control": control_state(conn), "model": mdl,
         "last_trade_ts": last_trade_ts(conn),
+        "board": situation(conn, now, sniper=sn, ct=ct, model=mdl, signals_24h=len(sigs), perf=perf),
     }
+
+
+def situation(conn, now=None, sniper=None, ct=None, model=None, signals_24h=None, perf=None):
+    """Start-page situation board: one line per service with its state (services_health), a headline number and
+    the page it links to, plus open problems (watchdog, backup, stopped services). Reuses what overview() already
+    computed; the extra reads are single-row lookups."""
+    now = int(now or time.time())
+    health = {h["name"]: h for h in cache.get(("health", "board"), 10, lambda: services_health(conn, now))}
+    out = []
+
+    def add(name, page, headline, detail=""):
+        h = health.get(name)
+        if not h:
+            return
+        out.append({"name": name, "label": h["label"], "state": h["state"], "last_ts": h["last_ts"], "page": page,
+                    "headline": headline, "detail": detail})
+
+    add("signals", "/signals", f"{signals_24h or 0} Signale in 24 h",
+        f"Trefferquote {round(100 * perf['hit_rate'])} %" if perf and perf.get("hit_rate") is not None else "")
+    paper = (ct or {}).get("paper") or {}
+    add("copytrade", "/copytrade", f"Papier {paper['pnl_sol']:+.2f} SOL".replace(".", ",") if paper.get("pnl_sol") is not None else "noch keine Trades",
+        f"{paper.get('open') or 0} offen · {paper.get('trades') or 0} Trades" if paper else "")
+    sq = cache.get(("safety_quality",), 60, lambda: safety_quality(conn))
+    blocked = scalar(conn, "SELECT COUNT(*) FROM safety_tokens WHERE blocked=1", default=0) if has(conn, "safety_tokens", "blocked") else None
+    best = None
+    if sq and sq.get("backtest"):
+        best = next((x for x in sq["backtest"]["scores"] if x["key"] == sq["backtest"]["best"]), None)
+    add("safety", "/coins", f"{blocked} Coins gesperrt" if blocked is not None else "–",
+        f"erkennt {round(100 * best['recall'])} % der Rugs bei ≤10 % Fehlalarm" if best and best.get("recall") is not None else "")
+    if sniper:
+        add("sniper", "/sniper", f"{sniper.get('launches_today', 0)} Launches heute",
+            (f"Papier {sniper['pnl_sol']:+.3f} SOL".replace(".", ",") if sniper.get("pnl_sol") is not None else "") +
+            (f" · {sniper.get('entered_today', 0)} gekauft" if sniper.get("entered_today") is not None else ""))
+    mk = one(conn, "SELECT ts, score, label, sol_ret_24h FROM market_snapshots ORDER BY ts DESC LIMIT 1") \
+        if has(conn, "market_snapshots", "label") else None
+    add("market", "/market", (mk.get("label") or "–") if mk else "noch keine Analyse",
+        (f"Marktwert {round(mk['score'])} von 100" if mk and mk.get("score") is not None else "") +
+        (f" · SOL {mk['sol_ret_24h'] * 100:+.1f} % in 24 h".replace(".", ",") if mk and mk.get("sol_ret_24h") is not None else ""))
+    if has(conn, "intel_events", "ts"):
+        ev = one(conn, "SELECT ts, title, severity FROM intel_events ORDER BY ts DESC LIMIT 1")
+        n1h = scalar(conn, "SELECT COUNT(*) FROM intel_events WHERE ts>=?", (now - 3600,), 0)
+        add("intel", "/zentrale", f"{n1h} Meldungen in 1 h", (ev.get("title") or "")[:90] if ev else "")
+    else:
+        add("intel", "/zentrale", "noch keine Meldungen")
+    m = model or {}
+    add("research", "/model", f"Modell v{m['id']}" if m.get("id") else "noch kein Modell",
+        f"AUC 1 h {m['auc_1h']:.2f}".replace(".", ",") if m.get("auc_1h") is not None else "")
+    problems = []
+    for h in health.values():
+        if h["state"] == "steht":
+            problems.append(f"{h['label']} steht" + (f" (letzte Daten {_ago_de(now - h['last_ts'])})" if h.get("last_ts") else ""))
+    bk = cache.get(("backup",), 60, backup_status)
+    if bk:
+        problems += [p for p in (bk.get("problems") or {}).values() if p and p not in problems]
+    order = {"steht": 0, "langsam": 1, "neu": 2, "ok": 3}
+    return {"rows": out, "problems": problems[:8],
+            "worst": min((r["state"] for r in out), key=lambda x: order.get(x, 9), default="ok")}
+
+
+def _ago_de(s):
+    s = int(s)
+    return f"vor {s} s" if s < 90 else f"vor {s // 60} min" if s < 5400 else f"vor {s // 3600} h" if s < 172800 else f"vor {s // 86400} Tagen"
 
 
 def _table_counts(conn):

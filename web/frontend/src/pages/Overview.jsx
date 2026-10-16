@@ -11,6 +11,7 @@ export default function Overview() {
   return (
     <div className={`col ${loading ? "" : ""}`} style={{ gap: 16 }}>
       {d.tier_source !== "model" && <Callout icon="info">{TIER_SOURCE[d.tier_source]}. Die Ränge werden genauer, sobald das Forschungsmodell trainiert hat.</Callout>}
+      <Board b={d.board} />
       <div className="tiles dense">
         <Tile label="Tier-Wallets" value={<TierCounts tiers={d.tiers} />} sub={`${n(d.wallets_total)} Wallets beobachtet`} />
         <Tile label="Signale 24 h" value={n(d.signals_24h)} sub={`${n(d.tokens_tracked)} Coins im Blick · ${n(d.trades_24h)} Trades`} />
@@ -103,5 +104,30 @@ function SniperTile({ s }) {
       sub={<>{n(s.launches_today)} Launches heute · {n(s.entered_today)} gekauft
         {sym ? <> · zuletzt {sym} {ago(lb.opened_ts)}</> : " · noch kein Kauf"}
         {s.service_up === false && <> · <span className="down">Dienst steht</span></>}</>} />
+  );
+}
+
+const BOARD_STATE = { ok: ["läuft", "good"], langsam: ["verzögert", "warn"], steht: ["steht", "bad"], neu: ["noch keine Daten", "idle"] };
+
+/** Situation board: every service in one line with its state, headline number and a link to its page. */
+function Board({ b }) {
+  if (!b?.rows?.length) return null;
+  return (
+    <div className="col" style={{ gap: 10 }}>
+      {b.problems?.length > 0 && <Callout kind="bad" icon="alert">{b.problems.join(" · ")} · <a href="#/system">Zustand ansehen</a></Callout>}
+      <div className="board" role="list" aria-label="Lagebild der Dienste">
+        {b.rows.map((r) => {
+          const [l, c] = BOARD_STATE[r.state] || [r.state, "idle"];
+          return (
+            <a key={r.name} href={`#${r.page}`} className="board-i" role="listitem" title={`${r.label}: ${l}${r.last_ts ? `, letzte Daten ${ago(r.last_ts)}` : ""}`}>
+              <div className="board-h"><span className={`dot ${c}`} aria-hidden="true" /><span className="board-l">{r.label}</span>
+                <span className={`board-s ${c}`}>{l}</span></div>
+              <div className="board-v">{r.headline}</div>
+              <div className="board-d">{r.detail || (r.last_ts ? `letzte Daten ${ago(r.last_ts)}` : "\u00a0")}</div>
+            </a>
+          );
+        })}
+      </div>
+    </div>
   );
 }

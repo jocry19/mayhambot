@@ -455,7 +455,7 @@ def test_pid_states(tmp_path, monkeypatch):
     assert Q._pid_running("gibtsnicht-xyz") is None
 
 
-def test_cache_swr_bg_and_last_ts(tmp_path, monkeypatch):
+def test_cache_swr_bg_and_last_ts(tmp_path):
     import threading
     import time as _t
 
@@ -480,18 +480,12 @@ def test_cache_swr_bg_and_last_ts(tmp_path, monkeypatch):
             break
         _t.sleep(0.01)
     assert c.get_bg(("b",), 10, lambda: 6) == 5
-    # newest trade without an index on ts: from the newest inserts
-    from web import db as wdb
-
-    monkeypatch.setenv("MAYHAM_DB_PATH", str(tmp_path / "t.db"))
-    wdb._schema_cache["ts"] = 0  # has() reads the schema of this DB, not the previous test's
+    # newest trade without an index on ts: from the newest inserts (own DB file: has() must see its schema)
     conn = sqlite3.connect(str(tmp_path / "t.db"))
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE trades(sig TEXT, wallet TEXT, mint TEXT, side TEXT, ts INTEGER, PRIMARY KEY(sig, wallet, mint, side))")
     conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?)", [(str(i), "w", "m", "buy", 1000 + i) for i in range(500)])
     Q.cache.clear()
-    from web import db as wdb
-    wdb._schema_cache["ts"] = 0  # the schema cache is per DB path; this test brings its own connection
     assert not Q._has_index(conn, "trades", "ts") and Q.last_ts(conn, "trades") == 1499
     conn.execute("CREATE INDEX ix ON trades(ts)")
     Q.cache.clear()
@@ -520,3 +514,25 @@ def test_cross_site_writes_refused(demo):
     same = c._call("POST", "/api/control/pause", b'{"on": false}', [(b"origin", b"http://127.0.0.1:8600"),
                                                                      (b"content-type", b"application/json")])
     assert same.status_code == 200
+
+
+def test_overview_board(demo, empty):
+    b = _client(demo).get("/api/overview").json()["board"]
+    names = [r["name"] for r in b["rows"]]
+    assert names[:4] == ["signals", "copytrade", "safety", "sniper"] and "research" in names
+    assert all(r["page"].startswith("/") and r["headline"] for r in b["rows"])
+    assert b["worst"] in ("ok", "langsam", "steht", "neu")
+    e = _client(empty).get("/api/overview").json()["board"]
+    assert all(r["state"] in ("neu", "ok") for r in e["rows"]) and not e["problems"]
+
+
+def test_schema_cache_per_database(tmp_path):
+    from web.db import has, tables
+
+    a, b = sqlite3.connect(str(tmp_path / "a.db")), sqlite3.connect(str(tmp_path / "b.db"))
+    a.execute("CREATE TABLE x(ts INTEGER)")
+    assert has(a, "x", "ts") and not has(b, "x")          # two files never share an entry
+    b.execute("CREATE TABLE x(ts INTEGER, y TEXT)")
+    assert has(b, "x", "y") and not has(a, "x", "y")
+    a.execute("ALTER TABLE x ADD COLUMN y TEXT")             # schema_version bump: seen at once, no 20 s wait
+    assert has(a, "x", "y") and "x" in tables(a)

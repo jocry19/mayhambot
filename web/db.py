@@ -60,18 +60,28 @@ def write_conn() -> sqlite3.Connection:
         return c
 
 
-_schema_cache: dict = {"ts": 0, "tables": {}}
+_schema_cache: dict = {}  # database file (or connection id for in-memory) -> (schema_version, ts, tables)
 
 
 def tables(conn) -> dict[str, set[str]]:
-    """{table: {columns}} cached for 20 s (other modules add tables while we run)."""
+    """{table: {columns}} of the database behind `conn`. Cached per database file and invalidated by SQLite's
+    schema_version (bumped by every CREATE/ALTER/DROP), so another service adding a table shows up at once and
+    connections to different files never share an entry."""
+    try:
+        ver = conn.execute("PRAGMA schema_version").fetchone()[0]
+        f = conn.execute("PRAGMA database_list").fetchone()[2]
+    except sqlite3.Error:
+        return {}
+    key = f or id(conn)
+    hit = _schema_cache.get(key)
     now = time.time()
-    if now - _schema_cache["ts"] > 20 or _schema_cache.get("path") != db_path():
-        out = {}
-        for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
-            out[name] = {r[1] for r in conn.execute(f"PRAGMA table_info('{name}')").fetchall()}
-        _schema_cache.update(ts=now, tables=out, path=db_path())
-    return _schema_cache["tables"]
+    if hit and hit[0] == ver and now - hit[1] < 300:
+        return hit[2]
+    out = {}
+    for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+        out[name] = {r[1] for r in conn.execute(f"PRAGMA table_info('{name}')").fetchall()}
+    _schema_cache[key] = (ver, now, out)
+    return out
 
 
 def has(conn, table: str, *cols: str) -> bool:
