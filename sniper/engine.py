@@ -30,6 +30,7 @@ SKIP_LABELS = {
     "capacity": "kein Platz (Limits, Guthaben)",
     "budget": "API-Budget erschöpft, nicht tief geprüft",
     "external": "Pool außerhalb pump.fun (nur beobachtet)",
+    "no_stream": "kein Trade-Datenstrom für diese Plattform (bonk)",
     "no_price": "kein Preis für den Einstieg",
     "unverified": "Launch-Daten nicht prüfbar (pump.fun und RPC ohne Antwort)",
 }
@@ -44,6 +45,7 @@ class Engine:
         self.lock = threading.RLock()
         self.to_sub, self.to_unsub = set(), set()
         self.tiers = {}
+        self.stream_pools = None   # pools whose trades we receive (None = all); the RPC log stream decodes pump only
         self.book = PaperBook(cfg, conn)
         self.counters = {"creates": 0, "trades": 0, "migrations": 0, "stage1": 0, "stage2": 0, "entries": 0}
         self._resume()
@@ -225,7 +227,9 @@ class Engine:
         st.prescore = round(a.momentum * (1 - a.risk / 100), 1)
         F = a.features
         reason = None
-        if F["dev_sold_pct"] >= 50:
+        if self.stream_pools is not None and st.pool not in self.stream_pools:
+            reason = "no_stream"
+        elif F["dev_sold_pct"] >= 50:
             reason = "dev_sold"
         elif F["n_buyers"] < self.cfg.min_buyers or F["net_sol"] < self.cfg.min_inflow_sol \
                 or a.momentum < self.cfg.prescore_min:

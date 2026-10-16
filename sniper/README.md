@@ -47,8 +47,13 @@ Wünsche an andere Pakete (über den Coordinator):
 
 ## Ablauf pro Launch
 
-1. **Erstellung** (PumpPortal `subscribeNewToken`, eine Websocket-Verbindung, kostenlos): Zustand im Speicher,
-   sofort `subscribeTokenTrade` für den Coin. Jeder Trade bringt Curve-Stand, Käufer und neuen Kontostand.
+1. **Erstellung** (PumpPortal `subscribeNewToken` + `subscribeMigration`, eine Websocket-Verbindung, kostenlos):
+   Zustand im Speicher, sofort ein Trade-Abo für den Coin. **Trades pro Coin** liefert PumpPortal nur mit einem
+   API-Key mit mindestens 0,02 SOL Guthaben (`SNIPER_PUMPPORTAL_API_KEY`, Test 10/2026). Ohne Key (Standard) kommen
+   sie kostenlos aus dem **Solana-RPC-Websocket** (`sniper/rpcws.py`): ein `logsSubscribe` je Coin (`mentions`),
+   pump.funs `TradeEvent` aus der Zeile `Program data:` dekodiert (Mint, SOL, Tokens, Seite, Trader, Curve-Reserven,
+   Slot). Lehnt PumpPortal Trade-Abos ab, wechselt der Dienst automatisch auf diesen Weg und meldet es als WARNING.
+   bonk-Launches haben dort keinen Decoder: sie werden erfasst und gemessen, aber mit `no_stream` übersprungen.
 2. **Stufe 1** nach `SNIPER_DECIDE_SEC` (20 s), **kostenlos** aus dem Datenstrom: organische Käufer, Netto-SOL,
    Kaufdruck, Smart Money (`wallets.tier`), Dev-Anteil und -Verkäufe, Top-10, Sniper-Bots in den ersten 2 s und die
    **Curve-Schätzung für Bundles**: Was die Curve seit der Erstellung verloren hat, minus was die gesehenen Trades
@@ -58,7 +63,8 @@ Wünsche an andere Pakete (über den Coordinator):
    - eigene Tabellen ohne Netz: Dev-Historie (`sniper_launches`), bekannte Bundler/Rugger (`sniper_launch_wallets`
      bei gerugten Launches), Geldquellen aus `research_funding` und `safety_wallets`, Cluster aus `wallets.cluster_id`
      und `model_wallet_stats`;
-   - pump.fun-API (kostenlos, kein Helius): Metadaten und Socials, die ersten Trades **mit Slot**, die anderen Coins des Devs;
+   - Socials aus dem Metadaten-JSON des Coins (`uri` der Erstellung, 1 Call); die pump.fun-API
+     (`SNIPER_USE_PUMP_API`, aus: die v3-Pfade antworten seit 10/2026 mit 400/404) bleibt als Option;
    - nur wenn das fehlt, RPC: `getSignaturesForAddress(mint)` für den Erstellungs-Slot (1 Call) und bis zu
      `SNIPER_BUNDLE_TXS_FETCHED` Bundle-Transaktionen; Geldquellen per RPC nur, wenn danach noch Budget übrig ist;
    - `model.score_token`, falls ein Modell trainiert ist (`ModelNotTrained` wird abgefangen).
@@ -93,8 +99,8 @@ Kauf nur bei `score ≥ SNIPER_MIN_SCORE` (50), `risk ≤ SNIPER_MAX_RISK` (45) 
 ## Kosten und Last
 
 - **Erkennung und Trades: 0 Calls** (ein PumpPortal-Websocket, keine Keys).
-- **Stufe 2 je Launch**: 3–4 pump.fun-Calls (keyless), **0 RPC**, solange pump.fun antwortet und die Geldquellen
-  im Cache liegen; sonst 1–5 Calls an `SNIPER_RPC_URL` (Standard: **öffentlicher RPC**, nicht Helius), gedeckelt auf
+- **Trades**: RPC-Websocket-Abos (keine HTTP-Calls, keine Credits), höchstens `SNIPER_WS_MAX_SUBS` gleichzeitig.
+- **Stufe 2 je Launch**: 1 Metadaten-Call, dazu 1–5 Calls an `SNIPER_RPC_URL` (Standard: **öffentlicher RPC**, nicht Helius), gedeckelt auf
   `SNIPER_MAX_RPC_PER_LAUNCH` (5) und `SNIPER_RPC_PER_MIN` (10) für den ganzen Dienst. Helius-Credits verbraucht
   der Sniper selbst nur, wenn der Nutzer `SNIPER_RPC_URL` auf Helius stellt.
 - **Safety-Tor** nur vor Papier-Käufen (höchstens `SNIPER_MAX_ENTRIES_PER_HOUR` = 12/h), mit dem Budget von safety/.
@@ -125,6 +131,9 @@ entries}` (seit Start), `pump_api_ok`. Beim Beenden wird einmal `connected: fals
 | Variable | Standard | Bedeutung |
 |---|---|---|
 | `SNIPER_RPC_URL` | öffentlicher RPC | RPC für Launch-Slot und Geldquellen |
+| `SNIPER_TRADE_SOURCE` | auto | `auto` (PumpPortal mit Key, sonst RPC-Logs), `pumpportal`, `rpc` |
+| `SNIPER_PUMPPORTAL_API_KEY` | – | PumpPortal-Key mit ≥ 0,02 SOL Guthaben (nur der Nutzer legt ihn an) |
+| `SNIPER_WS_URL` / `SNIPER_WS_MAX_SUBS` | wss://api.mainnet-beta.solana.com / 150 | RPC-Log-Datenstrom |
 | `SNIPER_RPC_PER_MIN` / `SNIPER_MAX_RPC_PER_LAUNCH` | 10 / 5 | RPC-Deckel |
 | `SNIPER_PUMP_API_PER_MIN` | 40 | pump.fun-API-Deckel |
 | `SNIPER_DEEP_PER_MIN` | 4 | tief geprüfte Launches je Minute |

@@ -158,6 +158,21 @@ class Enricher:
                 self.pump_fail = 0
             return None
 
+    def _metadata(self, uri):
+        """Socials from the token's metadata JSON (the create message's uri); 1 keyless call."""
+        url = uri.replace("ipfs://", "https://ipfs.io/ipfs/") if uri.startswith("ipfs://") else uri
+        if not url.startswith("http") or not self.budget.take("api", 1, wait=2.0):
+            return None
+        try:
+            d = http.get_json(url, retries=0, timeout=6)
+        except Exception as e:  # noqa: BLE001
+            log.debug("metadata %s: %s", url[:60], e)
+            return None
+        if not isinstance(d, dict):
+            return None
+        ext = d.get("extensions") if isinstance(d.get("extensions"), dict) else {}
+        return {k: d.get(k) or ext.get(k) for k in ("twitter", "telegram", "website")}
+
     def run(self, conn, st, now=None):
         now = now or time.time()
         enr = {"exchanges": self.exchanges, "errors": [], "calls_api": 0, "calls_rpc": 0}
@@ -170,6 +185,8 @@ class Enricher:
             if isinstance(coin, dict) and coin.get("mint", st.mint) == st.mint:
                 enr["coin"] = {k: coin.get(k) for k in ("twitter", "telegram", "website", "creator", "complete",
                                                          "usd_market_cap", "created_timestamp")}
+            if "coin" not in enr and st.uri:
+                enr["coin"] = self._metadata(st.uri)
             rows = []
             for page in range(2):
                 d = _list(self._pump(f"/trades/all/{st.mint}", {"limit": 200, "offset": page * 200, "minimumSize": 0}))

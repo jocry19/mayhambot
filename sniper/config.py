@@ -30,8 +30,13 @@ def _s(name, default):
 class SniperSettings:
     # ---- sources
     pumpportal_url: str = field(default_factory=lambda: _s("SNIPER_PUMPPORTAL_URL", "wss://pumpportal.fun/api/data"))
+    pumpportal_api_key: str = field(default_factory=lambda: os.getenv("SNIPER_PUMPPORTAL_API_KEY", "").strip())
+    # per-coin trades: PumpPortal only with a funded key; without one the free RPC log stream is used
+    trade_source: str = field(default_factory=lambda: _s("SNIPER_TRADE_SOURCE", "auto"))   # auto | pumpportal | rpc
+    ws_url: str = field(default_factory=lambda: _s("SNIPER_WS_URL", "wss://api.mainnet-beta.solana.com"))
+    ws_max_subs: int = field(default_factory=lambda: _i("SNIPER_WS_MAX_SUBS", 150))
     pump_api_url: str = field(default_factory=lambda: _s("SNIPER_PUMP_API_URL", "https://frontend-api-v3.pump.fun").rstrip("/"))
-    use_pump_api: bool = field(default_factory=lambda: _b("SNIPER_USE_PUMP_API", True))
+    use_pump_api: bool = field(default_factory=lambda: _b("SNIPER_USE_PUMP_API", False))  # v3 paths answer 400/404 (10/2026)
     use_geckoterminal: bool = field(default_factory=lambda: _b("SNIPER_USE_GECKOTERMINAL", True))
     gt_every_sec: int = field(default_factory=lambda: _i("SNIPER_GT_EVERY_SEC", 300))
     # public RPC by default: the Helius free plan (credits per month) stays for the other services
@@ -51,7 +56,7 @@ class SniperSettings:
     decide_sec: int = field(default_factory=lambda: _i("SNIPER_DECIDE_SEC", 20))            # first look after creation
     quiet_unsub_sec: int = field(default_factory=lambda: _i("SNIPER_QUIET_UNSUB_SEC", 120))
     max_watch_sec: int = field(default_factory=lambda: _i("SNIPER_MAX_WATCH_SEC", 3900))
-    max_subscribed: int = field(default_factory=lambda: _i("SNIPER_MAX_SUBSCRIBED", 400))
+    max_subscribed: int = field(default_factory=lambda: _i("SNIPER_MAX_SUBSCRIBED", 150))
     keep_days: int = field(default_factory=lambda: _i("SNIPER_KEEP_DAYS", 14))
 
     # ---- stage 1 (free, from the trade stream)

@@ -343,7 +343,7 @@ def test_enricher_uses_caches_before_network(conn, monkeypatch):
         return {"mint": "M", "twitter": "x"}
     monkeypatch.setattr(enrich.http, "get_json", get_json)
     monkeypatch.setattr(enrich.http, "post_json", lambda *a, **k: pytest.fail("no RPC expected"))
-    c = cfg(funders_profiled=1)
+    c = cfg(funders_profiled=1, use_pump_api=True)
     e = enrich.Enricher(c)
     cv = Curve("M")
     eng = Engine(c, conn)
@@ -378,3 +378,54 @@ def test_heartbeat(tmp_path):
     hb = json.loads(store.get_state(svc.conn, "service_status"))
     assert hb["connected"] and hb["ws_msgs"] == 7 and hb["queue"] == 0
     assert set(hb["budget"]) == {"rpc", "api", "deep"} and hb["budget"]["rpc"]["per_min"] == 10
+
+
+def _trade_event(mint_b, user_b, sol, tok, buy, vsol, vtok, ts=1_760_000_000):
+    import base64
+    import struct
+    from sniper import rpcws
+    raw = rpcws.TRADE_DISC + mint_b + struct.pack("<QQ", sol, tok) + bytes([1 if buy else 0]) + user_b \
+        + struct.pack("<qQQQQ", ts, vsol, vtok, 0, 0) + b"\0" * 40
+    return base64.b64encode(raw).decode()
+
+
+def test_rpc_log_trade_decoding():
+    from sniper import rpcws
+    mint_b, user_b = bytes(range(1, 33)), bytes(range(33, 65))
+    data = _trade_event(mint_b, user_b, 1_500_000_000, 2_000_000_000_000, True, 31_500_000_000, 1_020_000_000_000_000)
+    note = {"method": "logsNotification", "params": {"result": {"context": {"slot": 777}, "value": {
+        "signature": "SIG", "err": None, "logs": ["Program log: Instruction: Buy", "Program data: " + data,
+                                                  "Program data: AAAA"]}}}}
+    msgs = rpcws.parse_notification(note)
+    assert len(msgs) == 1
+    m = msgs[0]
+    assert m["mint"] == rpcws.b58(mint_b) and m["traderPublicKey"] == rpcws.b58(user_b)
+    assert m["txType"] == "buy" and m["solAmount"] == 1.5 and m["tokenAmount"] == 2_000_000 and m["slot"] == 777
+    assert abs(m["marketCapSol"] - 31.5 / 1_020_000_000 * 1e9) < 1e-6
+    note["params"]["result"]["value"]["err"] = {"InstructionError": [0, "x"]}
+    assert rpcws.parse_notification(note) == []
+    assert rpcws.b58(b"\0\0\x01") == "112"
+
+
+def test_rpc_stream_feeds_engine_and_bonk_is_marked(conn):
+    from sniper import rpcws
+    c = cfg()
+    eng = Engine(c, conn)
+    eng.stream_pools = {"pump"}
+    cv = Curve("MINTRPC")
+    eng.handle(cv.create(), T0)
+    for i in range(30):
+        m = cv.buy(f"buyer{i:03d}", 0.8)
+        ev = {"mint": "MINTRPC", "sol_lamports": int(m["solAmount"] * 1e9), "token_raw": int(m["tokenAmount"] * 1e6),
+              "is_buy": True, "user": m["traderPublicKey"], "ts": 0, "v_sol_lamports": int(m["vSolInBondingCurve"] * 1e9),
+              "v_tok_raw": int(m["vTokensInBondingCurve"] * 1e6)}
+        eng.handle(rpcws.to_stream_msg(ev, m["signature"], 100 + i), T0 + 1 + i * 0.5)
+    bonk = {"signature": "b", "traderPublicKey": "HE8h", "txType": "create", "mint": "BONKMINT", "tokensInPool": 0.14,
+            "initialBuy": 999999999.85, "solAmount": 0, "newTokenBalance": 0.0043, "marketCapSol": 6036.3, "pool": "bonk"}
+    st_b = eng.handle(bonk, T0)
+    assert st_b.dev_tokens == 0.0
+    cands = eng.tick(T0 + c.decide_sec + 1)
+    assert [s.mint for s in cands] == ["MINTRPC"]
+    assert eng.launches["MINTRPC"].n_seen == 30
+    r = conn.execute("SELECT skip_reason, dev_buy_pct FROM sniper_launches WHERE mint='BONKMINT'").fetchone()
+    assert r["skip_reason"] == "no_stream" and r["dev_buy_pct"] == 0

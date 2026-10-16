@@ -9,7 +9,7 @@ import threading
 import time
 
 from core import http
-from sniper import feed, store
+from sniper import feed, rpcws, store
 from sniper.engine import Engine
 from sniper.enrich import Budget, Enricher
 
@@ -29,7 +29,15 @@ class Service:
         self.engine.tiers = store.tier_map(self.conn)
         self.q = queue.Queue()
         self.stop = threading.Event()
-        self.record = open(record, "a") if record else None
+        self.record = open(record, "a", buffering=1) if record else None  # line-buffered: survives a crash
+        key = cfg.pumpportal_api_key
+        self.trades_via = "pumpportal" if key and cfg.trade_source in ("auto", "pumpportal") else "rpc"
+        if cfg.trade_source == "pumpportal" and not key:
+            log.warning("SNIPER_TRADE_SOURCE=pumpportal ohne SNIPER_PUMPPORTAL_API_KEY: PumpPortal liefert Trades "
+                        "nur mit aufgeladenem Key, nehme den RPC-Log-Datenstrom")
+        self.logs = rpcws.LogStream(cfg.ws_url, lambda m: self.engine.handle(m, time.time()), cfg.ws_max_subs)
+        self._warned_reject = False
+        self.engine.stream_pools = None if self.trades_via == "pumpportal" else {"pump"}
         self.connected = False
         self.ws_msgs = 0
         self._dex_conn = None
@@ -74,14 +82,18 @@ class Service:
         backoff = 2
         while not self.stop.is_set():
             try:
-                async with websockets.connect(self.cfg.pumpportal_url, ping_interval=20, ping_timeout=20,
+                url = self.cfg.pumpportal_url
+                if self.cfg.pumpportal_api_key:
+                    url += ("&" if "?" in url else "?") + "api-key=" + self.cfg.pumpportal_api_key
+                async with websockets.connect(url, ping_interval=20, ping_timeout=20,
                                               max_size=2 ** 22, open_timeout=15) as ws:
                     self.connected, backoff = True, 2
                     await ws.send(json.dumps({"method": "subscribeNewToken"}))
                     await ws.send(json.dumps({"method": "subscribeMigration"}))
                     with self.engine.lock:
                         resub = {m for m, s in self.engine.launches.items() if s.subscribed and s.source == "pumpportal"}
-                        self.engine.to_sub |= resub
+                        if self.trades_via == "pumpportal":
+                            self.engine.to_sub |= resub
                     log.info("PumpPortal verbunden (%d Coins im Trade-Abo)", len(resub))
                     sender = asyncio.create_task(self._sender(ws))
                     try:
@@ -91,6 +103,17 @@ class Service:
                             if self.record:
                                 self.record.write(json.dumps({"t": round(now, 3), "m": raw if isinstance(raw, str) else raw.decode()}) + "\n")
                             m = feed.parse(raw)
+                            if m is None and self.trades_via == "pumpportal" and "only available when connecting" in str(raw):
+                                if not self._warned_reject:
+                                    log.warning("PumpPortal lehnt Trade-Abos ab (Key ohne 0,02 SOL Guthaben?): "
+                                                "wechsle auf den kostenlosen RPC-Log-Datenstrom")
+                                    self._warned_reject = True
+                                if self.trades_via != "rpc":
+                                    self.trades_via = "rpc"
+                                    self.engine.stream_pools = {"pump"}
+                                    with self.engine.lock:
+                                        self.logs.subscribe({k for k, s in self.engine.launches.items()
+                                                             if s.subscribed and s.pool == "pump"})
                             if m:
                                 self.engine.handle(m, now)
                             if self.stop.is_set():
@@ -111,8 +134,14 @@ class Service:
             with self.engine.lock:
                 sub, unsub = self.engine.to_sub, self.engine.to_unsub
                 self.engine.to_sub, self.engine.to_unsub = set(), set()
-            for msg in feed.sub_msgs(sub - unsub, unsub - sub):
-                await ws.send(msg)
+            if self.trades_via == "pumpportal":
+                for msg in feed.sub_msgs(sub - unsub, unsub - sub):
+                    await ws.send(msg)
+            else:
+                with self.engine.lock:
+                    pump = {m for m in sub if (self.engine.launches.get(m) and self.engine.launches[m].pool == "pump")}
+                self.logs.subscribe(pump - unsub)
+                self.logs.unsubscribe(unsub)
 
     # ---------------------------------------------------------------- periodic loops
     async def tick_loop(self):
@@ -165,7 +194,9 @@ class Service:
         store.set_state(self._hb_conn, "service_status", json.dumps({
             "ts": int(now), "connected": self.connected, "ws_msgs": self.ws_msgs, "subscribed": subs, "in_memory": n,
             "queue": self.q.qsize(), "open_positions": len(self.engine.book.open), "budget": budget,
-            "counters": dict(self.engine.counters), "pump_api_ok": self.enricher.pump_ok}))
+            "counters": dict(self.engine.counters), "pump_api_ok": self.enricher.pump_ok,
+            "trade_source": self.trades_via, "rpc_ws_connected": self.logs.connected, "rpc_ws_subs": len(self.logs.subs),
+            "rpc_ws_msgs": self.logs.msgs}))
 
     def prune_round(self):
         store.prune(self.conn, self.cfg.keep_days)
@@ -177,14 +208,17 @@ class Service:
             n = len(e.launches)
         c = e.counters
         log.info("Stand: %d Launches, %d Trades, %d Migrationen | Stufe 1: %d, tief geprüft: %d, Käufe: %d | "
-                 "%d im Speicher, %d im Trade-Abo, Warteschlange %d | Calls gesamt RPC %d, pump.fun %d | offen %d, "
+                 "%d im Speicher, %d im Trade-Abo (%s, RPC-Logs %d Abos), Warteschlange %d | Calls gesamt RPC %d, pump.fun %d | offen %d, "
                  "Papier-Guthaben %.3f SOL", c["creates"], c["trades"], c["migrations"], c["stage1"], c["stage2"],
-                 c["entries"], n, subs, self.q.qsize(), self.budget.total["rpc"], self.budget.total["api"],
+                 c["entries"], n, subs, self.trades_via, len(self.logs.subs), self.q.qsize(), self.budget.total["rpc"], self.budget.total["api"],
                  len(e.book.open), e.book.balance(self.conn))
 
     async def main(self, duration=None):
         threading.Thread(target=self.worker, daemon=True, name="sniper-stage2").start()
+        stop_ev = asyncio.Event()
+        self._stop_ev = stop_ev
         tasks = [asyncio.create_task(self.ws_loop()), asyncio.create_task(self.tick_loop()),
+                 asyncio.create_task(self.logs.run(stop_ev)),
                  asyncio.create_task(self.every(300, self.sol_round)),
                  asyncio.create_task(self.every(10, self.heartbeat, 1)),
                  asyncio.create_task(self.every(self.cfg.dex_every_sec, self.dex_round, 10)),
@@ -200,6 +234,7 @@ class Service:
                 await asyncio.gather(*tasks)
         finally:
             self.stop.set()
+            stop_ev.set()
             for t in tasks:
                 t.cancel()
             self.connected = False

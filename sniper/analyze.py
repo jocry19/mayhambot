@@ -80,7 +80,9 @@ def analyze(st, cfg, enr=None, tiers=None, now=None):
         bundle_tokens = sum(b["tokens"] for b in bundle.values())
     else:
         src = "stream"
-        for t in st.trades:
+        # PumpPortal pushes bundled buys right after the create; the RPC log stream subscribes later, so its
+        # early trades are next-slot snipers and bundles only show up in the curve estimate below
+        for t in ([] if st.trade_src == "rpc_logs" else st.trades):
             if t.side == "buy" and t.wallet != creator and t.ts - st.created_ts < cfg.early_sec:
                 b = bundle.setdefault(t.wallet, {"wallet": t.wallet, "role": "bundle", "ts": t.ts, "tokens": 0.0,
                                                  "sol": 0.0})

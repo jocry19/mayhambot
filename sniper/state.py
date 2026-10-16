@@ -96,6 +96,7 @@ class LaunchState:
     prescore: float | None = None
     stage1_reason: str | None = None
     done: bool = False
+    trade_src: str = "pumpportal"                     # rpc_logs: subscribed after the creation block, bundles are unseen
     seen_net_tokens: float = 0.0                      # tokens bought minus sold by the trades we saw
     n_seen: int = 0
     max_trades: int = 3000
@@ -107,6 +108,8 @@ class LaunchState:
         self.create_sig = m.get("signature") or ""
         self.pool = m.get("pool") or "pump"
         self.dev_tokens = f(m.get("initialBuy") or m.get("tokenAmount"))
+        if self.pool != "pump" and (self.dev_tokens >= 0.9 * self.supply or not m.get("vTokensInBondingCurve")):
+            self.dev_tokens = 0.0  # bonk creates report the pool's tokens as initialBuy and no curve state
         self.dev_sol = f(m.get("solAmount"))
         self.v_sol = self.v_sol0 = f(m.get("vSolInBondingCurve"))
         self.v_tok = self.v_tok0 = f(m.get("vTokensInBondingCurve"))
@@ -130,6 +133,8 @@ class LaunchState:
         if len(self.trades) < self.max_trades:
             self.trades.append(t)
         self.n_seen += 1
+        if m.get("src"):
+            self.trade_src = m["src"]
         self.seen_net_tokens += t.tokens if side == "buy" else -t.tokens
         if t.v_sol > 0 and t.v_tok > 0:
             self.v_sol, self.v_tok = t.v_sol, t.v_tok

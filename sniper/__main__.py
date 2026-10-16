@@ -19,7 +19,7 @@ def _print_stats(s):
     if not s.get("available"):
         print("Noch keine Sniper-Daten.")
         return
-    print(f"Letzte {s['hours']} h: {s['launches']} Launches, {s['stage2']} tief geprüft, {s['entered']} Papier-Käufe "
+    print(f"Letzte {round(s['hours'], 1)} h: {s['launches']} Launches, {s['stage2']} tief geprüft, {s['entered']} Papier-Käufe "
           f"(Bundle {s['bundle_flagged']}, Insider {s['insider_flagged']})")
     c = s["calls_per_deep_launch"]
     print(f"Kosten pro tief geprüftem Launch: {c['rpc']} RPC-Calls, {c['pump_api']} pump.fun-Calls")
@@ -79,7 +79,7 @@ def main(argv=None):
     elif a.cmd == "watch":
         from sniper.service import run
         svc = run(settings, db_path=db_path, duration=a.minutes * 60, record=a.record)
-        _print_stats(st.stats(svc.conn, hours=a.minutes / 60 + 1.1))
+        _print_stats(st.stats(svc.conn, hours=round(a.minutes / 60, 2)))
     elif a.cmd == "replay":
         from sniper.service import replay
         eng, n, _ = replay(settings, a.file, db_path)
