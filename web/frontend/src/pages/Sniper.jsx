@@ -107,8 +107,8 @@ function Stream({ s }) {
   const rateSub = fromCounters ? `aus den Zählern des Dienstes, gemessen über ${dur(s.rate_span_s / 60)}` : "aus den gespeicherten Launches der letzten Stunde";
   return (
     <div className="tiles wrap-sub">
-      <Tile label="Datenstrom (PumpPortal)" value={<span className={cls}>{label}</span>}
-        sub={s.source === "heartbeat" ? `Meldung ${ago(s.heartbeat_ts)} · ${n(s.subscribed)} Coins im Trade-Abo · Warteschlange ${n(s.queue)}`
+      <Tile label="Launch-Datenstrom" value={<span className={cls}>{label}</span>}
+        sub={s.source === "heartbeat" ? `${s.active_launch_source ? `zuerst über ${LAUNCH_SRC[s.active_launch_source] || s.active_launch_source}${s.launches_per_min != null ? `, ${n(s.launches_per_min, 1)} pro min` : ""} · ` : ""}Meldung ${ago(s.heartbeat_ts)} · ${n(s.subscribed)} Coins im Trade-Abo`
           : s.heartbeat_ts ? `letzte Meldung ${ago(s.heartbeat_ts)} (meldet sonst alle 10 s)` : "noch keine Meldung vom Dienst sniper"} />
       <TradeSource s={s} />
       <Tile label="Launches pro Stunde" value={n(s.launches_1h)} sub={rateSub} />
@@ -117,6 +117,26 @@ function Stream({ s }) {
       <Tile label="Käufe pro Stunde (Papier)" value={n(s.entered_1h)}
         sub={s.source === "heartbeat" ? `${n(s.open_positions)} offen · pump.fun-API ${s.pump_api_ok ? "erreichbar" : "nicht erreichbar"}` : ""} />
     </div>
+  );
+}
+
+const LAUNCH_SRC = { pumpportal: "PumpPortal", rpc: "Solana-RPC" };
+
+/** Both launch streams side by side: which delivers, how many per minute, and how often it was first. */
+function LaunchSources({ s }) {
+  const rows = s.launch_sources || [];
+  if (s.source !== "heartbeat" || !rows.length) return null;
+  return (
+    <Card title="Launch-Quellen" sub="Beide Datenströme laufen parallel; jeder Launch zählt bei der Quelle, die ihn zuerst geliefert hat · Werte der letzten 5 min" flush>
+      <Table rows={rows} rowKey={(r) => r.source} cols={[
+        { k: "source", l: "Quelle", fmt: (r) => <span>{LAUNCH_SRC[r.source] || r.source}{r.source === s.active_launch_source ? <span className="badge good" style={{ marginLeft: 6 }}>führend</span> : null}</span> },
+        { k: "connected", l: "Status", fmt: (r) => (!r.enabled ? <span className="badge">aus</span>
+          : <span className={`badge ${r.connected ? "good" : "bad"}`}>{r.connected ? "verbunden" : "getrennt"}</span>) },
+        { k: "per_min", l: "Launches pro min", r: true, fmt: (r) => (r.enabled ? n(r.per_min, 1) : "–") },
+        { k: "first_per_min", l: "davon zuerst", r: true, fmt: (r) => (r.enabled ? n(r.first_per_min, 1) : "–") },
+        { k: "last_ts", l: "Letzter Launch", r: true, sort: (r) => r.last_ts || 0, fmt: (r) => (r.last_ts ? ago(r.last_ts) : "–") },
+      ]} />
+    </Card>
   );
 }
 
@@ -263,6 +283,8 @@ export default function Sniper() {
           { k: "ret_60m", l: "nach 60 min", r: true, fmt: (r) => (r.ret_60m != null ? <span>{pctSigned(r.ret_60m, 0)}{r.rugged ? <span className="badge bad" style={{ marginLeft: 4 }}>Rug</span> : null}</span> : <span className="dim">läuft</span>) },
         ]} />
       </Card>
+
+      <LaunchSources s={d.stream} />
 
       <Card title="Budget des Dienstes" sub={d.stream.source === "heartbeat" ? `Stand ${ago(d.stream.heartbeat_ts)} · wird das Budget knapp, wartet der Sniper vor weiteren Abfragen` : ""} flush>
         <BudgetTable s={d.stream} />

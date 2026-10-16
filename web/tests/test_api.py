@@ -390,3 +390,23 @@ def test_sniper_check_errors_and_trade_source(demo):
     Q._SNIPER_HIST.clear()
     assert st["source"] == "heartbeat"
     assert st["trade_source"] == "rpc" and st["rpc_ws_connected"] is True and st["rpc_ws_subs"] == 112 and st["rpc_ws_max_subs"] == 150
+
+
+def test_sniper_launch_sources(tmp_path):
+    import json
+
+    from web import queries as Q
+
+    conn = sqlite3.connect(str(tmp_path / "ls.db"))
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE sniper_state(key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("CREATE TABLE sniper_launches(mint TEXT, created_ts INT, decided_ts INT, stage INT, decision TEXT)")
+    conn.execute("INSERT INTO sniper_state VALUES ('service_status', ?)", (json.dumps({
+        "ts": 1000, "connected": False, "active_launch_source": "rpc", "launches_per_min": 9.0,
+        "launch_sources": {"pumpportal": {"enabled": True, "connected": False, "per_min": 0, "first_per_min": 0, "last_ts": None},
+                           "rpc": {"enabled": True, "connected": True, "per_min": 9.0, "first_per_min": 9.0, "last_ts": 998}}}),))
+    Q._SNIPER_HIST.clear()
+    s = Q.sniper_stream(conn, now=1005)
+    Q._SNIPER_HIST.clear()
+    assert s["connected"] is True and s["active_launch_source"] == "rpc" and s["launches_per_min"] == 9.0
+    assert [x["source"] for x in s["launch_sources"]] == ["pumpportal", "rpc"]

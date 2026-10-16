@@ -295,7 +295,9 @@ def _sniper_demo(conn, r, now):
         "ts": int(now), "connected": True, "ws_msgs": 412_877, "subscribed": 38, "in_memory": 640, "queue": 2, "open_positions": 3,
         "budget": {"rpc": {"used_last_min": 41, "per_min": 120, "total": 58_210}, "api": {"used_last_min": 22, "per_min": 30, "total": 21_904},
                    "deep": {"used_last_min": 3, "per_min": 4, "total": 3_310}},
-        "trade_source": "rpc", "rpc_ws_connected": True, "rpc_ws_subs": 112, "rpc_ws_msgs": 88_410,
+        "launch_sources": {"pumpportal": {"enabled": True, "connected": True, "per_min": 11.8, "first_per_min": 7.4, "last_ts": int(now) - 3},
+                           "rpc": {"enabled": True, "connected": True, "per_min": 11.2, "first_per_min": 4.2, "last_ts": int(now) - 5}},
+        "active_launch_source": "pumpportal", "launches_per_min": 11.6, "trade_source": "rpc", "rpc_ws_connected": True, "rpc_ws_subs": 112, "rpc_ws_msgs": 88_410,
         "counters": {"creates": 27_480, "trades": 391_200, "migrations": 212, "stage1": 9_870, "stage2": 3_310, "entries": 604},
         "pump_api_ok": True}),))
     conn.commit()

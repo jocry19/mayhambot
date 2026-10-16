@@ -1352,7 +1352,13 @@ def sniper_stream(conn, now=None):
                    open_positions=hb.get("open_positions"), pump_api_ok=hb.get("pump_api_ok"),
                    counters=hb.get("counters") or {}, budget=budget, trade_source=hb.get("trade_source"),
                    rpc_ws_connected=hb.get("rpc_ws_connected"), rpc_ws_subs=hb.get("rpc_ws_subs"),
-                   rpc_ws_msgs=hb.get("rpc_ws_msgs"), rpc_ws_max_subs=getattr(cfg, "ws_max_subs", None) or SNIPER_RPC_WS_MAX_SUBS)
+                   rpc_ws_msgs=hb.get("rpc_ws_msgs"), active_launch_source=hb.get("active_launch_source"),
+                   launches_per_min=hb.get("launches_per_min"),
+                   launch_sources=[{"source": k, **v}
+                                   for k, v in (hb.get("launch_sources") or {}).items() if isinstance(v, dict)],
+                   rpc_ws_max_subs=getattr(cfg, "ws_max_subs", None) or SNIPER_RPC_WS_MAX_SUBS)
+        if out["launch_sources"]:  # two launch streams (PumpPortal + RPC logs): connected when either delivers
+            out["connected"] = out["connected"] or any(x.get("connected") for x in out["launch_sources"])
         rates = _sniper_rates(hb["ts"], hb.get("counters"))
         if rates:
             out.update(rate_source="counters", rate_span_s=rates["span_s"], migrations_1h=rates.get("migrations"),
