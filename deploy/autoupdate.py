@@ -275,6 +275,37 @@ def _recent_backup(max_age_s: float):
     return None
 
 
+def _run_group(cmd, timeout_s: float, env=None) -> subprocess.CompletedProcess:
+    """Run cmd in its own process group; on timeout kill the whole group (pip, pytest and their children too,
+    which subprocess.run's timeout would leave running) and report it as a failed run (returncode -9)."""
+    p = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+                         start_new_session=True)
+    try:
+        out, err = p.communicate(timeout=timeout_s)
+        return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+    except subprocess.TimeoutExpired:
+        import signal  # noqa: PLC0415
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        out, err = p.communicate()
+        return subprocess.CompletedProcess(cmd, -9, out or "", (err or "") +
+                                           f"\nZeitüberschreitung nach {timeout_s / 60:.0f} min, abgebrochen")
+
+
+def _foreground():
+    """launchd's ProcessType Background throttles CPU, I/O and timers for the job and its children (the test gate
+    took 16+ min instead of ~3). Leave the Darwin background band for this process; children inherit it."""
+    prio = getattr(os, "PRIO_DARWIN_PROCESS", 4 if sys.platform == "darwin" else None)
+    if prio is None:
+        return
+    try:
+        os.setpriority(prio, 0, 0)
+    except (OSError, AttributeError):
+        pass
+
+
 def run_once(alert=ops.send_alert, now=None, health=None) -> str:
     env = ops.load_env()
     now = now or time.time()
@@ -338,8 +369,7 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
     st["last_deploy"] = now
     st["deploying"] = {"head": head, "target": target, "at": now}
     _save(st)
-    r = subprocess.run([_python(), "mayham.py", "update"], cwd=ROOT, capture_output=True, text=True, timeout=1800,
-                       env=_gate_env())
+    r = _run_group([_python(), "mayham.py", "update"], ops.cfg("AUTO_UPDATE_TIMEOUT_MIN", 45) * 60, _gate_env())
     log((r.stdout + r.stderr).strip()[-4000:])
     if r.returncode != 0 or "Update ok" not in r.stdout:
         st.pop("deploying", None)
@@ -431,6 +461,7 @@ def main(argv=None) -> int:
             print("läuft schon")
             return 0
         try:
+            _foreground()
             print(run_once())
         except Exception as e:  # noqa: BLE001
             log(f"Fehler: {e}")

@@ -240,13 +240,13 @@ def test_watchdog_counts_new_lock_errors(tmp_path, monkeypatch):
 def test_push_during_deploy_counts_as_success(repo, monkeypatch):
     work, push, head, alerts = repo
     push("a")
-    real = autoupdate.subprocess.run
+    real = autoupdate._run_group
 
     def run(cmd, *a, **k):
         if cmd[-1:] == ["update"]:
             push("b")              # someone pushes while the update runs; the pull takes the newer head
         return real(cmd, *a, **k)
-    monkeypatch.setattr(autoupdate.subprocess, "run", run)
+    monkeypatch.setattr(autoupdate, "_run_group", run)
     res = autoupdate.run_once(alerts.append, health=lambda: (True, "ok"))
     assert res.startswith("eingespielt") and (work / "b").exists()
     assert "b" in alerts[-1] and "zurückgerollt" not in alerts[-1]
@@ -431,3 +431,17 @@ def test_recent_hourly_backup_is_reused(repo, tmp_path):
     push("feature")
     assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil")).startswith("eingespielt")
     assert "reused" in (work / "logs" / "update.log").read_text()
+
+
+def test_run_group_kills_the_whole_tree_on_timeout(repo, tmp_path):
+    marker = tmp_path / "child_alive"
+    child = tmp_path / "child.py"
+    child.write_text(f"import time\ntime.sleep(3)\nopen({str(marker)!r}, 'w')\n")
+    parent = tmp_path / "parent.py"
+    parent.write_text(f"import subprocess, sys, time\nsubprocess.Popen([sys.executable, {str(child)!r}])\n"
+                      "time.sleep(30)\n")
+    r = autoupdate._run_group([sys.executable, str(parent)], 0.5)
+    assert r.returncode == -9 and "Zeitüberschreitung" in r.stderr
+    import time as _t
+    _t.sleep(3.5)
+    assert not marker.exists()          # the grandchild died with the group

@@ -28,7 +28,7 @@ cat > "$PLIST" <<PL
   <key>WorkingDirectory</key><string>$ROOT</string>
   <key>RunAtLoad</key><true/>
   <key>StartInterval</key><integer>600</integer>
-  <key>ProcessType</key><string>Background</string>
+  <key>ProcessType</key><string>Standard</string>
   <key>StandardOutPath</key><string>$ROOT/logs/updater.log</string>
   <key>StandardErrorPath</key><string>$ROOT/logs/updater.log</string>
 </dict></plist>
