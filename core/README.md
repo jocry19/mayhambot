@@ -68,6 +68,36 @@ wallet_source.early_buyers(mint, max_pages=8, n_tx=120) -> list[Trade]  # first 
 ```
 All network calls go through `core.http.get_json/post_json` (per-host rate limit, retries on 429/5xx).
 
+## Rate limits and API budgets — `core.http`
+
+```python
+from core import http
+http.get_json(url, params=None, headers=None) / http.post_json(url, payload)   # retries on 429/5xx, keys redacted in logs
+http.throttle(host)            # call before your own request to a host (packages with their own HTTP client)
+http.penalize(host, seconds)   # after a 429 you received yourself
+http.set_service("safety")     # name this process; mayham.py sets MAYHAM_SERVICE=<service> for every service
+http.set_budget("helius", 90)  # this process: at most 90 calls/min to that host or group (0/None = off)
+http.budget("helius")          # current per-minute budget of this process, None = unlimited
+http.usage()                   # {group: {calls, 429, waited_s, budget_per_min, last_min}} of this process
+http.usage(all_services=True)  # {service: {service, pid, ts, groups: {...}}} of all processes (updated every minute)
+http.slowdown(host)            # shared adaptive factor after 429s (1.0 = base interval)
+```
+
+Three layers, in this order on every call:
+1. **Own budget** (per process, sliding 60 s window): when the service's calls per minute to a group are used up,
+   `throttle` waits instead of calling. Groups: `helius` (api.helius.xyz, mainnet/beta.helius-rpc.com),
+   `geckoterminal`, otherwise the host. Defaults per service in `DEFAULT_BUDGETS` (Helius: signals 60,
+   research 120, copytrade 120, safety 60, sniper 120 = 480/min, free plan 600/min); override with
+   `<GROUP>_BUDGET_<SERVICE>` in `.env`, e.g. `HELIUS_BUDGET_SAFETY=90`. A process without a service name has
+   no budget (as before).
+2. **Shared spacing** for `SHARED_HOSTS`: one minimum interval per host across all processes (lock files in
+   `data/ratelimit/`).
+3. **Adaptive slowdown**: every 429 stretches that shared interval x1.5 (max x4) and pauses the host for all
+   processes (GeckoTerminal at least 20 s); successful calls relax it x0.98.
+
+Every 10 minutes each process logs `usage helius: N calls, M 429, budget X/min (...)`, and every 429 is logged
+as `429 GET host/path [rpc method]`.
+
 ## Wallets and scoring — `core.wallets`, `core.scoring`
 
 ```python

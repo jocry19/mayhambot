@@ -49,3 +49,53 @@ def test_tracebacks_are_redacted():
     except RuntimeError:
         rec = logging.getLogRecordFactory()("x", logging.ERROR, __file__, 1, "cycle failed", None, sys.exc_info())
     assert tok not in logging.Formatter().format(rec)
+
+
+def _fresh(monkeypatch, tmp_path, service=""):
+    monkeypatch.setattr(http, "_LOCK_DIR", str(tmp_path))
+    for name in ("_budgets", "_recent", "_usage", "_usage_window"):
+        monkeypatch.setattr(http, name, {})
+    monkeypatch.setattr(http, "_service", service)
+
+
+def test_no_service_means_no_budget(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    assert http.budget("beta.helius-rpc.com") is None
+
+
+def test_default_and_env_budget(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path, "safety")
+    assert http.budget("api.helius.xyz") == http.DEFAULT_BUDGETS["helius"]["safety"]
+    monkeypatch.setenv("HELIUS_BUDGET_SAFETY", "33")
+    assert http.budget("mainnet.helius-rpc.com") == 33
+    http.set_budget("helius", 7)
+    assert http.budget("beta.helius-rpc.com") == 7
+    assert sum(http.DEFAULT_BUDGETS["helius"].values()) < 600  # free plan: 10 req/s
+
+
+def test_budget_waits_instead_of_calling(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path, "signals")
+    clock = {"t": 1000.0}
+    slept = []
+    monkeypatch.setattr(http.time, "time", lambda: clock["t"])
+
+    def fake_sleep(s):
+        slept.append(s)
+        clock["t"] += s
+    monkeypatch.setattr(http.time, "sleep", fake_sleep)
+    http.set_budget("helius", 3)
+    for _ in range(4):
+        http._take_budget("beta.helius-rpc.com")
+    assert len(slept) == 1 and abs(slept[0] - 60) < 1e-6
+    u = http.usage()["helius"]
+    assert u["calls"] == 4 and u["budget_per_min"] == 3 and u["waited_s"] >= 59
+
+
+def test_usage_counts_429_and_is_shared(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path, "research")
+    http._take_budget("api.geckoterminal.com")
+    http.penalize("api.geckoterminal.com", 0)
+    http._write_usage_file()
+    allu = http.usage(all_services=True)
+    assert allu["research"]["groups"]["geckoterminal"] == {**allu["research"]["groups"]["geckoterminal"],
+                                                            "calls": 1, "429": 1}

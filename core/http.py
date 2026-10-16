@@ -111,8 +111,152 @@ def _unlock(f):
         f.close()
 
 
+# ---------------- per-service budgets and usage ----------------
+# One API plan can sit behind several hosts (Helius: REST + RPC). Budgets and usage count per group.
+HOST_GROUP = {"api.helius.xyz": "helius", "mainnet.helius-rpc.com": "helius", "beta.helius-rpc.com": "helius",
+              "api.geckoterminal.com": "geckoterminal"}
+# Calls per minute per service and group, used when the process knows its service name (MAYHAM_SERVICE,
+# set by mayham.py, or set_service()). Override with <GROUP>_BUDGET_<SERVICE>, e.g. HELIUS_BUDGET_SAFETY=90.
+# Helius free plan = 10 req/s = 600/min; these add up to 480/min, and the shared interval smooths peaks.
+DEFAULT_BUDGETS = {
+    "helius": {"signals": 60, "research": 120, "copytrade": 120, "safety": 60, "sniper": 120},
+}
+USAGE_LOG_EVERY = 600
+
+_service = os.getenv("MAYHAM_SERVICE", "")
+_budgets = {}      # group -> calls per minute (this process)
+_recent = {}       # group -> deque of call times in the last minute
+_usage = {}        # group -> {"calls", "429", "waited_s"} since start
+_usage_window = {}  # same, since the last usage log line
+_last_usage_log = [time.time()]
+_last_usage_file = [0.0]
+_budget_lock = threading.Lock()
+
+
+def group_of(host):
+    return HOST_GROUP.get(host, host)
+
+
+def set_service(name):
+    """Name this process (signals, research, copytrade, safety, sniper ...) so its default budgets apply."""
+    global _service
+    _service = name or ""
+
+
+def set_budget(host_or_group, per_minute):
+    """Cap this process at `per_minute` calls per minute to a host or group ('helius'); None/0 removes it."""
+    g = group_of(host_or_group)
+    with _budget_lock:
+        if per_minute:
+            _budgets[g] = float(per_minute)
+        else:
+            _budgets.pop(g, None)
+            _budgets[g + ":off"] = True
+
+
+def budget(host_or_group):
+    """Calls per minute this process may make to a host/group, or None (unlimited, only the shared spacing)."""
+    g = group_of(host_or_group)
+    if g in _budgets:
+        return _budgets[g]
+    if _budgets.get(g + ":off") or not _service:
+        return None
+    env = os.getenv(f"{g.upper().replace('.', '_').replace('-', '_')}_BUDGET_{_service.upper()}")
+    if env:
+        try:
+            return float(env) or None
+        except ValueError:
+            pass
+    return DEFAULT_BUDGETS.get(g, {}).get(_service)
+
+
+def _count(group, key, n=1):
+    with _budget_lock:
+        for d in (_usage, _usage_window):
+            d.setdefault(group, {"calls": 0, "429": 0, "waited_s": 0.0})[key] += n
+
+
+def _take_budget(host):
+    """Wait until this process has budget left for `host` in the last 60 s, then book one call."""
+    from collections import deque
+    g = group_of(host)
+    limit = budget(g)
+    if limit:
+        while True:
+            with _budget_lock:
+                q = _recent.setdefault(g, deque())
+                now = time.time()
+                while q and q[0] <= now - 60:
+                    q.popleft()
+                if len(q) < limit:
+                    q.append(now)
+                    break
+                wait = q[0] + 60 - now
+            _count(g, "waited_s", wait)
+            time.sleep(max(wait, 0.05))
+    _count(g, "calls")
+    _maybe_log_usage()
+
+
+def usage(all_services=False):
+    """This process: {group: {calls, 429, waited_s, budget_per_min, last_min}} since start.
+    all_services=True: {service: that dict} for every mayhambot process (from data/ratelimit/usage-*.json)."""
+    if all_services:
+        import glob
+        import json
+        out = {}
+        for path in glob.glob(os.path.join(_LOCK_DIR, "usage-*.json")):
+            try:
+                with open(path) as f:
+                    d = json.load(f)
+                out[d.get("service") or os.path.basename(path)[6:-5]] = d
+            except (OSError, ValueError):
+                pass
+        return out
+    with _budget_lock:
+        now = time.time()
+        return {g: dict(v, budget_per_min=budget(g),
+                        last_min=sum(1 for t in _recent.get(g, ()) if t > now - 60))
+                for g, v in _usage.items()}
+
+
+def _maybe_log_usage(force=False):
+    if time.time() - _last_usage_file[0] >= 60:
+        _write_usage_file()
+    if not force and time.time() - _last_usage_log[0] < USAGE_LOG_EVERY:
+        return
+    with _budget_lock:
+        window = dict(_usage_window)
+        _usage_window.clear()
+        _last_usage_log[0] = time.time()
+    for g, v in sorted(window.items()):
+        b = budget(g)
+        log.info("usage %s: %d calls, %d 429, budget %s/min%s (last %d min, service %s)", g, v["calls"], v["429"],
+                 f"{b:.0f}" if b else "-", f", waited {v['waited_s']:.0f}s" if v["waited_s"] else "",
+                 USAGE_LOG_EVERY // 60, _service or "?")
+    _write_usage_file()
+
+
+def _write_usage_file():
+    """Share this process's totals with the dashboard / TUI (usage(all_services=True))."""
+    _last_usage_file[0] = time.time()
+    if not _service:
+        return
+    import json
+    try:
+        os.makedirs(_LOCK_DIR, exist_ok=True)
+        tmp = os.path.join(_LOCK_DIR, f".usage-{_service}.tmp")
+        with open(tmp, "w") as f:
+            json.dump({"service": _service, "pid": os.getpid(), "ts": int(time.time()), "groups": usage()}, f)
+        os.replace(tmp, os.path.join(_LOCK_DIR, f"usage-{_service}.json"))
+    except OSError:
+        pass
+
+
 def throttle(host, interval=None):
-    """Block until this process may call `host`. Cross-process for SHARED_HOSTS (fcntl lock file)."""
+    """Block until this process may call `host`: first its own per-minute budget (see budget()), then the
+    shared cross-process spacing for SHARED_HOSTS (fcntl lock file)."""
+    _take_budget(host)
     iv = interval if interval is not None else HOST_INTERVAL.get(host, DEFAULT_INTERVAL)
     if host not in SHARED_HOSTS:
         return _wait_local(host, iv)
@@ -132,6 +276,7 @@ def throttle(host, interval=None):
 
 def penalize(host, seconds):
     """After a 429: push the shared next-call time back and stretch the interval for every process."""
+    _count(group_of(host), "429")
     if host not in SHARED_HOSTS:
         return
     try:

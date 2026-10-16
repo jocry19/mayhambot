@@ -53,8 +53,9 @@ def _spawn(name, detach):
     LOGS.mkdir(exist_ok=True)
     PIDS.mkdir(parents=True, exist_ok=True)
     log = open(LOGS / f"{name}.log", "a")
+    env = dict(os.environ, MAYHAM_SERVICE=name)  # core.http applies this service's API budgets
     p = subprocess.Popen(SERVICES[name], cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
-                         start_new_session=detach)
+                         start_new_session=detach, env=env)
     (PIDS / f"{name}.pid").write_text(str(p.pid))
     return p
 
