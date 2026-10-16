@@ -1,5 +1,6 @@
 # Option für später: mayhambot auf einem Linux-Server. Build-Kontext = mayhambot/
-FROM python:3.12-slim
+ARG BASE=python:3.12-slim
+FROM ${BASE}
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /app
 COPY requirements.txt .

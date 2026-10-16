@@ -11,7 +11,7 @@ PY="$ROOT/.venv/bin/python"
 
 if [ "${1:-}" != "--no-pull" ] && [ -d .git ] && git remote | grep -q .; then
   git diff --quiet && git diff --cached --quiet || { echo "Ungesicherte Änderungen im Ordner: erst committen."; exit 1; }
-  git pull --ff-only
+  git pull --ff-only origin main
 fi
 "$PY" -m pip install -q -r requirements.txt
 echo "Tests ..."

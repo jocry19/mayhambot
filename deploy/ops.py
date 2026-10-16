@@ -197,7 +197,8 @@ def collect() -> dict:
     elif dead:
         problems["service_down"] = f"Teil-Ausfall: {', '.join(dead)} läuft nicht."
     if not dash and "app_down" not in problems:
-        problems["dashboard_down"] = "Dashboard antwortet nicht."
+        problems["dashboard_down"] = ("Dashboard antwortet nicht." if runtime == "local"
+                                      else "mayhambot-Container antwortet nicht.")
     md = feed.get("Marktdaten")
     if md and now - md > stall:
         problems["feed_stalled"] = f"Keine neuen Marktdaten seit {(now - md) / 60:.0f} min (Internet/APIs?)."
@@ -298,7 +299,7 @@ def watchdog(args) -> int:
     for key in list(seen):
         if key not in r["problems"]:
             if seen[key].get("alerted"):
-                send_alert(f"🟢 Wieder OK: {seen[key].get('msg', key)}")
+                send_alert(f"🟢 Wieder OK (war: {seen[key].get('msg', key)})")
             del seen[key]
 
     save_state(st)
