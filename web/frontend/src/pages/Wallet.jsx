@@ -1,5 +1,5 @@
 import { EChart, baseOption, catAxis, timeAxis, valueAxis } from "../chart.jsx";
-import { EXIT_LABEL, STRAT_LABEL, act, ago, dt, mc, n, pct, solSigned, usd, usdSigned, usePoll } from "../lib.js";
+import { EXIT_LABEL, STRAT_LABEL, act, ago, dt, mc, n, pct, pctSigned, sign, solSigned, usd, usdSigned, usePoll } from "../lib.js";
 import { CoinLink, PnlCurve } from "../parts.jsx";
 import { Addr, Bars, Callout, Card, Delta, Empty, Icon, Table, Tier, Tile } from "../ui.jsx";
 
@@ -46,6 +46,8 @@ export default function Wallet({ address }) {
         {m.cluster_id && <Tile label="Gruppe" value={<span className="mono" style={{ fontSize: 15 }}>{String(m.cluster_id).slice(0, 10)}</span>} sub="kauft oft gleichzeitig mit anderen Wallets (vermutlich ein Akteur)" />}
         {cr && <Tile label="Copy-Pump-Quote" value={pct(cr.hit_rate)} sub={`${cr.samples} Käufe · erster Pump ${pct(cr.median_first_pump)}`} />}
       </div>
+
+      {d.edge && <EdgeCompare e={d.edge} />}
 
       <div className="grid g3">
         <Card title="Warum dieser Score" sub="Bausteine des Modell-Scores (0–1)">
@@ -123,3 +125,23 @@ export default function Wallet({ address }) {
 }
 
 export { timeAxis };
+
+/** The whale's own result next to what copying it earns us, and why the bot copies it or not. */
+function EdgeCompare({ e }) {
+  const c = e.copy;
+  return (
+    <Card title="Wal-Gewinn und unser Kopier-Ergebnis" sub="Der Wal kauft früher und verkauft anders als wir: entscheidend ist, was in unserer Kopie übrig bleibt">
+      <div className="col" style={{ gap: 12 }}>
+        <div className="tiles wrap-sub">
+          <Tile label="Gewinn des Wals (netto)" value={e.own_pnl_usd != null ? usdSigned(e.own_pnl_usd) : "–"} cls={sign(e.own_pnl_usd)}
+            sub={e.own_roi != null ? `ROI ${pctSigned(e.own_roi, 1)} nach Kosten (Forschungsmodell)` : "noch nicht vom Modell bewertet"} />
+          <Tile label="Unsere Kopie je Kauf" value={c ? pctSigned(c.mean, 1) : "–"} cls={c ? sign(c.mean) : ""}
+            sub={c ? `${n(c.n)} Käufe nachgespielt, mit unserer Verzögerung, unseren Ausstiegen und Kosten` : "noch keine nachgespielten Käufe"} />
+          <Tile label="Vorsichtige Schätzung" value={c ? pctSigned(c.lower, 1) : "–"} cls={c ? (c.proven ? "up" : "down") : ""}
+            sub={c ? (c.proven ? `belegt · Einsatz ×${n(c.size_factor, 2)}` : "nicht belegt: der Bot kopiert nicht") : "–"} />
+        </div>
+        <Callout kind={c?.proven ? "good" : c ? "warn" : "info"} icon={c?.proven ? "check" : "info"}>{e.verdict}</Callout>
+      </div>
+    </Card>
+  );
+}

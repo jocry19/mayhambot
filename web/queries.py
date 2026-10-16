@@ -819,7 +819,7 @@ def _live_prediction(mint):
 
 
 # ====================================================================== wallets
-WALLET_SORTS = {"score", "win_rate", "roi", "total_pnl_usd", "influence_followers", "influence_usd",
+WALLET_SORTS = {"net_pnl_usd", "net_roi", "score", "win_rate", "roi", "total_pnl_usd", "influence_followers", "influence_usd",
                 "inflow_lift_usd", "n_tokens", "early_rate", "last_trade_ts", "copy_score", "exit_capture",
                 "median_hold_min", "model_score", "score_heuristic", "cluster_n"}
 
@@ -880,7 +880,7 @@ def wallets(conn, tier=None, sort="score", q=None, limit=200, offset=0, include_
                                                   "realized_pnl_usd", "total_pnl_usd", "median_entry_mcap",
                                                   "median_min_to_2x", "influence_followers", "influence_usd",
                                                   "inflow_lift_usd", "consistency", "rug_rate", "cluster_id",
-                                                  "exit_capture", "median_hold_min")},
+                                                  "exit_capture", "median_hold_min", "net_pnl_usd", "net_roi")},
                         "components": comp, "last_trade_ts": lt.get(b["address"])})
     else:
         if not has(conn, "wallets"):
@@ -981,8 +981,46 @@ def wallets(conn, tier=None, sort="score", q=None, limit=200, offset=0, include_
             grouped.append(w)
         out = grouped
     total = len(out)
+    page = out[offset:offset + limit]
+    edges = copy_edges([w["address"] for w in page]) if page and limit <= 500 else {}
+    for w in page:
+        w["copy_edge"] = (edges or {}).get(w["address"])
     return {"tier_source": src, "tier_info": tier_info(conn), "total": total, "counts": counts,
-            "items": out[offset:offset + limit]}
+            "edges_pending": edges is None, "items": page}
+
+
+def _edge_view(e):
+    """copytrade.learn.wallet_edge in dashboard form: mean gain per copied buy after costs and its lower bound
+    (mean minus one standard error); proven = even the lower bound is positive (the bot's own gate)."""
+    if not e or not e.get("n"):
+        return None
+    return {"n": e["n"], "n_eff": _f(e.get("n_eff"), 1), "mean": _f(e.get("mean"), 4), "lower": _f(e.get("lower"), 4),
+            "size_factor": _f(e.get("size_factor"), 2), "extra_cost": _f(e.get("extra_cost"), 4),
+            "proven": (e.get("lower") or 0) > 0}
+
+
+def copy_edges(addresses):
+    """{address: edge view} for a page of wallets. wallet_edge replays every past buy of a whale, so a whole page
+    runs in one background job (cached 5 min); None while it is still being computed."""
+    try:
+        from copytrade import learn as ct_learn  # type: ignore
+    except Exception:
+        return {}
+    addrs = tuple(sorted(set(addresses)))
+
+    def calc():
+        from .db import read_conn
+        c = read_conn()
+        if not has(c, "ct_evals"):
+            return {}
+        out = {}
+        for a in addrs:
+            try:
+                out[a] = _edge_view(ct_learn.wallet_edge(c, a))
+            except Exception:
+                out[a] = None
+        return out
+    return cache.get_bg(("copy_edges", addrs), 300, calc)
 
 
 def wallet_stats_overview(conn):
@@ -1048,7 +1086,30 @@ def wallet_detail(conn, address):
         cum.append({"ts": p.get("first_buy_ts"), "pnl_usd": _f(acc, 2), "symbol": p["symbol"]})
     return {"address": address, "tier": (tm.get(address) or {}).get("tier"), "tier_source": tier_source(conn),
             "core": base, "model": mstats, "positions": pos, "trades": trades, "tier_history": history,
-            "copy_rank": ct, "copy_outcomes": outc, "copies": copies, "copy_tracked": tracked, "pnl_curve": cum}
+            "copy_rank": ct, "copy_outcomes": outc, "copies": copies, "copy_tracked": tracked, "pnl_curve": cum,
+            "edge": _wallet_edge_compare(conn, address, mstats)}
+
+
+def _wallet_edge_compare(conn, address, mstats):
+    """The whale's own result after costs (model: net_pnl_usd, net_roi) next to what copying it earns us
+    (copytrade.learn.wallet_edge), with the reason a profitable whale may still not be copied."""
+    try:
+        from copytrade import learn as ct_learn  # type: ignore
+        e = _edge_view(ct_learn.wallet_edge(conn, address)) if has(conn, "ct_evals") else None
+    except Exception:
+        e = None
+    own_pnl = (mstats or {}).get("net_pnl_usd")
+    own_roi = (mstats or {}).get("net_roi")
+    if e is None:
+        verdict = "Noch keine nachgespielten Käufe: der Copy-Trader hat diesen Wal noch nicht ausgewertet."
+    elif e["proven"]:
+        verdict = "Kopieren lohnt sich nachweislich: auch die vorsichtige Schätzung ist im Plus."
+    elif (own_pnl or 0) > 0:
+        verdict = ("Der Wal verdient selbst, aber unsere Kopie nicht sicher: mit unserer Verzögerung, unseren Ausstiegen "
+                   "und Kosten bleibt zu wenig übrig. Der Bot kopiert ihn deshalb nicht.")
+    else:
+        verdict = "Weder der Wal noch unsere Kopie sind nach Kosten im Plus."
+    return {"own_pnl_usd": _f(own_pnl, 2), "own_roi": _f(own_roi, 4), "copy": e, "verdict": verdict}
 
 
 # ====================================================================== copy trading
@@ -1820,6 +1881,9 @@ def backup_status(now=None):
     if int(au.get("red_streak") or 0) >= 2:
         problems["autoupdate_red"] = (f"Auto-Update hängt: Tests seit {int(au['red_streak'])} Runden rot, "
                                       f"der Mac bleibt auf {(au.get('deployed') or '?')[:7]}")
+    blocked = _redact(str(au["blocked"]))[:400] if au.get("blocked") else None
+    if blocked:  # a commit that exists only on the Mac stops every update until someone resolves it
+        problems["autoupdate_blocked"] = f"Auto-Update blockiert: {blocked}"
     return {"last_name": os.path.basename(last) if last else None, "last_ts": ts,
             "last_size": os.path.getsize(last) if last else None, "count": len(files),
             "age_s": int(now - ts) if ts else None, "ok": bool(ts and now - ts <= 3 * 3600),
@@ -1828,7 +1892,7 @@ def backup_status(now=None):
                            "bad": (au.get("bad") or "")[:7] or None,
                            "disabled": os.path.exists(os.path.join(ROOT_DIR, "data", "NO_AUTO_UPDATE")),
                            # rounds in a row whose test gate failed; from the 3rd the failing tests are named
-                           "red_streak": int(au.get("red_streak") or 0),
+                           "red_streak": int(au.get("red_streak") or 0), "blocked": blocked,
                            "red_tests": [_redact(x)[:200] for x in (au.get("red_tests") or [])
                                          if isinstance(x, str)][:12] if isinstance(au.get("red_tests"), list)
                            else ([_redact(au["red_tests"])[:600]] if au.get("red_tests") else [])}}

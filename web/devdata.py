@@ -37,6 +37,24 @@ def _named(conn, sql: str) -> str:
     return f"{m.group(1)}{m.group(2)}({','.join(cols)}){m.group(3)}"
 
 
+def _edge_demo(conn, r):
+    """Whale replays belong to real tiered wallets, and every model wallet has its own net PnL after costs:
+    so the wallet views can show 'the whale earns' next to 'copying it earns us'."""
+    cols = {c[1] for c in conn.execute("PRAGMA table_info(model_wallet_stats)")}
+    if not cols:
+        return
+    top = [x[0] for x in conn.execute("SELECT address FROM model_wallet_stats WHERE tier IS NOT NULL ORDER BY score DESC LIMIT 12")]
+    if "net_pnl_usd" in cols:
+        for (a, pnl) in conn.execute("SELECT address, total_pnl_usd FROM model_wallet_stats").fetchall():
+            net = (pnl or 0) * r.uniform(0.55, 0.9) - r.uniform(50, 900)
+            conn.execute("UPDATE model_wallet_stats SET net_pnl_usd=?, net_roi=? WHERE address=?", (round(net, 2), round(net / 20000, 4), a))
+    if top and conn.execute("SELECT 1 FROM sqlite_master WHERE name='ct_evals'").fetchone():
+        keys = [x[0] for x in conn.execute("SELECT ref FROM ct_evals WHERE strategy='whale' ORDER BY ref")]
+        for i, k in enumerate(keys):
+            conn.execute("UPDATE ct_evals SET wallet=? WHERE strategy='whale' AND ref=?", (top[i % min(len(top), 6)], k))
+    conn.commit()
+
+
 def _learn_demo(conn, r, now):
     """Self-learning tables of copytrade (ct_evals, ct_param_versions) in their real format, if copytrade has them."""
     try:
@@ -698,6 +716,7 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
     _learn_demo(conn, r, now)
     _safety_demo(conn, r, tokens, now)
     _sniper_demo(conn, r, now)
+    _edge_demo(conn, r)
     try:
         from research.events import FEATURE_LABELS, FEATURE_NAMES
     except Exception:

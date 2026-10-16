@@ -555,3 +555,29 @@ def test_autoupdate_red_streak(tmp_path, monkeypatch):
     b = Q.backup_status()
     assert b["problems"]["autoupdate_red"].startswith("Auto-Update hängt: Tests seit 3 Runden rot")
     assert b["autoupdate"]["red_tests"][0].startswith("FAILED web/tests") and "api-key=K" not in b["autoupdate"]["red_tests"][0]
+    assert b["autoupdate"]["blocked"] is None and "autoupdate_blocked" not in b["problems"]
+    st.update(blocked="Lokaler Commit blockiert das Update: 1 Commit(s) nur auf dem Mac, 2 Commit(s) von main fehlen")
+    (tmp_path / "data" / "autoupdate_state.json").write_text(json.dumps(st))
+    b = Q.backup_status()
+    assert b["autoupdate"]["blocked"].startswith("Lokaler Commit blockiert")
+    assert b["problems"]["autoupdate_blocked"].startswith("Auto-Update blockiert: Lokaler Commit")
+
+
+def test_wallet_copy_edge(demo):
+    import time as _t
+
+    c = _client(demo)
+    d = c.get("/api/wallets?limit=50").json()
+    assert "edges_pending" in d and all("copy_edge" in w for w in d["items"])
+    assert any(w.get("net_pnl_usd") is not None for w in d["items"])
+    for _ in range(100):                      # computed in the background, then served from the cache
+        d = c.get("/api/wallets?limit=50").json()
+        if not d["edges_pending"]:
+            break
+        _t.sleep(0.05)
+    with_edge = [w for w in d["items"] if w["copy_edge"]]
+    assert with_edge and all({"mean", "lower", "proven", "n"} <= set(w["copy_edge"]) for w in with_edge)
+    a = with_edge[0]["address"]
+    e = c.get(f"/api/wallets/{a}").json()["edge"]
+    assert e["copy"]["n"] == with_edge[0]["copy_edge"]["n"] and e["verdict"]
+    assert e["copy"]["proven"] == (e["copy"]["lower"] > 0)

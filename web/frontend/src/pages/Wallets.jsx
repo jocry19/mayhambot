@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { EChart, baseOption, tierColor, tipRow, valueAxis } from "../chart.jsx";
 import { TIER_LABEL, TIER_SOURCE, ago, go, mc, n, pct, usd, usdSigned, usePoll } from "../lib.js";
-import { HistBars, TierSrc, WalletLink } from "../parts.jsx";
+import { CopyEdge, HistBars, TierSrc, WalletLink } from "../parts.jsx";
 import { Callout, Card, Empty, Legend, Score, Seg, Table, Tier, Tile } from "../ui.jsx";
 
-const SORTS = [["score", "Score"], ["win_rate", "Trefferquote"], ["roi", "ROI"], ["total_pnl_usd", "Gewinn"],
+const SORTS = [["score", "Score"], ["win_rate", "Trefferquote"], ["roi", "ROI"], ["net_pnl_usd", "Gewinn netto"],
   ["influence_followers", "Einfluss"], ["influence_usd", "Erzeugter Inflow"], ["early_rate", "Früh-Quote"], ["exit_capture", "Ausstieg"], ["copy_score", "Copy-Score"]];
 const srcOf = (r) => (r.tier_source === "heuristic" ? "heuristic" : r.tier_source ? "model" : null);
 
@@ -14,7 +14,9 @@ export default function Wallets() {
   const [search, setSearch] = useState("");
   const [cluster, setCluster] = useState("");
   const [group, setGroup] = useState(false);
-  const { data } = usePoll(`/api/wallets?tier=${tier}&sort=${sort}&limit=500${search ? `&search=${encodeURIComponent(search)}` : ""}${cluster ? `&cluster=${encodeURIComponent(cluster)}` : ""}${group ? "&group=1" : ""}`, 30000);
+  const [pendingEdges, setPendingEdges] = useState(false);   // copy edges computed in the background: poll faster until they arrive
+  const { data } = usePoll(`/api/wallets?tier=${tier}&sort=${sort}&limit=500${search ? `&search=${encodeURIComponent(search)}` : ""}${cluster ? `&cluster=${encodeURIComponent(cluster)}` : ""}${group ? "&group=1" : ""}`, pendingEdges ? 4000 : 30000);
+  useEffect(() => setPendingEdges(!!data?.edges_pending), [data]);
   const { data: st } = usePoll("/api/wallets/stats", 60000);
   const ti = st?.tier_info;
   return (
@@ -94,7 +96,12 @@ export default function Wallets() {
             { k: "win_rate", l: "Treffer", r: true, fmt: (r) => pct(r.win_rate) },
             { k: "early_rate", l: "Früh", r: true, title: "Anteil Käufe vor einem 2x", fmt: (r) => pct(r.early_rate) },
             { k: "roi", l: "ROI", r: true, fmt: (r) => <span className={r.roi > 0 ? "up" : r.roi < 0 ? "down" : ""}>{pct(r.roi)}</span> },
-            { k: "total_pnl_usd", l: "Gewinn", r: true, fmt: (r) => <span className={r.total_pnl_usd > 0 ? "up" : r.total_pnl_usd < 0 ? "down" : ""}>{usdSigned(r.total_pnl_usd)}</span> },
+            { k: "net_pnl_usd", l: "Gewinn des Wals", r: true, sort: (r) => r.net_pnl_usd ?? r.total_pnl_usd ?? -1e12,
+              title: "Was der Wal selbst verdient hat, nach Kosten (Modell); ohne Modell der Bruttogewinn",
+              fmt: (r) => { const v = r.net_pnl_usd ?? r.total_pnl_usd; return <span className={v > 0 ? "up" : v < 0 ? "down" : ""} title={r.net_pnl_usd == null ? "brutto" : `netto · brutto ${usdSigned(r.total_pnl_usd)}`}>{usdSigned(v)}</span>; } },
+            { k: "copy_edge", l: "Unsere Kopie", r: true, sort: (r) => (r.copy_edge ? r.copy_edge.lower : -9),
+              title: "Was es uns pro Kauf bringt, diesen Wal zu kopieren: nachgespielt mit unserer Verzögerung, unseren Ausstiegen und Kosten",
+              fmt: (r) => <CopyEdge e={r.copy_edge} pending={data.edges_pending} /> },
             { k: "influence_followers", l: "Einfluss", r: true, title: "Ø Nachkäufer nach ihrem Kauf", fmt: (r) => n(r.influence_followers, 1) },
             { k: "influence_usd", l: "Erzeugter Inflow", r: true, title: "Ø USD, die andere nach ihrem Kauf hineinstecken", fmt: (r) => usd(r.influence_usd) },
             { k: "median_entry_mcap", l: "Einstieg MC", r: true, fmt: (r) => mc(r.median_entry_mcap) },

@@ -184,12 +184,20 @@ function Ops({ b }) {
         <Tile label="Letztes Backup" value={b.last_ts ? <span className={b.ok ? "" : "down"}>{ago(b.last_ts)}</span> : <span className="down">keins</span>}
           sub={b.last_ts ? `${n(b.count)} Backups · ${n((b.last_size || 0) / 1e6, 1)} MB · stündlich erwartet` : "Backups liegen in BACKUP_DIR (Standard ~/mayhambot-backups)"} />
         <Tile label="Wächter" value={b.watchdog_ts ? ago(b.watchdog_ts) : "–"} sub={b.watchdog_ts ? (probs.length ? `${probs.length} offene Probleme` : "keine offenen Probleme") : "läuft auf diesem Rechner nicht"} />
-        <Tile label="Auto-Update" value={au.disabled ? "aus" : au.red_streak >= 2 ? <span className="down">hängt</span>
+        <Tile label="Auto-Update" value={au.disabled ? "aus" : au.blocked ? <span className="down">blockiert</span> : au.red_streak >= 2 ? <span className="down">hängt</span>
           : au.deployed ? <span className="mono" style={{ fontSize: 17 }}>{au.deployed}</span> : "–"}
           sub={au.disabled ? "abgeschaltet (data/NO_AUTO_UPDATE)"
+            : au.blocked ? <span className="down">lokaler Commit auf dem Mac · bleibt auf {au.deployed || "?"}</span>
             : au.red_streak >= 2 ? <span className="down">Tests {au.red_streak}× in Folge rot · bleibt auf {au.deployed || "?"}</span>
             : au.last_deploy ? `eingespielt ${ago(au.last_deploy)}${au.red_streak ? " · letzte Runde rot" : ""}${au.bad ? ` · ${au.bad} zurückgerollt` : ""}` : "noch kein automatisches Update"} />
       </div>
+      {au.blocked && (
+        <Callout kind="bad" icon="alert">
+          <div className="b">Das Update ist blockiert:</div>
+          <div>{au.blocked}</div>
+          <div className="muted" style={{ fontSize: 12 }}>Auf dem Mac im Ordner prüfen: git status und git log origin/main..HEAD zeigen den lokalen Commit.</div>
+        </Callout>
+      )}
       {au.red_tests?.length > 0 && (
         <Callout kind="bad" icon="alert">
           <div className="b">Diese Tests halten das Update auf:</div>

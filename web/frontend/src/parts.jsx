@@ -186,3 +186,18 @@ export function TierSrc({ src, version, synced }) {
   }
   return <span className="badge warn" title="Stufe aus der Wallet-Formel, bis das Modell eine Version aktiviert hat">Heuristik</span>;
 }
+
+/** What copying a whale earns us per buy (copytrade.learn.wallet_edge): mean after costs, "belegt" when even the
+ *  cautious estimate (mean minus one standard error) is positive, which is the bot's own copy gate. */
+export function CopyEdge({ e, pending }) {
+  if (!e) return <span className="dim" title={pending ? "wird berechnet" : "noch keine nachgespielten Käufe"}>{pending ? "…" : "–"}</span>;
+  const title = `Ø ${pctSigned(e.mean, 1)} pro kopiertem Kauf nach Kosten (${n(e.n)} Käufe nachgespielt)\n`
+    + `vorsichtig geschätzt ${pctSigned(e.lower, 1)}${e.proven ? ": belegt, der Bot kopiert" : ": nicht belegt, der Bot kopiert nicht"}`
+    + (e.extra_cost ? `\ngemessene Zusatzkosten ${pct(e.extra_cost, 1)} je Kauf eingerechnet` : "");
+  return (
+    <span className="nowrap" title={title}>
+      <span className={sign(e.mean)}>{pctSigned(e.mean, 1)}</span>
+      <span className={`badge ${e.proven ? "good" : ""}`} style={{ marginLeft: 6 }}>{e.proven ? "belegt" : "unsicher"}</span>
+    </span>
+  );
+}
