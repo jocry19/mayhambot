@@ -51,7 +51,8 @@ CREATE INDEX IF NOT EXISTS idx_mp_mint ON model_predictions(mint, ts);
 """
 
 
-ADDED_COLUMNS = {"model_wallet_stats": [("cluster_id", "TEXT"), ("exit_capture", "REAL"), ("median_hold_min", "REAL")]}
+ADDED_COLUMNS = {"model_wallet_stats": [("cluster_id", "TEXT"), ("exit_capture", "REAL"), ("median_hold_min", "REAL")],
+                 "research_tokens": [("candles_fetched_at", "INTEGER")]}
 
 
 def ensure_schema(conn):

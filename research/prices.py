@@ -35,6 +35,7 @@ class PriceIndex:
         self.ts, self.px, self.hi_ts, self.hi, self.lo_ts, self.lo = {}, {}, {}, {}, {}, {}
         self._max, self._min = {}, {}
         self.supply = {}
+        self.fetched = {}  # mint -> time the newest candles were fetched (no candle after it = no trades)
 
     @classmethod
     def from_db(cls, conn, mints=None):
@@ -69,6 +70,13 @@ class PriceIndex:
             idx.supply[r[0]] = r[2] / r[1]
         for r in conn.execute("SELECT mint, supply FROM research_tokens WHERE supply > 0" + cond, args):
             idx.supply[r[0]] = r[1]
+        try:
+            for r in conn.execute("SELECT mint, candles_fetched_at FROM research_tokens WHERE candles_fetched_at > 0"
+                                  + cond, args):
+                if r[0] in cand:
+                    idx.fetched[r[0]] = r[1]
+        except Exception:  # noqa: BLE001  (column added by ensure_schema)
+            pass
         return idx
 
     def _add(self, mint, pts, highs=(), lows=()):
@@ -140,4 +148,7 @@ class PriceIndex:
         return price * self.supply.get(mint, rsettings.default_supply)
 
     def coverage_until(self, mint):
-        return self.last_ts(mint) or 0
+        """Prices are known up to here. A candle fetch returns everything up to the fetch time, so a coin that
+        stopped trading (dead, rugged) is still covered until then at its last price; without this only coins
+        that kept trading would ever get a label (survivorship bias)."""
+        return max(self.last_ts(mint) or 0, self.fetched.get(mint, 0))

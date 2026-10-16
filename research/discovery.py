@@ -60,6 +60,7 @@ def _candles(conn, mint, pool, age_s, budget):
         return []
     if cs:
         store_candles(conn, mint, 60 * agg, cs)
+        upsert_research_token(conn, mint, candles_fetched_at=int(time.time()))
     return cs
 
 
@@ -221,8 +222,25 @@ def run_once(conn=None):
         (now - 8 * 3600,))]
     pools = dict(conn.execute("SELECT mint, pool FROM research_tokens WHERE pool IS NOT NULL").fetchall())
     pools.update({r[0]: r[1] for r in conn.execute("SELECT mint, pool_address FROM tokens WHERE pool_address != ''")})
-    refresh = [m for m in active if m in pools and last_c.get(m, 0) < now - 1800 and _mine(m)]
-    for m in refresh[:max(0, min(15, budget.n))]:
+    # first: coins where a scored wallet bought or a live prediction was made in the last 7 h, so their
+    # 15m/1h/6h outcomes become labels (the model's sample size is limited by exactly these)
+    from model.config import msettings
+    fetched = dict(conn.execute("SELECT mint, candles_fetched_at FROM research_tokens WHERE candles_fetched_at > 0"))
+    labelled = [r[0] for r in conn.execute(
+        """SELECT t.mint FROM trades t JOIN model_wallet_stats m ON m.address = t.wallet
+           WHERE t.ts > ? AND t.side = 'buy' AND (m.tier IS NOT NULL OR m.score >= ?)
+           GROUP BY t.mint ORDER BY MAX(t.ts) DESC LIMIT 80""", (now - 7 * 3600, msettings.event_min_score))]
+    labelled += [r[0] for r in conn.execute(
+        "SELECT mint FROM model_predictions WHERE ts > ? AND ret_6h IS NULL GROUP BY mint", (now - 7 * 3600,))]
+    refresh, seen = [], set()
+    for m in labelled + active:
+        if m in seen or m not in pools or not _mine(m):
+            continue
+        seen.add(m)
+        if max(last_c.get(m, 0), fetched.get(m, 0)) < now - 1800:
+            refresh.append(m)
+    summary["label_coins_due"] = sum(1 for m in refresh if m in set(labelled))
+    for m in refresh[:max(0, min(25, budget.n))]:
         created = conn.execute("SELECT pair_created_at FROM tokens WHERE mint=?", (m,)).fetchone()
         age = now - (created[0] or now - 86400) if created else 86400
         if _candles(conn, m, pools[m], min(age, 15 * 3600), budget):
