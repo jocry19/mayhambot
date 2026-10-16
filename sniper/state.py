@@ -1,0 +1,177 @@
+"""In-memory state of one launch, built from the PumpPortal trade stream, plus bonding-curve math."""
+from dataclasses import dataclass, field
+
+PUMP_SUPPLY = 1_000_000_000.0          # every pump.fun / bonk launch has 1e9 tokens (6 decimals)
+PUMP_DECIMALS = 6
+PUMP_REAL_TOKENS = 793_100_000.0      # tokens sold through the curve until migration
+PUMP_TOKEN_OFFSET = 279_900_000.0     # virtual minus real token reserves (constant)
+
+
+def f(v, default=0.0):
+    try:
+        return float(v) if v is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def curve_buy(v_sol, v_tok, sol_in, fee_pct):
+    """Tokens out for sol_in on a constant-product curve (fee taken from the input)."""
+    if v_sol <= 0 or v_tok <= 0 or sol_in <= 0:
+        return 0.0
+    net = sol_in * (1 - fee_pct / 100)
+    return v_tok - (v_sol * v_tok) / (v_sol + net)
+
+
+def curve_sell(v_sol, v_tok, tokens, fee_pct):
+    """SOL out for selling tokens on the curve (fee taken from the output)."""
+    if v_sol <= 0 or v_tok <= 0 or tokens <= 0:
+        return 0.0
+    gross = v_sol - (v_sol * v_tok) / (v_tok + tokens)
+    return gross * (1 - fee_pct / 100)
+
+
+def curve_progress(v_tok, pool="pump"):
+    """Share of the pump.fun curve already sold (1.0 = migration). None for other launchpads."""
+    if pool != "pump" or v_tok <= 0:
+        return None
+    real = v_tok - PUMP_TOKEN_OFFSET
+    return max(0.0, min(1.0, 1 - real / PUMP_REAL_TOKENS))
+
+
+@dataclass
+class StreamTrade:
+    ts: float
+    sig: str
+    wallet: str
+    side: str          # buy | sell
+    sol: float
+    tokens: float
+    new_balance: float | None
+    v_sol: float
+    v_tok: float
+    mcap_sol: float
+
+
+@dataclass
+class LaunchState:
+    mint: str
+    created_ts: float
+    source: str = "pumpportal"
+    pool: str = "pump"
+    symbol: str = ""
+    name: str = ""
+    uri: str = ""
+    creator: str = ""
+    create_sig: str = ""
+    dev_tokens: float = 0.0
+    dev_sol: float = 0.0
+    v_sol0: float = 0.0
+    v_tok0: float = 0.0
+    v_sol: float = 0.0
+    v_tok: float = 0.0
+    mcap_sol: float = 0.0
+    mcap0_sol: float = 0.0
+    supply: float = PUMP_SUPPLY
+    trades: list = field(default_factory=list)
+    balances: dict = field(default_factory=dict)      # wallet -> tokens (from newTokenBalance)
+    bought: dict = field(default_factory=dict)        # wallet -> tokens bought (seen)
+    first_buy_ts: dict = field(default_factory=dict)  # wallet -> first seen buy time
+    last_trade_ts: float = 0.0
+    subscribed: bool = True
+    migrated: bool = False
+    migrated_ts: float | None = None
+    stage: int = 0                                    # 0 watching, 1 decided free, 2 checked in depth
+    decision: str = "pending"                         # pending | queued | enter | skip
+    decided_ts: float | None = None
+    base_mcap_sol: float | None = None                # mcap at decision (outcomes are measured from here)
+    outcomes: dict = field(default_factory=dict)      # horizon min -> mcap_sol
+    max_mcap_sol: float = 0.0
+    min_mcap_sol: float = 0.0
+    insiders: dict = field(default_factory=dict)      # wallet -> role (bundle/insider/dev) for exit rules
+    insider_sold: dict = field(default_factory=dict)  # wallet -> share of its buy sold after the decision
+    curve: list = field(default_factory=list)         # (ts, mcap_sol, v_sol, n_trades), 2 s resolution
+    external_mcap_sol: float | None = None            # DexScreener after migration / unsubscribe
+    external_ts: float | None = None
+    queued_ts: float | None = None
+    prescore: float | None = None
+    stage1_reason: str | None = None
+    done: bool = False
+    seen_net_tokens: float = 0.0                      # tokens bought minus sold by the trades we saw
+    n_seen: int = 0
+    max_trades: int = 3000
+
+    # ---- stream updates
+    def apply_create(self, m, now):
+        self.symbol, self.name, self.uri = m.get("symbol") or "", m.get("name") or "", m.get("uri") or ""
+        self.creator = m.get("traderPublicKey") or ""
+        self.create_sig = m.get("signature") or ""
+        self.pool = m.get("pool") or "pump"
+        self.dev_tokens = f(m.get("initialBuy") or m.get("tokenAmount"))
+        self.dev_sol = f(m.get("solAmount"))
+        self.v_sol = self.v_sol0 = f(m.get("vSolInBondingCurve"))
+        self.v_tok = self.v_tok0 = f(m.get("vTokensInBondingCurve"))
+        self.mcap_sol = self.mcap0_sol = f(m.get("marketCapSol")) or self.price_sol * self.supply
+        self.max_mcap_sol = self.min_mcap_sol = self.mcap_sol
+        if self.creator and self.dev_tokens > 0:
+            self.balances[self.creator] = self.dev_tokens
+            self.bought[self.creator] = self.dev_tokens
+            self.first_buy_ts[self.creator] = now
+        self.curve.append((int(now), self.mcap_sol, self.v_sol, 0))
+
+    def apply_trade(self, m, now):
+        side = (m.get("txType") or "").lower()
+        if side not in ("buy", "sell"):
+            return None
+        t = StreamTrade(ts=now, sig=m.get("signature") or "", wallet=m.get("traderPublicKey") or "", side=side,
+                        sol=f(m.get("solAmount")), tokens=f(m.get("tokenAmount")),
+                        new_balance=f(m.get("newTokenBalance"), None) if m.get("newTokenBalance") is not None else None,
+                        v_sol=f(m.get("vSolInBondingCurve")), v_tok=f(m.get("vTokensInBondingCurve")),
+                        mcap_sol=f(m.get("marketCapSol")))
+        if len(self.trades) < self.max_trades:
+            self.trades.append(t)
+        self.n_seen += 1
+        self.seen_net_tokens += t.tokens if side == "buy" else -t.tokens
+        if t.v_sol > 0 and t.v_tok > 0:
+            self.v_sol, self.v_tok = t.v_sol, t.v_tok
+        self.mcap_sol = t.mcap_sol or (self.price_sol * self.supply)
+        if self.decided_ts is None or now - self.decided_ts <= 3600:
+            self.max_mcap_sol = max(self.max_mcap_sol, self.mcap_sol)
+            self.min_mcap_sol = min(self.min_mcap_sol or self.mcap_sol, self.mcap_sol)
+        if t.wallet:
+            if t.new_balance is not None:
+                self.balances[t.wallet] = t.new_balance
+            elif side == "buy":
+                self.balances[t.wallet] = self.balances.get(t.wallet, 0.0) + t.tokens
+            else:
+                self.balances[t.wallet] = max(0.0, self.balances.get(t.wallet, 0.0) - t.tokens)
+            if side == "buy":
+                self.bought[t.wallet] = self.bought.get(t.wallet, 0.0) + t.tokens
+                self.first_buy_ts.setdefault(t.wallet, now)
+            elif t.wallet in self.insiders and self.bought.get(t.wallet):
+                got = self.bought[t.wallet]
+                self.insider_sold[t.wallet] = min(1.0, self.insider_sold.get(t.wallet, 0.0) + t.tokens / got)
+        self.last_trade_ts = now
+        if not self.curve or now - self.curve[-1][0] >= 2:
+            self.curve.append((int(now), self.mcap_sol, self.v_sol, self.n_seen))
+        return t
+
+    # ---- derived values
+    @property
+    def price_sol(self):
+        return self.v_sol / self.v_tok if self.v_tok > 0 else 0.0
+
+    @property
+    def age(self):
+        return self.last_trade_ts - self.created_ts if self.last_trade_ts else 0.0
+
+    def current_mcap_sol(self):
+        if (self.migrated or not self.subscribed) and self.external_mcap_sol:
+            return self.external_mcap_sol
+        return self.mcap_sol
+
+    def unseen_tokens(self):
+        """Tokens bought from the curve by transactions we never saw (bundled with the creation, before
+        our subscription was active): drop of the curve minus what the seen trades explain."""
+        if self.v_tok0 <= 0 or self.v_tok <= 0:
+            return 0.0
+        return max(0.0, (self.v_tok0 - self.v_tok) - self.seen_net_tokens)

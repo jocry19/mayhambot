@@ -30,6 +30,7 @@ SERVICES = {
     "copytrade": [PY, "-m", "copytrade", "run"],
     "web": [PY, "-m", "web"],
     "safety": [PY, "-m", "safety", "run"],  # rug/honeypot/insider refresher, every SAFETY_REFRESH_EVERY_SEC  # the dashboard (FastAPI + built frontend); the old Streamlit dashboard/ is no longer started
+    "sniper": [PY, "-m", "sniper", "run"],  # launch sniper with bundle check, paper mode only (sniper/README.md)
 }
 # research + retraining loop from model/ (other thread), started only once it exists
 if (ROOT / "model" / "__main__.py").exists():

@@ -1,6 +1,8 @@
 # core + signals
 requests>=2.31
 python-dotenv>=1.0
+# sniper (PumpPortal launch stream)
+websockets>=13,<16
 # dashboard (python -m web) and terminal (python -m cli), pinned to the tested versions.
 # web/tests call the ASGI app directly: no httpx or httpx2 package is needed.
 fastapi==0.143.2
