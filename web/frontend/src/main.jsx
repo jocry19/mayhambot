@@ -16,6 +16,7 @@ import System from "./pages/System.jsx";
 import Sniper from "./pages/Sniper.jsx";
 import Market from "./pages/Market.jsx";
 import Zentrale from "./pages/Zentrale.jsx";
+import Brain from "./pages/Brain.jsx";
 
 setTheme(getTheme());
 
@@ -25,6 +26,7 @@ const NAV = [
   ["/signals", "bolt", "Signale"],
   ["/coins", "coins", "Coins"],
   ["/wallets", "wallet", "Wallets"],
+  ["/brain", "bulb", "Entscheider"],
   ["/copytrade", "copy", "Copy-Trading"],
   ["/sniper", "target", "Launch-Sniper"],
   ["/market", "globe", "Markt"],
@@ -120,6 +122,7 @@ function Page({ route }) {
     case "sniper": return <Sniper />;
     case "market": return <Market />;
     case "zentrale": return <Zentrale />;
+    case "brain": return <Brain />;
     case "model": return <Model />;
     case "control": return <Control />;
     case "system": return <System />;
@@ -128,7 +131,7 @@ function Page({ route }) {
 }
 
 const TITLES = { "": "Übersicht", signals: "Signale", coins: "Coins", coin: "Coin", wallets: "Wallets", wallet: "Wallet",
-  copytrade: "Copy-Trading", sniper: "Launch-Sniper", market: "Markt", zentrale: "Zentrale", model: "Modell & Forschung", control: "Steuerung", system: "System" };
+  copytrade: "Copy-Trading", sniper: "Launch-Sniper", market: "Markt", zentrale: "Zentrale", brain: "Entscheider", model: "Modell & Forschung", control: "Steuerung", system: "System" };
 
 function Heartbeat() {
   const { data, error } = usePoll("/api/system", 20000);

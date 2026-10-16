@@ -63,6 +63,8 @@ class MayhamTUI(App):
     .tile { border: round #30363d; padding: 0 1; width: 1fr; height: 5; }
     DataTable { height: 1fr; }
     #sigdetail { height: 12; border-top: solid #30363d; padding: 0 1; }
+    #brainhead { height: auto; padding: 0 1; }
+    #braindetail { height: 9; border-top: solid #30363d; padding: 0 1; }
     .half { height: 1fr; }
     .lbl { color: #8b949e; padding: 0 1; }
     #dlg { width: 70; height: auto; padding: 1 2; border: round #5598e7; background: #161b22; }
@@ -82,6 +84,7 @@ class MayhamTUI(App):
         Binding("3", "tab('t-pos')", "Positionen", show=False),
         Binding("4", "tab('t-wal')", "Wallets", show=False),
         Binding("5", "tab('t-al')", "Hinweise", show=False),
+        Binding("6", "tab('t-brain')", "Entscheider", show=False),
     ]
 
     def __init__(self):
@@ -111,6 +114,10 @@ class MayhamTUI(App):
                 yield DataTable(id="wallets", zebra_stripes=True, cursor_type="row")
             with TabPane("5 Hinweise", id="t-al"):
                 yield DataTable(id="alerts", zebra_stripes=True, cursor_type="row")
+            with TabPane("6 Entscheider", id="t-brain"):
+                yield Static("", id="brainhead")
+                yield DataTable(id="brain", zebra_stripes=True, cursor_type="row")
+                yield Static("Zeile wählen: die Begründung der Entscheidung", id="braindetail")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -121,6 +128,7 @@ class MayhamTUI(App):
             "closed": ["Zu", "Coin", "Modus", "Konto", "Haltedauer", "Ergebnis", "SOL", "Grund"],
             "wallets": ["#", "Wallet", "Tier", "Score", "Coins", "Treffer", "ROI", "Gewinn", "Einfluss", "Zuletzt"],
             "alerts": ["Zeit", "Modus", "Coin", "Aktion", "Grund"],
+            "brain": ["Zeit", "Urteil", "Quelle", "Coin", "Plan", "Erwartet", "Sicher", "Einsatz", "Ergebnis"],
         }
         for tid, cs in cols.items():
             self.query_one(f"#{tid}", DataTable).add_columns(*cs)
@@ -174,6 +182,7 @@ class MayhamTUI(App):
         self._fill_positions(s["open"], s["closed"])
         self._fill_wallets(s["wallets"])
         self._fill_alerts(s["alerts"])
+        self._fill_brain(s.get("brain"))
 
     def _refill(self, tid: str, rows: list[tuple], keys: list[str]) -> None:
         tbl = self.query_one(f"#{tid}", DataTable)
@@ -246,8 +255,39 @@ class MayhamTUI(App):
             cell(a.get("action") or "", "yellow" if a.get("action") == "sell" else ""), cell(a.get("reason") or ""),
         ) for a in al], [str(i) for i in range(len(al))])
 
+    def _fill_brain(self, b: dict | None) -> None:
+        from .report import brain_line
+        if not b or not b.get("available"):
+            self.query_one("#brainhead", Static).update((b or {}).get("note") or "Entscheider: noch keine Daten")
+            self._refill("brain", [], [])
+            return
+        self.query_one("#brainhead", Static).update(brain_line(b))
+        style = {"good": "green", "warn": "yellow"}
+
+        def result(d):
+            p = d.get("position") or {}
+            if p.get("status") == "open":
+                return cell("offen", "yellow")
+            if p.get("pnl_pct") is not None:
+                return right(pct(p["pnl_pct"], 1, True), tone(p["pnl_pct"]))
+            if d.get("realized_plan") is not None:
+                return right(f"nachgespielt {pct(d['realized_plan'], 1, True)}", "dim")
+            return right("–", "dim")
+        ds = b["decisions"]
+        self._refill("brain", [(
+            cell(clock(d["ts"])), cell(d["verdict"], style.get(d.get("tone"), "dim")), cell(d.get("kind_label") or ""),
+            cell(d.get("symbol") or (d.get("mint") or "")[:6], "bold"), cell(d.get("plan_label") or ""),
+            right(pct(d.get("pred_mean"), 1, True), tone(d.get("pred_mean"))), right(pct(d.get("pred_p"))),
+            right(sol(d.get("size_sol"), 2) if d.get("decision") == "enter" else "–"), result(d),
+        ) for d in ds], [str(d["id"]) for d in ds])
+
     # ------------------------------------------------------------ interaction
     def on_data_table_row_highlighted(self, ev: DataTable.RowHighlighted) -> None:
+        if ev.data_table.id == "brain" and self.snap and ev.row_key is not None:
+            d = next((x for x in ((self.snap.get("brain") or {}).get("decisions") or []) if str(x["id"]) == ev.row_key.value), None)
+            if d:
+                self.query_one("#braindetail", Static).update("\n".join(escape(x) for x in d.get("note") or []) or "keine Begründung gespeichert")
+            return
         if ev.data_table.id != "sigs" or not self.snap or ev.row_key is None:
             return
         sid = ev.row_key.value

@@ -116,6 +116,79 @@ def _live_demo(conn, r, tokens, now):
     conn.commit()
 
 
+def _brain_demo(conn, r, tokens, now):
+    """brain/ tables in their real format (brain.store.SCHEMA): decisions with the trader's note, a few paper
+    positions, the minute equity curve, replayed outcomes for the honest scorecard and two diary entries."""
+    try:
+        from brain import store
+        from brain.plans import BY_NAME, NAMES
+    except Exception:
+        return
+    store.init(conn)
+    tok = [t for t in tokens if t["pts"]]
+    bal, eq_pts, open_sz = 5.0, [], 0.0
+    kinds = ("whale", "signal", "launch")
+    for i in range(80):
+        t, kind, ts = r.choice(tok), r.choice(kinds), now - int((80 - i) * 900 * r.uniform(0.6, 1.0))
+        plan = r.choice(NAMES)
+        p, mean = BY_NAME[plan], r.gauss(0.0, 0.02)
+        conf = min(0.97, max(0.2, 0.5 + mean * 12 + r.uniform(-0.1, 0.1)))
+        explore = conf < 0.75 and r.random() < 0.12
+        enter = (mean > 0 and conf >= 0.75) or explore
+        wanted = enter or (mean > 0 and conf >= 0.75 and r.random() < 0.3)
+        size = round(0.1 + 0.4 * max(0.0, (conf - 0.75) / 0.2), 2) if enter and not explore else (0.1 if enter else None)
+        who = {"whale": f"Wal {t['mint'][-6:]}… (smart) kaufte {r.uniform(0.5, 6):.1f} SOL {t['symbol']}, erkannt nach {r.randint(2, 30)} s.",
+               "signal": f"Signal auf {t['symbol']}: Score {r.randint(40, 95)}, {r.randint(2, 9)} Smart Wallets, Call {r.randint(1, 4)}.",
+               "launch": f"Launch {t['symbol']}: Sniper-Score {r.randint(30, 90)}, Risiko {r.randint(5, 60)}, Top-10 {r.randint(15, 60)} %."}[kind]
+        note = "\n".join([
+            who + f" Preis seither {r.uniform(-8, 12):+.0f}%.",
+            f"Dafür: weitere Smart Wallets im Coin {r.randint(1, 4)}+ ({r.uniform(0.5, 3):+.1f}%). Dagegen: Wash-Anteil 10-30% ({-r.uniform(0.5, 3):.1f}%).",
+            f"Erwartung mit „{p.label}“ ({p.text()}): Ø {100 * mean:+.1f}% netto ± {100 * abs(r.gauss(0.015, 0.005)):.1f}%, sicher im Plus zu {100 * conf:.0f}%.",
+            (f"Kauf {size:.2f} SOL." + (" (Erkunden)" if explore else "")) if enter else ("Wollte kaufen, aber Grenze: max. offene Positionen." if wanted else "Auslassen."),
+        ])
+        old = ts < now - 4.3 * 3600
+        realized = mean + r.gauss(0, 0.08) if old else None
+        cur = conn.execute(
+            "INSERT INTO brain_opps(ts, decided_at, kind, ref, mint, symbol, wallet, src_ts, price_sol, decision, wanted, plan, "
+            "pred_mean, pred_std, pred_p, sample, explore, size_sol, note, evaluated_at, realized_plan, realized_base, realized_best) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ts, ts + 0.02, kind, f"demo:{i}", t["mint"], t["symbol"], None, ts - 5, 1e-6, "enter" if enter else "skip", int(wanted),
+             plan, mean, 0.015, conf, mean, int(explore), size, note, ts + 4 * 3600 if old else None, realized,
+             (realized - r.uniform(0, 0.05)) if old else None, (realized + r.uniform(0, 0.2)) if old else None))
+        if enter:
+            closed = ts < now - 3 * 3600
+            pct = r.gauss(0.01, 0.15) if closed else None
+            conn.execute(
+                "INSERT INTO brain_positions(opp_id, kind, mint, symbol, src_ts, opened_at, entry_price_sol, size_sol, tokens, decimals, plan, "
+                "take_profit, stop_loss, trail_activate, trail_drawdown, max_hold_min, inflow_exit, whale_exit, high_price_sol, last_price_sol, "
+                "last_seen, status, closed_at, pnl_sol, pnl_pct, exit_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (cur.lastrowid, kind, t["mint"], t["symbol"], ts - 5, ts, 1e-6, size, size / 1e-6, 6, plan, p.take_profit, p.stop_loss,
+                 p.trail_activate, p.trail_drawdown, p.max_hold_min, p.inflow_exit, int(kind == "whale"), 1.2e-6, 1e-6 * (1 + r.uniform(-0.15, 0.25)),
+                 now - 30, "closed" if closed else "open", ts + r.randint(5, 120) * 60 if closed else None,
+                 size * pct if closed else None, pct, r.choice(("target", "stop", "trail", "inflow_peak", "whale", "time")) if closed else None))
+            if closed:
+                bal += size * pct
+            else:
+                open_sz += size
+    for k in range(48 * 6):
+        ts = now - (48 * 6 - k) * 600
+        eq_pts.append((ts, 5.0 + (bal - 5.0) * k / (48 * 6), 0.0))
+    conn.executemany("INSERT OR REPLACE INTO brain_equity(ts, balance_sol, open_value_sol, equity_sol) VALUES (?,?,?,?)",
+                     [(ts, b, o, b + o) for ts, b, o in eq_pts])
+    store.put(conn, "balance_sol", round(bal - open_sz, 4))  # cash: open stakes are out of the balance
+    store.put(conn, "started_at", now - 2 * 86400)
+    for d in (1, 0):
+        day = time.strftime("%Y-%m-%d", time.gmtime(now - d * 86400))
+        conn.execute("INSERT OR REPLACE INTO brain_journal(day, ts, text, data) VALUES (?,?,?,?)", (day, now - d * 86400, "\n".join([
+            f"Lerntagebuch {day}",
+            f"Gesehen: {r.randint(30, 60)} Gelegenheiten, gekauft {r.randint(3, 9)} (davon {r.randint(0, 2)} zum Erkunden).",
+            f"Ehrliche Nachprüfung: genommen Ø {r.uniform(-2, 4):+.1f}% netto, ausgelassen Ø {r.uniform(-6, 0):+.1f}%, alles kopiert Ø {r.uniform(-5, 1):+.1f}%.",
+            "Was sich bewegt hat: Wal-Stufe ultra zählt mehr, frische Launches mit Bundle deutlich weniger.",
+            "Bevorzugter Ausstieg: „Pump mitnehmen“. Unsicher bleibt: Signale am Abend (zu wenig Daten).",
+        ]), "{}"))
+    conn.commit()
+
+
 def _signal_plan_demo(conn, r, now):
     """signals/plan.py columns: highs after the call (15 min / 4 h), minutes to the 1 h high and the dip before it,
     re-calls on the same coin, target/stop from the alert and when they were hit."""
@@ -795,6 +868,7 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
     _inflight_demo(conn, r, tokens, now)
     _signal_plan_demo(conn, r, now)
     _live_demo(conn, r, tokens, now)
+    _brain_demo(conn, r, tokens, now)
     control.set_mode(conn, "signal", "semi")
     try:  # signals/ syncs the active model's tiers into wallets every rescore (core.scoring)
         from core.scoring import sync_model_tiers

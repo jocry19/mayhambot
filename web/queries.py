@@ -1990,6 +1990,13 @@ def situation(conn, now=None, sniper=None, ct=None, model=None, signals_24h=None
         add("sniper", "/sniper", f"{sniper.get('launches_today', 0)} Launches heute",
             (f"Papier {sniper['pnl_sol']:+.3f} SOL".replace(".", ",") if sniper.get("pnl_sol") is not None else "") +
             (f" · {sniper.get('entered_today', 0)} gekauft" if sniper.get("entered_today") is not None else ""))
+    br = cache.get(("brain_summary",), 15, lambda: brain_summary(conn, now))
+    if br:
+        def _p(x):
+            return f"{100 * x:+.1f} %".replace(".", ",") if x is not None else "–"
+        add("brain", "/brain", f"Papier {br['result_sol']:+.2f} SOL".replace(".", ",") if br.get("result_sol") is not None else "noch keine Trades",
+            f"{br['decisions_24h']} Entscheidungen in 24 h, {br['entered_24h']} gekauft" +
+            (f" · genommen Ø {_p(br['taken_mean'])} gegen alles kopiert {_p(br['copy_all_mean'])}" if br.get("n_taken") else ""))
     mk = one(conn, "SELECT ts, score, label, sol_ret_24h FROM market_snapshots ORDER BY ts DESC LIMIT 1") \
         if has(conn, "market_snapshots", "label") else None
     add("market", "/market", (mk.get("label") or "–") if mk else "noch keine Analyse",
@@ -2072,6 +2079,8 @@ SERVICE_INFO = {
     "sniper": ("Launch-Sniper", "neue Launches prüfen, Papierkäufe", None, SNIPER_HB_STALE_S),
     "market": ("Markt", "Marktphase, Sektoren, Narrative", "SELECT MAX(ts) FROM market_snapshots", 30 * 60),
     "intel": ("Zentrale", "Merkmale, Ticker, Quellen-Auswertung", "SELECT MAX(ts) FROM intel_events", 30 * 60),
+    "brain": ("Entscheider", "jede Gelegenheit einzeln entscheiden, eigenes Papierkonto",
+              ("SELECT MAX(ts) FROM brain_equity", "SELECT MAX(ts) FROM brain_opps"), 10 * 60),
     "research": ("Modell & Forschung", "Wallet-Bewertung, Retraining", "SELECT MAX(ts) FROM model_versions", 30 * 3600),
     "web": ("Dashboard", "diese Oberfläche", None, None),
 }
@@ -2306,3 +2315,138 @@ def market_summary(conn, now=None):
         return market.summary(conn, now)
     except Exception:
         return None
+
+
+# ====================================================================== brain (learning decider, brain/README.md)
+BRAIN_KIND = {"whale": "Wal-Kauf", "signal": "Signal", "launch": "Launch"}
+BRAIN_EXIT = {"target": "Ziel erreicht", "stop": "Stop", "trail": "Trailing-Stop", "inflow_peak": "Ansturm vorbei",
+              "whale": "Wal hat verkauft", "time": "Haltezeit vorbei", "rug": "Liquidität weg", "no_market": "kein Markt mehr"}
+BRAIN_TARGET = 100  # out-of-sample trades before the result counts (README: "100 nachgeprüfte Trades")
+
+
+def _brain_plans():
+    try:
+        from brain.plans import PLANS  # type: ignore
+        return {p.name: {"label": p.label, "text": p.text()} for p in PLANS}
+    except Exception:
+        return {}
+
+
+def _brain_honest(conn):
+    try:
+        from brain.learner import honest  # type: ignore  (reads only)
+        return honest(conn)
+    except Exception:
+        return None
+
+
+def brain_view(conn, kind=None, show="all", limit=60, now=None):
+    """The learning decider at a glance, read-only on brain's own tables (brain.status/balance would write the
+    start balance, so this reads the tables itself). Empty tables are fine: every number may be None."""
+    if not has(conn, "brain_opps"):
+        return {"available": False, "note": "Der Entscheider hat noch keine Daten (Dienst brain läuft noch nicht)."}
+    now = int(now or time.time())
+    plans = _brain_plans()
+    st = {r["key"]: _j(r["value"], r["value"]) for r in rows(conn, "SELECT key, value FROM brain_state")} if has(conn, "brain_state") else {}
+    try:
+        from brain import config as bcfg  # type: ignore
+        start = bcfg.load().start_balance_sol
+    except Exception:
+        start = 5.0
+    bal = _f(st.get("balance_sol"), 4) if st.get("balance_sol") is not None else start
+    pos = rows(conn, "SELECT * FROM brain_positions ORDER BY COALESCE(closed_at, opened_at) DESC LIMIT 300") if has(conn, "brain_positions") else []
+    open_, closed = [], []
+    for p in pos:
+        d = {k: p.get(k) for k in ("id", "opp_id", "kind", "mint", "symbol", "wallet", "opened_at", "closed_at", "size_sol",
+                                   "entry_price_sol", "last_price_sol", "plan", "take_profit", "stop_loss", "max_hold_min",
+                                   "status", "pnl_sol", "pnl_pct", "exit_reason")}
+        d["kind_label"] = BRAIN_KIND.get(p.get("kind"), p.get("kind"))
+        d["plan_label"] = (plans.get(p.get("plan")) or {}).get("label", p.get("plan"))
+        if p.get("status") == "open":
+            if p.get("entry_price_sol") and p.get("last_price_sol"):
+                d["value_sol"] = _f(p["last_price_sol"] / p["entry_price_sol"] * (p.get("size_sol") or 0), 4)
+                d["unrealized_pct"] = _f(p["last_price_sol"] / p["entry_price_sol"] - 1, 4)
+            if p.get("high_price_sol") and p.get("entry_price_sol"):
+                d["peak_pct"] = _f(p["high_price_sol"] / p["entry_price_sol"] - 1, 4)
+            d["held_min"] = _f((now - (p.get("opened_at") or now)) / 60, 1)
+            open_.append(d)
+        else:
+            d["exit_label"] = BRAIN_EXIT.get(p.get("exit_reason"), p.get("exit_reason"))
+            closed.append(d)
+    eq = rows(conn, "SELECT ts, balance_sol, open_value_sol, equity_sol FROM brain_equity ORDER BY ts") if has(conn, "brain_equity") else []
+    if len(eq) > 400:
+        eq = eq[:: len(eq) // 400 + 1] + [eq[-1]]
+    pnl = [p["pnl_sol"] or 0 for p in closed]
+    wins = sum(1 for p in closed if (p.get("pnl_pct") or 0) > 0)
+    open_val = sum(p.get("value_sol") or p.get("size_sol") or 0 for p in open_)
+    q, args = "SELECT * FROM brain_opps WHERE 1=1", []
+    if kind in BRAIN_KIND:
+        q += " AND kind=?"
+        args.append(kind)
+    if show == "enter":
+        q += " AND decision='enter'"
+    elif show == "skip":
+        q += " AND decision<>'enter'"
+    elif show == "wanted":
+        q += " AND wanted=1 AND decision<>'enter'"
+    by_id = {p["opp_id"]: p for p in pos if p.get("opp_id")}
+    decisions = []
+    for r in rows(conn, q + " ORDER BY ts DESC LIMIT ?", (*args, int(limit))):
+        p = by_id.get(r["id"]) or {}
+        if r["decision"] == "enter":
+            verdict = ("Erkunden", "warn") if r.get("explore") else ("Gekauft", "good")
+        elif r.get("wanted"):
+            verdict = ("Wollte, Grenze stoppte", "warn")
+        else:
+            verdict = ("Ausgelassen", "")
+        decisions.append({
+            "id": r["id"], "ts": r["ts"], "kind": r["kind"], "kind_label": BRAIN_KIND.get(r["kind"], r["kind"]),
+            "mint": r["mint"], "symbol": r["symbol"], "wallet": r["wallet"], "decision": r["decision"],
+            "verdict": verdict[0], "tone": verdict[1], "explore": bool(r.get("explore")), "wanted": bool(r.get("wanted")),
+            "plan": r["plan"], "plan_label": (plans.get(r["plan"]) or {}).get("label", r["plan"]),
+            "pred_mean": _f(r.get("pred_mean"), 4), "pred_std": _f(r.get("pred_std"), 4), "pred_p": _f(r.get("pred_p"), 3),
+            "size_sol": _f(r.get("size_sol"), 4),
+            "note": [_redact(x)[:400] for x in (r.get("note") or "").splitlines() if x.strip()][:6],
+            "evaluated": r.get("evaluated_at") is not None, "realized_plan": _f(r.get("realized_plan"), 4),
+            "realized_base": _f(r.get("realized_base"), 4), "realized_best": _f(r.get("realized_best"), 4),
+            "position": {"status": p.get("status"), "pnl_sol": _f(p.get("pnl_sol"), 4), "pnl_pct": _f(p.get("pnl_pct"), 4),
+                         "exit_label": BRAIN_EXIT.get(p.get("exit_reason"), p.get("exit_reason"))} if p else None,
+        })
+    day = now - 86400
+    c24 = one(conn, "SELECT COUNT(*) n, COALESCE(SUM(decision='enter'),0) entered, COALESCE(SUM(decision='enter' AND explore=1),0) explored, "
+                    "COALESCE(SUM(wanted=1 AND decision<>'enter'),0) blocked FROM brain_opps WHERE ts>=?", (day,)) or {}
+    tot = one(conn, "SELECT COUNT(*) n, COALESCE(SUM(decision='enter'),0) entered FROM brain_opps") or {}
+    diary = []
+    if has(conn, "brain_journal"):
+        for r in rows(conn, "SELECT day, ts, text FROM brain_journal ORDER BY day DESC LIMIT 14"):
+            diary.append({"day": r["day"], "ts": r["ts"], "text": _redact(r["text"] or "")[:6000]})
+    h = _brain_honest(conn) or {}
+    return {
+        "available": True, "now": now,
+        "account": {"start_sol": start, "balance_sol": bal, "open_value_sol": _f(open_val, 4),
+                    "equity_sol": _f(bal + open_val, 4) if bal is not None else None,
+                    "result_sol": _f(bal + open_val - start, 4) if bal is not None else None,
+                    "open": len(open_), "closed": len(closed), "pnl_sol": _f(sum(pnl), 4),
+                    "win_rate": _f(wins / len(closed), 3) if closed else None,
+                    "opportunities": tot.get("n") or 0, "entered": tot.get("entered") or 0,
+                    "started_at": st.get("started_at"), "model_saved_at": st.get("model_saved_at"),
+                    "prior_rows": st.get("prior_rows")},
+        "last24": {k: c24.get(k) or 0 for k in ("n", "entered", "explored", "blocked")},
+        "honest": {**h, "target": BRAIN_TARGET, "progress": _f(min(1.0, (h.get("n_taken") or 0) / BRAIN_TARGET), 3),
+                   "by_kind": [{"kind": k, "label": BRAIN_KIND.get(k, k), **v} for k, v in (h.get("by_kind") or {}).items()]},
+        "prior_check": st.get("prior_check") if isinstance(st.get("prior_check"), dict) else None,
+        "open": open_, "closed": closed[:40], "decisions": decisions, "diary": diary, "equity": eq,
+        "plans": [{"name": k, **v} for k, v in plans.items()],
+    }
+
+
+def brain_summary(conn, now=None):
+    """Overview tile and terminal line; None when brain never ran."""
+    if not has(conn, "brain_opps"):
+        return None
+    v = brain_view(conn, limit=1, now=now)
+    a, h = v["account"], v["honest"]
+    return {"equity_sol": a["equity_sol"], "result_sol": a["result_sol"], "start_sol": a["start_sol"], "open": a["open"],
+            "closed": a["closed"], "decisions_24h": v["last24"]["n"], "entered_24h": v["last24"]["entered"],
+            "n_taken": h.get("n_taken"), "taken_mean": h.get("taken_mean"), "passed_mean": h.get("passed_mean"),
+            "copy_all_mean": h.get("copy_all_mean"), "target": h["target"]}

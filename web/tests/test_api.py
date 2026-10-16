@@ -739,3 +739,39 @@ def test_local_day0():
     d0 = Q.local_day0(now)
     assert d0 <= now < d0 + 25 * 3600 and _t.localtime(d0)[3:6] == (0, 0, 0)
     assert _t.localtime(d0)[:3] == _t.localtime(now)[:3]
+
+
+def test_brain_view(demo, empty, tmp_path):
+    """Entscheider page: account, honest scorecard, decisions with their reasons; empty brain tables are fine."""
+    import sqlite3
+
+    from web import queries as Q
+
+    assert _client(empty).get("/api/brain").json()["available"] is False
+    c = _client(demo)
+    d = c.get("/api/brain").json()
+    assert d["available"] and d["decisions"] and d["equity"] and len(d["plans"]) == 6
+    a = d["account"]
+    assert abs(a["equity_sol"] - (a["balance_sol"] + a["open_value_sol"])) < 1e-3 and a["start_sol"] == 5.0
+    dec = d["decisions"][0]
+    assert 2 <= len(dec["note"]) <= 6 and dec["verdict"] and dec["kind_label"] in ("Wal-Kauf", "Signal", "Launch")
+    h = d["honest"]
+    assert h["target"] == 100 and h["n"] >= h["n_taken"] and 0 <= h["progress"] <= 1
+    assert all(x["decision"] == "enter" for x in c.get("/api/brain?show=enter").json()["decisions"])
+    assert all(x["decision"] != "enter" for x in c.get("/api/brain?show=skip").json()["decisions"])
+    assert all(x["kind"] == "whale" for x in c.get("/api/brain?kind=whale").json()["decisions"])
+    assert c.get("/api/brain?show=x").status_code == 400
+    assert any(b["name"] == "brain" for b in c.get("/api/overview").json()["board"]["rows"])
+    # brain created its tables but has not decided anything yet: every number may be empty
+    p = str(tmp_path / "fresh.db")
+    conn = sqlite3.connect(p)
+    from brain import store
+
+    store.init(conn)
+    conn.commit()
+    conn.row_factory = sqlite3.Row
+    v = Q.brain_view(conn)
+    assert v["available"] and v["decisions"] == [] and v["account"]["equity_sol"] == 5.0 and v["honest"]["n"] == 0
+    from cli.report import brain_line
+
+    assert "noch nichts nachgeprüft" in brain_line(v) and brain_line(None) == ""

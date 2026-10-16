@@ -249,6 +249,15 @@ def learning():
     return ok(cache.get(("learning",), 30, lambda: q.learning_progress(read_conn())))
 
 
+@app.get("/api/brain")
+def brain(kind: str | None = None, show: str = "all", limit: int = 60):
+    """The learning decider (brain/): account, honest scorecard, open positions, decisions with their reasons, diary."""
+    if show not in ("all", "enter", "skip", "wanted"):
+        raise HTTPException(400, "show: all, enter, skip oder wanted")
+    limit = max(1, min(int(limit), 300))
+    return ok(cache.get(("brain", kind, show, limit), 10, lambda: q.brain_view(read_conn(), kind=kind, show=show, limit=limit)))
+
+
 @app.get("/api/copytrade")
 def copytrade(mode: str = "paper", strategy: str | None = None):
     if mode not in ("paper", "explore", "dry", "live"):

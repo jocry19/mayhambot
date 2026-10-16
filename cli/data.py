@@ -42,8 +42,13 @@ def snapshot(n_signals: int = 60, n_wallets: int = 150) -> dict:
         "control": Q.control_state(conn),
         "model": Q.model_active(conn),
         "sniper": Q.sniper_summary(conn, now),
+        "brain": Q.brain_view(conn, limit=40, now=now),
         "market": Q.market_summary(conn, now),
     }
+
+
+def brain(limit: int = 12) -> dict:
+    return Q.brain_view(read_conn(), limit=limit)
 
 
 # ---------------------------------------------------------------- actions

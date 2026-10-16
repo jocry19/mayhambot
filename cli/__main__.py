@@ -5,6 +5,7 @@
     python -m cli signals [-n 20]      Letzte Signale mit Gewichtung
     python -m cli wallets [--tier ultra] [-n 30]
     python -m cli positions            Offene und letzte Trades
+    python -m cli brain [-n 12]        Entscheider: Konto, ehrliche Kennzahl, Entscheidungen mit Begründung
     python -m cli mode whale|signal off|manual|semi|auto
     python -m cli pause on|off
     python -m cli preset whale|signal NAME
@@ -38,6 +39,8 @@ def main(argv=None) -> int:
     p.add_argument("-n", type=int, default=25)
     p.add_argument("--tier", choices=["ultra", "smart", "good"])
     sub.add_parser("positions", help="Offene und letzte Trades")
+    p = sub.add_parser("brain", help="Entscheider: Entscheidungen mit Begründung, Lerntagebuch")
+    p.add_argument("-n", type=int, default=12)
     p = sub.add_parser("mode", help="Betriebsart setzen")
     p.add_argument("strategy", choices=["whale", "signal", "launch"])
     p.add_argument("mode", choices=["off", "manual", "semi", "auto"])
@@ -74,6 +77,8 @@ def main(argv=None) -> int:
             report.wallets(a.n, a.tier)
         elif a.cmd == "positions":
             report.positions()
+        elif a.cmd == "brain":
+            report.brain(a.n)
         elif a.cmd == "mode":
             print(data.set_mode(a.strategy, a.mode))
         elif a.cmd == "pause":

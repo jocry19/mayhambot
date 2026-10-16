@@ -51,6 +51,9 @@ def status() -> None:
     sl = sniper_line(s.get("sniper"))
     if sl:
         con.print(sl)
+    bl = brain_line(s.get("brain"))
+    if bl:
+        con.print(bl)
     ml = market_line(s.get("market"))
     if ml:
         con.print(ml)
@@ -200,6 +203,50 @@ def credits_line() -> str:
     refused = sum(r.get("refused") or 0 for r in u.get("rows", []))
     return (f"Helius-Credits diesen Monat: {n(t['used'])} von {n(t['limit'])} [{st}]({pct(ld, 1)})[/]"
             + (f" · [red]{n(refused)} Aufrufe abgewiesen[/]" if refused else ""))
+
+
+def brain_line(b: dict | None) -> str:
+    """'Entscheider (Papier): Equity 5,24 SOL (+0,24), 6 offen · genommen Ø +0,8 % gegen ausgelassen … und alles kopiert …'."""
+    if not b or not b.get("available"):
+        return ""
+    a, h = b["account"], b["honest"]
+    res = a.get("result_sol")
+    head = (f"Entscheider (Papier): Equity {sol(a.get('equity_sol'), 2)} ({_c(sol(res, 2, True), tone(res))}), {n(a.get('open'))} offen, "
+            f"{n(b['last24']['n'])} Entscheidungen 24 h, {n(b['last24']['entered'])} gekauft")
+    if not h.get("n"):
+        return head + " · noch nichts nachgeprüft"
+    return (head + f" · ehrlich: genommen Ø {_c(pct(h.get('taken_mean'), 1, True), tone(h.get('taken_mean')))}"
+            f" gegen ausgelassen Ø {pct(h.get('passed_mean'), 1, True)} und alles kopiert Ø {pct(h.get('copy_all_mean'), 1, True)}"
+            f" ({n(h.get('n_taken'))}/{n(h.get('target'))} nachgeprüft)")
+
+
+def brain(limit: int = 12) -> None:
+    """The learning decider: account, honest scorecard, open positions, newest decisions with their reasons, diary."""
+    b = data.brain(limit)
+    if not b.get("available"):
+        con.print(b.get("note") or "Entscheider: keine Daten")
+        return
+    con.print(brain_line(b))
+    t = _t("Offene Positionen (Entscheider)", "Coin", "Quelle", "Plan", "Einsatz", "Jetzt", "Seit")
+    for p in b["open"]:
+        u = p.get("unrealized_pct")
+        t.add_row(escape(p.get("symbol") or (p.get("mint") or "")[:6]), p.get("kind_label") or "", p.get("plan_label") or "",
+                  sol(p.get("size_sol"), 2), _c(pct(u, 1, True), tone(u)), ago(p.get("opened_at")))
+    if b["open"]:
+        con.print(t)
+    con.print()
+    for d in b["decisions"]:
+        style = {"good": "green", "warn": "yellow"}.get(d.get("tone"), "dim")
+        con.print(f"[{style}]{d['verdict']}[/] {d['kind_label']} [b]{escape(d.get('symbol') or (d.get('mint') or '')[:6])}[/] "
+                  f"{ago(d['ts'])} · Plan {d.get('plan_label') or '–'} · erwartet {pct(d.get('pred_mean'), 1, True)}, sicher zu {pct(d.get('pred_p'))}")
+        for line in d.get("note") or []:
+            con.print(f"   [dim]{escape(line)}[/]")
+        if d.get("evaluated"):
+            con.print(f"   nachgespielt: {_c(pct(d.get('realized_plan'), 1, True), tone(d.get('realized_plan')))} "
+                      f"(stumpf kopiert {pct(d.get('realized_base'), 1, True)})")
+    if b["diary"]:
+        con.print()
+        con.print(escape(b["diary"][0]["text"]))
 
 
 def sniper_line(sn: dict | None) -> str:
