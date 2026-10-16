@@ -223,6 +223,23 @@ def _sells_after(conn, wallet: str, mint: str, ts: int) -> list[int]:
         "SELECT ts FROM ct_swaps WHERE wallet=? AND mint=? AND side='sell' AND ts>? ORDER BY ts", (wallet, mint, ts))]
 
 
+TRACKER_GAP_S = 45 * 60  # no swap seen for this long = tracker was offline (Mac asleep, outage), not a quiet market
+
+
+def tracker_gaps(conn, t0: int, t1: int, min_gap_s: int = TRACKER_GAP_S) -> list[tuple[int, int]]:
+    """Windows in [t0, t1] where the tracker recorded nothing (by seen_at). Whale sells there are unknown."""
+    seen = [r[0] for r in conn.execute(
+        "SELECT seen_at FROM ct_swaps WHERE seen_at BETWEEN ? AND ? ORDER BY seen_at", (t0, t1))]
+    return [(a, b) for a, b in zip(seen, seen[1:]) if b - a > min_gap_s]  # only gaps the tracker came back from
+
+
+def _sell_unknown(gaps, ts: int, sells: list[int]) -> bool:
+    """True if the whale may have sold during an outage within the replay horizon: no sell is on record before the
+    outage ended, so the replay would hold past an exit we never saw. A sell recorded earlier settles every variant."""
+    first = sells[0] if sells else None
+    return any(a < ts + HORIZON_S and b > ts and (first is None or first > b) for a, b in gaps)
+
+
 def _store_eval(conn, kind, ref, strategy, wallet, mint, ts, gains, features, actual=None, sim_actual=None) -> None:
     conn.execute("INSERT OR REPLACE INTO ct_evals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                  (kind, str(ref), strategy, wallet or "", mint, int(ts), sim.GRID_VERSION, json.dumps(gains),
@@ -271,15 +288,28 @@ def evaluate_whale_buys(conn, s: Settings, limit: int = 40) -> int:
         """SELECT o.* FROM ct_buy_outcomes o WHERE o.pumped IS NOT NULL AND o.ts < ?
            AND NOT EXISTS (SELECT 1 FROM ct_evals e WHERE e.kind='whale_buy' AND e.ref=o.sig)
            ORDER BY o.ts DESC LIMIT ?""", (int(time.time()) - HORIZON_S, limit)).fetchall()
+    now = int(time.time())
+    gaps = tracker_gaps(conn, now - 3 * 86400, now)
+    for a, b in gaps:  # replays stored before the outage was known
+        for e in conn.execute("SELECT ref, wallet, mint, ts FROM ct_evals WHERE kind='whale_buy' AND ts<? AND ts+?>? "
+                              "AND gains!='[]'", (b, HORIZON_S, a)).fetchall():
+            if _sell_unknown(gaps, e[3], _sells_after(conn, e[1], e[2], e[3])):
+                conn.execute("UPDATE ct_evals SET gains='[]', features=? WHERE kind='whale_buy' AND ref=?",
+                             (json.dumps({"gap": 1}), e[0]))
     n = 0
     for b in rows:
-        cs = candles(conn, s, b["mint"], b["ts"] - 20 * 60, b["ts"] + HORIZON_S, b["pool"])
         w = b["wallet"]
+        sells = _sells_after(conn, w, b["mint"], b["ts"])
+        if _sell_unknown(gaps, b["ts"], sells):  # counts as no data rather than a too-long hold
+            _store_eval(conn, "whale_buy", b["sig"], "whale", w, b["mint"], b["ts"], [], {"gap": 1})
+            n += 1
+            continue
+        cs = candles(conn, s, b["mint"], b["ts"] - 20 * 60, b["ts"] + HORIZON_S, b["pool"])
         if not cs and b["ts"] > time.time() - RETRY_S:
             continue  # candles not available right now: try again next round
         feats = {"strategy": "whale", **wallet_features(conn, w), "size": bucket_size(b["sol_amount"]),
                  **intel_context(conn, b["mint"], w, b["ts"])[0]}
-        gains = sim.grid_gains(cs, b["ts"], sim.GRID, _sells_after(conn, w, b["mint"], b["ts"])) if cs else []
+        gains = sim.grid_gains(cs, b["ts"], sim.GRID, sells) if cs else []
         _store_eval(conn, "whale_buy", b["sig"], "whale", w, b["mint"], b["ts"], gains, feats)
         n += 1
     return n

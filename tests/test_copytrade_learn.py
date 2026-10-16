@@ -320,3 +320,21 @@ def test_intel_context_buckets_and_thesis(monkeypatch):
     monkeypatch.setitem(sys.modules, "intel", types.SimpleNamespace(features_at=lambda *a: 1 / 0))
     assert learn.intel_context(None, "MINTxyz", "WAL1", 1000) == ({}, {})
     assert learn.thesis({}) == ""
+
+
+def test_tracker_gap_marks_unknown_whale_exits():
+    import sqlite3
+    from copytrade import learn, store
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(store.SCHEMA)
+    t = 1_000_000
+    for i, seen in enumerate([t, t + 600, t + 1200, t + 1200 + 90 * 60, t + 1200 + 95 * 60]):
+        conn.execute("INSERT INTO ct_swaps VALUES (?,?,?,?,?,?,?,?,?)", (f"s{i}", "X", "M", "buy", seen, 1, 1, 1, seen))
+    gaps = learn.tracker_gaps(conn, t - 3600, t + 4 * 3600)
+    assert gaps == [(t + 1200, t + 1200 + 90 * 60)]
+    assert learn._sell_unknown(gaps, t, [])                    # holding into the outage, no sell on record
+    assert not learn._sell_unknown(gaps, t, [t + 900])         # sold before the outage: every exit is known
+    assert learn._sell_unknown(gaps, t, [t + 3 * 3600])        # first sell only after it: one may be missing
+    assert not learn._sell_unknown(gaps, t + 6 * 3600, [])     # horizon starts after the outage
