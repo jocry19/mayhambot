@@ -283,18 +283,28 @@ class ModelGuard:
 model_guard = ModelGuard()
 
 
-_tm_cache = {"at": 0.0, "map": None}
+_ctx = {"at": 0.0, "ctx": None}
+_stored = {}  # mint -> last ts a prediction row was stored
+STORE_EVERY = 900
 
 
-def _model_tier_map(conn, ttl=60):
-    """model.tier_map once a minute instead of per coin (it scans model_wallet_stats). None lets score_token load it."""
-    if time.time() - _tm_cache["at"] > ttl:
+def _model_ctx(conn, ttl=60):
+    """model.predict.prepare once a minute (tier map + shared lookups) instead of full scans per coin."""
+    if time.time() - _ctx["at"] > ttl:
         try:
-            from model.tiers import tier_map
-            _tm_cache.update(at=time.time(), map=tier_map(conn))
-        except Exception:  # noqa: BLE001 - model/ absent
-            _tm_cache.update(at=time.time(), map=None)
-    return _tm_cache["map"]
+            from model.predict import prepare
+            _ctx.update(at=time.time(), ctx=prepare(conn))
+        except Exception:  # noqa: BLE001 - model/ absent or older without prepare(): score_token loads itself
+            _ctx.update(at=time.time(), ctx=None)
+    return _ctx["ctx"]
+
+
+def _store_now(mint, now):
+    """Keep one stored prediction per coin every STORE_EVERY seconds (the live score is still computed every cycle)."""
+    if now - _stored.get(mint, 0) >= STORE_EVERY:
+        _stored[mint] = now
+        return True
+    return False
 
 
 def apply_model(conn, mint, now, m):
@@ -302,7 +312,9 @@ def apply_model(conn, mint, now, m):
     if not _score_token:
         return m
     try:
-        r = _score_token(mint, now=now, conn=conn, store=True, tiers=_model_tier_map(conn))
+        ctx = _model_ctx(conn)
+        kw = dict(tiers=ctx["tiers"], shared=ctx["shared"]) if ctx else {}
+        r = _score_token(mint, now=now, conn=conn, store=_store_now(mint, now), **kw)
         if r is None:
             raise ValueError("no model features for this coin")
     except Exception as e:  # noqa: BLE001 - incl. model.predict.ModelNotTrained before the first retrain

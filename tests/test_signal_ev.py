@@ -103,3 +103,18 @@ def test_tokenized_stocks_are_not_memecoins():
     assert not engine.not_a_memecoin(dict(name="dogwifhat", symbol="WIF", mcap_usd=2e9))
     assert not engine.not_a_memecoin(dict(name="Bonkx", symbol="BONKx", mcap_usd=50_000))
     assert not engine.not_a_memecoin(None)
+
+
+def test_incompatible_model_counts_as_fallback():
+    g = engine.ModelGuard()
+    NotTrained = type("ModelNotTrained", (Exception,), {})
+    Incompatible = type("ModelIncompatible", (NotTrained,), {})
+    g.record(False, Incompatible("feature_set differs"))
+    g.record(False, NotTrained("no version"))
+    assert g.fallbacks == 1 and "ModelIncompatible" in g.stats()["top_errors"][0][0]
+
+
+def test_predictions_stored_every_15_minutes_per_coin():
+    engine._stored.clear()
+    assert engine._store_now("M", 1000) and not engine._store_now("M", 1500) and engine._store_now("M", 1900)
+    assert engine._store_now("N", 1500)

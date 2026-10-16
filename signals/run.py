@@ -286,7 +286,9 @@ def main():
         try:
             cycle(conn, i)
         except engine.ModelCodeStale as e:  # the supervisor (mayham.py run) restarts us with fresh code
-            log.error("restarting the signals service: %s", e)
+            # last line before exit 3: the supervisor / watchdog quote it as the reason of the planned restart
+            log.error("planned restart (exit 3) after a model change: %s", e)
+            logging.shutdown()
             raise SystemExit(3)
         except Exception:  # noqa: BLE001
             log.exception("cycle %d failed", i)
