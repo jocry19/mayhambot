@@ -117,6 +117,8 @@ def _credit_env(monkeypatch, tmp_path, service, day=16, month_credits=31_000):
     monkeypatch.setattr(http.time, "time", lambda: ts)
     monkeypatch.setenv("HELIUS_CREDITS_MONTH", str(month_credits))
     monkeypatch.setenv("HELIUS_CREDITS_RESERVE_PCT", "0")
+    monkeypatch.setenv("HELIUS_SHARE_SIGNALS", "15")
+    monkeypatch.setenv("HELIUS_SHARE_COPYTRADE", "15")
     return ts
 
 
@@ -171,3 +173,20 @@ def test_unnamed_process_is_counted_not_limited(monkeypatch, tmp_path):
     for _ in range(50):
         http._charge(1)
     assert http.credits("other")["credits_month"] == 50
+
+
+def test_default_shares_fit_the_month():
+    assert sum(http.DEFAULT_CREDIT_SHARES.values()) == 100 and http.DEFAULT_CREDIT_SHARES["research"] == 50
+
+
+def test_das_and_enhanced_share_one_fixed_spacing(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    seen = []
+    monkeypatch.setattr(http, "_shared_spacing", lambda host, interval=None: seen.append(host))
+    monkeypatch.setattr(http, "_charge", lambda cost: None)
+    http.throttle("api.helius.xyz")
+    http.throttle("beta.helius-rpc.com", das=True)
+    http.throttle("beta.helius-rpc.com")
+    assert seen == [http.DAS_ENHANCED_SPACING, "api.helius.xyz", http.DAS_ENHANCED_SPACING, "beta.helius-rpc.com",
+                    "beta.helius-rpc.com"]
+    assert http.HOST_INTERVAL[http.DAS_ENHANCED_SPACING] >= 0.5

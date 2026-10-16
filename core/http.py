@@ -49,7 +49,8 @@ HOST_INTERVAL = {
     "api.geckoterminal.com": 4.0,      # documented 30 req/min, in practice 429s at 20/min across our processes
     "api.dexscreener.com": 0.25,       # 300 req/min on pair endpoints, 60 on profiles
     "api.mainnet-beta.solana.com": 0.25,
-    "api.helius.xyz": 0.6,              # free plan: DAS + Enhanced API together 2 req/s
+    "api.helius.xyz": 0.6,              # free plan: DAS + Enhanced API together 2 req/s, see DAS_ENHANCED_SPACING
+    "helius-das-enhanced": 0.5,         # virtual: every DAS (any Helius host) and api.helius.xyz call, 2 req/s
     "mainnet.helius-rpc.com": 0.12,
     "beta.helius-rpc.com": 0.12,
     "api.telegram.org": 0.05,
@@ -64,7 +65,8 @@ _lock = threading.Lock()
 
 # Hosts whose limit is shared by every mayhambot process (signals, copytrade, research run separately).
 # Their spacing is coordinated through a lock file, so together they stay under the free-tier limit.
-SHARED_HOSTS = {"api.geckoterminal.com", "api.helius.xyz", "mainnet.helius-rpc.com", "beta.helius-rpc.com",
+DAS_ENHANCED_SPACING = "helius-das-enhanced"
+SHARED_HOSTS = {DAS_ENHANCED_SPACING, "api.geckoterminal.com", "api.helius.xyz", "mainnet.helius-rpc.com", "beta.helius-rpc.com",
                 "api.mainnet-beta.solana.com"}
 _LOCK_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "ratelimit")
 
@@ -278,7 +280,7 @@ DAS_METHODS = {"getAsset", "getAssetProof", "getAssetProofBatch", "getNftEdition
                "getSignaturesForAsset", "getTokenAccounts"}
 RPC_10_CREDITS = {"getProgramAccounts", "getTransactionsForAddress", "getTransfersByAddress"}
 # Share of the usable month (after the reserve) per service, percent. Override: HELIUS_SHARE_<SERVICE>.
-DEFAULT_CREDIT_SHARES = {"research": 35, "sniper": 20, "signals": 15, "copytrade": 15, "safety": 15}
+DEFAULT_CREDIT_SHARES = {"research": 50, "signals": 12.5, "safety": 12.5, "copytrade": 12.5, "sniper": 12.5}
 # Services that react to events may run ahead of their even daily share (still never past their month share).
 CREDIT_BURST = {"safety": 1.5, "sniper": 1.5}
 PUBLIC_RPC = "https://api.mainnet-beta.solana.com"
@@ -373,14 +375,24 @@ def _svc_stats(led, svc):
 def credits(service=None):
     """Helius credit ledger: {service: {credits_today, credits_month, credits_cap, credits_day_budget, share_pct,
     ...}} for every service (or one dict for `service`). Shared by all processes, survives restarts."""
-    def read(led):
-        svcs = set(led.get("services", {})) | set(_credit_cfg()[2])
-        return {s: _svc_stats(led, s) for s in sorted(svcs)}
-    try:
-        allc = _ledger_update(read)
-    except OSError:
-        return {} if service is None else None
+    led = _ledger_read()
+    svcs = set(led.get("services", {})) | set(_credit_cfg()[2])
+    allc = {s: _svc_stats(led, s) for s in sorted(svcs)}
     return allc.get(service) if service else allc
+
+
+def _ledger_read():
+    """Read-only, no lock: writers replace the content under the lock; a torn or stale read only affects
+    a display or a pre-check, never the booking itself (that runs in _charge under the lock)."""
+    import json
+    try:
+        with open(_ledger_path()) as f:
+            led = json.loads(f.read() or "{}")
+    except (OSError, ValueError):
+        led = {}
+    if led.get("month") != _now_parts()[0]:
+        led = {"month": _now_parts()[0], "services": {}}
+    return led
 
 
 def credits_left_today(service=None):
@@ -445,11 +457,18 @@ def rpc_url(method="", helius_url=None):
     return url
 
 
-def throttle(host, interval=None, cost=None):
+def throttle(host, interval=None, cost=None, das=False):
     """Block until this process may call `host`: Helius credits (cost, default = the host's base cost),
-    then its own per-minute budget (see budget()), then the shared cross-process spacing for SHARED_HOSTS."""
+    then its own per-minute budget (see budget()), then the shared cross-process spacing for SHARED_HOSTS.
+    DAS calls (das=True) and api.helius.xyz also wait for the fixed 2 req/s DAS + Enhanced spacing."""
     _charge(credit_cost(f"https://{host}/") if cost is None else cost)
     _take_budget(host)
+    if das or host == "api.helius.xyz":
+        _shared_spacing(DAS_ENHANCED_SPACING, HOST_INTERVAL[DAS_ENHANCED_SPACING])
+    _shared_spacing(host, interval)
+
+
+def _shared_spacing(host, interval=None):
     iv = interval if interval is not None else HOST_INTERVAL.get(host, DEFAULT_INTERVAL)
     if host not in SHARED_HOSTS:
         return _wait_local(host, iv)
@@ -537,8 +556,12 @@ def _request(method, url, retries=4, timeout=20, **kw):
         if left is not None and left < cost:  # today's Helius share used up: standard RPC goes to the public node
             url, host, cost = PUBLIC_RPC, urlparse(PUBLIC_RPC).netloc, 0
     kw.pop("public_fallback", None)
+    payload = kw.get("json")
+    das = group_of(host) == CREDIT_GROUP and any(
+        isinstance(it, dict) and it.get("method") in DAS_METHODS
+        for it in (payload if isinstance(payload, list) else [payload]))
     for attempt in range(retries + 1):
-        throttle(host, cost=cost)
+        throttle(host, cost=cost, das=das)
         try:
             r = _session.request(method, url, timeout=timeout, **kw)
         except requests.RequestException as e:

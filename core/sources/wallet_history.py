@@ -6,7 +6,7 @@ import logging
 from collections import defaultdict
 
 from core.config import settings
-from core.http import get_json, post_json
+from core.http import PUBLIC_RPC, get_json, post_json
 from core.models import SOL_MINT, STABLE_MINTS, Trade
 from core.sources.market import sol_price_usd
 
@@ -37,8 +37,8 @@ def _net_to_trades(sig, ts, wallet, token_delta, sol_delta, stable_delta, source
 
 # ---------------- plain RPC ----------------
 
-def _rpc(method, params):
-    j = post_json(settings.rpc_url, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+def _rpc(method, params, url=None):
+    j = post_json(url or settings.rpc_url, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
     if "error" in j:
         raise RuntimeError(j["error"])
     return j.get("result")
@@ -73,8 +73,8 @@ def parse_rpc_tx(tx, wallet, sig=None):
                           tok, sol, stable, "rpc")
 
 
-def _get_tx(sig):
-    return _rpc("getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 1}])
+def _get_tx(sig, url=None):
+    return _rpc("getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 1}], url)
 
 
 def early_buyers(mint, max_pages=8, n_tx=120):
@@ -115,14 +115,14 @@ def early_buyers(mint, max_pages=8, n_tx=120):
     return out
 
 
-def _rpc_wallet_trades(wallet, limit):
-    sigs = _rpc("getSignaturesForAddress", [wallet, {"limit": limit}]) or []
+def _rpc_wallet_trades(wallet, limit, url=None):
+    sigs = _rpc("getSignaturesForAddress", [wallet, {"limit": limit}], url) or []
     out = []
     for s in sigs:
         if s.get("err"):
             continue
         try:
-            tx = _get_tx(s["signature"])
+            tx = _get_tx(s["signature"], url)
         except Exception as e:  # noqa: BLE001
             log.debug("getTransaction %s failed: %s", s["signature"], e)
             continue
@@ -163,11 +163,18 @@ def _helius_wallet_trades(wallet, limit):
     return out
 
 
-def wallet_trades(wallet, limit=60) -> list:
+def wallet_trades(wallet, limit=60, enhanced_fallback=True) -> list:
+    """A wallet's recent swaps. Public RPC first (0 Helius credits); only if that fails, Helius Enhanced
+    (100 credits, within this service's daily credit share) or the configured RPC."""
     try:
-        if settings.helius_api_key:
-            return _helius_wallet_trades(wallet, limit)
-        return _rpc_wallet_trades(wallet, limit)
+        return _rpc_wallet_trades(wallet, limit, PUBLIC_RPC)
     except Exception as e:  # noqa: BLE001
+        log.info("wallet history %s via public RPC failed (%s), trying Helius", wallet[:6], e)
+    try:
+        if settings.helius_api_key and enhanced_fallback:
+            return _helius_wallet_trades(wallet, limit)
+        if settings.rpc_url != PUBLIC_RPC:
+            return _rpc_wallet_trades(wallet, limit)
+    except Exception as e:  # noqa: BLE001 - incl. core.http.CreditsExhausted
         log.warning("wallet history %s failed: %s", wallet[:6], e)
-        return []
+    return []
