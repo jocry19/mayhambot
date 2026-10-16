@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { act, dt, n, usePoll } from "../lib.js";
 import { Callout, Card, Icon, Modal, Switch, Table } from "../ui.jsx";
-import { CoinLink } from "../parts.jsx";
+import { CMD_STATUS, CoinLink, StatusBadge } from "../parts.jsx";
 import { RISK, RiskBadge, SafetyButtons } from "../safety.jsx";
 
 function SafetyList() {
@@ -208,7 +208,7 @@ export default function Control() {
             { k: "ts", l: "Zeit", fmt: (r) => dt(r.ts) },
             { k: "action", l: "Art", fmt: (r) => (r.action === "buy" ? "Kauf" : "Verkauf") },
             { k: "target", l: "Ziel", sort: false, fmt: (r) => (r.position_id ? `Position #${r.position_id}` : <span className="mono">{(r.mint || "").slice(0, 6)}…</span>) },
-            { k: "status", l: "Status", fmt: (r) => <span className={`badge ${r.status === "done" ? "good" : r.status === "failed" ? "bad" : r.status === "pending" ? "warn" : ""}`}>{{ done: "erledigt", failed: "fehlgeschlagen", pending: "wartet", cancelled: "storniert" }[r.status] || r.status}</span> },
+            { k: "status", l: "Status", fmt: (r) => <StatusBadge s={r.status} map={CMD_STATUS} /> },
             { k: "result", l: "", fmt: (r) => (r.status === "pending" ? <button className="btn sm" onClick={() => act(`/api/commands/${r.id}/cancel`)}>Stornieren</button> : <span className="t2">{r.result}</span>) },
           ]} />
         </Card>

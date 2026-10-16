@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { EChart, baseOption, tierColor, timeAxis, tipRow, valueAxis } from "../chart.jsx";
 import { PhaseBadge } from "./Market.jsx";
 import { ALGO_LABEL, EXIT_LABEL, STRAT_LABEL, TIER_LABEL, TIER_SOURCE, act, ago, dt, go, mc, n, pct, pctSigned, price, sol, solSigned, usd, usdSigned, usePoll } from "../lib.js";
-import { Breakdown, FlowChart, Outcome, SignalDetail, WalletLink } from "../parts.jsx";
+import { Breakdown, FlowChart, Outcome, SignalDetail, StatusBadge, WalletLink } from "../parts.jsx";
 import { Addr, Callout, Card, Delta, Empty, Icon, Legend, Modal, Score, Seg, Switch, Table, Tier, TierCounts, Tile } from "../ui.jsx";
 import { BuyModal } from "../buy.jsx";
 import { PosRisk, RiskBadge, SafetyCard } from "../safety.jsx";
@@ -278,7 +278,7 @@ export default function Coin({ mint, hl }) {
             { k: "entry_mcap_usd", l: "Einstieg MC", r: true, fmt: (r) => mc(r.entry_mcap_usd) },
             { k: "size_sol", l: "Größe", r: true, fmt: (r) => sol(r.size_sol) },
             { k: "safety_score", l: "Risiko beim Kauf", fmt: (r) => <PosRisk r={r} /> },
-            { k: "status", l: "Status", fmt: (r) => (r.status === "open" ? <span className="badge accent">offen</span> : EXIT_LABEL[r.exit_reason] || r.exit_reason) },
+            { k: "status", l: "Status", fmt: (r) => (r.status === "closed" ? EXIT_LABEL[r.exit_reason] || r.exit_reason : <StatusBadge s={r.status} />) },
             { k: "pnl_pct", l: "Ergebnis", r: true, fmt: (r) => <Delta v={r.status === "open" ? r.unrealized_pct : r.pnl_pct} d={1} /> },
             { k: "pnl_sol", l: "SOL", r: true, fmt: (r) => solSigned(r.status === "open" ? r.unrealized_sol : r.pnl_sol) },
           ]} />

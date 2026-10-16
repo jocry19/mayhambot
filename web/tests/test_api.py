@@ -591,3 +591,13 @@ def test_live_buy_capped(demo, monkeypatch):
     monkeypatch.setenv("LIVE_MAX_TRADE_SOL", "1")
     r = c.post("/api/buy", json={"mint": free["mint"], "size_sol": 5})
     assert r.status_code == 409 and "LIVE_MAX_TRADE_SOL" in r.json()["detail"]
+
+
+def test_inflight_position_and_command_states(demo):
+    c = _client(demo)
+    d = c.get("/api/copytrade?mode=paper").json()
+    assert any(p["status"] == "opening" for p in d["open"]) and all(p["status"] != "failed" for p in d["open"])
+    assert all(p["status"] == "closed" for p in d["closed"])
+    live = c.get("/api/copytrade?mode=live").json()
+    assert [p["status"] for p in live["failed"]] == ["failed"] and live["failed"][0]["exit_reason"]
+    assert any(x["status"] == "expired" for x in d["commands"])

@@ -1220,6 +1220,11 @@ def control_state(conn):
     return out
 
 
+# ct_positions.status besides open/closed: opening = intent row before the swap, failed = live buy that bought nothing;
+# pending_buy/pending_sell/stuck come with live trading. In-flight rows are listed with the open ones.
+POS_IN_FLIGHT = ("open", "opening", "pending_buy", "pending_sell", "stuck")
+
+
 def copytrade(conn, mode="paper", strategy=None):
     if not has(conn, "ct_positions"):
         return {"available": False, "control": control_state(conn)}
@@ -1310,7 +1315,8 @@ def copytrade(conn, mode="paper", strategy=None):
         balance = _f(v, 4) if v is not None else None
     return {"available": True, "mode": mode, "strategy": strategy, "summary": summ, "by_strategy": by_strategy,
             "balance_sol": balance, "equity": eq, "pnl_curve": curve,
-            "open": [p for p in ps if p.get("status") == "open"][::-1],
+            "open": [p for p in ps if p.get("status") in POS_IN_FLIGHT][::-1],
+            "failed": [p for p in ps if p.get("status") == "failed"][::-1][:100],
             "closed": closed[::-1][:500], "exit_reasons": [{"reason": k, **{kk: _f(vv, 4) if isinstance(vv, float) else vv for kk, vv in v.items()}} for k, v in sorted(reasons.items(), key=lambda kv: -kv[1]["n"])],
             "per_wallet": pw[:100], "pnl_hist": pnl_hist,
             "by_hour": [{"hour": h, "n": by_hour[h]["n"], "pnl_sol": _f(by_hour[h]["pnl_sol"], 4)} for h in range(24)],

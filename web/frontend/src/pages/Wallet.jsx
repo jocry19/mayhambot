@@ -1,6 +1,6 @@
 import { EChart, baseOption, catAxis, timeAxis, valueAxis } from "../chart.jsx";
 import { EXIT_LABEL, STRAT_LABEL, act, ago, dt, mc, n, pct, pctSigned, sign, solSigned, usd, usdSigned, usePoll } from "../lib.js";
-import { CoinLink, PnlCurve } from "../parts.jsx";
+import { CoinLink, PnlCurve, StatusBadge } from "../parts.jsx";
 import { Addr, Bars, Callout, Card, Delta, Empty, Icon, Table, Tier, Tile } from "../ui.jsx";
 
 const COMP = { win: "Trefferquote", early: "Frühe Einstiege", roi: "ROI", consistency: "Konstanz", timing: "Timing", influence: "Einfluss", rug_avoid: "Rugs meiden" };
@@ -112,7 +112,7 @@ export default function Wallet({ address }) {
               { k: "opened_at", l: "Kauf", fmt: (r) => dt(r.opened_at) },
               { k: "symbol", l: "Coin", fmt: (r) => <CoinLink mint={r.mint} symbol={r.symbol} /> },
               { k: "strategy", l: "Modus", fmt: (r) => STRAT_LABEL[r.strategy] || r.strategy },
-              { k: "exit_reason", l: "Ausstieg", fmt: (r) => (r.status === "open" ? "offen" : EXIT_LABEL[r.exit_reason] || r.exit_reason) },
+              { k: "exit_reason", l: "Ausstieg", fmt: (r) => (r.status === "closed" ? EXIT_LABEL[r.exit_reason] || r.exit_reason : <StatusBadge s={r.status} />) },
               { k: "pnl_pct", l: "Ergebnis", r: true, fmt: (r) => <Delta v={r.pnl_pct} /> },
               { k: "pnl_sol", l: "SOL", r: true, fmt: (r) => solSigned(r.pnl_sol) },
             ]} />

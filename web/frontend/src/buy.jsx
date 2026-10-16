@@ -126,5 +126,9 @@ function BuyStatus({ cmd, waited, live }) {
     );
   }
   if (cmd.status === "done") return <Callout kind="good" icon="check">Auftrag #{cmd.id} ausgeführt.</Callout>;
+  if (cmd.status === "expired") {
+    return <Callout kind="warn" icon="alert">Auftrag #{cmd.id} verfallen: Der Bot hat ihn nicht innerhalb von 2 Minuten abgeholt, damit kein veralteter Kauf ausgeführt wird. Läuft der Copy-Trading-Dienst? (System-Seite)</Callout>;
+  }
+  if (cmd.status === "cancelled") return <Callout icon="info">Auftrag #{cmd.id} storniert.</Callout>;
   return <Callout kind="bad" icon="alert">Kauf nicht ausgeführt: {cmd.result || cmd.status}</Callout>;
 }

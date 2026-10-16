@@ -189,6 +189,20 @@ export function TierSrc({ src, version, synced }) {
 
 /** What copying a whale earns us per buy (copytrade.learn.wallet_edge): mean after costs, "belegt" when even the
  *  cautious estimate (mean minus one standard error) is positive, which is the bot's own copy gate. */
+// ct_positions.status and ct_commands.status in German, one place for every page
+export const POS_STATUS = {
+  open: ["offen", "accent"], opening: ["wird eröffnet", "warn"], pending_buy: ["Kauf läuft", "warn"],
+  pending_sell: ["Verkauf läuft", "warn"], stuck: ["hängt", "bad"], failed: ["fehlgeschlagen", "bad"], closed: ["geschlossen", ""],
+};
+export const CMD_STATUS = {
+  pending: ["wartet", "warn"], done: ["erledigt", "good"], failed: ["fehlgeschlagen", "bad"],
+  cancelled: ["storniert", ""], expired: ["verfallen", ""],
+};
+export function StatusBadge({ s, map = POS_STATUS }) {
+  const [l, k] = map[s] || [s || "–", ""];
+  return <span className={`badge ${k}`}>{l}</span>;
+}
+
 export function CopyEdge({ e, pending }) {
   if (!e) return <span className="dim" title={pending ? "wird berechnet" : "noch keine nachgespielten Käufe"}>{pending ? "…" : "–"}</span>;
   const title = `Ø ${pctSigned(e.mean, 1)} pro kopiertem Kauf nach Kosten (${n(e.n)} Käufe nachgespielt)\n`

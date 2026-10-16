@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { EChart, baseOption, catAxis, timeAxis, tipRow, valueAxis } from "../chart.jsx";
 import { EXIT_LABEL, MODE_LABEL, STRAT_LABEL, act, ago, dt, dur, go, mc, n, pct, sol, solSigned, usePoll } from "../lib.js";
-import { CoinLink, HistBars, PnlCurve, WalletLink } from "../parts.jsx";
+import { CoinLink, HistBars, PnlCurve, StatusBadge, WalletLink } from "../parts.jsx";
 import { Callout, Card, Delta, Empty, Modal, Seg, Table, Tabs, Tier, Tile } from "../ui.jsx";
 import Learn from "./Learn.jsx";
 import { PosRisk, RiskBadge } from "../safety.jsx";
@@ -143,7 +143,7 @@ export default function CopyTrade() {
         </div>
         {tab === "open" && (
           <Table rows={d.open} rowKey={(r) => r.id} empty="Keine offenen Positionen" cols={[
-            { k: "symbol", l: "Coin", fmt: (r) => <CoinLink mint={r.mint} symbol={r.symbol} /> },
+            { k: "symbol", l: "Coin", fmt: (r) => <>{<CoinLink mint={r.mint} symbol={r.symbol} />}{r.status !== "open" && <> <StatusBadge s={r.status} /></>}</> },
             { k: "strategy", l: "Modus", fmt: (r) => STRAT_LABEL[r.strategy] || r.strategy },
             { k: "managed", l: "Wer verkauft", fmt: (r) => (r.managed === "semi" ? <span className="badge warn">du</span> : <span className="badge">Bot</span>) },
             { k: "opened_at", l: "Seit", fmt: (r) => ago(r.opened_at) },
@@ -155,8 +155,21 @@ export default function CopyTrade() {
             { k: "param_version", l: "Version", title: "Welche gelernte Parameter-Version die Ausstiege festlegt", fmt: ver },
             { k: "safety_score", l: "Rug-Risiko", title: "Rug-Risiko beim Kauf (0–100)", fmt: (r) => <PosRisk r={r} /> },
             { k: "exit_hint", l: "Hinweis", fmt: (r) => (r.exit_hint ? <span className="badge good">{EXIT_LABEL[r.exit_hint] || r.exit_hint}: verkaufen</span> : "–") },
-            { k: "sell", l: "", sort: false, fmt: (r) => <SellButton p={r} /> },
+            { k: "sell", l: "", sort: false, fmt: (r) => (r.status === "open" ? <SellButton p={r} /> : null) },
           ]} />
+        )}
+        {tab === "open" && d.failed?.length > 0 && (
+          <>
+            <div className="card-h"><div><div className="card-t">Fehlgeschlagene Käufe ({d.failed.length})</div>
+              <div className="card-s">Echtgeld-Käufe, bei denen nichts gekauft wurde. Kein Ergebnis, nur zur Nachverfolgung.</div></div></div>
+            <Table rows={d.failed} rowKey={(r) => r.id} cols={[
+              { k: "opened_at", l: "Zeit", fmt: (r) => dt(r.opened_at) },
+              { k: "symbol", l: "Coin", fmt: (r) => <CoinLink mint={r.mint} symbol={r.symbol} /> },
+              { k: "strategy", l: "Modus", fmt: (r) => STRAT_LABEL[r.strategy] || r.strategy },
+              { k: "status", l: "Status", fmt: (r) => <StatusBadge s={r.status} /> },
+              { k: "exit_reason", l: "Grund", fmt: (r) => <span className="t2">{r.exit_reason || "–"}</span> },
+            ]} />
+          </>
         )}
         {tab === "closed" && (
           <Table rows={d.closed} rowKey={(r) => r.id} tall max={500} cols={[

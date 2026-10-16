@@ -55,6 +55,27 @@ def _edge_demo(conn, r):
     conn.commit()
 
 
+def _inflight_demo(conn, r, tokens, now):
+    """The short-lived states copytrade writes: an intent row before the swap ('opening'), a live buy that bought
+    nothing ('failed') and buy commands nobody picked up in time ('expired')."""
+    pcols = {c[1] for c in conn.execute("PRAGMA table_info(ct_positions)")}
+    tok = [t for t in tokens if t["pts"]]
+    for mode, st, why in (("paper", "opening", None), ("live", "failed", "Swap fehlgeschlagen: Slippage zu hoch")):
+        t = r.choice(tok)
+        row = {"mode": mode, "strategy": "whale", "mint": t["mint"], "symbol": t["symbol"], "opened_at": now - (20 if st == "opening" else 3600),
+               "entry_price_sol": 0, "size_sol": .5, "tokens": 0, "entry_cost_sol": 0, "status": st, "exit_reason": why,
+               "intent": json.dumps({"size_sol": .5, "source": "whale"})}
+        row = {k: v for k, v in row.items() if k in pcols}
+        conn.execute(f"INSERT INTO ct_positions({','.join(row)}) VALUES ({','.join('?' * len(row))})", list(row.values()))
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='ct_commands'").fetchone():
+        ccols = {c[1] for c in conn.execute("PRAGMA table_info(ct_commands)")}
+        for ts, st, res in ((now - 400, "expired", "abgelaufen"), (now - 1500, "done", "gekauft")):
+            row = {"ts": ts, "action": "buy", "mint": r.choice(tok)["mint"], "size_sol": .2, "strategy": "signal", "status": st,
+                   "result": res, "done_at": ts + (120 if st == "expired" else 5)}
+            row = {k: v for k, v in row.items() if k in ccols}
+            conn.execute(f"INSERT INTO ct_commands({','.join(row)}) VALUES ({','.join('?' * len(row))})", list(row.values()))
+
+
 def _learn_demo(conn, r, now):
     """Self-learning tables of copytrade (ct_evals, ct_param_versions) in their real format, if copytrade has them."""
     try:
@@ -706,6 +727,7 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
                       p_in / sol, p_in, p_in * 1e9, .5, .5 * sol / p_in, 6, .5, .35, .2, 60, max(p_in, p_now) / sol, p_now / sol, p_now,
                       p_now * 1e9, "open", hint, now - 60 if hint else None, json.dumps({"fill_source": "jupiter"})))
     conn.execute(_named(conn, "INSERT INTO ct_events VALUES (?,?,?,?,?)"), (now - 60, "info", "hint", "VERKAUFS-HINWEIS: Ziel erreicht", None))
+    _inflight_demo(conn, r, tokens, now)
     control.set_mode(conn, "signal", "semi")
     try:  # signals/ syncs the active model's tiers into wallets every rescore (core.scoring)
         from core.scoring import sync_model_tiers
