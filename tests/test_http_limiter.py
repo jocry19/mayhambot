@@ -119,6 +119,7 @@ def _credit_env(monkeypatch, tmp_path, service, day=16, month_credits=31_000):
     monkeypatch.setenv("HELIUS_CREDITS_RESERVE_PCT", "0")
     monkeypatch.setenv("HELIUS_SHARE_SIGNALS", "15")
     monkeypatch.setenv("HELIUS_SHARE_COPYTRADE", "15")
+    monkeypatch.setenv("HELIUS_BORROW_PCT", "0")  # own share only; lending is tested on its own
     return ts
 
 
@@ -136,6 +137,58 @@ def test_daily_share_spreads_over_rest_of_month(monkeypatch, tmp_path):
         raise AssertionError("expected CreditsExhausted")
     assert http.credits("signals")["credits_today"] == 150
     assert http.usage()["helius"]["refused"] == 1
+
+
+def _lend_env(monkeypatch, tmp_path, service):
+    """31,000 a month, no reserve, day 1 of 31: research 50 % = 500/day, signals 10 % = 100/day."""
+    _credit_env(monkeypatch, tmp_path, service, day=1)
+    monkeypatch.setenv("HELIUS_BORROW_PCT", "50")
+    for svc, pct in (("research", 50), ("signals", 10), ("safety", 0), ("copytrade", 0), ("sniper", 0)):
+        monkeypatch.setenv(f"HELIUS_SHARE_{svc.upper()}", str(pct))
+
+
+def test_used_up_share_borrows_half_of_what_others_leave(monkeypatch, tmp_path):
+    _lend_env(monkeypatch, tmp_path, "signals")
+    assert http.credits_left_today() == 250  # own 100 vs. half of research's unused 500
+    for _ in range(350):  # own 100 + 250 lent
+        http._charge(1)
+    try:
+        http._charge(1)
+    except http.CreditsExhausted:
+        pass
+    else:
+        raise AssertionError("lending is capped at half of the others' unused day budget")
+    assert http.credits("signals")["credits_today"] == 350 and http.credits_left_today() == 0
+
+
+def test_lender_keeps_its_own_share_and_lending_shrinks(monkeypatch, tmp_path):
+    _lend_env(monkeypatch, tmp_path, "research")
+    for _ in range(400):  # research spends most of its own day
+        http._charge(1)
+    monkeypatch.setattr(http, "_service", "signals")
+    assert http.credits_left_today() == 100  # own share; only 50 of research's 100 unused may be lent
+    for _ in range(150):
+        http._charge(1)
+    try:
+        http._charge(1)
+    except http.CreditsExhausted:
+        pass
+    else:
+        raise AssertionError("expected CreditsExhausted")
+    monkeypatch.setattr(http, "_service", "research")
+    for _ in range(100):  # the lender still gets the rest of its own share
+        http._charge(1)
+
+
+def test_no_lending_when_plan_is_ahead_of_the_calendar(monkeypatch, tmp_path):
+    _lend_env(monkeypatch, tmp_path, "research")
+    monkeypatch.setenv("HELIUS_CREDITS_MONTH", "3100")  # pace on day 1 of 31: 100 credits for the whole plan
+    monkeypatch.setenv("HELIUS_SHARE_RESEARCH", "300")  # 300/day
+    monkeypatch.setenv("HELIUS_SHARE_SIGNALS", "0")
+    for _ in range(98):
+        http._charge(1)
+    monkeypatch.setattr(http, "_service", "signals")
+    assert http.credits_left_today() == 2  # research leaves 202 unused (101 lendable), but the plan is at 98/100
 
 
 def test_unused_credits_carry_over(monkeypatch, tmp_path):
