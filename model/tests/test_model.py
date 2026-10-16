@@ -264,3 +264,18 @@ def test_exit_replay_stop_before_target_and_costs():
     r2 = dict(tp=0.5, sl=None, hold="1h", hold_s=3600)
     assert abs(exits.replay(idx, "M", 0, r2) - (0.5 - 0.06)) < 1e-9
     assert exits.replay(idx, "M", 0, dict(r2, hold_s=21600)) is None  # 6 h not covered yet
+
+
+def test_prediction_blobs_are_small_and_models_carry_a_feature_stamp():
+    import json as _json
+    from model import predict
+    from research import events as ev
+    f = {n: 0.123456789 for n in ev.FEATURE_NAMES}
+    con = {h: [{"feature": n, "label": "x" * 30, "value": 1.0, "weight": 0.5, "contribution": 0.1, "share": 0.02}
+               for n in ev.FEATURE_NAMES] for h in ("15m", "1h", "6h")}
+    w = [{"address": "A" * 44, "tier": "good", "score": 50, "net_sol": i, "first_ts": 1, "extra": "y" * 100}
+         for i in range(200)]
+    fj, cj, wj = predict._compact(f, con, w)
+    assert len(fj) + len(cj) + len(wj) < 6000
+    assert len(_json.loads(cj)["1h"]) == 10 and len(_json.loads(wj)) == 15
+    assert len(ev.FEATURE_SET) == 10

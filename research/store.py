@@ -48,12 +48,14 @@ CREATE TABLE IF NOT EXISTS research_funding (
 );
 CREATE INDEX IF NOT EXISTS idx_rf_funder ON research_funding(funder);
 CREATE INDEX IF NOT EXISTS idx_mp_mint ON model_predictions(mint, ts);
+CREATE INDEX IF NOT EXISTS idx_mp_ts ON model_predictions(ts);
 """
 
 
 ADDED_COLUMNS = {"model_wallet_stats": [("cluster_id", "TEXT"), ("exit_capture", "REAL"), ("median_hold_min", "REAL"),
                                         ("net_pnl_usd", "REAL"), ("net_roi", "REAL")],
-                 "research_tokens": [("candles_fetched_at", "INTEGER")]}
+                 "research_tokens": [("candles_fetched_at", "INTEGER")],
+                 "model_versions": [("feature_set", "TEXT")]}
 
 
 _migrated = set()  # database files whose schema this process already ensured

@@ -45,6 +45,9 @@ FEATURE_GROUPS = {
     "price_time": ["log_mcap", "log_age", "momentum", "first_tier_age"],
 }
 FEATURE_NAMES = [f for f, _ in FEATURES]
+# version stamp of the feature vector: stored with every model, so code and model can tell if they fit together
+import hashlib as _hashlib  # noqa: E402
+FEATURE_SET = _hashlib.sha1(",".join(FEATURE_NAMES).encode()).hexdigest()[:10]
 FEATURE_LABELS = dict(FEATURES)
 
 

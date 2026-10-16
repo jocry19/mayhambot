@@ -50,6 +50,9 @@ def run_once(conn=None, now=None, write_files=True):
         selection[f"{h}_net"] = net_sel[h]
         if m.get("kind") != "prior" and (m.get("cfg") or {}).get("algo") != "base":  # only tested net models
             models[f"{h}_net"] = m
+    from research.events import FEATURE_NAMES, FEATURE_SET
+    for m in models.values():  # version stamp: which feature vector the model expects
+        m.update(feature_set=FEATURE_SET, n_features=len(FEATURE_NAMES))
     bt.setdefault("metrics", {})["selection"] = selection
     for line in selection_log(selection):
         log.info(line)
@@ -84,6 +87,15 @@ def run_once(conn=None, now=None, write_files=True):
         conn.execute("UPDATE model_versions SET active = (id = ?)", (vid,))
         conn.commit()
     retry(swap, conn=conn)
+    retry(lambda: (conn.execute("UPDATE model_versions SET feature_set=? WHERE id=?", (FEATURE_SET, vid)), conn.commit()),
+          conn=conn)
+    try:
+        from model.predict import compact_predictions
+        n = compact_predictions(conn)
+        if n:
+            log.info("compacted %d stored predictions", n)
+    except Exception:  # noqa: BLE001
+        log.exception("compacting predictions failed")
     md, rep = report.build(conn, vid, bt, tiers, weights, winfo, models, prev)
     save_report(conn, f"Modell v{vid}", md, rep, vid)
     if write_files:

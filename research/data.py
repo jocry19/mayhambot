@@ -75,6 +75,20 @@ class Dataset:
         return t.sol if t.sol and t.sol > 0 else (t.usd / self.sol_usd if self.sol_usd else 0.0)
 
 
+_flag_cache = {"ts": 0.0, "val": (set(), set()), "db": None}
+
+
+def _flags(conn, ttl=120):
+    """is_bot / manual wallet sets, cached for `ttl` s (score_token loads one coin at a time, many times a minute)."""
+    import time as _time
+    db_path = next((r[2] for r in conn.execute("PRAGMA database_list") if r[1] == "main"), "")
+    if _flag_cache["db"] != db_path or _time.time() - _flag_cache["ts"] > ttl:
+        bots = {r[0] for r in conn.execute("SELECT address FROM wallets WHERE is_bot=1")}
+        manual = {r[0] for r in conn.execute("SELECT address FROM wallets WHERE manual=1")}
+        _flag_cache.update(ts=_time.time(), val=(bots, manual), db=db_path)
+    return _flag_cache["val"]
+
+
 def load(conn, since_ts=0, mints=None):
     cond, args = "WHERE ts >= ?", [since_ts]
     if mints is not None:
@@ -91,12 +105,12 @@ def load(conn, since_ts=0, mints=None):
             ratios.append(t.usd / t.sol)
     pidx = PriceIndex.from_db(conn, mints)
     created = {}
-    for r in conn.execute("SELECT mint, pair_created_at FROM tokens WHERE pair_created_at > 0"):
+    mcond, margs = (f" AND mint IN ({','.join('?' * len(mints))})", mints) if mints is not None else ("", [])
+    for r in conn.execute("SELECT mint, pair_created_at FROM tokens WHERE pair_created_at > 0" + mcond, margs):
         created[r[0]] = r[1]
-    for r in conn.execute("SELECT mint, created_at FROM research_tokens WHERE created_at > 0"):
+    for r in conn.execute("SELECT mint, created_at FROM research_tokens WHERE created_at > 0" + mcond, margs):
         created[r[0]] = min(created.get(r[0], r[1]), r[1])
-    bots = {r[0] for r in conn.execute("SELECT address FROM wallets WHERE is_bot=1")}
-    manual = {r[0] for r in conn.execute("SELECT address FROM wallets WHERE manual=1")}
+    bots, manual = _flags(conn)
     ds = Dataset(trades, pidx, created, bots, manual, median(ratios) or 150.0)
     from research.intel_features import Source
     ds.intel = Source(conn)  # point-in-time coin features from intel/ (neutral when unavailable)

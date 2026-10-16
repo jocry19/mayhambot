@@ -53,6 +53,7 @@ class ModelSettings:
                                                 "smart": int(_f("MODEL_SMART_MAX", 150)),
                                                 "good": int(_f("MODEL_GOOD_MAX", 0))})
     window_min: int = int(_f("MODEL_WINDOW_MIN", 30))
+    prediction_keep_days: int = int(_f("MODEL_PREDICTION_KEEP_DAYS", 30))
     event_min_score: float = _f("MODEL_EVENT_MIN_SCORE", 40)  # untiered wallets this good also trigger research events
     event_dedupe_min: int = int(_f("MODEL_EVENT_DEDUPE_MIN", 10))
     retrain_hours: float = _f("MODEL_RETRAIN_HOURS", 6)
