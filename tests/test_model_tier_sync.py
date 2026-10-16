@@ -68,3 +68,20 @@ def test_cluster_counts_once(tmp_path):
                      [(f"s{w}", w, "M", "buy", now - 60, 1, 5, 1000, 1, "t") for w in "ABC"])
     m = engine.token_metrics(conn, "M", engine.QualityCache(conn), now=now)
     assert m["smart_buyers"] == 2 and m["n_smart"] == 1 and m["n_ultra"] == 1 and m["buy_usd"] == 3000
+
+
+def test_rescore_skips_without_new_trades(tmp_path, monkeypatch):
+    from core import db, scoring
+    from core.models import Trade
+    conn = db.connect(str(tmp_path / "r.db"))
+    db.insert_trades(conn, [Trade("a", "W", "M", "buy", 1000, 10.0, 0.1, 10.0, 1.0, "t")])
+    runs = []
+    real = scoring._rescore
+    monkeypatch.setattr(scoring, "_rescore", lambda c, cfg: runs.append(1) or real(c, cfg))
+    scoring.rescore_all(conn)
+    scoring.rescore_all(conn)  # nothing new: skipped
+    assert len(runs) == 1
+    db.insert_trades(conn, [Trade("b", "W", "M", "sell", 2000, 10.0, 0.2, 20.0, 2.0, "t")])
+    scoring.rescore_all(conn)
+    scoring.rescore_all(conn, force=True)
+    assert len(runs) == 3
