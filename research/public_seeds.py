@@ -1,11 +1,14 @@
 """Seed candidate winner wallets from public, keyless sources. Every source is optional: if a site blocks
 automated requests (403/Cloudflare) it is skipped and reported, never worked around.
 
+  github_lists   open-source wallet lists on GitHub (kol-quest: GMGN smart money + KOL wallets, KolScan
+                 leaderboard; more via RESEARCH_SEED_URLS)
   gmgn_rank      GMGN public wallet leaderboard (7d / 30d PnL)
   pumpfun_coins  pump.fun coins with the highest market cap -> their earliest buyers via RPC (core early_buyers)
 Wallets go to data/seed_wallets.txt with provenance; coins found go through early-buyer discovery right away.
 """
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -33,6 +36,62 @@ def _append_seeds(rows):
             f.write(f"{a} {lab.replace(' ', '_')[:30]} # {src}\n")
             have.add(a)
     return len(new)
+
+
+# Public open-source wallet lists (raw GitHub files). More can be added with RESEARCH_SEED_URLS (comma separated).
+GITHUB_LISTS = [
+    ("https://raw.githubusercontent.com/nirholas/kol-quest/HEAD/solwallets.json", "kol-quest/gmgn"),
+    ("https://raw.githubusercontent.com/nirholas/kol-quest/HEAD/output/kolscan-leaderboard.json", "kol-quest/kolscan"),
+]
+B58 = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+
+
+def _is_sol_address(a):
+    return isinstance(a, str) and 32 <= len(a) <= 44 and set(a) <= B58
+
+
+def extract_wallets(obj, path=""):
+    """Walk any JSON and yield (address, label, section) for objects carrying a Solana wallet address."""
+    if isinstance(obj, dict):
+        a = obj.get("wallet_address") or obj.get("wallet") or obj.get("address") or obj.get("owner")
+        if _is_sol_address(a) and obj.get("chain", "sol") in ("sol", "solana", None):
+            name = obj.get("name") or obj.get("twitter_username") or obj.get("twitter_name") or ""
+            prof = obj.get("realized_profit_30d") or obj.get("realized_profit_7d") or obj.get("profit")
+            try:
+                lab = f"{name}_p{float(prof):.0f}" if prof is not None else str(name)
+            except (TypeError, ValueError):
+                lab = str(name)
+            yield a, lab, path
+            return
+        for k, v in obj.items():
+            if k in ("tokens", "walletHoldings", "interceptorRaw", "twitterUsers"):
+                continue  # token lists / holdings, not wallets
+            yield from extract_wallets(v, f"{path}/{k}" if path else k)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from extract_wallets(v, path)
+
+
+def github_lists(urls=None):
+    urls = list(urls or GITHUB_LISTS)
+    extra = os.getenv("RESEARCH_SEED_URLS", "")
+    urls += [(u.strip(), "custom") for u in extra.split(",") if u.strip()]
+    rows, status = [], {}
+    day = time.strftime("%Y-%m-%d")
+    for url, name in urls:
+        try:
+            j = get_json(url, headers=BROWSER_HEADERS, retries=1, timeout=60)
+        except Exception as e:  # noqa: BLE001
+            status[name] = f"skipped ({str(e)[:80]})"
+            continue
+        seen = set()
+        for a, lab, sec in extract_wallets(j):
+            if a in seen:
+                continue
+            seen.add(a)
+            rows.append((a, lab or sec.split("/")[-1], f"{name}:{sec} {day}"))
+        status[name] = f"{len(seen)} wallets"
+    return rows, status
 
 
 def gmgn_rank(periods=("7d", "30d"), limit=100):
@@ -73,6 +132,10 @@ def pumpfun_coins(limit=50):
 
 def run(conn, early_coins=10):
     summary = {}
+    rows, st = github_lists()
+    summary["github_lists"] = st
+    add_research_wallets(conn, [a for a, _, _ in rows], "open_source_list", 60.0)
+    summary["github_new_in_seed_file"] = _append_seeds(rows)
     rows, st = gmgn_rank()
     summary["gmgn"] = st
     for a, lab, src in rows:
