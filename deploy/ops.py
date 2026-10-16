@@ -381,7 +381,7 @@ def check_planned_restarts(st: dict):
 
 
 # ---------------------------------------------------------------- resources / maintenance
-LOG_STALL_MIN = {"signals": 30}   # services that log every cycle; silent this long = hung (pid alive, no progress)
+LOG_STALL_MIN = {"signals": 30, "brain": 120}   # services that log every cycle (brain: hourly "brain hour" line); silent this long = hung
 
 
 def _rss_mb(pid: int) -> float | None:

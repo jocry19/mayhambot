@@ -134,7 +134,7 @@ Neustart höchstens alle 15 min und höchstens `MAX_RESTARTS_PER_HOUR` (3) pro S
 
 - alle Prozesse aus (`app_down`) oder einzelne (`service_down`; überwacht werden automatisch alle Dienste aus `mayham.py`, auch der Forschungsdienst `research`), Dashboard antwortet nicht
 - keine neuen Marktdaten seit `FEED_STALL_MIN` (15 min), Copy-Trader pollt nicht mehr
-- Dienst hängt: `signals` läuft, schreibt aber 30 min keine Zeile ins Log (`service_hung`, Neustart). Der Dienst
+- Dienst hängt: `signals` läuft, schreibt aber 30 min keine Zeile ins Log (`brain`: 2 h, er meldet sich stündlich) (`service_hung`, Neustart). Der Dienst
   loggt jede Runde (alle 2 bis 3 min), auch ohne Signal; ruhige Nächte ohne Signal lösen das also nicht aus
 - Speicher je Dienst: ab `MEM_WARN_MB` (1500) Hinweis, ab `MEM_RESTART_MB` (3000) Neustart
 - Datenbank-Journal (`mayhambot.db-wal`) größer als `WAL_WARN_MB` (1000): ein Leser hält den Checkpoint auf, Neustart
