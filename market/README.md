@@ -84,6 +84,9 @@ vom 16.10.2026: "flying", "tesla", "roadster" in 7 % aller Launches.
 - Alles Zeitpunkt-genau: nur Zeilen mit ts ≤ t, Launch-Ergebnisse erst nach Ablauf ihres 60-min-Fensters, und eine
   Coin-Zeile, die nach t geschrieben wurde, zählt für t nicht als frisch.
 - Ergebnis in `market_state` (`dynamics`, `learned_weights`), Intervall `MARKET_DYNAMICS_EVERY_SEC` (3600).
+- Mit jeder Dynamik-Runde schreibt der Dienst `reports/market_report.json` neben der DB (Auswertung mit Walk-forward,
+  Bausteine, Sektor-Vorlauf, Schalter und `walk_forward_says`) und eine Log-Zeile "Taugt die Marktanalyse? ...".
+  Damit lässt sich die Messung ohne Zugriff auf die DB lesen.
 
 ## Wirkung auf andere Pakete (aus, bis gemessen)
 

@@ -413,3 +413,21 @@ def test_market_tokens_index_on_existing_db():
     plan = " ".join(str(tuple(r)) for r in conn.execute(
         "EXPLAIN QUERY PLAN SELECT mint FROM market_tokens WHERE updated_at<?", (NOW,)))
     assert "idx_market_tokens_updated" in plan
+
+
+def test_service_writes_market_report(monkeypatch):
+    conn = make_db("on")
+    monkeypatch.setattr(sources, "apply_budgets", lambda c: None)
+    d = tempfile.mkdtemp()
+    s = service.Service(cfg(), os.path.join(d, "unused.db"))
+    s.conn = conn
+    s.backfill(hours=24, now=NOW)
+    s.dynamics(NOW)
+    p = os.path.join(d, "reports", "market_report.json")
+    rep = json.load(open(p))
+    assert rep["ts"] == NOW and set(rep["walk_forward_says"]) == {"signal_weight", "sniper_gate", "sniper_hot_term",
+                                                                  "learned_weights"}
+    assert rep["switches"] == {"signal_weight": False, "sniper_gate": False, "learned_weights": False}
+    assert "by_phase" in rep["launches"] and "rows" in rep["components"]
+    from market import report
+    assert report.line(rep).startswith("Taugt die Marktanalyse?")

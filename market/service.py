@@ -22,6 +22,8 @@ class Service:
             http.set_service("market")
         sources.apply_budgets(cfg)
         self.conn = store.connect(db_path)
+        from market import report
+        self.report_path = report.report_path(db_path)
         self.last = {"boosts": 0, "coingecko": 0, "sol_hist": 0, "prune": 0, "dynamics": 0}
         self.meme = None
         self.calls = {"dexscreener": 0, "coingecko": 0}
@@ -138,9 +140,21 @@ class Service:
             ok = [k for k, v in power["rows"].items() if v.get("confirmed")]
             log.info("Markt-Dynamik: %d Stunden mit Launch-Ergebnis, bestätigte Bausteine: %s, Sektor-Vorlauf: %s (%.1fs)",
                      power["n_hours"], ", ".join(ok) or "noch keine", ", ".join(lead) or "noch keiner", time.time() - t0)
+            self.report(now)
             return d
         except Exception:  # noqa: BLE001 - the round itself already succeeded
             log.exception("market dynamics failed")
+            return None
+
+    def report(self, now=None):
+        """reports/market_report.json plus one log line: the evaluation with walk-forward, hourly with the dynamics."""
+        from market import report
+        try:
+            rep = report.write(self.conn, self.report_path, now, self.cfg)
+            log.info(report.line(rep))
+            return rep
+        except Exception:  # noqa: BLE001 - a report never breaks the service
+            log.exception("market report failed")
             return None
 
     def heartbeat(self, now, took=None, n_tok=None):
