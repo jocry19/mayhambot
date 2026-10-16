@@ -16,8 +16,8 @@ from collections import Counter
 
 from core import db
 from core.models import Token
-from core.sources import market, wallet_source
-from research import funding, seeds, sources
+from core.sources import market
+from research import credits, funding, rpc, seeds, sources
 from research.config import rsettings
 from research.store import add_research_wallets, connect, retry, store_candles, upsert_research_token
 
@@ -123,7 +123,7 @@ def run_once(conn=None):
         age = now - p["created_at"]
         cs = _candles(conn, p["mint"], p["pool"], age, budget)
         try:
-            early = wallet_source.early_buyers(p["mint"], max_pages=rsettings.early_max_sig_pages,
+            early = rpc.early_buyers(p["mint"], max_pages=rsettings.early_max_sig_pages,
                                                n_tx=rsettings.early_tx_per_token)
         except Exception as e:  # noqa: BLE001
             log.warning("early buyers %s failed: %s", p["mint"][:6], e)
@@ -160,6 +160,16 @@ def run_once(conn=None):
     summary["candidates_top"] = len(top)
     user = _user_wallets(conn)
     add_research_wallets(conn, user, "user", 100.0)
+    # wallets signals tracks that the model has not scored yet: backfill them before new candidates
+    unscored = [r[0] for r in conn.execute(
+        """SELECT w.address FROM wallets w LEFT JOIN model_wallet_stats m ON m.address = w.address
+           WHERE m.address IS NULL AND COALESCE(w.is_bot, 0) = 0""")]
+    retry(lambda: add_research_wallets(conn, unscored, "signals_unscored", 50.0), conn=conn)
+    summary["signals_unscored"] = len(unscored)
+    summary["signals_unscored_pending"] = conn.execute(
+        """SELECT COUNT(*) FROM research_wallets r JOIN wallets w ON w.address = r.address
+           LEFT JOIN model_wallet_stats m ON m.address = r.address
+           WHERE m.address IS NULL AND r.backfilled_at = 0 AND COALESCE(w.is_bot, 0) = 0""").fetchone()[0]
     # backfill histories
     bots = {r[0] for r in conn.execute("SELECT address FROM wallets WHERE is_bot=1")}
     due = [r[0] for r in conn.execute(
@@ -167,9 +177,11 @@ def run_once(conn=None):
            LIMIT ?""", (now - int(rsettings.rebackfill_hours * 3600), rsettings.wallets_per_run * 2))
         if r[0] not in bots and _mine(r[0])][:rsettings.wallets_per_run]
     new_mints = Counter()
+    # wallets that matter get the Helius Enhanced API (100 credits, 100 parsed swaps); the rest go via RPC
+    vip = set(user) | {r[0] for r in conn.execute("SELECT address FROM model_wallet_stats WHERE tier IS NOT NULL")}
     for w in due:
         time.sleep(rsettings.pause_s)
-        tr = wallet_source.wallet_trades(w, limit=rsettings.wallet_tx_limit)
+        tr = rpc.wallet_trades(w, enhanced=bool(rsettings.enhanced_backfill) and w in vip)
         summary["wallet_trades_added"] += retry(lambda: db.insert_trades(conn, tr))
         for t in tr:
             new_mints[t.mint] += 1
@@ -216,6 +228,7 @@ def run_once(conn=None):
         if _candles(conn, m, pools[m], min(age, 15 * 3600), budget):
             summary["candles_refreshed"] += 1
     summary["gt_calls_left"] = budget.n
+    summary["helius_credits_today"] = credits.used_today()
     log.info("discovery: %s", dict(summary))
     return dict(summary)
 

@@ -22,7 +22,7 @@ class ResearchSettings:
     early_max_sig_pages: int = _i("RESEARCH_EARLY_MAX_SIG_PAGES", 15)   # 1000 signatures per page
     early_tx_per_token: int = _i("RESEARCH_EARLY_TX_PER_TOKEN", 80)    # earliest swaps parsed per token
     wallets_per_run: int = _i("RESEARCH_WALLETS_PER_RUN", 20)
-    wallet_tx_limit: int = _i("RESEARCH_WALLET_TX_LIMIT", 100)
+    wallet_tx_limit: int = _i("RESEARCH_WALLET_TX_LIMIT", 60)
     pause_s: float = _f("RESEARCH_PAUSE_S", 3.0)  # pause between heavy RPC jobs so the live loop keeps up
     seed_every_hours: float = _f("RESEARCH_SEED_EVERY_HOURS", 6)  # GMGN rank + pump.fun top coins in the service
     rebackfill_hours: float = _f("RESEARCH_REBACKFILL_HOURS", 24)
@@ -36,6 +36,10 @@ class ResearchSettings:
     funding_per_run: int = _i("RESEARCH_FUNDING_PER_RUN", 8)
     funding_max_sig_pages: int = _i("RESEARCH_FUNDING_MAX_SIG_PAGES", 3)
     funding_hub_min: int = _i("RESEARCH_FUNDING_HUB_MIN", 12)  # funders of more wallets are exchanges/hubs
+    # chain access: public RPC first (no Helius credits), Helius only within a daily research cap
+    rpc_url: str = os.getenv("RESEARCH_RPC_URL", "https://api.mainnet-beta.solana.com")
+    helius_credits_per_day: int = _i("RESEARCH_HELIUS_CREDITS_PER_DAY", 25000)
+    enhanced_backfill: int = _i("RESEARCH_ENHANCED_BACKFILL", 1)  # tiered/user wallets via Helius Enhanced (100 cr)
     default_supply: float = _f("RESEARCH_DEFAULT_SUPPLY", 1e9)  # pump.fun standard supply when unknown
 
 

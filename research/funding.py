@@ -5,15 +5,15 @@ wallets. The model then counts them as one smart-money group instead of several 
 Funders that funded many of our wallets are exchanges or hubs and are ignored (see hubs()).
 
 Cost per wallet: up to RESEARCH_FUNDING_MAX_SIG_PAGES getSignaturesForAddress pages plus up to 4
-getTransaction calls, all through core's rate-limited RPC client. Wallets whose history is longer than
+getTransaction calls via research.rpc (public RPC first, capped Helius fallback). Wallets whose history is longer than
 the page budget get status 'deep' and are retried after a week.
 """
 import logging
 import time
 from collections import Counter
 
-from core.sources.wallet_history import _get_tx, _rpc
 from research.config import rsettings
+from research.rpc import call as _rpc, get_tx as _get_tx
 from research.store import retry
 
 log = logging.getLogger("mayhambot.research.funding")

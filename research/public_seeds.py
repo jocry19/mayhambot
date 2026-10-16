@@ -15,7 +15,8 @@ from pathlib import Path
 
 from core import db
 from core.http import get_json
-from core.sources import wallet_source
+
+from research import rpc
 from research.config import rsettings
 from research.store import add_research_wallets, retry, upsert_research_token
 
@@ -199,7 +200,7 @@ def run(conn, early_coins=10):
     for mint, sym, created in fresh[:early_coins]:
         time.sleep(rsettings.pause_s)
         try:
-            early = wallet_source.early_buyers(mint, max_pages=rsettings.early_max_sig_pages,
+            early = rpc.early_buyers(mint, max_pages=rsettings.early_max_sig_pages,
                                                n_tx=rsettings.early_tx_per_token)
         except Exception as e:  # noqa: BLE001
             log.warning("early buyers %s failed: %s", mint[:6], e)

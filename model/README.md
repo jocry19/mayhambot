@@ -129,3 +129,12 @@ backtest are computed only from trades before each checkpoint.
 | `research_funding` | wallet PK, funder, ts, sol, status (found/none/deep), checked_at: who first sent the wallet SOL. Wallets with the same funder join one cluster (n_clusters); funders of ≥ RESEARCH_FUNDING_HUB_MIN wallets count as exchanges and are ignored |
 
 All timestamps unix seconds UTC. Amounts in SOL are converted with the SOL price stored on the trade.
+
+## Chain access and Helius credits (research)
+
+Bulk research goes through `research.rpc`: public Solana RPC first (`RESEARCH_RPC_URL`, no Helius credits,
+spaced by core.http), Helius RPC (1 credit per call) only as a fallback, Helius Enhanced API (100 credits,
+up to 100 parsed swaps) only for backfills of tiered and user wallets. All Helius use by research is booked in
+`research.credits` (data/research_credits.json, per UTC day) and stops at `RESEARCH_HELIUS_CREDITS_PER_DAY`
+(25,000 = at most 750k per month), so the event-driven services always keep the rest of the plan.
+Wallets in the `wallets` table that the model has not scored yet are backfilled before new candidates.

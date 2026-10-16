@@ -139,3 +139,26 @@ def test_tier_sync_none_before_first_model():
     from model import tier_sync
     conn = db.connect(os.path.join(tempfile.mkdtemp(), "s.db"))
     assert tier_sync(conn) is None
+
+
+def test_research_credit_cap_and_cheap_rpc(monkeypatch):
+    from research import credits, rpc
+    from research.config import rsettings
+    monkeypatch.setattr(credits, "PATH", os.path.join(tempfile.mkdtemp(), "c.json"))
+    monkeypatch.setattr(rsettings, "helius_credits_per_day", 150)
+    assert credits.take("enhanced") and not credits.take("enhanced")
+    assert credits.take("rpc", 50) and not credits.take("rpc")
+    assert credits.report()["today"] == {"enhanced": 100, "rpc": 50}
+    monkeypatch.setattr(credits, "PATH", os.path.join(tempfile.mkdtemp(), "c.json"))
+    seen = []
+
+    def post(url, method, params):
+        seen.append(url)
+        if "solana.com" in url:
+            raise RuntimeError("429")
+        return "ok"
+    monkeypatch.setattr(rpc, "_post", post)
+    monkeypatch.setattr(rpc, "_helius_rpc_url", lambda: "https://mainnet.helius-rpc.com/?api-key=x")
+    monkeypatch.setattr(rsettings, "rpc_url", "https://api.mainnet-beta.solana.com")
+    assert rpc.call("getSlot", []) == "ok" and len(seen) == 2  # public first, then 1-credit Helius
+    assert credits.used_today() == 1
