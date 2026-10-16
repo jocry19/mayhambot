@@ -195,18 +195,22 @@ def sync_model_tiers(conn):
 
 
 RESCORE_MAX_AGE_S = 600
+RESCORE_MIN_S = 300
 _last_rescore = {}  # db file -> (newest trade rowid, time, wallets scored)
 
 
 def rescore_all(conn, cfg=settings, force=False) -> int:
-    """Recompute every wallet's positions, score and tier. Without new trades since the last run in this process
-    it is skipped for up to RESCORE_MAX_AGE_S (only current prices would move unrealized PnL): the full pass reads
-    every trade and price and rewrites wallet_positions and wallets, ~8 s and a write lock on a 300k-trade DB."""
+    """Recompute every wallet's positions, score and tier. The full pass reads every trade and price and rewrites
+    wallet_positions and wallets (~8 s on a 300k-trade DB, every 90 s signals cycle = a tenth of a core), so it runs
+    at most every RESCORE_MIN_S even with new trades (a few minutes of trades barely move a track record), and
+    without new trades only after RESCORE_MAX_AGE_S (current prices still move unrealized PnL)."""
     path = conn.execute("PRAGMA database_list").fetchone()[2]
     newest = conn.execute("SELECT MAX(rowid) FROM trades").fetchone()[0]
     last = _last_rescore.get(path)
-    if not force and last and last[0] == newest and time.time() - last[1] < RESCORE_MAX_AGE_S:
-        return last[2]
+    if not force and last:
+        age = time.time() - last[1]
+        if age < RESCORE_MIN_S or (last[0] == newest and age < RESCORE_MAX_AGE_S):
+            return last[2]
     n = _rescore(conn, cfg)
     _last_rescore[path] = (newest, time.time(), n)
     return n

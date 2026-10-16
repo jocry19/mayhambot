@@ -76,12 +76,22 @@ def test_rescore_skips_without_new_trades(tmp_path, monkeypatch):
     conn = db.connect(str(tmp_path / "r.db"))
     db.insert_trades(conn, [Trade("a", "W", "M", "buy", 1000, 10.0, 0.1, 10.0, 1.0, "t")])
     runs = []
+    now = [1_000_000.0]
     real = scoring._rescore
     monkeypatch.setattr(scoring, "_rescore", lambda c, cfg: runs.append(1) or real(c, cfg))
+    monkeypatch.setattr(scoring.time, "time", lambda: now[0])
     scoring.rescore_all(conn)
+    now[0] += scoring.RESCORE_MIN_S
     scoring.rescore_all(conn)  # nothing new: skipped
     assert len(runs) == 1
     db.insert_trades(conn, [Trade("b", "W", "M", "sell", 2000, 10.0, 0.2, 20.0, 2.0, "t")])
-    scoring.rescore_all(conn)
+    scoring.rescore_all(conn)  # new trade, last full pass long enough ago
+    assert len(runs) == 2
+    db.insert_trades(conn, [Trade("c", "W", "M", "sell", 2100, 10.0, 0.2, 20.0, 2.0, "t")])
+    now[0] += 60
+    scoring.rescore_all(conn)  # new trade, but the last full pass was a minute ago
+    assert len(runs) == 2
     scoring.rescore_all(conn, force=True)
-    assert len(runs) == 3
+    now[0] += scoring.RESCORE_MAX_AGE_S
+    scoring.rescore_all(conn)  # nothing new for ten minutes: prices moved, runs again
+    assert len(runs) == 4
