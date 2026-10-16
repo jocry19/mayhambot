@@ -217,7 +217,12 @@ export default function Coin({ mint, hl }) {
       </div>
       <MarketContext mint={mint} />
 
-      {d.prediction_live && !d.prediction_live.error && (
+      {d.prediction_live?.pending && (
+        <Card title="Live-Prognose des Modells" sub="wird gerade berechnet, erscheint beim nächsten Aktualisieren">
+          <div className="empty">Das Modell rechnet die ganze Handelshistorie dieses Coins durch …</div>
+        </Card>
+      )}
+      {d.prediction_live && !d.prediction_live.error && !d.prediction_live.pending && (
         <Card title="Live-Prognose des Modells" sub={`Modell v${d.prediction_live.version ?? "?"}${d.prediction_live.algo ? ` · ${ALGO_LABEL[d.prediction_live.algo] || d.prediction_live.algo}` : ""} · jetzt berechnet`}>
           <div className="grid g-wide-right">
             <div className="col">

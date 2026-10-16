@@ -453,3 +453,40 @@ def test_pid_states(tmp_path, monkeypatch):
     from web import queries as Q
 
     assert Q._pid_running("gibtsnicht-xyz") is None
+
+
+def test_cache_swr_bg_and_last_ts(tmp_path):
+    import threading
+    import time as _t
+
+    from web.db import TTLCache
+    from web import queries as Q
+
+    c = TTLCache()
+    calls = []
+    assert c.get_swr(("k",), 0.05, lambda: calls.append(1) or 1) == 1        # first call computes inline
+    _t.sleep(0.06)
+    ev = threading.Event()
+    assert c.get_swr(("k",), 0.05, lambda: (ev.wait(1), 2)[1]) == 1           # stale: old value at once
+    ev.set()
+    for _ in range(50):
+        if c._d[("k",)][1] == 2:
+            break
+        _t.sleep(0.01)
+    assert c._d[("k",)][1] == 2
+    assert c.get_bg(("b",), 10, lambda: 5) is None                            # never blocks
+    for _ in range(50):
+        if c.get_bg(("b",), 10, lambda: 6) == 5:
+            break
+        _t.sleep(0.01)
+    assert c.get_bg(("b",), 10, lambda: 6) == 5
+    # newest trade without an index on ts: from the newest inserts
+    conn = sqlite3.connect(str(tmp_path / "t.db"))
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE trades(sig TEXT, wallet TEXT, mint TEXT, side TEXT, ts INTEGER, PRIMARY KEY(sig, wallet, mint, side))")
+    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?)", [(str(i), "w", "m", "buy", 1000 + i) for i in range(500)])
+    Q.cache.clear()
+    assert not Q._has_index(conn, "trades", "ts") and Q.last_ts(conn, "trades") == 1499
+    conn.execute("CREATE INDEX ix ON trades(ts)")
+    Q.cache.clear()
+    assert Q._has_index(conn, "trades", "ts") and Q.last_trade_ts(conn) == 1499

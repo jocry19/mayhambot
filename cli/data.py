@@ -33,7 +33,7 @@ def snapshot(n_signals: int = 60, n_wallets: int = 150) -> dict:
         "tier_source": Q.tier_source(conn),
         "wallets_total": scalar(conn, "SELECT COUNT(*) FROM wallets", default=0) if has(conn, "wallets") else 0,
         "trades_24h": scalar(conn, "SELECT COUNT(*) FROM trades WHERE ts>=?", (now - 86400,), 0) if has(conn, "trades") else 0,
-        "last_trade_ts": scalar(conn, "SELECT MAX(ts) FROM trades") if has(conn, "trades") else None,
+        "last_trade_ts": Q.last_trade_ts(conn),
         "signals": sigs,
         "signals_24h": sum(1 for s in sigs if s["ts"] >= now - 86400),
         "top_coins": Q.coins(conn, sort="strength", limit=15),

@@ -70,10 +70,45 @@ def now_ts() -> int:
 
 
 # ====================================================================== basics
+def _has_index(conn, table, col):
+    """True if some index of `table` starts with `col` (then range and MAX queries on it are cheap)."""
+    def calc():
+        try:
+            for ix in conn.execute(f"PRAGMA index_list('{table}')").fetchall():
+                first = conn.execute(f"PRAGMA index_info('{ix[1]}')").fetchone()
+                if first and first[2] == col:
+                    return True
+        except Exception:
+            pass
+        return False
+    return cache.get(("has_index", table, col), 300, calc)
+
+
+TAIL_ROWS = 20000  # newest inserts looked at when trades(ts) has no index
+
+
+def last_ts(conn, table, col="ts"):
+    """Newest value of a time column. Without an index starting with it, MAX() reads the whole table (seconds on
+    millions of rows), so look at the newest inserts by rowid instead: rows arrive in time order, backfills only
+    add older ones."""
+    if not has(conn, table, col):
+        return None
+    if _has_index(conn, table, col):
+        return scalar(conn, f"SELECT MAX({col}) FROM {table}")
+    try:
+        return scalar(conn, f"SELECT MAX({col}) FROM {table} WHERE rowid > (SELECT MAX(rowid) FROM {table}) - ?", (TAIL_ROWS,))
+    except Exception:  # WITHOUT ROWID table
+        return scalar(conn, f"SELECT MAX({col}) FROM {table}")
+
+
+def last_trade_ts(conn):
+    return last_ts(conn, "trades")
+
+
 def sol_usd(conn) -> float:
     def calc():
-        r = rows(conn, """SELECT usd_amount, sol_amount FROM trades WHERE sol_amount>0 AND usd_amount>0
-                          ORDER BY ts DESC LIMIT 300""")
+        r = rows(conn, """SELECT usd_amount, sol_amount FROM trades WHERE rowid > (SELECT MAX(rowid) FROM trades) - ?
+                          AND sol_amount>0 AND usd_amount>0 ORDER BY rowid DESC LIMIT 300""", (TAIL_ROWS,))
         xs = [a["usd_amount"] / a["sol_amount"] for a in r if a["sol_amount"]]
         xs = [x for x in xs if 20 < x < 2000]
         return statistics.median(xs) if xs else 150.0
@@ -197,9 +232,10 @@ def flow_series(conn, since, bucket, mint=None):
     tm = tier_map(conn)
     trades = _trades_since(conn, since, [mint] if mint else None)
     b = defaultdict(lambda: {"ultra": 0.0, "smart": 0.0, "good": 0.0, "other": 0.0, "buyers": set(),
-                             "buy_usd": 0.0, "sell_usd": 0.0})
+                             "buy_usd": 0.0, "sell_usd": 0.0, "n": 0})
     for t in trades:
         k = (t["ts"] // bucket) * bucket
+        b[k]["n"] += 1
         tier = _tier(tm, t["wallet"])
         usd = t["usd_amount"] or 0.0
         sgn = 1 if t["side"] == "buy" else -1
@@ -218,7 +254,7 @@ def flow_series(conn, since, bucket, mint=None):
         d = b.get(k)
         out.append({"ts": k, "ultra": round(d["ultra"], 2) if d else 0, "smart": round(d["smart"], 2) if d else 0,
                     "good": round(d["good"], 2) if d else 0, "other": round(d["other"], 2) if d else 0,
-                    "tiered_buyers": len(d["buyers"]) if d else 0})
+                    "tiered_buyers": len(d["buyers"]) if d else 0, "n": d["n"] if d else 0})
         k += bucket
         if len(out) > 2000:
             break
@@ -511,6 +547,21 @@ def safety_list(conn):
 
 
 # ====================================================================== coins
+METRICS_RECENT_S = 6 * 3600
+
+
+def _last_metrics(conn, now):
+    """Newest signal_metrics row per mint. The table's key is (ts, mint), so 'latest per mint' over all of it is a
+    full scan: the last 6 h come from a cheap ts range on every call, older coins from a full pass cached 10 min."""
+    old = cache.get(("last_metrics_all",), 600, lambda: {r["mint"]: r for r in rows(conn, """
+        SELECT m.* FROM signal_metrics m JOIN (SELECT mint, MAX(ts) ts FROM signal_metrics GROUP BY mint) x
+        ON x.mint=m.mint AND x.ts=m.ts""")})
+    out = dict(old)
+    for r in rows(conn, "SELECT * FROM signal_metrics WHERE ts>=? ORDER BY ts", (now - METRICS_RECENT_S,)):
+        out[r["mint"]] = r   # ascending, so the newest row per mint wins
+    return out
+
+
 def coins(conn, sort="strength", limit=100, q=None, window_min=30):
     if not has(conn, "tokens"):
         return []
@@ -519,12 +570,7 @@ def coins(conn, sort="strength", limit=100, q=None, window_min=30):
     def calc():
         toks = {t["mint"]: t for t in rows(conn, "SELECT * FROM tokens")}
         # coins that ever had a signal or a prognosis, plus tracked ones
-        last_metric = {}
-        if has(conn, "signal_metrics"):
-            for r in rows(conn, """SELECT m.* FROM signal_metrics m
-                                   JOIN (SELECT mint, MAX(ts) ts FROM signal_metrics GROUP BY mint) x
-                                   ON x.mint=m.mint AND x.ts=m.ts"""):
-                last_metric[r["mint"]] = r
+        last_metric = _last_metrics(conn, now) if has(conn, "signal_metrics") else {}
         last_pred = {}
         if has(conn, "model_predictions"):
             for r in rows(conn, """SELECT p.* FROM model_predictions p JOIN
@@ -575,7 +621,7 @@ def coins(conn, sort="strength", limit=100, q=None, window_min=30):
                 "since_first_signal": _f(t["mcap_usd"] / ss["first_mcap"] - 1, 4) if ss["first_mcap"] and t.get("mcap_usd") else None,
             })
         return out
-    data = cache.get(("coins", window_min), 15, calc)
+    data = cache.get_swr(("coins", window_min), 15, calc)
     sm = safety_map(conn, [c["mint"] for c in data])
     data = [{**c, "safety": sm.get(c["mint"])} for c in data]
     if q:
@@ -715,7 +761,11 @@ def _live_prediction(mint):
     except Exception:
         return None
     try:
-        r = cache.get(("score_token", mint), 60, lambda: score_token(mint))
+        # score_token reads the coin's whole trade history: seconds on busy coins, so it runs in the background and
+        # the page shows "wird berechnet" until the next poll
+        r = cache.get_bg(("score_token", mint), 60, lambda: score_token(mint))
+        if r is None:
+            return {"pending": True}
         out = _norm_prediction({"id": 0, "ts": r.get("ts"), "mint": mint, "symbol": "", "score": r.get("score"),
                                  "p_15m": (r.get("horizons", {}).get("15m") or {}).get("p_pump"),
                                  "p_1h": (r.get("horizons", {}).get("1h") or {}).get("p_pump"),
@@ -1571,12 +1621,12 @@ def overview(conn):
         "now": now, "tier_source": tier_source(conn), "tiers": tiers, "sniper": sniper_summary(conn, now),
         "wallets_total": scalar(conn, "SELECT COUNT(*) FROM wallets", default=0),
         "tokens_tracked": scalar(conn, "SELECT COUNT(*) FROM tokens WHERE tracked=1", default=0),
-        "trades_24h": scalar(conn, "SELECT COUNT(*) FROM trades WHERE ts>=?", (day,), 0),
+        "trades_24h": sum(f["n"] for f in flows),  # same 24 h window flow_series already read
         "signals_24h": len(sigs),
         "net_tiered_24h": _f(net_24, 0), "flows": flows, "signal_perf": {k: perf[k] for k in ("n", "hits", "hit_rate", "pump_threshold", "median_max_1h")},
         "feed": sigs[:25], "top_coins": coins(conn, sort="strength", limit=12),
         "copytrade": ct, "control": control_state(conn), "model": model_active(conn),
-        "last_trade_ts": scalar(conn, "SELECT MAX(ts) FROM trades"),
+        "last_trade_ts": last_trade_ts(conn),
     }
 
 
@@ -1593,8 +1643,7 @@ def system(conn):
     for t, col in (("trades", "ts"), ("token_prices", "ts"), ("signal_metrics", "ts"), ("signals", "ts"),
                    ("model_predictions", "ts"), ("model_versions", "ts"), ("ct_events", "ts"), ("ct_equity", "ts"),
                    ("ct_swaps", "seen_at"), ("market_snapshots", "ts")):
-        if has(conn, t, col):
-            last[t] = scalar(conn, f"SELECT MAX({col}) FROM {t}")
+        last[t] = last_ts(conn, t, col)
     services = []
     pids = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "pids")
     if os.path.isdir(pids):
@@ -1696,6 +1745,8 @@ def services_health(conn, now=None):
                 extra = {"connected": st.get("connected"), "launch_source": st.get("active_launch_source"),
                          "launches_per_min": st.get("launches_per_min"), "trade_source": st.get("trade_source"),
                          "rpc_ws_connected": st.get("rpc_ws_connected")}
+        elif name == "signals":
+            last = last_trade_ts(conn)
         elif sql:
             tbl = re.search(r"FROM (\w+)", sql).group(1)
             if has(conn, tbl):

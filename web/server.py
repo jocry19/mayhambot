@@ -100,7 +100,7 @@ async def auth(request: Request, call_next):
 # ---------------------------------------------------------------------- read
 @app.get("/api/overview")
 def overview():
-    return ok(cache.get(("overview",), 5, lambda: q.overview(read_conn())))
+    return ok(cache.get_swr(("overview",), 5, lambda: q.overview(read_conn())))
 
 
 @app.get("/api/signals")
@@ -382,7 +382,7 @@ def intel_coin(mint: str):
 
 @app.get("/api/system")
 def system():
-    return ok(q.cache.get(("system",), 5, lambda: q.system(read_conn())))
+    return ok(cache.get_swr(("system",), 5, lambda: q.system(read_conn())))
 
 
 @app.get("/api/search")

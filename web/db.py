@@ -107,6 +107,7 @@ class TTLCache:
 
     def __init__(self):
         self._d: dict = {}
+        self._busy: set = set()
         self._lock = threading.Lock()
 
     def get(self, key, ttl: float, fn):
@@ -119,6 +120,58 @@ class TTLCache:
         with self._lock:
             self._d[key] = (now, val)
         return val
+
+    def get_bg(self, key, ttl: float, fn):
+        """Never blocks: returns the cached value (or None the first time) and computes in a background thread.
+        For slow extras on a page (the live model prognosis), so the page itself loads at once."""
+        now = time.time()
+        with self._lock:
+            hit = self._d.get(key)
+            if hit and now - hit[0] < ttl:
+                return hit[1]
+            start = key not in self._busy
+            if start:
+                self._busy.add(key)
+        if start:
+            def run():
+                try:
+                    val = fn()
+                    with self._lock:
+                        self._d[key] = (time.time(), val)
+                except Exception:
+                    pass
+                finally:
+                    with self._lock:
+                        self._busy.discard(key)
+            threading.Thread(target=run, daemon=True, name="bg-cache").start()
+        return hit[1] if hit else None
+
+    def get_swr(self, key, ttl: float, fn, stale: float = 120):
+        """Like get, but a value older than ttl (and younger than stale) is returned at once while one background
+        thread recomputes it: pages stay instant even when the aggregate takes a second on a busy database."""
+        now = time.time()
+        with self._lock:
+            hit = self._d.get(key)
+            if hit and now - hit[0] < ttl:
+                return hit[1]
+            refresh = hit and now - hit[0] < stale and key not in self._busy
+            if refresh:
+                self._busy.add(key)
+        if not refresh:
+            return self.get(key, 0, fn)
+
+        def run():
+            try:
+                val = fn()
+                with self._lock:
+                    self._d[key] = (time.time(), val)
+            except Exception:  # keep the old value; the next request tries again
+                pass
+            finally:
+                with self._lock:
+                    self._busy.discard(key)
+        threading.Thread(target=run, daemon=True, name=f"swr-{key[0] if key else ''}").start()
+        return hit[1]
 
     def clear(self):
         with self._lock:
