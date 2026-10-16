@@ -27,6 +27,7 @@ LABELS = {
     "ev": "Signal-EV", "call": "Call Nr.", "lscore": "Sniper-Score", "lrisk": "Sniper-Risiko",
     "bundle": "Bundle", "insider": "Insider", "devl": "Dev-Launches", "top10": "Top-10-Anteil",
     "socials": "Socials", "lsmart": "Smart Wallets im Launch", "modelp": "Modell-Chance", "form": "eigene Form",
+    "flip": "Wal verkauft binnen 2 min",
 }
 
 
@@ -164,6 +165,29 @@ def _crowd(conn, mint: str, wallet: str, now: float) -> tuple[int, bool]:
 
 
 # ---------------------------------------------------------------------- per kind
+FLIP_S = 120
+FLIP_LOOKBACK_S = 7 * 86400
+
+
+def flip(conn, wallet: str, now: float, limit: int = 40) -> dict:
+    """How often this wallet sold a coin within FLIP_S of buying it (its recent buys, 7 days): a copy enters seconds
+    after the whale, so a wallet that is out again within two minutes leaves the copy holding the dip."""
+    rows = conn.execute(
+        """SELECT b.mint, b.ts,
+                  (SELECT MIN(s.ts) FROM ct_swaps s WHERE s.wallet=b.wallet AND s.mint=b.mint AND s.side='sell'
+                     AND s.ts>=b.ts) AS sold
+           FROM ct_swaps b WHERE b.wallet=? AND b.side='buy' AND b.ts>=? AND b.ts<?
+           ORDER BY b.ts DESC LIMIT ?""", (wallet, int(now - FLIP_LOOKBACK_S), int(now - FLIP_S), limit)).fetchall()
+    seen, n, fast = set(), 0, 0
+    for r in rows:  # first buy per coin only: adds to a position are no new round trip
+        if r["mint"] in seen:
+            continue
+        seen.add(r["mint"])
+        n += 1
+        fast += r["sold"] is not None and r["sold"] - r["ts"] <= FLIP_S
+    return {"n": n, "share": fast / n if n else None}
+
+
 def whale(conn, sw, snap, now: float) -> tuple[dict, dict]:
     """sw: a ct_swaps row (buy). -> (features, raw facts for the note)."""
     from copytrade import learn, store as ct_store
@@ -186,6 +210,9 @@ def whale(conn, sw, snap, now: float) -> tuple[dict, dict]:
         f["edge"] = ("?" if e["n"] < 8 else "belegt" if e["lower"] > 0 else "plus" if e["mean"] > 0 else "minus")
     except Exception:
         e = {}
+    fl = flip(conn, w, sw["ts"])
+    if fl["n"] >= 5:
+        f["flip"] = b(fl["share"], (0.2, 0.5), ("<20%", "20-50%", ">50%"))
     nb, kb = launch_bot_share(conn, w)
     if nb >= 8:
         f["launchbot"] = "ja" if kb / nb >= 0.6 else "nein"
@@ -196,7 +223,7 @@ def whale(conn, sw, snap, now: float) -> tuple[dict, dict]:
     ent = ct_store.entity(conn, w)
     raw = {"wallet": w, "tier": info.get("tier") or "none", "cluster": ent if ent != w else None,
            "sol": sw["sol_amount"], "delay_s": round(delay, 1), "run": run, "crowd": crowd,
-           "edge_n": e.get("n"), "edge_mean": e.get("mean"), "thesis": learn.thesis(iraw), "intel": iraw}
+           "edge_n": e.get("n"), "edge_mean": e.get("mean"), "flip": fl, "thesis": learn.thesis(iraw), "intel": iraw}
     return f, raw
 
 
