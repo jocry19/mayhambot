@@ -18,6 +18,9 @@ import os
 import re
 import statistics
 import time
+
+# repo root: data/ (pids, state files) and logs/ live under it; tests point it at a temp dir (web/tests/conftest.py)
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 from collections import defaultdict
 
 from .db import cache, has, one, rows, scalar, tables
@@ -1436,8 +1439,7 @@ def retrain_schedule(conn, now=None):
             every_h = 6.0
     last_ok = scalar(conn, "SELECT MAX(ts) FROM model_versions WHERE active=1") if has(conn, "model_versions") else None
     out = {"every_h": every_h, "last_ok": last_ok, "next_ts": None, "source": None, "failed_ts": None}
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    path = os.path.join(os.getenv("MAYHAM_LOG_DIR") or os.path.join(root, "logs"), "research.log")
+    path = os.path.join(os.getenv("MAYHAM_LOG_DIR") or os.path.join(ROOT_DIR, "logs"), "research.log")
     try:
         with open(path, "rb") as f:
             f.seek(0, 2)
@@ -1469,9 +1471,8 @@ def _sniper_cfg():
 
 
 def _pid_running(name):
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
-        pid = int(open(os.path.join(root, "data", "pids", f"{name}.pid")).read().strip())
+        pid = int(open(os.path.join(ROOT_DIR, "data", "pids", f"{name}.pid")).read().strip())
     except Exception:
         return None  # unknown (no pid file: launchd, other machine, tests)
     try:
@@ -1905,7 +1906,7 @@ def system(conn):
                    ("ct_swaps", "seen_at"), ("market_snapshots", "ts")):
         last[t] = last_ts(conn, t, col)
     services = []
-    pids = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "pids")
+    pids = os.path.join(ROOT_DIR, "data", "pids")
     if os.path.isdir(pids):
         for f in sorted(os.listdir(pids)):
             if f.endswith(".pid"):
@@ -1931,7 +1932,6 @@ def system(conn):
 
 
 # ====================================================================== health of all services
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # service -> (German label, what it does, SQL for its newest activity ts, expected max gap in s)
 SERVICE_INFO = {
     "signals": ("Signale", "Trades sammeln, Smart-Money-Signale", "SELECT MAX(ts) FROM trades", 15 * 60),
