@@ -518,8 +518,9 @@ class Strategy:
             self.conn.execute("UPDATE ct_positions SET status='open', closed_at=NULL WHERE id=? AND status='closing'",
                               (p["id"],))
             self.conn.commit()
-            store.event(self.conn, "error", f"Verkauf {p['symbol']} fehlgeschlagen: {fill.error if fill else err}",
-                        "error")
+            if not (fill and "pausiert" in (fill.error or "")):  # backoff after an unclear sell: no event per loop
+                store.event(self.conn, "error", f"Verkauf {p['symbol']} fehlgeschlagen: {fill.error if fill else err}",
+                            "error")
             return False
         ex.adjust_balance(self.conn, fill.sol)
         pnl = fill.sol - p["entry_cost_sol"]
