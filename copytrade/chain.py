@@ -161,15 +161,30 @@ class Rpc:
 _decimals_cache: dict[str, int] = {}
 
 
-def token_decimals(rpc: Rpc, mint: str) -> int:
+class DecimalsUnknown(RuntimeError):
+    """The token's decimals could not be read: amounts and prices of this mint can not be trusted."""
+
+
+def token_decimals(rpc: Rpc, mint: str, strict: bool = False) -> int:
+    """Decimals of a mint. Usually known already: every transaction read and every pump.fun log trade teaches
+    them (see extract_swap / swap_from_logs). Otherwise one getTokenSupply, retried once. If that fails too:
+    strict raises DecimalsUnknown (a wrong guess puts prices off by powers of ten), else 6, not cached."""
     if mint in _decimals_cache:
         return _decimals_cache[mint]
-    try:
-        r = rpc.read("getTokenSupply", [mint], priority="live") if hasattr(rpc, "read") else rpc.call("getTokenSupply", [mint])
-        dec = int(r["value"]["decimals"])
-    except Exception as e:
-        log.debug("decimals %s failed: %s", mint, e)
-        return 6  # pump.fun default for now, but not cached: the next call asks again
+    err: Exception | None = None
+    for _ in range(2):
+        try:
+            r = rpc.read("getTokenSupply", [mint], priority="live") if hasattr(rpc, "read") \
+                else rpc.call("getTokenSupply", [mint])
+            dec = int(r["value"]["decimals"])
+            break
+        except Exception as e:
+            err = e
+    else:
+        log.debug("decimals %s failed: %s", mint, err)
+        if strict:
+            raise DecimalsUnknown(f"decimals of {mint[:8]} unknown: {err}")
+        return 6
     _decimals_cache[mint] = dec
     return dec
 
@@ -245,6 +260,9 @@ def extract_swap(tx: dict, wallet: str, sol_usd: float = 0.0) -> Swap | None:
             if b.get("owner") != wallet:
                 continue
             amt = float(b["uiTokenAmount"].get("uiAmount") or 0)
+            dec = b["uiTokenAmount"].get("decimals")
+            if isinstance(dec, int):  # learnt for free: later sizing and pricing need no getTokenSupply
+                _decimals_cache[b["mint"]] = dec
             deltas[b["mint"]] = deltas.get(b["mint"], 0.0) + sign * amt
 
     add(meta.get("postTokenBalances"), +1)
@@ -366,6 +384,7 @@ def swap_from_logs(logs: list | None, wallet: str, signature: str) -> Swap | Non
         LOG_STATS["dust"] += 1
         return None
     LOG_STATS["read"] += 1
+    _decimals_cache.setdefault(evs[0]["mint"], 6)  # every pump.fun curve token has 6 decimals (amounts above too)
     last = evs[-1]  # curve state after the wallet's last trade: price * 1e9 supply = market cap
     mcap = last["v_sol"] / last["v_tok"] * 1e9 if last["v_tok"] else 0.0
     return Swap(signature=signature, wallet=wallet, block_time=int(last["ts"] or 0),

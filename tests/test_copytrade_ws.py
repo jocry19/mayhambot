@@ -364,8 +364,8 @@ def test_failed_decimals_lookup_is_not_cached(monkeypatch):
             return {"value": {"decimals": 9}}
 
     chain._decimals_cache.pop("MintX", None)
-    assert real(R(), "MintX") == 6
-    assert real(R(), "MintX") == 9 and real(R(), "MintX") == 9 and R.n == 2
+    assert real(R(), "MintX") == 9  # first read failed, the retry got it
+    assert real(R(), "MintX") == 9 and real(R(), "MintX") == 9 and R.n == 2  # one retry already succeeds
 
 
 # ------------------------------------------------------------------ pump.fun trades read from the logs
@@ -729,3 +729,64 @@ def test_status_reports_queue_wait_and_read_times():
     w.fetch_s.extend([0.5] * 9 + [3.0])
     txt = w.status()
     assert "queue wait p50 0.1s p90 4.0s" in txt and "transaction read p50 0.5s p90 3.0s" in txt
+
+
+def test_a_locked_save_does_not_lose_the_swaps_on_retry(env, monkeypatch):
+    """Audit round 3 #9: the retried poll used to see its own claimed signatures as handled and drop them."""
+    import sqlite3
+
+    s, conn, ex, state = env
+    store.add_wallets(conn, [W], "manual")
+    conn.execute("UPDATE ct_wallets SET last_sig='sigOld' WHERE address=?", (W,))
+    tracker._seen.clear()
+    tracker._seen["sigWsBusy"] = None  # the websocket is handling another transaction right now
+    def tx_of(sig):
+        tx = parsed_tx(-3_000_000_000, 0, 1_000_000)
+        tx["transaction"]["signatures"] = [sig]
+        return tx
+
+    rpc, _ = _helius_rpc(monkeypatch, tx_of)
+    real, n = store.save_swaps, {"calls": 0}
+
+    def flaky(*a, **kw):
+        n["calls"] += 1
+        if n["calls"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(store, "save_swaps", flaky)
+    monkeypatch.setattr(store.time, "sleep", lambda x: None)
+    row = conn.execute("SELECT * FROM ct_wallets WHERE address=?", (W,)).fetchone()
+    got = store.retry_locked(tracker.poll, conn, s, rpc, row, "live")
+    assert {sw.signature for sw in got} == {"sigMid", "sigNew"} and n["calls"] == 2
+    assert conn.execute("SELECT last_sig FROM ct_wallets").fetchone()[0] == "sigNew"
+    assert "sigWsBusy" in tracker._seen  # only its own claims were handed back
+    # stored but the cursor write failed: the swaps still go to the strategy, the next poll skips them
+    tracker._seen.clear()
+    conn.execute("UPDATE ct_wallets SET last_sig='sigOld' WHERE address=?", (W,))
+    row = conn.execute("SELECT * FROM ct_wallets WHERE address=?", (W,)).fetchone()
+    assert tracker.poll(conn, s, rpc, row, "live") == []
+
+
+def test_decimals_are_learnt_from_reads_and_strict_mode_never_guesses():
+    chain._decimals_cache.pop(MINT, None)
+    tx = parsed_tx(-3_000_000_000, 0, 1_000_000)
+    for b in tx["meta"]["preTokenBalances"] + tx["meta"]["postTokenBalances"]:
+        b["uiTokenAmount"]["decimals"] = 9
+    assert chain.extract_swap(tx, W) and chain._decimals_cache[MINT] == 9
+    chain._decimals_cache.pop(PMINT, None)
+    assert chain.swap_from_logs(_logs(_trade_log(1.0, 20e6)), WHALE, "sigP")
+    assert chain._decimals_cache[PMINT] == 6
+
+    class Down:
+        n = 0
+
+        def read(self, *a, **kw):
+            Down.n += 1
+            raise RuntimeError("429")
+
+    chain._decimals_cache.pop("MintY", None)
+    assert chain.token_decimals(Down(), "MintY") == 6 and Down.n == 2  # retried once, guess not cached
+    with pytest.raises(chain.DecimalsUnknown):
+        chain.token_decimals(Down(), "MintY", strict=True)
+    assert "MintY" not in chain._decimals_cache

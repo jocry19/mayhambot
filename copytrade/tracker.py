@@ -301,11 +301,13 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk",
         return []
     solusd = market.sol_usd(s)
     out = []
+    claimed = []
     cursor = last
     for sg in reversed(sigs):  # oldest first
         if sg.get("err") or not _claim(conn, sg["signature"], wallet):
             cursor = sg["signature"]  # failed on chain, or already handled from the websocket
             continue
+        claimed.append(sg["signature"])
         try:
             # gap finds of websocket-covered wallets are old already: public pool only, no main RPC credits
             tx = rpc.transaction(sg["signature"], priority="bulk" if covered else "live")
@@ -320,15 +322,29 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk",
         if sw:
             out.append(sw)
     if out:
-        store.save_swaps(conn, out, solusd)
+        try:
+            store.save_swaps(conn, out, solusd)
+        except Exception:
+            # nothing stored, cursor not moved: hand every claimed signature back, or the retry (retry_locked)
+            # would take them as handled and skip them, and a whale sell would never reach the strategy
+            for sig in claimed:
+                _release(sig)
+            raise
         src = "gap" if covered else "poll"
         DETECTED[src] += len(out)
         for sw in out:
-            record_detection(conn, sw, src, sol_usd=solusd)
-    # advance the cursor only after the swaps are stored (a locked write is retried without losing them)
-    conn.execute("UPDATE ct_wallets SET last_sig=?, last_polled=? WHERE address=?",
-                 (cursor, int(time.time()), wallet))
-    conn.commit()
+            try:
+                record_detection(conn, sw, src, sol_usd=solusd)
+            except Exception as e:
+                log.debug("detection row %s failed: %s", sw.signature[:8], e)
+    # advance the cursor only after the swaps are stored. From here on the swaps are saved, so they are returned
+    # even if this write fails: the next poll re-reads those signatures and skips them as stored
+    try:
+        conn.execute("UPDATE ct_wallets SET last_sig=?, last_polled=? WHERE address=?",
+                     (cursor, int(time.time()), wallet))
+        conn.commit()
+    except Exception as e:
+        log.debug("cursor %s not moved: %s", wallet[:6], e)
     return out
 
 
