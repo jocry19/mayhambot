@@ -116,8 +116,8 @@ method (getTransaction) never starves the others.
 
 ### Pool of public RPC endpoints
 
-`PUBLIC_RPC_URLS` (comma list, keyless) defaults to api.mainnet-beta.solana.com, solana-rpc.publicnode.com,
-solana.drpc.org, rpc.ankr.com/solana (candidates; not verifiable from the build machine). Every POST to any pool
+`PUBLIC_RPC_URLS` (comma list, keyless) defaults to api.mainnet-beta.solana.com and solana-rpc.publicnode.com
+(both passed the probe on the Mac; solana.drpc.org and rpc.ankr.com/solana did not). Every POST to any pool
 URL (also `http.PUBLIC_RPC` and the Helius fallback) goes to the pool:
 - Each endpoint is probed (getSignaturesForAddress + getTransaction jsonParsed v1, no key) before first use and
   every 10 min; failing endpoints, and endpoints with 3 failures (429/5xx/errors) in a row, leave the rotation for

@@ -94,10 +94,15 @@ def start():
 
 def stop():
     if _agent_loaded():
+        running = [n for n in SERVICES if _pid(n)]
         # unload only; the plist stays, so autostart is back at next login or with `start`
         subprocess.call(["launchctl", "bootout", _agent()])
         _wait_unloaded()
+        for name in SERVICES:
+            print(f"{name}: {'gestoppt' if name in running else 'lief nicht'}")
         print("Autostart-Agent angehalten (bleibt eingerichtet; `start` oder nächster Login startet ihn wieder)")
+        _stop_detached(quiet=True)  # leftovers from a detached `start`, reported only if any
+        return
     _stop_detached()
 
 

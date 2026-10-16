@@ -698,8 +698,8 @@ def _wait_local(host, iv):
 # ---------------- pool of keyless public Solana RPC endpoints ----------------
 # Candidates (not verifiable from the build machine): each is probed once (getSignaturesForAddress +
 # getTransaction jsonParsed v1) and dead or keyed ones leave the rotation for POOL_COOLDOWN seconds.
-DEFAULT_PUBLIC_RPC_URLS = ["https://api.mainnet-beta.solana.com", "https://solana-rpc.publicnode.com",
-                           "https://solana.drpc.org", "https://rpc.ankr.com/solana"]
+# Verified keyless on the Mac 2026-10-16; drpc.org and ankr (needs a key) failed the probe. More via PUBLIC_RPC_URLS.
+DEFAULT_PUBLIC_RPC_URLS = ["https://api.mainnet-beta.solana.com", "https://solana-rpc.publicnode.com"]
 POOL_COOLDOWN = 600
 POOL_FAILS_TO_DISABLE = 3
 PROBE_ADDRESS = "So11111111111111111111111111111111111111112"

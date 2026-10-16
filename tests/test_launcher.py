@@ -64,3 +64,14 @@ def test_bootstrap_retries_on_exit_5(monkeypatch, tmp_path):
     monkeypatch.setattr(mayham.subprocess, "call", flaky)
     mayham.install_autostart()
     assert fake.loaded and fake.calls.count("bootstrap") == 2
+
+
+def test_stop_reports_services_stopped_by_launchd(monkeypatch, tmp_path, capsys):
+    fake = FakeLaunchd(loaded=True)
+    setup(monkeypatch, tmp_path, fake)
+    mayham.PLIST.write_text("x")
+    alive = {"signals": 1}
+    monkeypatch.setattr(mayham, "_pid", lambda n: alive.get(n) if fake.loaded else None)
+    mayham.stop()
+    out = capsys.readouterr().out
+    assert "signals: gestoppt" in out and "läuft nicht" not in out
