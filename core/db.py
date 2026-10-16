@@ -141,7 +141,37 @@ def retry_locked(conn, fn, attempts=4):
             time.sleep(2 * (i + 1))
 
 
+PRICE_OUTLIER_X = 50      # a trade priced this many times off the market price is a parse error
+PRICE_FRESH_S = 3600      # ... judged only against a market price this close to the trade
+
+
+def clean_trades(conn, trades):
+    """Drop what is not a real trade: a buy and a sell of the same token by the same wallet in one transaction
+    (MEV / volume bot round trip), and a trade whose price is PRICE_OUTLIER_X off the token's market price at
+    about the same time (mis-parsed SOL leg, e.g. 9,990 SOL 'buys' on a pump.fun curve)."""
+    sides = {}
+    for t in trades:
+        sides.setdefault((t.sig, t.wallet, t.mint), set()).add(t.side)
+    mints = list({t.mint for t in trades})
+    ref = {}
+    for i in range(0, len(mints), 500):
+        chunk = mints[i:i + 500]
+        ref.update({r[0]: (r[1], r[2]) for r in conn.execute(
+            f"SELECT mint, price_usd, last_updated FROM tokens WHERE mint IN ({','.join('?' * len(chunk))})", chunk)})
+    out = []
+    for t in trades:
+        if len(sides[(t.sig, t.wallet, t.mint)]) > 1:
+            continue
+        p, at = ref.get(t.mint, (None, None))
+        if p and t.price_usd and at and abs(int(t.ts) - at) <= PRICE_FRESH_S \
+                and max(t.price_usd / p, p / t.price_usd) > PRICE_OUTLIER_X:
+            continue
+        out.append(t)
+    return out
+
+
 def insert_trades(conn, trades) -> int:
+    trades = clean_trades(conn, list(trades))
     before = conn.total_changes
     conn.executemany(
         "INSERT OR IGNORE INTO trades VALUES (?,?,?,?,?,?,?,?,?,?)",
