@@ -60,9 +60,9 @@ class SniperSettings:
     keep_days: int = field(default_factory=lambda: _i("SNIPER_KEEP_DAYS", 14))
 
     # ---- stage 1 (free, from the trade stream)
-    prescore_min: float = field(default_factory=lambda: _f("SNIPER_PRESCORE_MIN", 30))
-    min_buyers: int = field(default_factory=lambda: _i("SNIPER_MIN_BUYERS", 6))
-    min_inflow_sol: float = field(default_factory=lambda: _f("SNIPER_MIN_INFLOW_SOL", 1.5))
+    prescore_min: float = field(default_factory=lambda: _f("SNIPER_PRESCORE_MIN", 25))
+    min_buyers: int = field(default_factory=lambda: _i("SNIPER_MIN_BUYERS", 5))
+    min_inflow_sol: float = field(default_factory=lambda: _f("SNIPER_MIN_INFLOW_SOL", 1.0))
 
     # ---- bundles and insiders
     bundle_slots: int = field(default_factory=lambda: _i("SNIPER_BUNDLE_SLOTS", 1))          # slots after creation that count as bundle
@@ -80,7 +80,7 @@ class SniperSettings:
     bundle_txs_fetched: int = field(default_factory=lambda: _i("SNIPER_BUNDLE_TXS_FETCHED", 2))
 
     # ---- decision
-    min_score: float = field(default_factory=lambda: _f("SNIPER_MIN_SCORE", 50))
+    min_score: float = field(default_factory=lambda: _f("SNIPER_MIN_SCORE", 40))
     max_risk: float = field(default_factory=lambda: _f("SNIPER_MAX_RISK", 45))
     require_launch_data: bool = field(default_factory=lambda: _b("SNIPER_REQUIRE_LAUNCH_DATA", True))  # no buy without slot data
     insider_block: bool = field(default_factory=lambda: _b("SNIPER_INSIDER_BLOCK", True))

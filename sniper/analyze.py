@@ -125,7 +125,7 @@ def analyze(st, cfg, enr=None, tiers=None, now=None):
         a.positives.append(f"Dev hält nur {dev_pct:.1f} %.")
     if dev_sold_pct >= 50:
         a.add("dev", 75, f"Dev hat schon {dev_sold_pct:.0f} % seiner Tokens verkauft.")
-        a.insider = True
+        a.insider = a.stage >= 2  # stage 1 has its own skip reason (dev_sold); the insider flag means more than that
     elif dev_sold_pct >= 10:
         a.add("dev", 35, f"Dev verkauft bereits ({dev_sold_pct:.0f} % seiner Tokens).")
     if creator:
@@ -295,6 +295,10 @@ def analyze(st, cfg, enr=None, tiers=None, now=None):
         score = 0.8 * score + 0.2 * 100 * float(p) * (1 - a.risk / 100) * factor
     a.score = round(score, 1)
     F.update(momentum=a.momentum, risk=a.risk, score=a.score, safety_factor=factor)
+    if enr.get("errors"):
+        F["errors"] = enr["errors"][:6]
+    if enr.get("early_src"):
+        F["early_src"] = enr["early_src"]
 
     # wallets for the research table: bundle, insiders, dev, first 20 buyers
     rows = {(b["wallet"], "bundle"): dict(b, funder=funders.get(b["wallet"])) for b in bundle.values()}
@@ -310,5 +314,5 @@ def analyze(st, cfg, enr=None, tiers=None, now=None):
         got = st.bought.get(r["wallet"]) or r.get("tokens") or 0
         bal = st.balances.get(r["wallet"])
         r["sold_pct"] = round(100 * (1 - bal / got), 1) if got and bal is not None else None
-    a.wallets = list(rows.values())
+    a.wallets = [r for r in rows.values() if not str(r["wallet"]).startswith("unbekannt-")]
     return a

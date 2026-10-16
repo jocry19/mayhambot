@@ -88,7 +88,7 @@ Wünsche an andere Pakete (über den Coordinator):
                                              bundle_sells, socials, authorities, safety
     score    = momentum × (1 − risk/100) × safety_factor   (+20 % Modellwahrscheinlichkeit, wenn vorhanden)
 
-Kauf nur bei `score ≥ SNIPER_MIN_SCORE` (50), `risk ≤ SNIPER_MAX_RISK` (45) und ohne Bundle-, Insider- oder harten Befund.
+Kauf nur bei `score ≥ SNIPER_MIN_SCORE` (40), `risk ≤ SNIPER_MAX_RISK` (45) und ohne Bundle-, Insider- oder harten Befund.
 
 | Flag | wann |
 |---|---|
@@ -138,11 +138,11 @@ entries}` (seit Start), `pump_api_ok`. Beim Beenden wird einmal `connected: fals
 | `SNIPER_PUMP_API_PER_MIN` | 40 | pump.fun-API-Deckel |
 | `SNIPER_DEEP_PER_MIN` | 4 | tief geprüfte Launches je Minute |
 | `SNIPER_DECIDE_SEC` | 20 | erste Entscheidung nach der Erstellung |
-| `SNIPER_MIN_BUYERS` / `SNIPER_MIN_INFLOW_SOL` / `SNIPER_PRESCORE_MIN` | 6 / 1,5 / 30 | Stufe 1 |
+| `SNIPER_MIN_BUYERS` / `SNIPER_MIN_INFLOW_SOL` / `SNIPER_PRESCORE_MIN` | 5 / 1,0 / 25 | Stufe 1 |
 | `SNIPER_BUNDLE_WARN_PCT` / `_BLOCK_PCT` / `_MIN_WALLETS` / `SNIPER_BUNDLE_SLOTS` | 5 / 15 / 3 / 1 | Bundle |
 | `SNIPER_DEV_WARN_PCT` / `_BLOCK_PCT`, `SNIPER_TOP10_WARN_PCT` / `_BLOCK_PCT` | 5 / 20, 30 / 60 | Dev, Konzentration |
 | `SNIPER_DEV_MAX_LAUNCHES_24H` | 3 | Serien-Launcher |
-| `SNIPER_MIN_SCORE` / `SNIPER_MAX_RISK` | 50 / 45 | Kaufschwelle |
+| `SNIPER_MIN_SCORE` / `SNIPER_MAX_RISK` | 40 / 45 | Kaufschwelle |
 | `SNIPER_SAFETY_GATE` / `SNIPER_SAFETY_DEEP` | an / an | Rug-Schutz vor jedem Papier-Kauf |
 | `SNIPER_REQUIRE_LAUNCH_DATA` | an | ohne Slot-Daten kein Kauf |
 | `SNIPER_SIZE_SOL` / `SNIPER_PAPER_START_SOL` / `SNIPER_MAX_OPEN` / `SNIPER_MAX_ENTRIES_PER_HOUR` | 0,1 / 5 / 5 / 12 | Papierkonto |

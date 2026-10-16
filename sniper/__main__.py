@@ -19,10 +19,11 @@ def _print_stats(s):
     if not s.get("available"):
         print("Noch keine Sniper-Daten.")
         return
-    print(f"Letzte {round(s['hours'], 1)} h: {s['launches']} Launches, {s['stage2']} tief geprüft, {s['entered']} Papier-Käufe "
+    span = "Alle Launches" if not s["hours"] else f"Letzte {round(s['hours'], 1)} h"
+    print(f"{span}: {s['launches']} Launches, {s['stage2']} tief geprüft, {s['entered']} Papier-Käufe "
           f"(Bundle {s['bundle_flagged']}, Insider {s['insider_flagged']})")
     c = s["calls_per_deep_launch"]
-    print(f"Kosten pro tief geprüftem Launch: {c['rpc']} RPC-Calls, {c['pump_api']} pump.fun-Calls")
+    print(f"Kosten pro tief geprüftem Launch: {c['rpc']} RPC-Calls, {c['pump_api']} API-/Metadaten-Calls")
     print(f"\n{'Gruppe':<22}{'n':>6}{'1m':>8}{'5m':>8}{'15m':>8}{'60m':>8}{'max60':>8}{'2x':>7}{'Rug':>7}")
     for name, g in (("gekauft", s["groups"]["entered"]), ("tief geprüft, skip", s["groups"]["skipped_deep"]),
                     ("Stufe 1 skip", s["groups"]["skipped_stage1"]), ("alle", s["groups"]["all"])):

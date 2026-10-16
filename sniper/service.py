@@ -35,13 +35,19 @@ class Service:
         if cfg.trade_source == "pumpportal" and not key:
             log.warning("SNIPER_TRADE_SOURCE=pumpportal ohne SNIPER_PUMPPORTAL_API_KEY: PumpPortal liefert Trades "
                         "nur mit aufgeladenem Key, nehme den RPC-Log-Datenstrom")
-        self.logs = rpcws.LogStream(cfg.ws_url, lambda m: self.engine.handle(m, time.time()), cfg.ws_max_subs)
+        self.logs = rpcws.LogStream(cfg.ws_url, self._on_rpc_trade, cfg.ws_max_subs)
         self._warned_reject = False
         self.engine.stream_pools = None if self.trades_via == "pumpportal" else {"pump"}
         self.connected = False
         self.ws_msgs = 0
         self._dex_conn = None
         self._hb_conn = store.connect(db_path)
+
+    def _on_rpc_trade(self, m):
+        now = time.time()
+        if self.record:  # same format as PumpPortal lines, so replay sees the RPC trades too
+            self.record.write(json.dumps({"t": round(now, 3), "m": json.dumps(m)}) + "\n")
+        self.engine.handle(m, now)
 
     def sol_usd(self):
         """Cached SOL price; never blocks (the event loop calls this). Refreshed by sol_round."""
@@ -208,7 +214,7 @@ class Service:
             n = len(e.launches)
         c = e.counters
         log.info("Stand: %d Launches, %d Trades, %d Migrationen | Stufe 1: %d, tief geprüft: %d, Käufe: %d | "
-                 "%d im Speicher, %d im Trade-Abo (%s, RPC-Logs %d Abos), Warteschlange %d | Calls gesamt RPC %d, pump.fun %d | offen %d, "
+                 "%d im Speicher, %d im Trade-Abo (%s, RPC-Logs %d Abos), Warteschlange %d | Calls gesamt RPC %d, API/Metadaten %d | offen %d, "
                  "Papier-Guthaben %.3f SOL", c["creates"], c["trades"], c["migrations"], c["stage1"], c["stage2"],
                  c["entries"], n, subs, self.trades_via, len(self.logs.subs), self.q.qsize(), self.budget.total["rpc"], self.budget.total["api"],
                  len(e.book.open), e.book.balance(self.conn))

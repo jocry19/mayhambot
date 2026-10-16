@@ -235,6 +235,7 @@ class Enricher:
                     break
                 except Exception as e:  # noqa: BLE001
                     enr["errors"].append(f"funder {w[:6]}: {e}"[:160])
+                    log.info("Geldquelle %s nicht auflösbar: %s", w[:8], str(e)[:120])
         enr["funders"] = funders
 
         # model probability, when model/ is trained and knows something about the coin
@@ -275,7 +276,7 @@ class Enricher:
         for e in early:
             if e["side"] == "buy" and e["wallet"] != st.creator and e["wallet"] not in out:
                 out.append(e["wallet"])
-        return out[:40]
+        return [w for w in out if not w.startswith("unbekannt-")][:40]
 
     def _rpc_early(self, f, st, enr):
         sigs = f.rpc("getSignaturesForAddress", [st.mint, {"limit": 1000}]) or []
