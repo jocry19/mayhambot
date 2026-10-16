@@ -18,6 +18,8 @@ from .plans import BY_NAME
 log = logging.getLogger("brain.trader")
 
 DEDUP_S = 6 * 3600  # one opportunity per (whale entity or kind, coin) in this window: repeat buys are no new idea
+REENTRY_S = 6 * 3600  # no second brain position in a coin within this window: a coin we just lost on is no new idea
+FLIP_MAX = 0.6  # wallets that sell this share of their buys within FLIP_S are gone before a copy can follow
 NO_MARKET_S = 15 * 60  # an open position without any price this long is closed as "kein Markt"
 RUG_LIQ_DROP = 0.8
 INFLOW_DROP = 0.6  # 5-min buys under this share of their peak while in profit: the rush is over
@@ -159,7 +161,7 @@ class Trader:
         block = None
         wanted = d.enter and not d.explore  # convinced before the hard gates: what the honest score judges
         if d.enter:
-            block = self._gate(kind, row["mint"], snap, d)
+            block = self._gate(kind, row["mint"], snap, d, row, raw)
         if block:
             d.enter = False
         note = decide.note(kind, raw, symbol, d, block or "")
@@ -178,7 +180,7 @@ class Trader:
             return None
         return self.open(opp_id, kind, row, snap, d, note, symbol)
 
-    def _gate(self, kind: str, mint: str, snap, d) -> str | None:
+    def _gate(self, kind: str, mint: str, snap, d, row=None, raw=None) -> str | None:
         """Hard limits the model never overrides: a market to trade, the rug check, risk limits."""
         if snap is None or not snap.price_sol:
             return "kein Marktpreis"
@@ -187,6 +189,16 @@ class Trader:
         c = self.conn
         if c.execute("SELECT 1 FROM brain_positions WHERE mint=? AND status='open'", (mint,)).fetchone():
             return "schon eine offene Position in diesem Coin"
+        if c.execute("SELECT 1 FROM brain_positions WHERE mint=? AND opened_at>=?",
+                     (mint, int(self.clock() - REENTRY_S))).fetchone():
+            return "Coin in den letzten 6 h schon gehandelt"
+        if kind == "whale" and row is not None:
+            if c.execute("SELECT 1 FROM ct_swaps WHERE wallet=? AND mint=? AND side='sell' AND ts>=?",
+                         (row["wallet"], mint, row["ts"])).fetchone():
+                return "Wal hat schon wieder verkauft"
+            fl = (raw or {}).get("flip") or {}
+            if fl.get("n", 0) >= 5 and fl.get("share", 0) >= FLIP_MAX:
+                return f"Wal verkauft meist sofort wieder ({fl['share']:.0%} seiner Käufe binnen 2 min)"
         n_open = c.execute("SELECT COUNT(*) FROM brain_positions WHERE status='open'").fetchone()[0]
         if n_open >= self.s.max_open:
             return f"schon {n_open} Positionen offen"

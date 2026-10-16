@@ -216,6 +216,59 @@ def test_whale_sell_and_rug_exits(conn, s):
     assert conn.execute("SELECT exit_reason FROM brain_positions").fetchone()[0] == "whale"
 
 
+def sell(conn, sig, wallet=WHALE, mint=MINT, ts=None):
+    ts = int(ts or time.time())
+    conn.execute("INSERT INTO ct_swaps VALUES (?,?,?,?,?,?,?,?,?)", (sig, wallet, mint, "sell", ts, 1e6, 3, 1e-6, ts))
+
+
+def test_no_copy_when_the_whale_is_already_out_or_flips(conn, s):
+    set_tier(conn, WHALE, "ultra")
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    t = make_trader(conn, s, trained(), mk)
+    t.scan()
+    now = int(time.time())
+    add_whale_buy(conn, "early", ts=now - 20)
+    sell(conn, "out", ts=now - 5)  # sold again before we could decide
+    t.scan()
+    o = conn.execute("SELECT decision, note FROM brain_opps").fetchone()
+    assert o["decision"] == "skip" and "schon wieder verkauft" in o["note"]
+    # a wallet that sells most coins within two minutes: no copy, and its habit is a token the model learns from
+    w2 = "Flip111111111111111111111111111111111111111"
+    set_tier(conn, w2, "ultra")
+    for i in range(6):
+        m = f"Old{i}" + "1" * 40
+        add_whale_buy(conn, f"fb{i}", wallet=w2, mint=m, ts=now - 3600 * (i + 1))
+        sell(conn, f"fs{i}", wallet=w2, mint=m, ts=now - 3600 * (i + 1) + 40)
+    t.scan()  # cursor past the history
+    add_whale_buy(conn, "flipbuy", wallet=w2)
+    t.scan()
+    o = conn.execute("SELECT decision, note, features FROM brain_opps WHERE ref='flipbuy'").fetchone()
+    assert o["decision"] == "skip" and "sofort wieder" in o["note"]
+    assert json.loads(o["features"])["flip"] == ">50%"
+    assert conn.execute("SELECT COUNT(*) FROM brain_positions").fetchone()[0] == 0
+
+
+def test_no_rebuy_of_a_coin_just_traded(conn, s):
+    set_tier(conn, WHALE, "ultra")
+    w2 = "Whale22222222222222222222222222222222222222"
+    set_tier(conn, w2, "ultra")
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    t = make_trader(conn, s, trained(), mk)
+    t.scan()
+    add_whale_buy(conn, "a")
+    t.scan()
+    sell(conn, "a_out")
+    t.manage()
+    assert conn.execute("SELECT status FROM brain_positions").fetchone()[0] == "closed"
+    add_whale_buy(conn, "b", wallet=w2)  # another whale, same coin, minutes later
+    t.scan()
+    o = conn.execute("SELECT decision, note FROM brain_opps WHERE ref='b'").fetchone()
+    assert o["decision"] == "skip" and "6 h schon gehandelt" in o["note"]
+    assert conn.execute("SELECT COUNT(*) FROM brain_positions").fetchone()[0] == 1
+
+
 def test_signal_and_launch_are_opportunities(conn, s):
     mk = Market()
     m2 = "Mint3333333333333333333333333333333333333333"

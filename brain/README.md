@@ -26,7 +26,10 @@ Teil der Entscheidung: Ziel, Stop, Trailing, Haltezeit, „Ansturm vorbei“, un
 
 Harte Grenzen, die das Modell nie übergeht: Marktpreis vorhanden, Liquidität ≥ `BRAIN_MIN_LIQ_USD`, Rug-Prüfung
 (`safety.assess` quick, ohne Ergebnis kein Kauf), eine Position je Coin, `BRAIN_MAX_OPEN`, Tagesverlust
-`BRAIN_MAX_DAILY_LOSS_SOL`, Guthaben.
+`BRAIN_MAX_DAILY_LOSS_SOL`, Guthaben. Dazu bei Wal-Käufen: kein Kopieren, wenn der Wal schon wieder verkauft hat
+oder meist binnen 2 min wieder raus ist (≥ 60 % seiner letzten Käufe, mindestens 5), und kein zweiter Kauf in einem
+Coin, den das Hirn in den letzten 6 h schon gehandelt hat. Die Flip-Quote des Wals ist zusätzlich ein Merkmal
+(`flip`), aus dem das Modell lernt.
 
 Jede Entscheidung schreibt 2 bis 4 Zeilen Begründung (`brain_opps.note`), zum Beispiel:
 
