@@ -817,3 +817,29 @@ def test_exploration_whale_copy_from_lower_liquidity(env, monkeypatch):
     conn.execute("DELETE FROM ct_positions")
     state["snap"] = dataclasses.replace(state["snap"], liquidity_usd=2000)
     assert st.on_whale_buy(chain.Swap("sigY", W, int(time.time()) - 5, "buy", MINT, 1e6, 1.0, 3e-6)) is None
+
+
+def test_paper_target_needs_a_sellable_price_and_slippage_survives_a_restart(env, monkeypatch):
+    import dataclasses
+    import json as _json
+
+    from copytrade import execution
+
+    s, conn, ex, state = env
+    store.set_state(conn, "paper_adverse", _json.dumps({"adverse": 0.0075}))
+    monkeypatch.delenv("CT_PAPER_ADVERSE_SLIPPAGE", raising=False)
+    monkeypatch.setattr(execution, "_adverse", 0.02)
+    st = strategy.Strategy(conn, s, ex)
+    assert execution.paper_adverse() == pytest.approx(0.0075)  # measured value, not the 2 % default
+    pid = st.on_whale_buy(whale_buy())
+    p = conn.execute("SELECT * FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    assert _json.loads(p["meta"])["adverse"] == pytest.approx(0.0075)
+    state["snap"] = dataclasses.replace(state["snap"], price_sol=p["entry_price_sol"] * (1 + p["take_profit"] + 0.05))
+    quote = {"outAmount": str(int(p["entry_cost_sol"] * 0.95 * 1e9))}  # mid says target, a sell would lose 5 %
+    monkeypatch.setattr(market, "jupiter_quote", lambda *a, **k: quote)
+    st.update()
+    assert conn.execute("SELECT status FROM ct_positions WHERE id=?", (pid,)).fetchone()[0] == "open"
+    quote["outAmount"] = str(int(p["entry_cost_sol"] * (1 + p["take_profit"]) * 1e9))
+    st.update()
+    p = conn.execute("SELECT * FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    assert p["status"] == "closed" and p["exit_reason"] == "target" and p["pnl_sol"] > 0

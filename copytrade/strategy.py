@@ -84,6 +84,16 @@ class Strategy:
         self._noroute: dict[int, float] = {}  # last 'no sell route' alarm per live position
         self._pending: list[tuple[float, Swap]] = []  # whale buys waiting for the learned entry delay
         control.init(conn)
+        try:  # the measured paper slippage from the last learning round, before the first buy after a restart
+            # (10/2026: auto-updates restart the app often, and buys before the first maintenance round were
+            # booked with the 2 % default instead of the measured 0.75 %)
+            from .execution import set_paper_adverse
+
+            cal = json.loads(store.get_state(conn, "paper_adverse") or "{}")
+            if cal.get("adverse"):
+                set_paper_adverse(float(cal["adverse"]))
+        except Exception as e:
+            log.debug("paper slippage from state failed: %s", e)
         try:  # a sell that never finished (crash mid-close): back to open so the exits can retry
             conn.execute("UPDATE ct_positions SET status='open', closed_at=NULL WHERE status='closing' AND closed_at<?",
                          (int(time.time()) - 300,))
@@ -747,9 +757,23 @@ class Strategy:
                 reason = "smart_exit"
             elif (now - p["opened_at"]) / 60 >= p["max_hold_min"]:
                 reason = "time"
+            if reason == "target" and p["mode"] in PAPER_MODES and not self._target_confirmed(p):
+                reason = None  # trailing stop, stop and time limit still apply
             if reason:
                 self._exit(p, snap, reason)
         self.conn.commit()
+
+    def _target_confirmed(self, p) -> bool:
+        """Paper targets are judged on the screener's mid price; confirm with what a sell would bring (one Jupiter
+        quote, only when the target fires). 10/2026: a 'target' exit was booked at -7 % because the mid price ran
+        ahead of the sellable price. Without a quote the mid price decides, as before."""
+        from .config import SOL_MINT
+
+        q = market.jupiter_quote(self.s, p["mint"], SOL_MINT, int(p["tokens"] * 10 ** (p["token_decimals"] or 6)))
+        if not q or int(q.get("outAmount", 0)) <= 0:
+            return True
+        gain = int(q["outAmount"]) / 1e9 / (p["entry_cost_sol"] or p["size_sol"]) - 1
+        return gain >= p["take_profit"] * 0.8  # quote vs mid: a little of the spread is allowed
 
     # ------------------------------------------------------------------ commands from dashboard / terminal
     def process_commands(self) -> int:
