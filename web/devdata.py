@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import random
 import sqlite3
 import sys
@@ -26,6 +27,14 @@ B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 def _addr(r):
     return "".join(r.choice(B58) for _ in range(44))
 
+
+
+def _named(conn, sql: str) -> str:
+    """Positional INSERT -> named columns (the first N of the table), so columns other packages append later
+    never break the demo DB: "INSERT INTO t VALUES (?,?)" -> "INSERT INTO t(a,b) VALUES (?,?)"."""
+    m = re.match(r"(INSERT (?:OR \w+ )?INTO )(\w+)( VALUES \(([?,]+)\))", sql)
+    cols = [c[1] for c in conn.execute(f"PRAGMA table_info({m.group(2)})")][: m.group(4).count("?")]
+    return f"{m.group(1)}{m.group(2)}({','.join(cols)}){m.group(3)}"
 
 def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wallets: int = 700) -> str:
     try:
@@ -131,7 +140,7 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
                 sig_i += 1
                 trades.append((f"sig{sig_i}", w["address"], tok["mint"], side, t + r.randint(0, 59),
                                usd / p, usd / sol, usd, p * r.uniform(0.995, 1.005), "geckoterminal"))
-    conn.executemany("INSERT OR IGNORE INTO trades VALUES (?,?,?,?,?,?,?,?,?,?)", trades)
+    conn.executemany(_named(conn, "INSERT OR IGNORE INTO trades VALUES (?,?,?,?,?,?,?,?,?,?)"), trades)
 
     # tokens table + snapshots
     for tok in tokens:
@@ -147,7 +156,7 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
                      (tok["mint"], tok["symbol"], tok["symbol"].title() + " Coin", _addr(r), "raydium", last, last * 1e9,
                       last * 1e9 * r.uniform(0.08, 0.2), tok["born"], (last / p5 - 1) * 100, (last / p1h - 1) * 100,
                       (last / p24 - 1) * 100, r.uniform(5e3, 4e5), tok["born"], now))
-        conn.executemany("INSERT OR REPLACE INTO token_prices VALUES (?,?,?,?,?)",
+        conn.executemany(_named(conn, "INSERT OR REPLACE INTO token_prices VALUES (?,?,?,?,?)"),
                          [(tok["mint"], t, p, p * 1e9, p * 1e9 * 0.12) for t, p in tok["pts"][::5]])
 
     # wallets tables
@@ -173,7 +182,7 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
             d["sell"] += t[7]
             d["st"] += t[5]
     tokp = {tok["mint"]: tok["pts"][-1][1] for tok in tokens if tok["pts"]}
-    conn.executemany("INSERT OR REPLACE INTO wallet_positions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.executemany(_named(conn, "INSERT OR REPLACE INTO wallet_positions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"),
                      [(k[0], k[1], d["buy"], d["sell"], d["bt"], d["st"], d["sell"] - d["buy"] * min(1, d["st"] / d["bt"]) if d["bt"] else 0,
                        max(0, d["bt"] - d["st"]) * tokp.get(k[1], 0), (d["sell"] / d["buy"] - 1) if d["buy"] else None,
                        d["first"], d["fp"], r.uniform(1, 6), d["n"]) for k, d in pos.items()])
@@ -195,6 +204,12 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
                         top10_n=4 * v, top10_median_max_ret=1.1, precision_p50=[.5 + .03 * v, 3 * v], quintiles=q,
                         learned_share=min(1, .2 * v))
         metrics = {"15m": hm(auc - .03, .22), "1h": hm(auc, .18), "6h": hm(auc - .02, .12),
+                   "selection": {h: dict(status="selected", chosen={"algo": "gbm" if (h == "1h" and v >= 4) else "logistic",
+                                                                    "drop": "crowd" if h == "6h" and v > 2 else None},
+                                         why="neuer Sieger" if (h == "1h" and v == 4) else "Champion bleibt (kein Kandidat klar besser)",
+                                         n=120 * v, pos=22 * v, n_train=84 * v, n_test=36 * v, base_logloss=.48,
+                                         holdout=dict(logloss=round(.46 - .01 * v, 3), auc=round(auc, 3)))
+                                 for h in ("15m", "1h", "6h")},
                    "tier_forward": {t: dict(n=30 * v, pump_rate=pr + .01 * v, ci_low=pr - .08, ci_high=pr + .1, median_max_ret=pr * 2)
                                     for t, pr in (("ultra", .41), ("smart", .29), ("good", .2), ("none", .1))}}
         coef = [round(x + .03 * v, 3) for x in (.9, .5, .2, .25, .15, .05, .2, .01, .08, -.35, -.1, -.8, -.01, -.3, .1, .03, .2)]
@@ -204,23 +219,31 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
                       json.dumps({"weights": {"win": .22 - .01 * v, "early": .18 + .015 * v, "roi": .15, "consistency": .1,
                                               "timing": .12 + .01 * v, "influence": .13 + .006 * v, "rug_avoid": .1 - .005 * v},
                                   "info": {"n": 50 * v, "learned": v > 1}}),
-                      json.dumps({h: {"kind": "logistic" if v > 1 else "prior", "bias": -1.8, "coef": coef, "n": 120 * v, "pos": 22 * v}
+                      json.dumps({h: {"kind": "logistic" if v > 1 else "prior", "bias": -1.8, "coef": coef, "n": 120 * v, "pos": 22 * v,
+                                      "cfg": {"algo": "gbm" if (h == "1h" and v >= 4) else "logistic", "drop": "crowd" if h == "6h" and v > 2 else None}}
                                   for h in ("15m", "1h", "6h")}),
                       json.dumps({"ultra": {"min_score": 72}, "smart": {"min_score": 60}, "good": {"min_score": 48}}),
                       json.dumps(metrics), f"Retrain {v}: walk-forward, {120 * v} Events"))
         sample = r.sample(tiered, min(len(tiered), tc["ultra"] + tc["smart"] + tc["good"]))
         for w in sample:
-            conn.execute("INSERT OR REPLACE INTO model_tier_history VALUES (?,?,?,?)",
+            conn.execute(_named(conn, "INSERT OR REPLACE INTO model_tier_history VALUES (?,?,?,?)"),
                          (v, w["address"], w["tier"], w["score"] - (n_versions - v) * r.uniform(0, 2)))
+    mws_extra = "exit_capture" in {c[1] for c in conn.execute("PRAGMA table_info(model_wallet_stats)")}
     for w in wallets:
         if w["score"] < 30 and not w["tier"]:
             continue
         comp = {k: round(r.uniform(.2, 1) * (w["score"] / 100), 3) for k in ("win", "early", "roi", "consistency", "timing", "influence", "rug_avoid")}
-        conn.execute("""INSERT OR REPLACE INTO model_wallet_stats VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                     (w["address"], n_versions, now - 1800, w["tier"], w["score"], w["n_tokens"], w["win_rate"],
-                      w["early_rate"], w["roi"], w["pnl"] * .8, w["pnl"], r.uniform(2e4, 4e5), r.uniform(3, 60),
-                      w["influence_followers"], w["influence_usd"], w["influence_usd"] * r.uniform(.3, 1.2),
-                      r.uniform(.3, .9), r.uniform(0, .2), json.dumps(comp)))
+        cols = ["address", "version", "ts", "tier", "score", "n_tokens", "win_rate", "early_rate", "roi", "realized_pnl_usd",
+                "total_pnl_usd", "median_entry_mcap", "median_min_to_2x", "influence_followers", "influence_usd",
+                "inflow_lift_usd", "consistency", "rug_rate", "components_json"]
+        vals = [w["address"], n_versions, now - 1800, w["tier"], w["score"], w["n_tokens"], w["win_rate"],
+                w["early_rate"], w["roi"], w["pnl"] * .8, w["pnl"], r.uniform(2e4, 4e5), r.uniform(3, 60),
+                w["influence_followers"], w["influence_usd"], w["influence_usd"] * r.uniform(.3, 1.2),
+                r.uniform(.3, .9), r.uniform(0, .2), json.dumps(comp)]
+        if mws_extra:  # newer research schema: cluster_id, exit_capture, median_hold_min
+            cols += ["cluster_id", "exit_capture", "median_hold_min"]
+            vals += [f"c{r.randint(1, 6)}" if r.random() < .15 else None, r.uniform(.35, .9), r.uniform(4, 180)]
+        conn.execute(f"INSERT OR REPLACE INTO model_wallet_stats({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", vals)
 
     # ------------------------------------------------------------------ signal metrics + signals (+ predictions)
     by_mint = defaultdict(list)
@@ -313,14 +336,14 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
         hit = {"ultra": .62, "smart": .5, "good": .4}.get(w["tier"], .3) + r.uniform(-.1, .1)
         fp = r.uniform(.3, 1.4)
         ev = (hit * fp * .6 - (1 - hit) * .18) * r.uniform(.7, 1.1)
-        conn.execute("INSERT OR REPLACE INTO ct_wallet_rank VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        conn.execute(_named(conn, "INSERT OR REPLACE INTO ct_wallet_rank VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"),
                      (w["address"], n, hit, fp, r.uniform(2, 25), r.uniform(.3, 6), fp * .6, -.18, ev, ev * n / (n + 5),
                       min(1.5, max(.15, .7 * fp)), r.uniform(15, 90), now - 600))
         for _ in range(n):
             ts = r.randint(t_start, now - 3600)
             pumped = r.random() < hit
             g = r.uniform(.25, 3) if pumped else r.uniform(0, .2)
-            conn.execute("INSERT OR REPLACE INTO ct_buy_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            conn.execute(_named(conn, "INSERT OR REPLACE INTO ct_buy_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"),
                          (_addr(r), w["address"], r.choice(tokens)["mint"], ts, r.uniform(2, 30), "", 1e-5, 1.02e-5, g,
                           r.uniform(.5, 30), g * r.uniform(1, 1.8), r.uniform(1, 60), r.uniform(0, 20), r.uniform(-1, 8),
                           (g * .6 if pumped else -r.uniform(.05, .2)), 1 if pumped else 0, r.randint(30, 120), now))
@@ -360,8 +383,8 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
         conn.execute("INSERT INTO ct_alerts(ts, strategy, mint, symbol, wallet, price_sol, price_usd, mcap_usd, score, action, reason, position_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                      (t, strat, tok["mint"], tok["symbol"], w["address"] if w else "", p_in / sol, p_in, p_in * 1e9,
                       r.uniform(50, 95), "bought", "Wal-Kauf 4.2 SOL, Wal-Score 0.31" if w else "Signal-Score 74, 4 Smart Wallets", pid))
-        conn.execute("INSERT INTO ct_events VALUES (?,?,?,?,?)", (t, "info", "buy", f"KAUF [{strat}/paper] {tok['symbol']} {size:.2f} SOL", None))
-        conn.execute("INSERT INTO ct_events VALUES (?,?,?,?,?)", (closed_at, "info", "sell", f"VERKAUF [{strat}/paper] {tok['symbol']} {pct:+.1%}", None))
+        conn.execute(_named(conn, "INSERT INTO ct_events VALUES (?,?,?,?,?)"), (t, "info", "buy", f"KAUF [{strat}/paper] {tok['symbol']} {size:.2f} SOL", None))
+        conn.execute(_named(conn, "INSERT INTO ct_events VALUES (?,?,?,?,?)"), (closed_at, "info", "sell", f"VERKAUF [{strat}/paper] {tok['symbol']} {pct:+.1%}", None))
     # equity every 10 min
     closed_pnl.sort()
     acc, k = 10.0, 0
@@ -370,7 +393,7 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
             acc += closed_pnl[k][1]
             k += 1
         eq_points.append((ts, "paper", acc, 0.0, acc))
-    conn.executemany("INSERT OR REPLACE INTO ct_equity VALUES (?,?,?,?,?)", eq_points)
+    conn.executemany(_named(conn, "INSERT OR REPLACE INTO ct_equity VALUES (?,?,?,?,?)"), eq_points)
     ct_store.set_state(conn, "paper_balance_sol", bal)
     # open positions
     for strat, managed, hint in (("whale", "auto", None), ("signal", "semi", "target"), ("signal", "auto", None)):
@@ -384,7 +407,7 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
                      ("paper", strat, managed, w["address"] if w else "", tok["mint"], tok["symbol"], now - 900 if w else None, now - 880,
                       p_in / sol, p_in, p_in * 1e9, .5, .5 * sol / p_in, 6, .5, .35, .2, 60, max(p_in, p_now) / sol, p_now / sol, p_now,
                       p_now * 1e9, "open", hint, now - 60 if hint else None, json.dumps({"fill_source": "jupiter"})))
-    conn.execute("INSERT INTO ct_events VALUES (?,?,?,?,?)", (now - 60, "info", "hint", "VERKAUFS-HINWEIS: Ziel erreicht", None))
+    conn.execute(_named(conn, "INSERT INTO ct_events VALUES (?,?,?,?,?)"), (now - 60, "info", "hint", "VERKAUFS-HINWEIS: Ziel erreicht", None))
     control.set_mode(conn, "signal", "semi")
     try:
         from research.events import FEATURE_LABELS, FEATURE_NAMES
@@ -406,6 +429,11 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
                                   "direction": "höher = besser" if d_ >= 0 else "niedriger = besser"}
                                  for f, d_ in zip(FEATURE_NAMES, [.17, .12, .05, .15, .1, .03, .11, .06, .09, -.12, -.04, -.1, .02, -.05, .03, .01, .04])),
                                 key=lambda d: -d["power"]),
+           "paper": {"signals": [dict(grade=g, n=nn, hit_50=hr, median_max_ret_1h=mx, median_ret_1h=md)
+                                 for g, nn, hr, mx, md in (("A", 9, .56, .74, .21), ("B", 21, .38, .41, .06), ("C", 34, .24, .22, -.02),
+                                                           ("D", 48, .13, .1, -.06), ("E", 70, .06, .04, -.09))],
+                     "paper": [dict(mode="paper", grade=g, n=nn, win_rate=wr, avg_pnl_pct=ap, pnl_sol=ap * nn * .5)
+                               for g, nn, wr, ap in (("A", 7, .71, .29), ("B", 15, .6, .14), ("C", 12, .5, .03), ("ohne Signal", 64, .55, .08))]},
            "tier_profiles": {t: dict(n=nn, win_rate=wr, roi=ro, pnl=pn, entry_mcap=em, followers=fo, min_to_2x=m2)
                              for t, nn, wr, ro, pn, em, fo, m2 in (("ultra", 14, .61, 2.4, 410000, 62000, 31, 14), ("smart", 45, .47, 1.1, 520000, 140000, 12, 28),
                                                                    ("good", 110, .34, .45, 300000, 260000, 4, 45))}}

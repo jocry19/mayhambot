@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { EChart, baseOption, catAxis, tierColor, tipRow, valueAxis } from "../chart.jsx";
-import { TIER_LABEL, TIER_SOURCE, dt, mc, n, pct, pctSigned, usePoll } from "../lib.js";
-import { Bars, Callout, Card, Empty, Legend, Markdown, Seg, Table, Tile } from "../ui.jsx";
+import { ALGO_LABEL, DROP_LABEL, TIER_LABEL, TIER_SOURCE, dt, mc, n, pct, pctSigned, sign, solSigned, usePoll } from "../lib.js";
+import { Bars, Callout, Card, Delta, Empty, Legend, Markdown, Seg, Table, Tile } from "../ui.jsx";
 
 const COMP = { win: "Trefferquote", early: "Frühe Einstiege", roi: "ROI", consistency: "Konstanz", timing: "Timing", influence: "Einfluss", rug_avoid: "Rugs meiden" };
 
@@ -19,6 +19,33 @@ function RateBars({ rows, keyName = "bucket", height = 210 }) {
           data: rows.map((r) => ({ value: r.rate, itemStyle: { color: c.s[0], borderRadius: [4, 4, 0, 0], opacity: r.n < 8 ? 0.5 : 1 } })),
           label: { show: true, position: "top", color: c.muted, fontSize: 11, formatter: (p) => `n=${rows[p.dataIndex].n}` } }],
       })} />
+  );
+}
+
+function PaperVsSignals({ p }) {
+  if (!p || (!p.signals?.length && !p.paper?.length)) return <Empty>Noch keine ausgewerteten Prognosen oder Papier-Trades</Empty>;
+  return (
+    <>
+      {p.signals?.length > 0 && (
+        <Table rows={p.signals} rowKey={(r) => r.grade} cols={[
+          { k: "grade", l: "Note" },
+          { k: "n", l: "Prognosen", r: true },
+          { k: "hit_50", l: "+50 % in 1 h", r: true, fmt: (r) => pct(r.hit_50) },
+          { k: "median_max_ret_1h", l: "Median Max 1 h", r: true, fmt: (r) => <Delta v={r.median_max_ret_1h} d={0} arrow={false} /> },
+          { k: "median_ret_1h", l: "Median nach 1 h", r: true, fmt: (r) => <Delta v={r.median_ret_1h} d={0} arrow={false} /> },
+        ]} />
+      )}
+      {p.paper?.length > 0 && (
+        <Table rows={p.paper} rowKey={(r) => `${r.mode}-${r.grade}`} cols={[
+          { k: "mode", l: "Konto", fmt: (r) => (r.mode === "live" ? "Echtgeld" : r.mode === "paper" ? "Papier" : r.mode) },
+          { k: "grade", l: "Note beim Kauf" },
+          { k: "n", l: "Trades", r: true },
+          { k: "win_rate", l: "Gewinner", r: true, fmt: (r) => pct(r.win_rate) },
+          { k: "avg_pnl_pct", l: "Ø Trade", r: true, fmt: (r) => <Delta v={r.avg_pnl_pct} arrow={false} /> },
+          { k: "pnl_sol", l: "Summe", r: true, fmt: (r) => <span className={sign(r.pnl_sol)}>{solSigned(r.pnl_sol, 3)}</span> },
+        ]} />
+      )}
+    </>
   );
 }
 
@@ -41,7 +68,9 @@ export default function Model() {
           <Tile label="Top 10 % der Prognosen" value={v.top10_1h != null ? pct(v.top10_1h) : "–"} sub={v.base_rate_1h != null ? `pumpen, sonst nur ${pct(v.base_rate_1h)}` : "–"} />
           <Tile label="Lern-Events" value={n(v.n_events)} sub={`${n(v.n_test_1h)} davon im Test`} />
           <Tile label="Wallets bewertet" value={n(v.n_wallets)} sub={`${v.tier_counts.ultra || 0} Ultra · ${v.tier_counts.smart || 0} Smart · ${v.tier_counts.good || 0} Good`} />
-          {Object.values(d.research).slice(0, 2).map((r) => <Tile key={r.label} label={r.label} value={n(r.n)} />)}
+          <Tile label="Algorithmus 1 h" value={<span style={{ fontSize: 17 }}>{ALGO_LABEL[v.algo_1h] || v.algo_1h || "–"}</span>}
+            sub={v.selection?.["1h"]?.why || "gewählt nach Test auf ungesehenen Daten"} />
+          {Object.values(d.research).filter((r) => r.n > 0).slice(0, 1).map((r) => <Tile key={r.label} label={r.label} value={n(r.n)} />)}
         </div>
       )}
 
@@ -118,7 +147,8 @@ export default function Model() {
             <>
               <Bars items={v.coefs[h].map((x) => ({ label: x.label, value: x.weight }))} fmt={(x) => n(x, 2)} />
               <div className="dim" style={{ fontSize: 12, marginTop: 8 }}>
-                {v.coefs._kind?.[h]?.kind === "prior" ? "Noch Startwerte (zu wenige Lern-Events)." : `Gelernt aus ${n(v.coefs._kind?.[h]?.n)} Events, ${n(v.coefs._kind?.[h]?.pos)} Pumps.`}
+                {v.coefs._kind?.[h]?.kind === "prior" ? "Noch Startwerte (zu wenige Lern-Events)." : `${ALGO_LABEL[v.coefs._kind?.[h]?.algo] || "Modell"}${v.coefs._kind?.[h]?.drop ? ` ${DROP_LABEL[v.coefs._kind[h].drop] || "ohne " + v.coefs._kind[h].drop}` : ""} · gelernt aus ${n(v.coefs._kind?.[h]?.n)} Events, ${n(v.coefs._kind?.[h]?.pos)} Pumps.`}
+                {v.coefs._kind?.[h]?.algo === "gbm" && " Bei Gradient Boosting: Wichtigkeit je Eingang, die Richtung zeigt die Live-Prognose je Coin."}
               </div>
             </>
           ) : (
@@ -155,6 +185,24 @@ export default function Model() {
           </Card>
         </div>
       )}
+
+      <div className="grid g2">
+        <Card title="Welches Modell gewinnt?" sub="Jeder Kandidat wird auf ungesehenen Daten getestet; der bisherige Sieger bleibt, bis einer klar besser ist" flush>
+          <Table rows={Object.entries(v?.selection || {}).filter(([, x]) => x && x.chosen).map(([hz, x]) => ({ hz, ...x }))} rowKey={(r) => r.hz}
+            empty="Noch keine Modellauswahl (braucht genug Lern-Events)" cols={[
+              { k: "hz", l: "Horizont" },
+              { k: "chosen", l: "Gewählt", fmt: (r) => `${ALGO_LABEL[r.chosen.algo] || r.chosen.algo}${r.chosen.drop ? ` ${DROP_LABEL[r.chosen.drop] || "ohne " + r.chosen.drop}` : ""}`, sort: false },
+              { k: "why", l: "Warum", fmt: (r) => <span className="t2">{r.why}</span> },
+              { k: "n_test", l: "Testfälle", r: true, fmt: (r) => n(r.n_test) },
+              { k: "ll", l: "Fehler (Logloss)", r: true, title: "kleiner ist besser; Vergleich: ohne Modell", sort: (r) => r.holdout?.logloss,
+                fmt: (r) => (r.holdout?.logloss != null ? `${n(r.holdout.logloss, 3)} / ${n(r.base_logloss, 3)}` : "–") },
+              { k: "auc", l: "AUC", r: true, sort: (r) => r.holdout?.auc, fmt: (r) => (r.holdout?.auc != null ? n(r.holdout.auc, 2) : "–") },
+            ]} />
+        </Card>
+        <Card title="Signale gegen Papier-Trading" sub="Was die Noten der Prognosen gebracht haben, und was der Copy-Trader auf denselben Coins verdient hat" flush>
+          <PaperVsSignals p={rep.paper} />
+        </Card>
+      </div>
 
       {rep.tier_profiles && Object.keys(rep.tier_profiles).length > 0 && (
         <Card title="Tier-Profile aus der Forschung" sub="Median je Tier" flush>

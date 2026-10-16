@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { EChart, baseOption, tierColor, timeAxis, tipRow, valueAxis } from "../chart.jsx";
-import { EXIT_LABEL, STRAT_LABEL, TIER_LABEL, TIER_SOURCE, act, ago, dt, go, mc, n, pct, pctSigned, price, sol, solSigned, usd, usdSigned, usePoll } from "../lib.js";
+import { ALGO_LABEL, EXIT_LABEL, STRAT_LABEL, TIER_LABEL, TIER_SOURCE, act, ago, dt, go, mc, n, pct, pctSigned, price, sol, solSigned, usd, usdSigned, usePoll } from "../lib.js";
 import { Breakdown, FlowChart, Outcome, SignalDetail, WalletLink } from "../parts.jsx";
 import { Addr, Callout, Card, Delta, Empty, Icon, Legend, Modal, Score, Seg, Switch, Table, Tier, TierCounts, Tile } from "../ui.jsx";
 import { BuyModal } from "../buy.jsx";
@@ -192,7 +192,7 @@ export default function Coin({ mint, hl }) {
       </div>
 
       {d.prediction_live && !d.prediction_live.error && (
-        <Card title="Live-Prognose des Modells" sub={`Modell v${d.prediction_live.version ?? "?"} · jetzt berechnet`}>
+        <Card title="Live-Prognose des Modells" sub={`Modell v${d.prediction_live.version ?? "?"}${d.prediction_live.algo ? ` · ${ALGO_LABEL[d.prediction_live.algo] || d.prediction_live.algo}` : ""} · jetzt berechnet`}>
           <div className="grid g-wide-right">
             <div className="col">
               <div className="row" style={{ gap: 18 }}>

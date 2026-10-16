@@ -587,7 +587,7 @@ def _live_prediction(mint):
         return None
     try:
         r = cache.get(("score_token", mint), 60, lambda: score_token(mint))
-        return _norm_prediction({"id": 0, "ts": r.get("ts"), "mint": mint, "symbol": "", "score": r.get("score"),
+        out = _norm_prediction({"id": 0, "ts": r.get("ts"), "mint": mint, "symbol": "", "score": r.get("score"),
                                  "p_15m": (r.get("horizons", {}).get("15m") or {}).get("p_pump"),
                                  "p_1h": (r.get("horizons", {}).get("1h") or {}).get("p_pump"),
                                  "p_6h": (r.get("horizons", {}).get("6h") or {}).get("p_pump"),
@@ -600,13 +600,16 @@ def _live_prediction(mint):
                                  "contributions_json": json.dumps(r.get("contributions") or {}),
                                  "wallets_json": json.dumps(r.get("wallets") or []),
                                  "features_json": json.dumps(r.get("features") or {}), "version": r.get("version")}, 0)
+        out["algo"] = (r.get("horizons", {}).get("1h") or {}).get("algo")
+        return out
     except Exception as e:  # never break the coin page because of the model
         return {"error": str(e)[:200]}
 
 
 # ====================================================================== wallets
 WALLET_SORTS = {"score", "win_rate", "roi", "total_pnl_usd", "influence_followers", "influence_usd",
-                "inflow_lift_usd", "n_tokens", "early_rate", "last_trade_ts", "copy_score"}
+                "inflow_lift_usd", "n_tokens", "early_rate", "last_trade_ts", "copy_score", "exit_capture",
+                "median_hold_min"}
 
 
 def _fallback_influence(conn, addresses, window_s=600):
@@ -662,7 +665,8 @@ def wallets(conn, tier=None, sort="score", q=None, limit=200, offset=0, include_
             out.append({**{k: b.get(k) for k in ("address", "tier", "score", "n_tokens", "win_rate", "early_rate", "roi",
                                                   "realized_pnl_usd", "total_pnl_usd", "median_entry_mcap",
                                                   "median_min_to_2x", "influence_followers", "influence_usd",
-                                                  "inflow_lift_usd", "consistency", "rug_rate")},
+                                                  "inflow_lift_usd", "consistency", "rug_rate", "cluster_id",
+                                                  "exit_capture", "median_hold_min")},
                         "components": comp, "last_trade_ts": lt.get(b["address"])})
     else:
         if not has(conn, "wallets"):
@@ -963,12 +967,16 @@ def _norm_version(r):
         elif isinstance(c, dict):
             coefs[h] = sorted(({"feature": f, "label": labels.get(f, f), "weight": _f(w, 4)} for f, w in c.items()),
                               key=lambda d: -abs(d["weight"] or 0))
-        coefs.setdefault("_kind", {})[h] = {"kind": (m or {}).get("kind"), "n": (m or {}).get("n"), "pos": (m or {}).get("pos")}
+        cfg = (m or {}).get("cfg") or {}
+        coefs.setdefault("_kind", {})[h] = {"kind": (m or {}).get("kind"), "n": (m or {}).get("n"), "pos": (m or {}).get("pos"),
+                                            "algo": cfg.get("algo") or (m or {}).get("kind"), "drop": cfg.get("drop")}
     h1 = metrics.get("1h") or {}
     return {"id": r["id"], "ts": r["ts"], "active": bool(r.get("active")), "n_events": r.get("n_events"),
             "n_wallets": r.get("n_wallets"), "tier_counts": _j(r.get("tier_counts_json"), {}) or {},
             "wallet_weights": {k: _f(v, 4) for k, v in weights.items() if isinstance(v, (int, float))},
             "coefs": coefs, "metrics": metrics, "tier_rules": _j(r.get("tier_rules_json"), {}),
+            "algo_1h": ((coefs.get("_kind") or {}).get("1h") or {}).get("algo"),
+            "selection": metrics.get("selection") or {},
             "auc_1h": _f(h1.get("auc"), 4), "auc_baseline_1h": _f(h1.get("auc_baseline"), 4),
             "top10_1h": _f(h1.get("top10_pump_rate"), 4), "base_rate_1h": _f(h1.get("base_rate"), 4),
             "n_test_1h": h1.get("n"), "notes": r.get("notes")}
@@ -999,6 +1007,17 @@ def model_view(conn):
     if has(conn, "research_tokens"):
         research["pumped_tokens"] = {"label": "davon gepumpt", "n": scalar(conn, "SELECT COUNT(*) FROM research_tokens WHERE pumped=1", default=0)}
     active = next((v for v in reversed(versions) if v["active"]), versions[-1] if versions else None)
+    # gradient boosting has no coefficients in token_model_json: use the report's per-feature weights instead
+    rmodels = ((report or {}).get("data") or {}).get("models") or {}
+    if active and report and report.get("version") == active["id"]:
+        for h, mm in rmodels.items():
+            if not active["coefs"].get(h) and mm.get("weights"):
+                active["coefs"][h] = [{"feature": w.get("feature"), "label": w.get("label"), "weight": _f(w.get("weight"), 4)}
+                                      for w in mm["weights"]]
+            k = active["coefs"].setdefault("_kind", {}).setdefault(h, {})
+            k.setdefault("algo", mm.get("algo"))
+            if not k.get("algo"):
+                k["algo"] = mm.get("algo")
     return {"versions": versions, "active": active, "report": report, "calibration": calib, "research": research,
             "tier_source": tier_source(conn),
             "signal_formula": [{"feature": f, "label": lab, "weight": w} for f, lab, w in

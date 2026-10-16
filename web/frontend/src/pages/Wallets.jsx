@@ -5,7 +5,7 @@ import { HistBars, WalletLink } from "../parts.jsx";
 import { Callout, Card, Empty, Legend, Score, Seg, Table, Tier, Tile } from "../ui.jsx";
 
 const SORTS = [["score", "Score"], ["win_rate", "Trefferquote"], ["roi", "ROI"], ["total_pnl_usd", "Gewinn"],
-  ["influence_followers", "Einfluss"], ["influence_usd", "Erzeugter Inflow"], ["early_rate", "Früh-Quote"], ["copy_score", "Copy-Score"]];
+  ["influence_followers", "Einfluss"], ["influence_usd", "Erzeugter Inflow"], ["early_rate", "Früh-Quote"], ["exit_capture", "Ausstieg"], ["copy_score", "Copy-Score"]];
 
 export default function Wallets() {
   const [tier, setTier] = useState("");
@@ -86,6 +86,9 @@ export default function Wallets() {
             { k: "influence_followers", l: "Einfluss", r: true, title: "Ø Nachkäufer nach ihrem Kauf", fmt: (r) => n(r.influence_followers, 1) },
             { k: "influence_usd", l: "Erzeugter Inflow", r: true, title: "Ø USD, die andere nach ihrem Kauf hineinstecken", fmt: (r) => usd(r.influence_usd) },
             { k: "median_entry_mcap", l: "Einstieg MC", r: true, fmt: (r) => mc(r.median_entry_mcap) },
+            { k: "exit_capture", l: "Ausstieg", r: true, title: "Verkaufspreis als Anteil vom Hoch nach dem Einstieg (Median); 100 % = am Gipfel verkauft", fmt: (r) => (r.exit_capture != null ? pct(r.exit_capture) : "–") },
+            { k: "median_hold_min", l: "Haltedauer", r: true, title: "Median, Minuten", fmt: (r) => (r.median_hold_min != null ? `${n(r.median_hold_min, 0)} min` : "–") },
+            { k: "cluster_id", l: "Gruppe", title: "Wallets, die wiederholt innerhalb von 60 s denselben Coin kaufen (vermutlich ein Akteur)", fmt: (r) => (r.cluster_id ? <span className="badge">{String(r.cluster_id).slice(0, 8)}</span> : <span className="dim">–</span>) },
             { k: "copy_score", l: "Copy-Score", r: true, title: "Erwarteter Gewinn pro Kopie (Copy-Trading-Ranking)", fmt: (r) => (r.copy_score != null ? pct(r.copy_score, 1) : "–") },
             { k: "last_trade_ts", l: "Zuletzt", r: true, fmt: (r) => ago(r.last_trade_ts) },
           ]} />

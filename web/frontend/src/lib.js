@@ -149,6 +149,8 @@ export const TIER_LABEL = { ultra: "Ultra Smart", smart: "Smart", good: "Good", 
 export const TIERS = ["ultra", "smart", "good"];
 export const STRAT_LABEL = { whale: "Modus 1 · Wal-Pumps", signal: "Modus 2 · Signale", manual: "Manuell" };
 export const MODE_LABEL = { off: "Aus", manual: "Manuell", semi: "Halbautomatisch", auto: "Automatisch" };
+export const ALGO_LABEL = { gbm: "Gradient Boosting", logistic: "Logistische Regression", prior: "Startannahme", heuristic: "Heuristik" };
+export const DROP_LABEL = { tiers: "ohne Tier-Eingänge", crowd: "ohne Crowd-Eingänge", price_time: "ohne Preis/Zeit-Eingänge" };
 export const MODE_SHORT = { off: "Aus", manual: "Manuell", semi: "Halbauto", auto: "Auto" };
 export const EXIT_LABEL = {
   target: "Ziel erreicht", inflow_peak: "Copy-Ansturm vorbei", trail: "Trailing-Stop", stop: "Stop-Loss",

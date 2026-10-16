@@ -41,6 +41,9 @@ export default function Wallet({ address }) {
         <Tile label="Gewinn" value={usdSigned(s.total_pnl_usd)} cls={s.total_pnl_usd > 0 ? "up" : "down"} sub={`realisiert ${usdSigned(s.realized_pnl_usd)}`} />
         <Tile label="Einfluss" value={m.influence_followers != null ? n(m.influence_followers, 1) : "–"} sub={m.influence_usd != null ? `Ø Nachkäufer · ${usd(m.influence_usd)} folgen` : "nach Modell-Lauf"} />
         <Tile label="Einstieg typisch" value={mc(m.median_entry_mcap)} sub={m.median_min_to_2x != null ? `${n(m.median_min_to_2x, 0)} min bis 2x (Median)` : "–"} />
+        {(m.exit_capture != null || m.median_hold_min != null) && <Tile label="Ausstieg" value={m.exit_capture != null ? pct(m.exit_capture) : "–"}
+          sub={`vom Hoch erwischt · hält ${m.median_hold_min != null ? `${n(m.median_hold_min, 0)} min` : "–"} (Median)`} />}
+        {m.cluster_id && <Tile label="Gruppe" value={<span className="mono" style={{ fontSize: 15 }}>{String(m.cluster_id).slice(0, 10)}</span>} sub="kauft oft gleichzeitig mit anderen Wallets (vermutlich ein Akteur)" />}
         {cr && <Tile label="Copy-Pump-Quote" value={pct(cr.hit_rate)} sub={`${cr.samples} Käufe · erster Pump ${pct(cr.median_first_pump)}`} />}
       </div>
 
