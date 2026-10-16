@@ -106,5 +106,6 @@ backtest are computed only from trades before each checkpoint.
 | `research_candles` | mint, tf_sec, ts, o, h, l, c, v (OHLCV history, GeckoTerminal) |
 | `research_tokens` | mint PK, pool, supply, created_at, researched_at, early_fetched_at, peak_multiple, pumped, source |
 | `research_wallets` | address PK, discovered_via, priority, first_seen, backfilled_at, n_backfills |
+| `research_funding` | wallet PK, funder, ts, sol, status (found/none/deep), checked_at: who first sent the wallet SOL. Wallets with the same funder join one cluster (n_clusters); funders of ≥ RESEARCH_FUNDING_HUB_MIN wallets count as exchanges and are ignored |
 
 All timestamps unix seconds UTC. Amounts in SOL are converted with the SOL price stored on the trade.

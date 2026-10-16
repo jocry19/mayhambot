@@ -32,6 +32,7 @@ class Dataset:
         self.bots = bots
         self.manual = manual
         self.sol_usd = sol_usd
+        self.funding = {}  # wallet -> (funder, ts) from research.funding
         self.by_mint = defaultdict(list)
         for t in self.trades:
             self.by_mint[t.mint].append(t)
@@ -92,7 +93,13 @@ def load(conn, since_ts=0, mints=None):
         created[r[0]] = min(created.get(r[0], r[1]), r[1])
     bots = {r[0] for r in conn.execute("SELECT address FROM wallets WHERE is_bot=1")}
     manual = {r[0] for r in conn.execute("SELECT address FROM wallets WHERE manual=1")}
-    return Dataset(trades, pidx, created, bots, manual, median(ratios) or 150.0)
+    ds = Dataset(trades, pidx, created, bots, manual, median(ratios) or 150.0)
+    try:
+        ds.funding = {r[0]: (r[1], int(r[2] or 0)) for r in conn.execute(
+            "SELECT wallet, funder, ts FROM research_funding WHERE funder IS NOT NULL")}
+    except Exception:  # noqa: BLE001  (table not created yet)
+        pass
+    return ds
 
 
 def bot_wallets(trades, limit=settings.bot_max_trades_per_token):

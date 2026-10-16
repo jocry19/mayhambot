@@ -185,7 +185,8 @@ def first_buys(ds, a, b):
 
 def clusters(ds, wallets, cutoff, window_s=60, min_shared=2):
     """Group wallets that repeatedly buy the same coin within `window_s` seconds of each other (same entity,
-    bundles, shared signal groups). Returns wallet -> cluster id (smallest member address)."""
+    bundles, shared signal groups), or that were funded by the same address (ds.funding, exchanges/hubs
+    excluded, funding before `cutoff` only). Returns wallet -> cluster id (smallest member address)."""
     wallets = set(wallets)
     pair = {}
     for mint, lst in ds.by_mint.items():
@@ -211,9 +212,25 @@ def clusters(ds, wallets, cutoff, window_s=60, min_shared=2):
             parent[x] = parent.get(parent[x], parent[x])
             x = parent[x]
         return x
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
     for (a, b), c in pair.items():
         if c >= min_shared:
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[max(ra, rb)] = min(ra, rb)
+            union(a, b)
+    funding = getattr(ds, "funding", None) or {}
+    if funding:
+        from research.funding import hubs
+        skip = hubs(funding)
+        by_funder = {}
+        for w in wallets:
+            f = funding.get(w)
+            if f and f[0] not in skip and f[1] < cutoff:
+                by_funder.setdefault(f[0], []).append(w)
+                if f[0] in wallets:
+                    union(w, f[0])
+        for ws in by_funder.values():
+            for w in ws[1:]:
+                union(ws[0], w)
     return {w: find(w) for w in wallets}

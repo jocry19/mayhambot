@@ -79,3 +79,22 @@ def test_stats_helpers():
     assert lo < 0.5 < hi
     m = stats.logistic_fit([[0], [1], [2], [3], [4], [5]], [0, 0, 0, 1, 1, 1], l2=0.1)
     assert stats.logistic_predict(m, [5]) > 0.8 > 0.2 > stats.logistic_predict(m, [0])
+
+
+def test_funding_detection_and_clusters():
+    from research import funding
+    tx = {"blockTime": 50, "meta": {"err": None, "innerInstructions": []},
+          "transaction": {"message": {"instructions": [
+              {"program": "system", "parsed": {"type": "transfer", "info": {
+                  "source": "F", "destination": "A", "lamports": 2_000_000_000}}}]}}}
+    assert funding.funder_in_tx(tx, "A") == ("F", 2_000_000_000)
+    assert funding.funder_in_tx(tx, "B") is None
+    ds = data.Dataset([], None, {}, set(), set(), 150.0)
+    ds.funding = {"A": ("F", 50), "B": ("F", 60), "C": ("G", 70), "D": ("F", 9999)}
+    cl = wallet_stats.clusters(ds, ["A", "B", "C", "D"], cutoff=1000)
+    assert cl["A"] == cl["B"] != cl["C"]
+    assert cl["D"] == "D"  # funded after the cutoff: not visible yet
+    ds.funding.update({f"H{i}": ("HUB", 1) for i in range(20)})
+    ds.funding.update({"A": ("HUB", 1), "B": ("HUB", 1)})
+    cl = wallet_stats.clusters(ds, ["A", "B"], cutoff=1000)
+    assert cl["A"] != cl["B"]  # exchanges fund everyone: no link

@@ -164,7 +164,27 @@ def build(conn, version_id, bt, tiers_now, weights, weight_info, models, prev=No
                                 pnl=s["total_pnl_usd"], entry_mcap=s["median_entry_mcap"],
                                 followers=s["influence_followers"], min_to_2x=s["median_min_to_2x"])
                            for w, (t, sc, s) in top]
+    data["funding"] = funding_summary(conn, tiers_now)
     return render(data), data
+
+
+def funding_summary(conn, tiers_now):
+    """How many wallets have a known funder, and how many tiered wallets share one (= likely one person)."""
+    from research.funding import hubs
+    try:
+        rows = conn.execute("SELECT wallet, funder, ts, status FROM research_funding").fetchall()
+    except Exception:  # noqa: BLE001
+        return {}
+    fmap = {r[0]: (r[1], r[2]) for r in rows if r[1]}
+    skip = hubs(fmap)
+    groups = {}
+    for w, (t, _, _) in tiers_now.items():
+        f = fmap.get(w)
+        if t and f and f[0] not in skip:
+            groups.setdefault(f[0], []).append(w)
+    shared = {f: ws for f, ws in groups.items() if len(ws) > 1}
+    return dict(checked=len(rows), found=len(fmap), deep=sum(1 for r in rows if r[3] == "deep"), hubs=len(skip),
+                shared_groups=len(shared), wallets_in_shared=sum(len(v) for v in shared.values()))
 
 
 def render(d):
@@ -183,6 +203,12 @@ def render(d):
             L.append(f"| {TIER_LABELS[t]} | {p['n']} | {_pct(p['win_rate'])} | {_pct(p['roi'])} | {_usd(p['pnl'])} | "
                      f"{_usd(p['entry_mcap'])} | {_num(p['followers'])} | "
                      f"{_num(p['min_to_2x'])} |")
+    fu = d.get("funding") or {}
+    if fu.get("checked"):
+        L.append(f"\n**Geldherkunft:** {fu['checked']} Wallets geprüft, bei {fu['found']} den ersten SOL-Absender gefunden "
+                 f"({fu['deep']} mit zu langer Historie, {fu['hubs']} Börsen/Sammeladressen ignoriert). "
+                 f"{fu['wallets_in_shared']} Tier-Wallets teilen sich mit anderen einen Absender "
+                 f"({fu['shared_groups']} Gruppen) und zählen im Modell als eine Gruppe.\n")
     L.append("\n**Wallet-Score-Gewichte** (gelernt aus den Folge-Käufen, gemischt mit der Startannahme "
              f"zu {100 * (d['weight_info'].get('lam') or 0):.0f} % gelernt, {d['weight_info'].get('n', 0)} Beispiele):\n")
     L.append(" · ".join(f"{COMPONENT_LABELS[k]} {100 * d['weights'][k]:.0f} %" for k in COMPONENTS) + "\n")

@@ -32,6 +32,10 @@ class ResearchSettings:
     max_token_age_days: float = _f("RESEARCH_MAX_TOKEN_AGE_DAYS", 7)
     # influence = what happens in the N minutes after a wallet's buy
     influence_window_min: int = _i("RESEARCH_INFLUENCE_WINDOW_MIN", 10)
+    # funding source: who first sent SOL to a wallet (same funder = probably the same person)
+    funding_per_run: int = _i("RESEARCH_FUNDING_PER_RUN", 8)
+    funding_max_sig_pages: int = _i("RESEARCH_FUNDING_MAX_SIG_PAGES", 3)
+    funding_hub_min: int = _i("RESEARCH_FUNDING_HUB_MIN", 12)  # funders of more wallets are exchanges/hubs
     default_supply: float = _f("RESEARCH_DEFAULT_SUPPLY", 1e9)  # pump.fun standard supply when unknown
 
 

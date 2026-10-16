@@ -17,7 +17,7 @@ from collections import Counter
 from core import db
 from core.models import Token
 from core.sources import market, wallet_source
-from research import seeds, sources
+from research import funding, seeds, sources
 from research.config import rsettings
 from research.store import add_research_wallets, connect, retry, store_candles, upsert_research_token
 
@@ -176,6 +176,11 @@ def run_once(conn=None):
         retry(lambda: (conn.execute("UPDATE research_wallets SET backfilled_at=?, n_backfills=n_backfills+1 WHERE address=?",
                                     (now, w)), conn.commit()))
     summary["wallets_backfilled"] = len(due)
+    # funding source of the best wallets (same funder = same person, counted as one group)
+    try:
+        summary["funders_found"] = funding.run_once(conn, mine=_mine)
+    except Exception as e:  # noqa: BLE001
+        log.warning("funding failed: %s", e)
     # candles for coins those wallets traded (so entries/outcomes can be measured)
     have = {r[0] for r in conn.execute("SELECT DISTINCT mint FROM research_candles")}
     recent_tried = {r[0] for r in conn.execute("SELECT mint FROM research_tokens WHERE researched_at > ?", (now - 86400,))}

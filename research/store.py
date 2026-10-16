@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS model_predictions (
     features_json TEXT, contributions_json TEXT, wallets_json TEXT,
     ret_15m REAL, ret_1h REAL, ret_6h REAL, max_ret_1h REAL, max_ret_6h REAL
 );
+CREATE TABLE IF NOT EXISTS research_funding (
+    wallet TEXT PRIMARY KEY, funder TEXT, ts INTEGER, sol REAL, status TEXT, checked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_rf_funder ON research_funding(funder);
 CREATE INDEX IF NOT EXISTS idx_mp_mint ON model_predictions(mint, ts);
 """
 
