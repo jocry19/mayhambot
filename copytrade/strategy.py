@@ -38,6 +38,34 @@ LAUNCH_MAX_AGE_S = 60  # mode 3: a sniper decision older than this is not bought
 EXIT_NAMES = {"target": "Ziel erreicht", "inflow_peak": "Copy-Ansturm vorbei", "trail": "Trailing-Stop",
               "stop": "Stop-Loss", "time": "Zeit abgelaufen", "whale": "Wal verkauft", "no_market": "kein Markt",
               "smart_exit": "Smart Money steigt aus", "manual": "von dir verkauft"}
+PAPER_MODES = ("paper", "explore")  # simulated accounts: strict paper (the live rules) and exploration
+
+
+class ExploreExecutor:
+    """The exploration account: paper fills from the strict paper executor, its own balance and PnL (mode
+    'explore', state key explore_balance_sol). Never live."""
+    mode = "explore"
+
+    def __init__(self, paper, s: Settings):
+        self.paper, self.s = paper, s
+
+    def buy(self, mint, size_sol, snap):
+        return self.paper.buy(mint, size_sol, snap)
+
+    def sell(self, mint, tokens, decimals, snap, last_price_sol):
+        return self.paper.sell(mint, tokens, decimals, snap, last_price_sol)
+
+    def balance(self, conn) -> float:
+        v = store.get_state(conn, "explore_balance_sol")
+        if v is None:
+            store.set_state(conn, "explore_balance_sol", self.s.explore_start_balance_sol)
+            return self.s.explore_start_balance_sol
+        return float(v)
+
+    def adjust_balance(self, conn, delta: float) -> None:
+        self.balance(conn)
+        conn.execute("UPDATE ct_state SET value = CAST(value AS REAL) + ? WHERE key='explore_balance_sol'", (delta,))
+        conn.commit()
 
 
 class Strategy:
@@ -47,6 +75,10 @@ class Strategy:
         self.s = s
         if not isinstance(executors, dict):
             executors = {executors.mode: executors}
+        from .execution import PaperExecutor
+
+        if s.explore and isinstance(executors.get("paper"), PaperExecutor) and "explore" not in executors:
+            executors = {**executors, "explore": ExploreExecutor(executors["paper"], s)}
         self.exs = executors
         self._missing: dict[int, int] = {}
         self._noroute: dict[int, float] = {}  # last 'no sell route' alarm per live position
@@ -56,7 +88,7 @@ class Strategy:
             conn.execute("UPDATE ct_positions SET status='open', closed_at=NULL WHERE status='closing' AND closed_at<?",
                          (int(time.time()) - 300,))
             # a buy that never got its fill booked: paper simply failed; live needs a look at the wallet
-            conn.execute("DELETE FROM ct_positions WHERE status='opening' AND mode='paper' AND opened_at<?",
+            conn.execute("DELETE FROM ct_positions WHERE status='opening' AND mode IN ('paper','explore') AND opened_at<?",
                          (int(time.time()) - 600,))
             for r in conn.execute("SELECT id, symbol FROM ct_positions WHERE status='opening' AND mode='live' "
                                   "AND opened_at<?", (int(time.time()) - 600,)).fetchall():
@@ -93,15 +125,19 @@ class Strategy:
         ).fetchone()
         return float(r[0])
 
-    def _risk_block(self, strategy: str, p: control.Preset, size: float, mint: str) -> str | None:
-        ex = self.executor(strategy)
+    def _risk_block(self, strategy: str, p: control.Preset, size: float, mint: str,
+                    account: str | None = None) -> str | None:
+        ex = self.exs[account] if account else self.executor(strategy)
+        explore = ex.mode == "explore"
         if control.paused(self.conn):
             return "Handel pausiert"
-        if any(r["mint"] == mint for r in self.open_positions()):
+        # the exploration account holds its own positions: it neither blocks nor is blocked by the strict one
+        if any(r["mint"] == mint and (r["mode"] == "explore") == explore for r in self.open_positions()):
             return "schon im Coin"
-        if len(self.open_positions(strategy, ex.mode)) >= p.max_open:
-            return f"max. {p.max_open} offene Positionen"
-        if self._daily_pnl(strategy, ex.mode) <= -p.max_daily_loss_sol:
+        cap = self.s.explore_max_open if explore else p.max_open
+        if len(self.open_positions(strategy, ex.mode)) >= cap:
+            return f"max. {cap} offene Positionen"
+        if not explore and self._daily_pnl(strategy, ex.mode) <= -p.max_daily_loss_sol:
             return "Tagesverlust-Limit erreicht"
         if ex.balance(self.conn) < size + 0.01:
             return "Guthaben zu klein"
@@ -134,10 +170,23 @@ class Strategy:
                     data={"strategy": strategy, "mint": mint, "symbol": sym, "reason": why, **data})
 
     # ------------------------------------------------------------------ mode 1: whales
+    def _explore_ok(self, swap: Swap) -> bool:
+        """The exploration account copies this buy: account on, whale buy big enough, wallet tier in CT_EXPLORE_TIERS."""
+        s = self.s
+        if "explore" not in self.exs or swap.sol_amount < s.explore_min_sol:
+            return False
+        tiers = {t.strip() for t in s.explore_tiers.split(",") if t.strip()}
+        return (store.wallet_info(self.conn, swap.wallet).get("tier") or "none") in tiers
+
     def on_whale_buy(self, swap: Swap, deferred: bool = False) -> int | None:
+        """Copy a whale buy into the strict account (the live rules) and/or the exploration account. The returned id
+        is the strict position if there is one."""
         s = self.s
         m = control.mode(self.conn, "whale")
-        if m == "off" or swap.sol_amount < s.min_whale_buy_sol:
+        if m == "off":
+            return None
+        expl = m == "auto" and self._explore_ok(swap)
+        if swap.sol_amount < s.min_whale_buy_sol and not expl:
             return None
         age = time.time() - swap.block_time
         lp = learn.params_for(self.conn, "whale", swap.wallet)
@@ -156,24 +205,34 @@ class Strategy:
             return self._skip("whale", swap.mint, f"Launch-/Dev-Bot ({kb} von {nb} Käufen in den ersten "
                               f"{LAUNCH_BOT_S} s eines Coins), nicht kopierbar", wallet=swap.wallet)
         rank = ranking.wallet_rank(self.conn, swap.wallet)
-        size, explore, edge = p.size_sol, False, None
+        size, explore, edge, why, wdata = p.size_sol, False, None, None, {}
         if rank is None or rank["samples"] < s.min_wallet_samples:
-            if not (s.explore_unranked and ex.mode == "paper"):
-                return self._skip("whale", swap.mint, "Wallet noch nicht bewertet (nur mitgemessen)",
-                                  wallet=swap.wallet)
-            explore, size = True, size * 0.5
+            if s.explore_unranked and ex.mode == "paper":
+                explore, size = True, size * 0.5
+            else:
+                why = "Wallet noch nicht bewertet (nur mitgemessen)"
         elif rank["score"] < s.min_wallet_score:
-            return self._skip("whale", swap.mint, f"Wallet-Score zu niedrig ({rank['score'] * 100:.1f})",
-                              wallet=swap.wallet)
+            why = f"Wallet-Score zu niedrig ({rank['score'] * 100:.1f})"
         elif s.require_edge:
             edge = learn.wallet_edge(self.conn, swap.wallet)
             if edge["n"] < s.edge_min_n or edge["lower"] <= 0:
-                return self._skip("whale", swap.mint,
-                                  f"Vorteil nach Kosten nicht nachgewiesen ({edge['n']} Käufe, "
-                                  f"Ø {edge['mean']:+.1%}, sicher nur {edge['lower']:+.1%}; nur mitgemessen)",
-                                  wallet=swap.wallet, edge=edge)
-            size *= edge["size_factor"]  # conviction: more size for a clearer edge, never above 1.5x
-        if s.max_copies_per_coin and self._coin_copies(swap.mint) >= s.max_copies_per_coin:
+                why = (f"Vorteil nach Kosten nicht nachgewiesen ({edge['n']} Käufe, Ø {edge['mean']:+.1%}, "
+                       f"sicher nur {edge['lower']:+.1%}; nur mitgemessen)")
+                wdata = {"edge": edge}
+            else:
+                size *= edge["size_factor"]  # conviction: more size for a clearer edge, never above 1.5x
+        if not why and swap.sol_amount < s.min_whale_buy_sol:
+            why = f"Wal-Kauf zu klein ({swap.sol_amount:.2f} SOL)"
+        # accounts that take this buy: the strict one when every wallet gate passed, exploration when eligible
+        accounts = ([] if why else ["paper"]) + (["explore"] if expl else [])
+        if not accounts:
+            return self._skip("whale", swap.mint, why, wallet=swap.wallet, **wdata)
+        if why:  # strict said no: say why once, the exploration copy goes on
+            self._skip("whale", swap.mint, f"{why}; nur Erkundung", wallet=swap.wallet, account="explore", **wdata)
+        for acc in list(accounts):
+            if s.max_copies_per_coin and self._coin_copies(swap.mint, acc == "explore") >= s.max_copies_per_coin:
+                accounts.remove(acc)
+        if not accounts:
             return self._skip("whale", swap.mint, f"schon {s.max_copies_per_coin}× in diesem Coin kopiert (6 h)",
                               wallet=swap.wallet)
 
@@ -192,9 +251,9 @@ class Strategy:
         avg_m5 = snap.buys_h1 / 12 if snap.buys_h1 else 0
         if avg_m5 and snap.buys_m5 > 3 * avg_m5 and snap.change_m5 > 30:
             return self._skip("whale", swap.mint, "Copy-Trader sind schon drin", snap)
-        safe, why = self._safety("whale", swap.mint)
-        if why:
-            return self._skip("whale", swap.mint, why, snap, wallet=swap.wallet, safety=safe)
+        safe, sw_why = self._safety("whale", swap.mint)
+        if sw_why:
+            return self._skip("whale", swap.mint, sw_why, snap, wallet=swap.wallet, safety=safe)
         wash = wash_share(self.conn, swap.mint)
         if wash is not None and wash >= s.max_wash_share:
             return self._skip("whale", swap.mint, f"Wash-Trading: {wash:.0%} des Volumens hin und her", snap,
@@ -211,15 +270,23 @@ class Strategy:
         winfo = store.wallet_info(self.conn, swap.wallet)
         tier = winfo.get("tier") or "none"
         ent = store.entity(self.conn, swap.wallet)
-        if ent != swap.wallet and self._cluster_copied(ent, swap.mint):
-            return self._skip("whale", swap.mint, "gleicher Wallet-Cluster schon kopiert", snap, wallet=swap.wallet)
+        if ent != swap.wallet:
+            accounts = [a for a in accounts if not self._cluster_copied(ent, swap.mint, explore=a == "explore")]
+            if not accounts:
+                return self._skip("whale", swap.mint, "gleicher Wallet-Cluster schon kopiert", snap,
+                                  wallet=swap.wallet)
         ibuckets, iraw = learn.intel_context(self.conn, swap.mint, swap.wallet, time.time())
         feats = {**learn.wallet_features(self.conn, swap.wallet), **ibuckets, "size": learn.bucket_size(swap.sol_amount),
                  "mcap": learn.bucket_mcap(snap.fdv),
                  "liq": learn.bucket_liq(snap.liquidity_usd), "explore": explore, "safety": safe.get("level") or "-"}
-        why = learn.blocked(self.conn, "whale", feats)
-        if why:
-            return self._skip("whale", swap.mint, f"gelernter Filter: {why} verliert", snap, wallet=swap.wallet)
+        # the learned filter guards the strict account only: exploration keeps buying what it blocks, otherwise a
+        # filter could never be proven wrong by new trades
+        blocked = learn.blocked(self.conn, "whale", feats)
+        if blocked and "paper" in accounts:
+            accounts.remove("paper")
+            if not accounts:
+                return self._skip("whale", swap.mint, f"gelernter Filter: {blocked} verliert", snap,
+                                  wallet=swap.wallet)
         exits = self._learned_exits(lp, p, tp, hold, inflow=1)
         info = {"explore": explore, "whale_sol": swap.sol_amount, "delay_s": round(age, 1),
                 "wallet_score": round(rank["score"] * 100, 2) if rank else None,
@@ -238,21 +305,35 @@ class Strategy:
                           price_sol=snap.price_sol, price_usd=snap.price_usd, mcap_usd=snap.fdv,
                           score=info["wallet_score"] or 0, data={**info, "take_profit": exits["tp"]})
             return None
-        block = self._risk_block("whale", p, size, swap.mint)
-        if block:
-            return self._skip("whale", swap.mint, block, snap)
-        return self.open("whale", m, swap.mint, size, snap, p, reason=reason, wallet=swap.wallet,
-                         whale=swap, meta=info, score=info["wallet_score"] or 0, **exits)
+        first = None
+        for acc in accounts:
+            if acc == "explore":
+                a_size, a_reason = s.explore_size_sol, f"Erkundung ({tier}): {reason}"
+                a_info = {**info, "account": "explore", "edge": None, "strict_skip": why,
+                          "learned_block": blocked or None}
+                a_ex = "explore"
+            else:
+                a_size, a_reason, a_info, a_ex = size, reason, info, None
+            block = self._risk_block("whale", p, a_size, swap.mint, account=a_ex)
+            if block:
+                self._skip("whale", swap.mint, ("[Erkundung] " if a_ex else "") + block, snap,
+                           account=acc)
+                continue
+            pid = self.open("whale", m, swap.mint, a_size, snap, p, reason=a_reason, wallet=swap.wallet,
+                            whale=swap, meta=a_info, score=info["wallet_score"] or 0, account=a_ex, **exits)
+            first = first or pid
+        return first
 
-    def _coin_copies(self, mint: str) -> int:
-        """Whale-mode positions in this coin within COIN_WINDOW_S, any wallet."""
-        return self.conn.execute("SELECT COUNT(*) FROM ct_positions WHERE mint=? AND strategy='whale' AND opened_at>?",
-                                 (mint, int(time.time()) - COIN_WINDOW_S)).fetchone()[0]
+    def _coin_copies(self, mint: str, explore: bool = False) -> int:
+        """Whale-mode positions in this coin within COIN_WINDOW_S, any wallet (per account: strict or exploration)."""
+        return self.conn.execute("SELECT COUNT(*) FROM ct_positions WHERE mint=? AND strategy='whale' AND opened_at>? "
+                                 "AND (mode='explore')=?",
+                                 (mint, int(time.time()) - COIN_WINDOW_S, explore)).fetchone()[0]
 
-    def _cluster_copied(self, ent: str, mint: str, window_s: int = 6 * 3600) -> bool:
+    def _cluster_copied(self, ent: str, mint: str, window_s: int = 6 * 3600, explore: bool = False) -> bool:
         """Another wallet of the same cluster was already copied on this coin recently (count the entity once)."""
-        for r in self.conn.execute("SELECT wallet FROM ct_positions WHERE mint=? AND strategy='whale' AND opened_at>?",
-                                   (mint, int(time.time()) - window_s)).fetchall():
+        for r in self.conn.execute("SELECT wallet FROM ct_positions WHERE mint=? AND strategy='whale' AND opened_at>? "
+                                   "AND (mode='explore')=?", (mint, int(time.time()) - window_s, explore)).fetchall():
             if r["wallet"] and store.entity(self.conn, r["wallet"]) == ent:
                 return True
         return False
@@ -391,12 +472,15 @@ class Strategy:
              hold: float, reason: str, wallet: str = "", whale: Swap | None = None, meta: dict | None = None,
              signal_id: int | None = None, score: float = 0, sl: float | None = None,
              trail: tuple[float, float] | None = None, inflow: int | None = None,
-             version: int | None = None, intent: str | None = None) -> int | None:
+             version: int | None = None, intent: str | None = None, account: str | None = None) -> int | None:
         sl = p.stop_loss if sl is None else min(sl, p.stop_loss)  # never wider than your preset
         trail = trail or (p.trail_activate, p.trail_drawdown)
         inflow = (1 if strategy == "whale" else 0) if inflow is None else inflow
-        ex = self.executor(strategy) if strategy in control.STRATEGIES else self.exs.get("paper")
+        ex = (self.exs[account] if account else
+              self.executor(strategy) if strategy in control.STRATEGIES else self.exs.get("paper"))
         intent = intent or (f"signal:{signal_id}" if signal_id else f"whale:{whale.signature}" if whale else None)
+        if intent and ex.mode == "explore":
+            intent = "explore:" + intent
         # the intent row is committed BEFORE the swap: if a later write fails (database locked) and the caller
         # is retried, the same intent finds this row and never sends a second swap
         with INTENT_LOCK:  # decision + intent row only, never the swap: whale copies, signals, launches and
@@ -406,7 +490,7 @@ class Strategy:
                 if r:
                     return r[0] if r[1] != "failed" else None
             busy = self.conn.execute("SELECT strategy, status FROM ct_positions WHERE mint=? AND status IN "
-                                     "('opening','open')", (mint,)).fetchall()
+                                     "('opening','open') AND (mode='explore')=?", (mint, ex.mode == "explore")).fetchall()
             if any(b[1] == "opening" for b in busy) or (strategy != "whale" and busy):
                 why = "Kauf läuft schon" if any(b[1] == "opening" for b in busy) else f"schon gehalten ({busy[0][0]})"
                 self._skip(strategy, mint, f"Coin {why}", snap)
@@ -422,11 +506,11 @@ class Strategy:
         except Exception as e:  # unknown outcome of a live swap stays 'opening' for a manual look; paper: failed
             fill = None
             store.event(self.conn, "error", f"Kauf {snap.symbol} abgebrochen: {e}", "error")
-            if ex.mode == "paper":
+            if ex.mode in PAPER_MODES:
                 _write_hard(self.conn, "DELETE FROM ct_positions WHERE id=?", (pid,))
             return None
         if not fill.ok:  # nothing was bought: paper rows go, a live row stays as 'failed' for the record
-            if ex.mode == "paper":
+            if ex.mode in PAPER_MODES:
                 _write_hard(self.conn, "DELETE FROM ct_positions WHERE id=?", (pid,))
             else:
                 _write_hard(self.conn, "UPDATE ct_positions SET status='failed', exit_reason=? WHERE id=?",
@@ -446,7 +530,7 @@ class Strategy:
         safe = (meta or {}).get("safety") or {}
         meta = {**(meta or {}), "fill_source": fill.source, "impact": fill.price_impact,
                 "liq_usd": snap.liquidity_usd, "fdv": snap.fdv, "dex": snap.dex_id}
-        if ex.mode == "paper":
+        if ex.mode in PAPER_MODES:
             from .execution import paper_adverse
 
             meta["adverse"] = paper_adverse()  # lets learn.extra_cost compare fills made under different settings
@@ -555,7 +639,7 @@ class Strategy:
                 store.event(self.conn, "hint", f"VERKAUFS-HINWEIS {p['symbol']}: {EXIT_NAMES.get(reason, reason)}",
                             data={"position": p["id"], "reason": reason})
             return
-        self.close(p, snap, reason, wait=p["mode"] == "paper")
+        self.close(p, snap, reason, wait=p["mode"] in PAPER_MODES)
 
     def _smart_exit(self, p) -> bool:
         try:
@@ -594,7 +678,7 @@ class Strategy:
                 continue
             self._missing.pop(p["id"], None)
             price = snap.price_sol
-            if p["mode"] != "paper":  # real money: judge the stop on what a sell would bring now (Jupiter quote)
+            if p["mode"] not in PAPER_MODES:  # real money: judge the stop on what a sell would bring now (Jupiter quote)
                 ev = getattr(self._ex_for_position(p), "exit_value", None)
                 v = ev(p["mint"], p["tokens"], p["token_decimals"] or 6) if ev else False
                 if v is None and time.time() - self._noroute.get(p["id"], 0) > 600:

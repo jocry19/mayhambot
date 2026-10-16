@@ -669,7 +669,7 @@ def test_retried_entry_never_buys_twice(env):
     pid = st.on_whale_buy(sw)
     assert pid and len(calls) == 1
     # e.g. 'database is locked' after the swap and the caller runs again: same intent, no second swap
-    st._coin_copies = lambda mint: 0
+    st._coin_copies = lambda mint, explore=False: 0
     assert st.on_whale_buy(sw) in (pid, None) and len(calls) == 1
     assert conn.execute("SELECT COUNT(*) FROM ct_positions WHERE intent=?", (f"whale:{sw.signature}",)).fetchone()[0] == 1
 
@@ -718,3 +718,58 @@ def test_live_sell_runs_in_a_worker_and_stops_use_the_exit_quote(env):
         time.sleep(0.05)
     r = conn.execute("SELECT status, exit_reason FROM ct_positions WHERE id=?", (pid,)).fetchone()
     assert tuple(r) == ("closed", "stop")
+
+
+def test_exploration_account_trades_what_the_strict_rules_skip(env, monkeypatch):
+    import dataclasses
+
+    s, conn, ex, state = env
+    s = Settings(db_path=s.db_path)  # defaults: exploration on, unranked whales not copied by the strict account
+    tiers = {"t": "smart"}
+    monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": tiers["t"]})
+    st = strategy.Strategy(conn, s, ex)
+    assert "explore" in st.exs
+    pid = st.on_whale_buy(whale_buy(sol=1.0))  # unranked and under the 2 SOL minimum: strict skips, exploration buys
+    p = conn.execute("SELECT * FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    assert p["mode"] == "explore" and p["size_sol"] == pytest.approx(s.explore_size_sol)
+    assert p["intent"].startswith("explore:whale:")
+    assert st.exs["explore"].balance(conn) == pytest.approx(s.explore_start_balance_sol - p["entry_cost_sol"])
+    assert ex.balance(conn) == pytest.approx(s.paper_start_balance_sol)  # strict account untouched
+    assert any("nur Erkundung" in r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'"))
+    st.on_whale_buy(whale_buy(sol=1.0))  # the same whale buy again: no second exploration buy
+    assert conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0] == 1
+    # exits work the same; PnL lands on the exploration balance
+    state["snap"] = dataclasses.replace(state["snap"], price_sol=p["entry_price_sol"] * (1 + p["take_profit"] + 0.05))
+    st.update()
+    p = conn.execute("SELECT * FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    assert p["status"] == "closed" and p["pnl_sol"] > 0
+    assert st.exs["explore"].balance(conn) > s.explore_start_balance_sol
+    assert ex.balance(conn) == pytest.approx(s.paper_start_balance_sol)
+
+
+def test_exploration_only_for_chosen_tiers_and_beside_strict_copies(env, monkeypatch):
+    s, conn, ex, state = env
+    s = Settings(db_path=s.db_path)
+    tiers = {"t": "good"}
+    monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": tiers["t"]})
+    st = strategy.Strategy(conn, s, ex)
+    assert st.on_whale_buy(whale_buy(sol=1.0)) is None  # tier 'good' is not explored
+    assert st.on_whale_buy(whale_buy(sol=0.3)) is None
+    assert not conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0]
+    tiers["t"] = "ultra"
+    _rank(conn)
+    _evals(conn, 0.12)
+    pid = st.on_whale_buy(whale_buy())  # proven edge: the strict account copies, exploration copies beside it
+    rows = {r["mode"]: r for r in conn.execute("SELECT * FROM ct_positions WHERE status='open'")}
+    assert set(rows) == {"paper", "explore"} and rows["paper"]["id"] == pid
+    assert rows["explore"]["size_sol"] == pytest.approx(s.explore_size_sol)
+    control.set_mode(conn, "whale", "manual")  # manual mode only alerts, also no exploration buy
+    conn.execute("DELETE FROM ct_positions")
+    assert st.on_whale_buy(chain.Swap("sigX", W, int(time.time()) - 5, "buy", MINT, 1e6, 5.0, 3e-6)) is None
+    assert not conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0]
+
+
+def test_exploration_can_be_turned_off(env):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore=False), ex)
+    assert "explore" not in st.exs

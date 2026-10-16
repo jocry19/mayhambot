@@ -662,7 +662,7 @@ def landing_drift(conn, land_s: int = LAND_S) -> dict:
 
     buys, sells = [], []
     try:
-        rows = conn.execute("SELECT mint, opened_at, closed_at FROM ct_positions WHERE mode='paper' "
+        rows = conn.execute("SELECT mint, opened_at, closed_at FROM ct_positions WHERE mode IN ('paper','explore') "
                             "ORDER BY opened_at DESC LIMIT 400").fetchall()
         for mint, op, cl in rows:
             for t, out, sign in ((op, buys, 1), (cl, sells, -1)):

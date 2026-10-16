@@ -110,6 +110,16 @@ class Settings:
     # paper only: copy unranked whales at half size so the ranking learns faster (off: every whale buy is
     # still measured and replayed by learn.py from ct_buy_outcomes, so learning does not need these trades)
     explore_unranked: bool = field(default_factory=lambda: _b("CT_EXPLORE_UNRANKED", False))
+    # second paper account 'explore' (Erkundung): the strict account ('paper') mirrors the live rules, so it may go
+    # hours without a trade; this one copies every ultra/smart whale buy >= CT_EXPLORE_MIN_SOL inside the entry
+    # window (rug check, market and wash filters still apply) at a small fixed size with its own balance and PnL,
+    # so learning, fill calibration and the exit study keep getting real trades. Never live.
+    explore: bool = field(default_factory=lambda: _b("CT_EXPLORE", True))
+    explore_size_sol: float = field(default_factory=lambda: _f("CT_EXPLORE_SIZE_SOL", 0.1))
+    explore_min_sol: float = field(default_factory=lambda: _f("CT_EXPLORE_MIN_SOL", 0.5))
+    explore_max_open: int = field(default_factory=lambda: _i("CT_EXPLORE_MAX_OPEN", 5))
+    explore_start_balance_sol: float = field(default_factory=lambda: _f("CT_EXPLORE_START_BALANCE_SOL", 5.0))
+    explore_tiers: str = field(default_factory=lambda: os.getenv("CT_EXPLORE_TIERS", "ultra,smart"))
     # copy a ranked whale only if its past buys (ct_evals, our current exits, calibrated costs) made money
     require_edge: bool = field(default_factory=lambda: _b("CT_REQUIRE_EDGE", True))
     edge_min_n: int = field(default_factory=lambda: _i("CT_EDGE_MIN_N", 8))
