@@ -10,6 +10,7 @@ smart just because this very coin pumped.
 import json
 import logging
 import math
+import os
 import re
 import time
 
@@ -107,6 +108,9 @@ def not_a_memecoin(tok):
     return "xstock" in name.lower().replace(" ", "") or bool(_XSTOCK.match(sym) and (tok["mcap_usd"] or 0) > 5e6)
 
 
+STRICT_LIQ_USD = float(os.getenv("CT_MIN_LIQUIDITY_USD", 15000))
+
+
 def explain(m, cfg=settings):
     """Plain German why (and what speaks against it), stored with the signal and shown in alerts."""
     pro, con = [], []
@@ -125,6 +129,9 @@ def explain(m, cfg=settings):
             f"ähnliche Setups brachten im Schnitt {_eur(m['ev'])} nach Kosten (n={m.get('ev_n') or 0})")
     if m.get("sellers"):
         con.append(f"{m['sellers']} Smart-Wallet{' verkauft' if m['sellers'] == 1 else 's verkaufen'} schon")
+    liq = m.get("liquidity_usd")
+    if liq is not None and liq < STRICT_LIQ_USD:
+        con.append(f"nur ${liq:,.0f} Liquidität (striktes Konto ab ${STRICT_LIQ_USD:,.0f})")
     sp = m.get("safety") or {}
     if sp.get("risk") is not None and sp.get("factor", 1.0) < 1.0:
         con.append(f"Rug-Risiko {sp['risk']:.0f}" + (f": {sp['reasons'][0]}" if sp.get("reasons") else ""))
@@ -504,7 +511,7 @@ def evaluate(conn, mints, cfg=settings, now=None):
             f["excluded"] = f.get("excluded", 0) + 1
             continue
         m = apply_market(conn, mint, apply_safety(conn, mint, apply_model(conn, mint, now, token_metrics(conn, mint, qc, now, cfg))), now)
-        m = dict(m, min_net=min_net)
+        m = dict(m, min_net=min_net, liquidity_usd=tok["liquidity_usd"] if tok else None)
         if ev_table:
             e, n, k = ev_mod.predict(ev_table, m.get("entities", m["smart_buyers"]), m["net_usd"], m.get("sellers", 0),
                                      m.get("prediction"))

@@ -7,6 +7,7 @@ exactly where coins drop out: smart buyers, distinct entities, net inflow, score
 """
 import argparse
 import json
+import os
 import time
 
 from core import db
@@ -110,6 +111,7 @@ def outcomes(conn, hours=168, cost=COST, now=None, bands=(0, 20, 30, 40, 50, 60,
 
 
 REPORT_EVERY = 3600
+TRADABLE_LIQ_USD = float(os.getenv("CT_MIN_LIQUIDITY_USD", 15000))  # the strict copytrade account's liquidity floor
 
 
 def report_path():
@@ -143,9 +145,12 @@ def write_report(conn, path=None, now=None):
     from signals import engine
     rep = dict(ts=now, last_cycle=dict(engine.last_funnel), funnel_4h=funnel(conn, 4, now=now), funnel_24h=funnel(conn, 24, now=now),
                outcomes_24h=outcomes(conn, 24, now=now), outcomes_7d=outcomes(conn, 168, now=now), calibration=cal,
-               recent_signals=[dict(r) for r in conn.execute(
-                   "SELECT ts, symbol, score, ev, ev_n, smart_buyers, net_usd, ret_1h, max_ret_1h, outcome_flag, reason "
-                   "FROM signals ORDER BY ts DESC LIMIT 20")])
+               recent_signals=[dict(r, tradable_strict=(r["liquidity_usd"] or 0) >= TRADABLE_LIQ_USD)
+                               for r in conn.execute(
+                   "SELECT ts, symbol, score, ev, ev_n, smart_buyers, net_usd, liquidity_usd, mcap_usd, ret_1h, "
+                   "max_ret_1h, outcome_flag, reason FROM signals ORDER BY ts DESC LIMIT 20")])
+    rs = rep["recent_signals"]
+    rep["tradable_strict_share"] = round(sum(r["tradable_strict"] for r in rs) / len(rs), 3) if rs else None
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(rep, ensure_ascii=False, indent=1, default=str))
     tmp.replace(path)

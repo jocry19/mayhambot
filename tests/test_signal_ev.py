@@ -128,3 +128,9 @@ def test_model_band_bucket_shrinks_toward_its_setup():
     assert hi["n"] == 5 and base["ev"] < hi["ev"] < 0.44
     assert ev.predict(t, 2, 300, 0, 0.4)[2].endswith("|p>=.30")
     assert ev.predict(t, 2, 300, 0, None)[2] == ev.bucket(2, 300, 0)      # no 'na' band seen: setup bucket
+
+
+def test_reason_flags_thin_liquidity():
+    txt = engine.explain(dict(smart_buyers=2, entities=2, net_usd=300, liquidity_usd=8000))
+    assert "nur $8,000 Liquidität" in txt and "Dagegen:" in txt
+    assert "Liquidität" not in engine.explain(dict(smart_buyers=2, entities=2, net_usd=300, liquidity_usd=40000))
