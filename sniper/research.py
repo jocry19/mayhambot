@@ -329,15 +329,10 @@ def _match(r, conds):
     return True
 
 
-def rule_search(rows, paths, cfg, train_share=0.7, min_n=30, top_singles=10):
-    """Entry rules (one or two feature conditions) chosen on the earlier part of the data with the best exit of
-    the grid, then measured once on the later part. Accepted only if the later part is profitable after costs
-    with a bootstrap lower bound above zero and at least min_n trades."""
+def _select(train, paths, cfg, min_n=30, top_singles=10):
+    """Rank entry rules (one or two feature conditions, each with the best exits of the grid) on `train` by the
+    bootstrap lower bound of their net result. Returns ([(ci_low, net, conditions, exit, n), ...], tested)."""
     side_cost, tx_cost = costs(cfg)
-    n_train = int(len(rows) * train_share)
-    train, test = rows[:n_train], rows[n_train:]
-    if len(train) < 100 or len(test) < min_n:
-        return {"status": "zu wenig Daten", "n_train": len(train), "n_test": len(test), "accepted": None}
     ex = exit_grid(train, paths, side_cost, tx_cost, top=3)
     rules = [tuple(e["rule"].values()) for e in ex]
     cur = (cfg.tp1_pct, cfg.tp1_frac, cfg.trail_pct, cfg.stop_pct, cfg.time_stop_min, cfg.max_hold_min)
@@ -381,6 +376,44 @@ def rule_search(rows, paths, cfg, train_share=0.7, min_n=30, top_singles=10):
         if key not in seen:
             seen.add(key)
             uniq.append(t)
+    return uniq, tested
+
+
+def walk_forward(rows, paths, cfg, blocks=5, min_n=30, min_test=10):
+    """The whole selection procedure, rerun on growing windows: pick the best rule on blocks [0, k), trade it on
+    block k (k = 2 .. blocks-1). A procedure that only finds noise wins in some folds and loses in others."""
+    side_cost, tx_cost = costs(cfg)
+    size = len(rows) // blocks
+    folds = []
+    for k in range(2, blocks):
+        train, test = rows[:k * size], rows[k * size:(k + 1) * size if k < blocks - 1 else len(rows)]
+        uniq, _ = _select(train, paths, cfg, min_n=min_n)
+        if not uniq:
+            folds.append({"fold": k, "n": 0, "ok": False})
+            continue
+        lo, m, cs, rule, n = uniq[0]
+        sel = [r for r in test if _match(r, cs)]
+        rt = trade_returns(sel, paths, rule, side_cost, tx_cost) if sel else []
+        med = sorted(rt)[len(rt) // 2] if rt else None
+        ok = len(rt) >= min_test and mean(rt) > 0 and med > 0 and mean(rt) <= 1.0
+        folds.append({"fold": k, "conditions": [list(c) for c in cs], "n": len(rt),
+                      "net": round(mean(rt), 4) if rt else None, "median": round(med, 4) if med is not None else None,
+                      "ok": ok})
+    return folds
+
+
+def rule_search(rows, paths, cfg, train_share=0.7, min_n=30, top_singles=10):
+    """Entry rules (one or two feature conditions) chosen on the earlier part of the data with the best exit of
+    the grid, then measured once on the later part. Accepted only if the later part is profitable after costs
+    (bootstrap lower bound above zero, winning median and trimmed mean, plausible size, at least min_n trades)
+    AND the selection procedure holds walk-forward: re-run on growing windows, its pick wins in at least two of
+    three following blocks."""
+    side_cost, tx_cost = costs(cfg)
+    n_train = int(len(rows) * train_share)
+    train, test = rows[:n_train], rows[n_train:]
+    if len(train) < 100 or len(test) < min_n:
+        return {"status": "zu wenig Daten", "n_train": len(train), "n_test": len(test), "accepted": None}
+    uniq, tested = _select(train, paths, cfg, min_n, top_singles)
     results = []
     for lo, m, cs, rule, n in uniq[:5]:
         sel = [r for r in test if _match(r, cs)]
@@ -402,8 +435,14 @@ def rule_search(rows, paths, cfg, train_share=0.7, min_n=30, top_singles=10):
                                  "win": round(sum(1 for v in rt if v > 0) / len(rt), 3) if rt else None},
                         "accepted": ok})
     acc = next((r for r in results if r["accepted"]), None)
+    folds = walk_forward(rows, paths, cfg, min_n=min_n) if acc else []
+    wf_ok = sum(1 for f in folds if f["ok"]) >= 2
+    if acc and not wf_ok:
+        acc["accepted"] = False
+        acc["rejected_by"] = "walk_forward"
+        acc = None
     return {"status": "ok", "n_train": len(train), "n_test": len(test), "tested": tested,
-            "split_ts": train[-1]["created_ts"], "candidates": results, "accepted": acc}
+            "split_ts": train[-1]["created_ts"], "candidates": results, "walk_forward": folds, "accepted": acc}
 
 
 def run(conn, cfg=None, hours=0, save=False, now=None):
@@ -490,6 +529,11 @@ def summary(rep, top=8):
                      + (f"{100 * t['net']:+.1f} % (n {t['n']}, untere Grenze {100 * (t['ci_low'] or 0):+.1f} %)"
                         if t["net"] is not None else "keine Treffer")
                      + ("  ANGENOMMEN" if c["accepted"] else ""))
+        wf = rs.get("walk_forward") or []
+        if wf:
+            L.append("Walk-forward: " + ", ".join(
+                f"Block {f['fold']}: {'+' if (f.get('net') or 0) >= 0 else ''}{100 * (f.get('net') or 0):.1f} % (n {f['n']})"
+                for f in wf) + f" -> {sum(1 for f in wf if f['ok'])} von {len(wf)} im Plus")
         if not rs.get("accepted"):
             L.append("Keine Regel hält auf ungesehenen Daten nach Kosten: der Sniper kauft weiter nur nach seinen "
                      "festen Regeln.")

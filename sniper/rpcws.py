@@ -29,6 +29,17 @@ def b58(b):
     return "1" * pad + out
 
 
+# plausible pump.fun curve reserves: 30 virtual SOL at the start, about 115 at migration; virtual tokens from
+# 1.073e9 down to about 2.8e8. Outside this a decoded event is not a pump.fun curve trade we understand: such a
+# value produced paper buys at "MCAP 0.4 SOL" that were stopped out at -100 % a second later
+V_SOL_RANGE, V_TOK_RANGE = (25.0, 200.0), (1.0e8, 1.2e9)
+REJECTS = {"trade": 0, "create": 0}
+
+
+def reserves_ok(v_sol, v_tok):
+    return V_SOL_RANGE[0] <= v_sol <= V_SOL_RANGE[1] and V_TOK_RANGE[0] <= v_tok <= V_TOK_RANGE[1]
+
+
 def decode_trade(data_b64):
     """pump.fun TradeEvent -> dict, or None for other events. Layout (Anchor): disc 8, mint 32, sol_amount u64,
     token_amount u64, is_buy bool, user 32, timestamp i64, virtual_sol_reserves u64, virtual_token_reserves u64."""
@@ -43,6 +54,9 @@ def decode_trade(data_b64):
     is_buy = raw[56] == 1
     user = b58(raw[57:89])
     ts, vsol, vtok = struct.unpack_from("<qQQ", raw, 89)
+    if not reserves_ok(vsol / 1e9, vtok / 1e6):
+        REJECTS["trade"] += 1     # a layout we do not know (or garbage): a broken price must not reach the engine
+        return None
     return {"mint": mint, "sol_lamports": sol, "token_raw": tok, "is_buy": is_buy, "user": user, "ts": ts,
             "v_sol_lamports": vsol, "v_tok_raw": vtok}
 
@@ -113,9 +127,11 @@ def parse_creates(m):
         buy = next((t for t in trades if t["mint"] == c["mint"] and t["is_buy"]), None)
         if buy:
             v_sol, v_tok = buy["v_sol_lamports"] / 1e9, buy["v_tok_raw"] / 1e6
-        elif c.get("v_tok_raw"):
+        elif c.get("v_tok_raw") and reserves_ok(c["v_sol_lamports"] / 1e9, c["v_tok_raw"] / 1e6):
             v_sol, v_tok = c["v_sol_lamports"] / 1e9, c["v_tok_raw"] / 1e6
         else:
+            if c.get("v_tok_raw"):
+                REJECTS["create"] += 1
             v_sol, v_tok = PUMP_INITIAL_V_SOL, PUMP_INITIAL_V_TOK
         out.append({"signature": v.get("signature") or "", "mint": c["mint"], "traderPublicKey": dev, "txType": "create",
                     "initialBuy": buy["token_raw"] / 1e6 if buy else 0.0, "solAmount": buy["sol_lamports"] / 1e9 if buy else 0.0,

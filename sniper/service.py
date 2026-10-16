@@ -370,7 +370,8 @@ class Service:
                 "rpc": {"active": self.trades_via == "rpc", "connected": self.logs.connected, "mode": self.logs.mode,
                         "subs": self.logs.active_subs(), "wanted": len(self.logs.want), "attempts": self.logs.attempts,
                         "rejects": self.logs.rejects, "reconnects": self.logs.reconnects,
-                        "server_drops": self.logs.server_drops, "trades_per_min": rpc}}
+                        "server_drops": self.logs.server_drops, "decode_rejects": dict(rpcws.REJECTS),
+                        "replayed": self.logs.replayed, "trades_per_min": rpc}}
 
     def _launch_status(self, now):
         rates = self.launch_rates(now)
