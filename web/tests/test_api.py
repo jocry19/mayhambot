@@ -220,6 +220,8 @@ def test_api_usage(demo, tmp_path, monkeypatch, capsys):
     month, day = chttp._now_parts()[:2]
     (tmp_path / "credits-helius.json").write_text(json.dumps({"month": month, "services": {
         "safety": {"month": 120000, "days": {day: 3000}}, "research": {"month": 700000, "days": {day: 1000}}}}))
+    from web.db import cache
+    cache.clear()
     rows = {(r["service"], r["group"]): r for r in c.get("/api/system").json()["api_usage"]["rows"]}
     s = rows[("safety", "helius")]
     assert s["calls_window"] == 300 and s["window_s"] == 300 and s["load"] == 0.9 and s["429"] == 2

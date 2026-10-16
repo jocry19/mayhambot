@@ -1339,7 +1339,8 @@ def system(conn):
     except OSError:
         size = None
     return {"db_path": path, "db_size": size, "tables": counts, "last": last, "services": services,
-            "tier_source": tier_source(conn), "now": now_ts(), "sol_usd": _f(sol_usd(conn), 2), "api_usage": api_usage()}
+            "tier_source": tier_source(conn), "now": now_ts(), "sol_usd": _f(sol_usd(conn), 2),
+            "api_usage": cache.get(("api_usage",), 10, api_usage)}
 
 
 # ====================================================================== API budgets (core.http usage files)
