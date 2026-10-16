@@ -93,7 +93,7 @@ strategy.EXIT_NAMES                                # deutsche Namen der Ausstieg
 ```
 
 `Preset`-Felder: `size_sol, max_open, max_daily_loss_sol, take_profit, learned_tp, stop_loss, trail_activate,
-trail_drawdown, max_hold_min, min_score, min_smart_buyers, min_liquidity_usd, max_mcap_usd, max_signal_age_s,
+trail_drawdown, max_hold_min, min_score, min_model_score, require_model, min_smart_buyers, min_liquidity_usd, max_mcap_usd, max_signal_age_s,
 slippage_bps` (Anteile: 0.2 = 20 %; `min_score`, `min_smart_buyers`, `max_signal_age_s` gelten für Modus 2).
 
 ### Tabellen (Präfix `ct_`, Spalten werden nur ergänzt)
@@ -127,8 +127,10 @@ slippage_bps` (Anteile: 0.2 = 20 %; `min_score`, `min_smart_buyers`, `max_signal
 
 ## Modus 2 · Smart-Money-Signale
 
-Neue Zeilen der Tabelle `signals` (Signal-Engine) werden alle ~5 s gelesen. Gekauft wird, wenn Score ≥ `min_score`
-(Modell-Score, sobald `model` trainiert ist, sonst Signal-Score), ≥ `min_smart_buyers` Smart Wallets, Signal jünger als
+Neue Zeilen der Tabelle `signals` (Signal-Engine) werden alle ~5 s gelesen. Gekauft wird, wenn der Modell-Score
+(`model.score_token`: Pump-Chance in 1 h × 100) ≥ `min_model_score` ist; solange das Modell noch nicht trainiert ist
+(`ModelNotTrained`), gilt der Signal-Score ≥ `min_score`, oder es wird mit `require_model=True` gar nicht gekauft.
+Die Note A–E skaliert die Größe (A 1,5×, B 1,2×, C 1×, D 0,6×, E 0,4×). Außerdem nötig: ≥ `min_smart_buyers` Smart Wallets, Signal jünger als
 `max_signal_age_s`, Liquidität/Market Cap im Preset-Rahmen, Preis seit dem Signal nicht schon +50 %.
 Ausstieg: Ziel, Stop, Trailing, Zeit, oder „Smart Money steigt aus“ (die Wallets des Signals haben ≥ 50 % verkauft).
 Ultra- und Smart-Wallets des Modells werden außerdem als Wale für Modus 1 beobachtet.

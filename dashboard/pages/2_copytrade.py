@@ -68,7 +68,8 @@ for col, strat in zip(cols, control.STRATEGIES):
         st.caption(f"{pr.size_sol} SOL/Trade · max {pr.max_open} offen · Stop −{pr.stop_loss:.0%} · "
                    + (f"Ziel +{pr.take_profit:.0%}" if strat == "signal" or not pr.learned_tp else "Ziel pro Wal gelernt")
                    + f" · Tagesverlust max {pr.max_daily_loss_sol} SOL"
-                   + (f" · Score ≥ {pr.min_score:.0f}, ≥ {pr.min_smart_buyers} Smart Wallets" if strat == "signal" else ""))
+                   + (f" · Modell ≥ {pr.min_model_score:.0f} % Pump-Chance (vorher Signal-Score ≥ {pr.min_score:.0f}),"
+                      f" ≥ {pr.min_smart_buyers} Smart Wallets" if strat == "signal" else ""))
 
 with st.expander("✏️ Presets bearbeiten (Größe, Ziele, Stops, Limits)"):
     base = st.selectbox("Vorlage", list(presets), key="preset_edit_base")
@@ -84,7 +85,10 @@ with st.expander("✏️ Presets bearbeiten (Größe, Ziele, Stops, Limits)"):
         trail_activate=e[2].number_input("Trailing ab (%)", 1.0, 1000.0, bp.trail_activate * 100, 1.0) / 100,
         trail_drawdown=e[3].number_input("Trailing-Abstand (%)", 1.0, 90.0, bp.trail_drawdown * 100, 1.0) / 100,
         max_hold_min=e[0].number_input("max. Haltedauer (min)", 1.0, 10080.0, float(bp.max_hold_min), 5.0),
-        min_score=e[1].number_input("min. Signal-Score", 0.0, 100.0, float(bp.min_score), 1.0),
+        min_score=e[1].number_input("min. Signal-Score (ohne Modell)", 0.0, 100.0, float(bp.min_score), 1.0),
+        min_model_score=e[1].number_input("min. Modell-Score = Pump-Chance 1 h (%)", 0.0, 100.0,
+                                          float(bp.min_model_score), 1.0),
+        require_model=e[2].checkbox("Modus 2 nur mit trainiertem Modell", value=bp.require_model),
         min_smart_buyers=e[2].number_input("min. Smart Wallets", 1, 50, int(bp.min_smart_buyers)),
         max_signal_age_s=e[3].number_input("Signal max. alt (s)", 10.0, 3600.0, float(bp.max_signal_age_s), 10.0),
         min_liquidity_usd=e[0].number_input("min. Liquidität ($)", 0.0, 1e8, float(bp.min_liquidity_usd), 1000.0),

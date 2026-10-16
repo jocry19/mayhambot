@@ -252,3 +252,35 @@ def test_failing_request_never_logs_api_key(monkeypatch, caplog, tmp_path):
     store.event(conn, "error", f"call {url} failed", data={"url": url})
     row = conn.execute("SELECT message, data FROM ct_events").fetchone()
     assert secret not in row[0] and secret not in row[1]
+
+
+def test_signal_mode_uses_model_when_trained(env, monkeypatch):
+    import model
+    from model.predict import ModelNotTrained
+
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    follow_signals(conn, st)
+
+    def untrained(*a, **k):
+        raise ModelNotTrained("no model yet")
+
+    monkeypatch.setattr(model, "score_token", untrained)
+    p = control.preset(conn, "signal")
+    control.save_preset(conn, "nurmodell", control.Preset(**{**p.__dict__, "require_model": True}))
+    control.use_preset(conn, "signal", "nurmodell")
+    _signal(conn, score=95)
+    follow_signals(conn, st)  # untrained + require_model: no buy, no crash
+    assert conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0] == 0
+
+    control.use_preset(conn, "signal", "standard")
+    monkeypatch.setattr(model, "score_token", lambda mint, conn=None: {"score": 20.0, "grade": "D", "version": 3})
+    _signal(conn, score=95)
+    follow_signals(conn, st)  # model says 20 % < 30 %: skip even though the signal score is 95
+    assert conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0] == 0
+
+    monkeypatch.setattr(model, "score_token", lambda mint, conn=None: {"score": 62.0, "grade": "A", "version": 3})
+    _signal(conn, score=40)
+    follow_signals(conn, st)  # model 62 % (A): buy at 1.5x size
+    pos = conn.execute("SELECT * FROM ct_positions").fetchone()
+    assert pos and pos["size_sol"] == pytest.approx(control.preset(conn, "signal").size_sol * 1.5)

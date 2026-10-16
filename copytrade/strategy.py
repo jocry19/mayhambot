@@ -167,9 +167,16 @@ class Strategy:
         if age > p.max_signal_age_s:
             return self._skip("signal", mint, f"Signal zu alt ({age:.0f}s)")
         model = model_view(sig, self.conn)
-        score = model["score"] if model and model.get("score") is not None else sig["score"]
-        if score < p.min_score:
-            return self._skip("signal", mint, f"Score {score:.0f} < {p.min_score:.0f}")
+        if model:  # trained research model: its score is P(pump within 1 h) x 100
+            score = model["score"]
+            if score < p.min_model_score:
+                return self._skip("signal", mint, f"Modell {score:.0f} (Note {model.get('grade')}) < {p.min_model_score:.0f}")
+        else:  # model not trained yet: the signal engine's own score
+            if p.require_model:
+                return self._skip("signal", mint, "Modell noch nicht trainiert")
+            score = sig["score"]
+            if score < p.min_score:
+                return self._skip("signal", mint, f"Signal-Score {score:.0f} < {p.min_score:.0f}")
         if (sig["smart_buyers"] or 0) < p.min_smart_buyers:
             return self._skip("signal", mint, f"nur {sig['smart_buyers']} Smart Wallets")
         snap = market.snapshot(mint, self.s)
@@ -408,8 +415,8 @@ def model_view(sig, conn=None) -> dict | None:
         return None
     try:
         out = score_token(sig["mint"], conn=conn)
-    except Exception as e:
-        log.debug("model prediction failed: %s", e)
+    except Exception as e:  # includes model.predict.ModelNotTrained before the first retrain
+        log.debug("model prediction unavailable: %s", e)
         return None
     if not out or out.get("score") is None or not out.get("version"):
         return None  # untrained model: fall back to the signal score

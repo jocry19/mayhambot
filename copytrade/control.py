@@ -56,7 +56,9 @@ class Preset:
     trail_activate: float = 0.2
     trail_drawdown: float = 0.12
     max_hold_min: float = 240
-    min_score: float = 60  # signal: minimum signal score (0-100); whale: minimum wallet score x100
+    min_score: float = 60  # signal: minimum score of the signal engine (0-100), used while the model is untrained
+    min_model_score: float = 30  # signal: minimum model score = P(pump within 1 h) x 100 (grade C from 30)
+    require_model: bool = False  # signal: buy only with a trained model prediction
     min_smart_buyers: int = 2  # signal only
     min_liquidity_usd: float = 15000
     max_mcap_usd: float = 20_000_000
@@ -71,11 +73,11 @@ class Preset:
 
 BUILTIN = {
     "vorsichtig": Preset(size_sol=0.1, max_open=3, max_daily_loss_sol=0.5, take_profit=0.3, stop_loss=0.12,
-                         trail_activate=0.15, trail_drawdown=0.08, max_hold_min=90, min_score=70,
+                         trail_activate=0.15, trail_drawdown=0.08, max_hold_min=90, min_score=70, min_model_score=45,
                          min_smart_buyers=3, min_liquidity_usd=30000),
     "standard": Preset(),
     "aggressiv": Preset(size_sol=1.0, max_open=8, max_daily_loss_sol=5.0, take_profit=1.0, stop_loss=0.3,
-                        trail_activate=0.3, trail_drawdown=0.18, max_hold_min=480, min_score=50,
+                        trail_activate=0.3, trail_drawdown=0.18, max_hold_min=480, min_score=50, min_model_score=20,
                         min_smart_buyers=2, min_liquidity_usd=10000),
 }
 
