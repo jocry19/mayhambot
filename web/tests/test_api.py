@@ -713,3 +713,13 @@ def test_signal_hit_rate_counts_unmeasured(demo, tmp_path):
     con.close()
     p = _client(db).get("/api/signals/performance").json()
     assert p["unmeasured"] >= 1 and p["hit_rate"] == round(p["hits"] / p["n"], 3)
+
+
+def test_learning_progress(demo):
+    d = _client(demo).get("/api/learning").json()
+    assert d["available"] and d["target"] == 100 and d["rows"]
+    accts = {(r["strategy"], r["account"]) for r in d["rows"]}
+    assert ("whale", "paper") in accts and ("whale", "explore") in accts
+    for r in d["rows"]:
+        assert 0 <= r["oos_trades"] <= r["trades"] and 0 <= r["progress"] <= 1
+    assert any(r["gate"] for r in d["rows"] if r["account"] == "paper")

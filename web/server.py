@@ -244,6 +244,11 @@ def wallet(address: str):
     return ok(q.wallet_detail(read_conn(), address))
 
 
+@app.get("/api/learning")
+def learning():
+    return ok(cache.get(("learning",), 30, lambda: q.learning_progress(read_conn())))
+
+
 @app.get("/api/copytrade")
 def copytrade(mode: str = "paper", strategy: str | None = None):
     if mode not in ("paper", "explore", "dry", "live"):

@@ -4,6 +4,7 @@ import { EXIT_LABEL, MODE_LABEL, STRAT_LABEL, act, ago, dt, dur, go, mc, n, pct,
 import { CoinLink, HistBars, PnlCurve, StatusBadge, WalletLink } from "../parts.jsx";
 import { Callout, Card, Delta, Empty, Modal, Seg, Table, Tabs, Tier, Tile } from "../ui.jsx";
 import Learn from "./Learn.jsx";
+import { LoadBar } from "./System.jsx";
 import { PosRisk, RiskBadge } from "../safety.jsx";
 
 const ver = (r) => (r.param_version ? <span className="badge" title={r.use_inflow_exit ? "mit Verkauf am Ansturm-Ende" : undefined}>v{r.param_version}</span> : <span className="dim">Preset</span>);
@@ -64,6 +65,33 @@ function Backtest() {
   );
 }
 
+const ACCT = { paper: "Papier streng", explore: "Erkundung", dry: "Dry-Run", live: "Echtgeld" };
+
+/** How far each strategy is on the way to real money: trades the learner never saw (after its active parameters)
+ *  against the ~100 needed, net after costs and hit rate per account, and the live gate on the strict book. */
+function Learning() {
+  const { data: d } = usePoll("/api/learning", 30000);
+  if (!d?.available || !d.rows?.length) return null;
+  return (
+    <Card title="Lernfortschritt zum Echtgeld" sub={`Zählt nur Trades nach den aktuell gelernten Einstellungen (out of sample). Ab etwa ${d.target} solcher Trades ist ein Ergebnis belastbar. Netto = nach Gebühren und Slippage.`} flush>
+      <Table rows={d.rows} rowKey={(r) => `${r.strategy}-${r.account}`} cols={[
+        { k: "strategy", l: "Modus", fmt: (r) => STRAT_LABEL[r.strategy] || r.strategy },
+        { k: "account", l: "Konto", fmt: (r) => (r.account === "paper" ? <b>{ACCT.paper}</b> : ACCT[r.account] || r.account) },
+        { k: "progress", l: `Out of sample (Ziel ${d.target})`, sort: (r) => r.oos_trades,
+          fmt: (r) => <span className="col" style={{ gap: 2, minWidth: 140 }}><LoadBar v={r.progress} /><span className="dim" style={{ fontSize: 11 }}>{n(r.oos_trades)} / {d.target}{r.since_params ? ` · seit ${dt(r.since_params)}` : " · noch keine gelernte Version"}</span></span> },
+        { k: "oos_net_sol", l: "Netto out of sample", r: true, fmt: (r) => <span className={(r.oos_net_sol || 0) >= 0 ? "up" : "down"}>{solSigned(r.oos_net_sol, 3)}</span> },
+        { k: "oos_win_rate", l: "Treffer oos", r: true, fmt: (r) => (r.oos_win_rate != null ? pct(r.oos_win_rate) : "–") },
+        { k: "net_sol", l: "Netto gesamt", r: true, fmt: (r) => <span className={(r.net_sol || 0) >= 0 ? "up" : "down"}>{solSigned(r.net_sol, 3)}</span> },
+        { k: "trades", l: "Trades gesamt", r: true },
+        { k: "gate", l: "Go-Live-Prüfung", sort: (r) => (r.gate ? (r.gate.ok ? 2 : 1) : 0),
+          fmt: (r) => (r.gate ? <span className={`badge ${r.gate.ok ? "good" : ""}`} title={`Letzte ${n(r.gate.days)} Tage: ${r.gate.n} Trades (min. ${r.gate.min_trades}), netto ${solSigned(r.gate.net_sol, 3)}, Profit-Faktor ${r.gate.profit_factor != null ? n(r.gate.profit_factor, 2) : "∞"} (min. ${n(r.gate.min_pf, 1)}), beide Hälften im Plus: ${r.gate.halves_positive ? "ja" : "nein"}`}>
+            {r.gate.ok ? "bestanden" : r.gate.n < r.gate.min_trades ? `${r.gate.n}/${r.gate.min_trades} Trades` : r.gate.net_sol <= 0 ? "netto im Minus"
+              : r.gate.profit_factor != null && r.gate.profit_factor < r.gate.min_pf ? "Profit-Faktor zu niedrig" : "eine Hälfte im Minus"}</span> : <span className="dim">–</span>) },
+      ]} />
+    </Card>
+  );
+}
+
 export default function CopyTrade() {
   const [mode, setMode] = useState("paper");
   const [strategy, setStrategy] = useState("");
@@ -87,6 +115,8 @@ export default function CopyTrade() {
       {mode === "explore" && <Callout icon="info">Erkundungskonto (Start 5 SOL): kauft bewusst breiter, auch Ultra- und Smart-Wale, die die strengen Regeln auslassen, mit kleinen Beträgen. Es dient zum Lernen, nicht als Maßstab für Echtgeld.</Callout>}
       {mode === "dry" && <Callout icon="info">Dry-Run-Konto: Orders, die der Echtgeld-Pfad gebaut, signiert und simuliert, aber nie gesendet hat. Gebucht mit Quote-Preisen wie auf Papier.</Callout>}
       {mode === "live" && !ctl.live_ready && <Callout icon="info">Echtgeld ist aus. Der Hauptschalter steht in der .env (LIVE_TRADING=true und ein Schlüssel), danach je Modus unter Steuerung.</Callout>}
+
+      <Learning />
 
       <div className="tiles">
         <Tile label="Kontostand" value={eq != null ? sol(eq) : d.balance_sol != null ? sol(d.balance_sol) : "–"} sub={`${sol(s.open_value_sol, 2)} in offenen Positionen (Verkaufswert)`} />

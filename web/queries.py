@@ -1245,6 +1245,59 @@ def _summary(ps):
     return s
 
 
+LEARN_TARGET_TRADES = 100  # closed trades after the active parameters before a result is worth trusting
+
+
+def learning_progress(conn, now=None):
+    """Progress toward real money per strategy and account: closed trades in total and out of sample (opened after
+    the strategy's active learned parameters went live, so the learner never saw them), net after costs (the paper
+    fills already carry fees and slippage), hit rate, and the live go-live gate on the strict paper book."""
+    if not has(conn, "ct_positions"):
+        return {"available": False}
+    now = now or now_ts()
+    cols = tables(conn)["ct_positions"]
+    strat_col = "COALESCE(strategy,'whale')" if "strategy" in cols else "'whale'"
+    since = {}
+    if has(conn, "ct_param_versions"):
+        for r in rows(conn, "SELECT strategy, MAX(ts) ts FROM ct_param_versions WHERE active=1 GROUP BY strategy"):
+            since[r["strategy"]] = r["ts"]
+    agg = rows(conn, f"""SELECT {strat_col} strategy, mode, COUNT(*) n, SUM(pnl_sol) net, SUM(pnl_sol > 0) wins,
+                                AVG(pnl_pct) avg_pct, MIN(opened_at) first_ts
+                         FROM ct_positions WHERE status='closed' AND pnl_sol IS NOT NULL GROUP BY 1, 2""")
+    oos = {}
+    for st, ts in since.items():
+        for r in rows(conn, f"""SELECT mode, COUNT(*) n, SUM(pnl_sol) net, SUM(pnl_sol > 0) wins FROM ct_positions
+                                WHERE status='closed' AND pnl_sol IS NOT NULL AND {strat_col}=? AND opened_at>=? GROUP BY mode""", (st, ts)):
+            oos[(st, r["mode"])] = r
+    gate = {}
+    try:
+        from live import readiness  # type: ignore
+        from live.config import load as live_load  # type: ignore
+        cfg = live_load()
+        for st in {r["strategy"] for r in agg}:
+            e = readiness.paper_edge(conn, st, cfg.gate_days)
+            pf = e["profit_factor"]
+            gate[st] = {"days": cfg.gate_days, "n": e["n"], "min_trades": cfg.gate_min_trades, "net_sol": _f(e["net_sol"], 4),
+                        "profit_factor": _f(pf, 3) if pf != float("inf") else None, "min_pf": cfg.gate_min_profit_factor,
+                        "halves_positive": e["first_half"] > 0 and e["second_half"] > 0,
+                        "ok": e["n"] >= cfg.gate_min_trades and e["net_sol"] > 0 and pf >= cfg.gate_min_profit_factor
+                        and e["first_half"] > 0 and e["second_half"] > 0}
+    except Exception:
+        pass
+    out = []
+    for r in sorted(agg, key=lambda r: (r["strategy"], ["paper", "explore", "dry", "live"].index(r["mode"]) if r["mode"] in ("paper", "explore", "dry", "live") else 9)):
+        o = oos.get((r["strategy"], r["mode"]))
+        n_oos = o["n"] if o else (r["n"] if r["strategy"] not in since else 0)
+        out.append({"strategy": r["strategy"], "account": r["mode"], "trades": r["n"], "net_sol": _f(r["net"], 4),
+                    "win_rate": _f((r["wins"] or 0) / r["n"], 3) if r["n"] else None, "avg_pct": _f(r["avg_pct"], 4),
+                    "since_params": since.get(r["strategy"]), "oos_trades": n_oos,
+                    "oos_net_sol": _f(o["net"], 4) if o else (_f(r["net"], 4) if r["strategy"] not in since else 0.0),
+                    "oos_win_rate": _f((o["wins"] or 0) / o["n"], 3) if o and o["n"] else None,
+                    "progress": _f(min(1.0, n_oos / LEARN_TARGET_TRADES), 3),
+                    "gate": gate.get(r["strategy"]) if r["mode"] == "paper" else None})
+    return {"available": True, "target": LEARN_TARGET_TRADES, "rows": out}
+
+
 def control_state(conn):
     out = {"available": False, "modes": {}, "presets": {}, "active_presets": {}, "live": {}, "paused": False,
            "live_ready": False, "live_master": False, "strategies": {}, "mode_labels": {}}
