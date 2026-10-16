@@ -21,6 +21,7 @@ Settings (optional, in .env):
   BACKUP_KEEP_HOURS     keep every backup this long (default 24), then one per day ...
   BACKUP_KEEP_DAYS      ... for this many days (default 14)
   BACKUP_MAX_GB         and never more than this in total, oldest go first, the newest 3 always stay (default 5)
+  BACKUP_GZIP_LEVEL     1 (fast, default) to 9 (smallest); level 6 took ~3x longer for ~5 % less size
   FEED_STALL_MIN        alert/restart when no new market data for this long (default 15)
   ALERT_REPEAT_HOURS    repeat an unresolved alert every N hours (default 6)
   WATCHDOG_RUNTIME      local (default) | docker   (docker: the host watches the container)
@@ -628,7 +629,19 @@ def _redacted_env() -> str:
     return "\n".join(lines) + "\n"
 
 
+def leave_background_band():
+    """launchd's ProcessType Background throttles CPU, I/O and timers (the hourly backup of a 178 MB database took
+    18 min). Leave the Darwin background band for this process; children inherit it. No-op off macOS."""
+    if not IS_MAC:
+        return
+    try:
+        os.setpriority(getattr(os, "PRIO_DARWIN_PROCESS", 4), 0, 0)
+    except (OSError, AttributeError):
+        pass
+
+
 def backup(args) -> int:
+    leave_background_band()
     out = backup_dir()
     out.mkdir(parents=True, exist_ok=True)
     os.chmod(out, 0o700)
@@ -637,7 +650,7 @@ def backup(args) -> int:
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         tar_tmp = td / "b.tar.gz"
-        with tarfile.open(tar_tmp, "w:gz", compresslevel=6) as tar:
+        with tarfile.open(tar_tmp, "w:gz", compresslevel=cfg("BACKUP_GZIP_LEVEL", 1)) as tar:
             src = db_path()
             if src.exists():
                 snap = td / "mayhambot.db"
