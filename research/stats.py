@@ -1,5 +1,11 @@
-"""Small pure-Python statistics: Wilson interval, AUC, standardized logistic + ridge regression."""
+"""Small statistics: Wilson interval, AUC, standardized logistic + ridge regression.
+The regression fits use numpy when available (same results, many times faster); models stay plain lists."""
 import math
+
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover - numpy is in requirements, the pure-Python path stays as fallback
+    np = None
 
 
 def wilson(k, n, z=1.96):
@@ -56,6 +62,8 @@ def _z(X, mean, std):
 def logistic_fit(X, y, l2=5.0, iters=25, weights=None):
     """L2-regularised logistic regression on standardized inputs, fitted with Newton/IRLS.
     Returns dict(bias, coef, mean, std) with coef per standard deviation."""
+    if np is not None and X:
+        return _logistic_fit_np(X, y, l2, iters, weights)
     mean, std = standardize_fit(X)
     Z = [[1.0] + r for r in _z(X, mean, std)]
     n, k = len(Z), len(mean) + 1
@@ -92,6 +100,47 @@ def logistic_fit(X, y, l2=5.0, iters=25, weights=None):
     return dict(bias=beta[0], coef=beta[1:], mean=mean, std=std)
 
 
+def _standardize_np(X):
+    A = np.asarray(X, dtype=float)
+    mean = A.mean(axis=0)
+    var = ((A - mean) ** 2).mean(axis=0)
+    std = np.where(var > 1e-12, np.sqrt(var), 1.0)
+    return A, mean, std
+
+
+def _solve_np(A, b):
+    try:
+        return np.linalg.solve(A, b)
+    except np.linalg.LinAlgError:
+        return np.asarray(_solve(A.tolist(), b.tolist()))
+
+
+def _logistic_fit_np(X, y, l2, iters, weights):
+    A, mean, std = _standardize_np(X)
+    n = len(A)
+    Z = np.hstack([np.ones((n, 1)), (A - mean) / std])
+    k = Z.shape[1]
+    yv = np.asarray(y, dtype=float)
+    w = np.asarray(weights, dtype=float) if weights else np.ones(n)
+    pbar = min(0.99, max(0.01, float(w @ yv) / float(w.sum())))
+    beta = np.zeros(k)
+    beta[0] = math.log(pbar / (1 - pbar))
+    pen = np.full(k, l2)
+    pen[0] = 0.0  # no penalty on the bias
+    for _ in range(iters):
+        t = Z @ beta
+        p = np.where(t >= 0, 1 / (1 + np.exp(-np.abs(t))), np.exp(-np.abs(t)) / (1 + np.exp(-np.abs(t))))
+        g = Z.T @ (w * (p - yv)) + pen * beta
+        v = w * np.maximum(p * (1 - p), 1e-6)
+        H = (Z * v[:, None]).T @ Z + np.diag(pen)
+        step = _solve_np(H, g)
+        beta = beta - step
+        if np.max(np.abs(step)) < 1e-6:
+            break
+    return dict(bias=float(beta[0]), coef=[float(c) for c in beta[1:]], mean=[float(m) for m in mean],
+                std=[float(sd) for sd in std])
+
+
 def logistic_predict(m, x):
     t = m["bias"] + sum(c * (xi - mu) / sd for c, xi, mu, sd in zip(m["coef"], x, m["mean"], m["std"]))
     return sigmoid(t)
@@ -119,6 +168,15 @@ def _solve(A, b):
 
 
 def ridge_fit(X, y, l2=5.0):
+    if np is not None and X and y:
+        A, mean, std = _standardize_np(X)
+        Z = (A - mean) / std
+        yv = np.asarray(y, dtype=float)
+        ybar = float(yv.mean())
+        k = Z.shape[1]
+        coef = _solve_np(Z.T @ Z + l2 * np.eye(k), Z.T @ (yv - ybar)) if k else []
+        return dict(bias=ybar, coef=[float(c) for c in coef], mean=[float(m) for m in mean],
+                    std=[float(sd) for sd in std])
     mean, std = standardize_fit(X)
     Z = _z(X, mean, std)
     k = len(mean)
