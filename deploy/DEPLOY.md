@@ -87,7 +87,12 @@ sein, sonst geht es automatisch zurück auf die laufende Version. Danach `mayham
 
 - Telegram: "⬆️ Update eingespielt: <hash>, Tests grün, 6 von 6 Dienste laufen" bzw. "↩️ Update zurückgerollt".
   Alles steht auch in `logs/update.log`.
-- Höchstens ein Deploy pro 10 min. Ein an den Tests gescheiterter Commit wird nicht wieder probiert, erst der nächste.
+- Höchstens ein Deploy pro 10 min; Commits dazwischen kommen gebündelt. Vorher ein Backup mit Integritätsprüfung,
+  schlägt es fehl, wartet das Update.
+- Nach dem Neustart müssen alle Dienste 3 min stabil laufen (gleiche Prozess-ID, kein Neustart-Kreislauf) und das
+  Dashboard antworten, sonst geht es automatisch zurück auf den alten Stand ("↩️ Update zurückgerollt: … Grund").
+  Die Meldung nennt auch, wie oft 'database is locked' kam.
+- Ein gescheiterter Commit wird nicht wieder probiert, erst der nächste.
 - **Kein Update, solange Echtgeld im Spiel ist:** `LIVE_TRADING=true` in `.env` oder offene Echtgeld-Positionen.
   Dann kommt einmal "Update wartet", einspielen von Hand mit `.venv/bin/python mayham.py update`.
 - Lokale Änderungen im Ordner blockieren das Update (Meldung kommt einmal).
@@ -104,6 +109,7 @@ Neustart höchstens alle 15 min. Geprüft wird:
 - keine neuen Marktdaten seit `FEED_STALL_MIN` (15 min), Copy-Trader pollt nicht mehr
 - weniger als 2 GB frei, letztes Backup älter als 3 h, Mac auf Akku
 - Pause > 10 min seit dem letzten Watchdog-Lauf (Mac schlief / war aus)
+- mehr als `LOCK_ALERT_PER_RUN` (20) 'database is locked' in den Logs innerhalb von 2 min (Datenbank überlastet)
 
 ## Backups
 

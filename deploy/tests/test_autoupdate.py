@@ -14,7 +14,7 @@ FAKE_MAYHAM = '''import subprocess, sys
 from pathlib import Path
 if sys.argv[1:2] == ["backup"]:
     sys.exit(1 if Path("BACKUP_FAILS").exists() else 0)
-if sys.argv[1] == "update":
+if sys.argv[1:2] == ["update"]:
     old = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     subprocess.check_call(["git", "pull", "-q", "--ff-only", "origin", "main"])
     if Path("RED").exists():
@@ -65,9 +65,9 @@ def repo(tmp_path, monkeypatch):
 
 def test_deploys_new_commit_and_alerts(repo):
     work, push, head, alerts = repo
-    assert autoupdate.run_once(alerts.append).startswith("aktuell")
+    assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil")).startswith("aktuell")
     push("feature")
-    assert autoupdate.run_once(alerts.append).startswith("eingespielt")
+    assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil")).startswith("eingespielt")
     assert (work / "feature").exists()
     assert "Update eingespielt" in alerts[-1] and "2 von 2" in alerts[-1]
     assert "deployed" in (work / "logs" / "update.log").read_text()
@@ -77,9 +77,9 @@ def test_rollback_is_reported_and_not_retried(repo):
     work, push, head, alerts = repo
     before = head()
     push("broken", red=True)
-    assert autoupdate.run_once(alerts.append, now=1e9).startswith("zurückgerollt")
+    assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"), now=1e9).startswith("zurückgerollt")
     assert head() == before and "zurückgerollt" in alerts[-1]
-    assert "übersprungen" in autoupdate.run_once(alerts.append, now=2e9)
+    assert "übersprungen" in autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"), now=2e9)
 
 
 def test_live_trading_blocks_and_alerts_once(repo):
@@ -87,8 +87,8 @@ def test_live_trading_blocks_and_alerts_once(repo):
     (work / ".env").write_text("LIVE_TRADING=true\n")
     push("feature")
     before = head()
-    autoupdate.run_once(alerts.append)
-    autoupdate.run_once(alerts.append)
+    autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"))
+    autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"))
     assert head() == before
     assert len(alerts) == 1 and "wartet" in alerts[0]
     assert "update pending: live trading on" in (work / "logs" / "update.log").read_text()
@@ -104,7 +104,7 @@ def test_open_live_position_blocks(repo):
     c.close()
     push("feature")
     before = head()
-    assert "Echtgeld" in autoupdate.run_once(alerts.append)
+    assert "Echtgeld" in autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"))
     assert head() == before
 
 
@@ -114,20 +114,20 @@ def test_kill_switch_file_and_env(repo):
     before = head()
     (work / "data").mkdir()
     (work / "data" / "NO_AUTO_UPDATE").write_text("")
-    assert autoupdate.run_once(alerts.append).startswith("aus")
+    assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil")).startswith("aus")
     (work / "data" / "NO_AUTO_UPDATE").unlink()
     (work / ".env").write_text("AUTO_UPDATE=0\n")
-    assert autoupdate.run_once(alerts.append).startswith("aus")
+    assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil")).startswith("aus")
     assert head() == before and not alerts
 
 
 def test_one_deploy_per_interval(repo):
     work, push, head, alerts = repo
     push("a")
-    assert autoupdate.run_once(alerts.append, now=1e9).startswith("eingespielt")
+    assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"), now=1e9).startswith("eingespielt")
     push("b")
-    assert autoupdate.run_once(alerts.append, now=1e9 + 60).startswith("warte")
-    assert autoupdate.run_once(alerts.append, now=1e9 + 601).startswith("eingespielt")
+    assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"), now=1e9 + 60).startswith("warte")
+    assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"), now=1e9 + 601).startswith("eingespielt")
 
 
 def test_dirty_checkout_waits(repo):
@@ -135,7 +135,7 @@ def test_dirty_checkout_waits(repo):
     (work / "mayham.py").write_text(FAKE_MAYHAM + "\n# local edit\n")
     push("feature")
     before = head()
-    assert "lokale Änderungen" in autoupdate.run_once(alerts.append)
+    assert "lokale Änderungen" in autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"))
     assert head() == before
 
 
@@ -159,8 +159,57 @@ def test_failed_backup_blocks_deploy(repo):
     (work / "BACKUP_FAILS").write_text("")
     push("feature")
     before = head()
-    assert "Backup" in autoupdate.run_once(alerts.append)
-    autoupdate.run_once(alerts.append)
+    assert "Backup" in autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"))
+    autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"))
     assert head() == before and len(alerts) == 1
     (work / "BACKUP_FAILS").unlink()
-    assert autoupdate.run_once(alerts.append).startswith("eingespielt")
+    assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil")).startswith("eingespielt")
+
+
+def test_unhealthy_deploy_rolls_back(repo):
+    work, push, head, alerts = repo
+    before = head()
+    push("crashy")
+    calls = []
+
+    def health():
+        calls.append(1)
+        return (False, "signals läuft nicht") if len(calls) == 1 else (True, "ok")
+    assert autoupdate.run_once(alerts.append, health=health).startswith("zurückgerollt")
+    assert head() == before and "signals läuft nicht" in alerts[-1]
+    assert "übersprungen" in autoupdate.run_once(alerts.append, now=9e9)
+
+
+def test_health_check_detects_crash_loop(repo, monkeypatch):
+    work, push, head, alerts = repo
+    monkeypatch.setattr(autoupdate, "_services_now", lambda: ["a", "b"])
+    monkeypatch.setattr(ops, "check_dashboard", lambda: True)
+    seq = iter([{"a": 1, "b": 2}, {"a": 1, "b": 3}, {"a": 1, "b": 4}])
+    monkeypatch.setattr(autoupdate, "_pids", lambda names: next(seq))
+    ok, detail = autoupdate.health_check(window=0.02, interval=0.01)
+    assert not ok and "b" in detail
+    monkeypatch.setattr(autoupdate, "_pids", lambda names: {"a": 1, "b": 2})
+    assert autoupdate.health_check(window=0.02, interval=0.005)[0]
+
+
+def test_lock_count_reads_only_new_log_lines(repo):
+    work, push, head, alerts = repo
+    (work / "logs").mkdir(exist_ok=True)
+    f = work / "logs" / "signals.log"
+    f.write_text("old database is locked\n")
+    sizes = autoupdate._log_sizes()
+    f.write_text(f.read_text() + "x database is locked\ny database is locked\n")
+    assert autoupdate._lock_count(sizes) == 2
+
+
+def test_watchdog_counts_new_lock_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(ops, "ROOT", tmp_path)
+    (tmp_path / "logs").mkdir()
+    f = tmp_path / "logs" / "copytrade.log"
+    f.write_text("database is locked\n")
+    st = {}
+    assert ops.new_lock_errors(st) == 0          # history before the first run is not counted
+    f.write_text(f.read_text() + "database is locked\n" * 3)
+    assert ops.new_lock_errors(st) == 3
+    f.write_text("database is locked\n")         # rotated (copytruncate)
+    assert ops.new_lock_errors(st) == 1

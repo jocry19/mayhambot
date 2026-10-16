@@ -298,6 +298,23 @@ def restart_app(reason: str) -> str:
     return f"Neustart über mayham.py start -> {r.returncode}"
 
 
+def new_lock_errors(st: dict) -> int:
+    """'database is locked' lines written to logs/*.log since the last watchdog run (8 services share SQLite)."""
+    seen = st.setdefault("log_offsets", {})
+    n = 0
+    for f in (ROOT / "logs").glob("*.log"):
+        try:
+            size = f.stat().st_size
+            start = seen.get(f.name, size)       # first sighting: count from now on
+            with open(f, "rb") as fh:
+                fh.seek(start if start <= size else 0)   # truncated by rotation -> from the start
+                n += fh.read().count(b"database is locked")
+            seen[f.name] = size
+        except OSError:
+            pass
+    return n
+
+
 def watchdog(args) -> int:
     st = load_state()
     now = time.time()
@@ -310,6 +327,9 @@ def watchdog(args) -> int:
 
     rotate_logs(quiet=True)
     r = collect()
+    locks = new_lock_errors(st)
+    if locks > cfg("LOCK_ALERT_PER_RUN", 20):
+        r["problems"]["db_locked"] = f"Datenbank überlastet: {locks}× 'database is locked' in 2 min."
     seen = st.setdefault("problems", {})     # key -> {first, count, alerted, msg}
     repeat = cfg("ALERT_REPEAT_HOURS", 6) * 3600
     restartable = {"app_down", "service_down", "dashboard_down", "feed_stalled", "copytrade_stalled",

@@ -11,6 +11,8 @@ Spielt nichts ein, wenn
   - der Checkout lokale Änderungen hat oder nicht vorspulbar ist,
   - der letzte Deploy weniger als AUTO_UPDATE_MIN (10) Minuten her ist,
   - das Backup vor dem Update fehlschlägt (Integritätsprüfung),
+Nach dem Neustart müssen alle Dienste 3 min stabil laufen (gleiche PID) und das Dashboard antworten,
+sonst geht es automatisch zurück auf den alten Stand (Telegram-Meldung, Commit wird nicht wieder probiert).
   - derselbe Commit schon einmal an den Tests gescheitert ist (der nächste Push wird wieder probiert).
 
   python deploy/autoupdate.py           # einmal prüfen (das macht launchd)
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -97,7 +100,72 @@ def disabled(env: dict) -> str | None:
     return None
 
 
-def run_once(alert=ops.send_alert, now=None) -> str:
+def _services_now() -> list[str]:
+    """Service list of the version now on disk (a deploy can add services)."""
+    try:
+        out = subprocess.run([_python(), "-c", "import mayham; print(' '.join(mayham.SERVICES))"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=60).stdout.split()
+        return out or list(ops.SERVICES)
+    except Exception:  # noqa: BLE001
+        return list(ops.SERVICES)
+
+
+def _pids(names) -> dict:
+    out = {}
+    for n in names:
+        try:
+            pid = int((ROOT / "data" / "pids" / f"{n}.pid").read_text())
+            os.kill(pid, 0)
+            out[n] = pid
+        except (OSError, ValueError):
+            out[n] = None
+    return out
+
+
+def health_check(window=None, interval=15) -> tuple[bool, str]:
+    """After a restart: every service must be up and keep the same pid (no crash loop) for the last part of
+    the window, and the dashboard must answer. Returns (ok, detail)."""
+    window = window if window is not None else ops.cfg("AUTO_UPDATE_HEALTH_S", 180)
+    names = _services_now()
+    end = time.time() + window
+    stable_since, last, detail = None, None, "noch nicht geprüft"
+    while True:
+        cur = _pids(names)
+        down = [n for n, p in cur.items() if not p]
+        changed = [n for n in names if last and cur[n] and last[n] and cur[n] != last[n]]
+        if down or changed:
+            stable_since = None
+            detail = ", ".join([f"{n} läuft nicht" for n in down] + [f"{n} startet neu" for n in changed])
+        elif stable_since is None:
+            stable_since = time.time()
+        last = cur
+        if time.time() >= end:
+            break
+        time.sleep(interval)
+    if stable_since is None or time.time() - stable_since < min(60, window / 2):
+        return False, detail
+    if not ops.check_dashboard():
+        return False, "Dashboard antwortet nicht"
+    return True, f"{len(names)} von {len(names)} Dienste laufen stabil"
+
+
+def _lock_count(since_sizes: dict) -> int:
+    n = 0
+    for f, size in since_sizes.items():
+        try:
+            with open(f, "rb") as fh:
+                fh.seek(size if os.path.getsize(f) >= size else 0)
+                n += fh.read().count(b"database is locked")
+        except OSError:
+            pass
+    return n
+
+
+def _log_sizes() -> dict:
+    return {str(f): f.stat().st_size for f in (ROOT / "logs").glob("*.log") if f.name != "update.log"}
+
+
+def run_once(alert=ops.send_alert, now=None, health=None) -> str:
     env = ops.load_env()
     now = now or time.time()
     st = _load()
@@ -148,14 +216,28 @@ def run_once(alert=ops.send_alert, now=None) -> str:
     a = subprocess.run([_python(), "mayham.py", "install-autostart"], cwd=ROOT, capture_output=True, text=True,
                        timeout=300)
     log((a.stdout + a.stderr).strip()[-1000:])
-    time.sleep(ops.cfg("AUTO_UPDATE_SETTLE_S", 20))
-    procs = ops.check_processes()
-    up = sum(procs.values())
+    sizes = _log_sizes()
+    ok, detail = (health or health_check)()
+    locks = _lock_count(sizes)
+    if not ok:
+        # the new version starts but does not stay up: back to the previous commit and restart that
+        git("reset", "-q", "--hard", head)
+        subprocess.run([_python(), "-m", "pip", "install", "-q", "-r", "requirements.txt"], cwd=ROOT,
+                       capture_output=True, timeout=900)
+        subprocess.run([_python(), "mayham.py", "restart"], cwd=ROOT, capture_output=True, timeout=300)
+        ok2, detail2 = (health or health_check)()
+        st["bad"] = target
+        _save(st)
+        log(f"rolled back after health check: {subject}: {detail}; old version: {detail2}")
+        alert(f"↩️ Update zurückgerollt: {subject}. Grund: {detail}. Alte Version {head[:7]} läuft wieder"
+              f"{'' if ok2 else ' NICHT sauber: ' + detail2}. Details: logs/update.log")
+        return f"zurückgerollt {target[:7]} ({detail})"
     st.pop("bad", None)
     st["deployed"] = target
     _save(st)
-    log(f"deployed {subject}: {up} von {len(procs)} Diensten laufen")
-    alert(f"⬆️ Update eingespielt: {subject}, Tests grün, {up} von {len(procs)} Dienste laufen.")
+    lock_note = f", {locks}× 'database is locked'" if locks else ""
+    log(f"deployed {subject}: {detail}{lock_note}")
+    alert(f"⬆️ Update eingespielt: {subject}, Tests grün, {detail}{lock_note}.")
     return f"eingespielt {target[:7]}"
 
 
