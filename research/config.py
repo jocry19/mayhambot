@@ -17,7 +17,7 @@ def _i(name, default):
 @dataclass
 class ResearchSettings:
     # discovery budget per run (GeckoTerminal allows ~30 calls/min keyless)
-    gt_calls_per_run: int = _i("RESEARCH_GT_CALLS_PER_RUN", 80)
+    gt_calls_per_run: int = _i("RESEARCH_GT_CALLS_PER_RUN", 40)
     early_tokens_per_run: int = _i("RESEARCH_EARLY_TOKENS_PER_RUN", 5)
     early_max_sig_pages: int = _i("RESEARCH_EARLY_MAX_SIG_PAGES", 15)   # 1000 signatures per page
     early_tx_per_token: int = _i("RESEARCH_EARLY_TX_PER_TOKEN", 80)    # earliest swaps parsed per token
