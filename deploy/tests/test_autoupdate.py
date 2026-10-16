@@ -390,3 +390,21 @@ def test_interrupted_round_is_finished_next_time(repo):
     autoupdate._save({"deploying": {"head": mid, "target": "x", "at": 1.0}})
     assert autoupdate.run_once(alerts.append, health=lambda: (False, "b läuft nicht")).startswith("zurückgerollt")
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=work, text=True).strip() == mid
+
+
+def test_gate_env_drops_env_file_keys_and_secrets(repo, monkeypatch):
+    work, push, head, alerts = repo
+    (work / ".env").write_text("HELIUS_API_KEY=k\nMY_KEY=v\n# C=1\n")
+    monkeypatch.setenv("MY_KEY", "v")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    monkeypatch.setenv("PATH_LIKE", "keep")
+    env = autoupdate._gate_env()
+    assert "MY_KEY" not in env and "TELEGRAM_CHAT_ID" not in env and env["PATH_LIKE"] == "keep"
+    assert env["MAYHAM_SKIP_BACKUP"] == "1"
+
+
+def test_live_trading_in_file_wins_over_stale_environment(repo, monkeypatch):
+    work, push, head, alerts = repo
+    monkeypatch.setenv("LIVE_TRADING", "false")      # left behind by an earlier dotenv import
+    (work / ".env").write_text("LIVE_TRADING=true\n")
+    assert autoupdate.live_reason(ops.load_env())

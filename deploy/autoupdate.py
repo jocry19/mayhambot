@@ -77,7 +77,10 @@ def _python() -> str:
 
 def live_reason(env: dict) -> str | None:
     """Why real money might be at stake right now, or None."""
-    if str(env.get("LIVE_TRADING", "")).strip().lower() in TRUE:
+    # every source counts, the most cautious wins: a value an earlier dotenv import left in os.environ must
+    # never hide LIVE_TRADING=true written to .env later (ops.load_env lets the environment override the file)
+    vals = [env.get("LIVE_TRADING", ""), os.environ.get("LIVE_TRADING", ""), _env_file().get("LIVE_TRADING", "")]
+    if any(str(v).strip().lower() in TRUE for v in vals):
         return "LIVE_TRADING=true in .env"
     db = ops.db_path()
     if db.exists():
@@ -234,6 +237,33 @@ def _finish_interrupted(pend: dict, alert, health=None) -> str | None:
     return f"zurückgerollt {cur[:7]} ({detail})"
 
 
+def _env_file() -> dict:
+    """KEY=value pairs of .env as written in the file, without the environment on top."""
+    out = {}
+    try:
+        for line in (ROOT / ".env").read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                out[k.strip().removeprefix("export ").strip()] = v.split(" #", 1)[0].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return out
+
+
+def _gate_env() -> dict:
+    """Environment for `mayham.py update`: without the .env keys (Telegram, live, wallet, API keys) that an
+    earlier dotenv import may have copied into this process, so the test gate never sees real credentials;
+    the services read .env themselves. MAYHAM_SKIP_BACKUP: the backup above is fresh, a second costs minutes."""
+    keys = set(_env_file())
+    env = {k: v for k, v in os.environ.items() if k not in keys and not k.startswith(SECRET_PREFIXES)}
+    env["MAYHAM_SKIP_BACKUP"] = "1"
+    return env
+
+
+SECRET_PREFIXES = ("TELEGRAM_", "LIVE_", "SOLANA_", "HELIUS_", "WALLET_", "KEYPAIR")
+
+
 def run_once(alert=ops.send_alert, now=None, health=None) -> str:
     env = ops.load_env()
     now = now or time.time()
@@ -290,7 +320,7 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
     st["deploying"] = {"head": head, "target": target, "at": now}
     _save(st)
     r = subprocess.run([_python(), "mayham.py", "update"], cwd=ROOT, capture_output=True, text=True, timeout=1800,
-                       env=dict(os.environ, MAYHAM_SKIP_BACKUP="1"))  # fresh backup above, a second costs minutes
+                       env=_gate_env())
     log((r.stdout + r.stderr).strip()[-4000:])
     if r.returncode != 0 or "Update ok" not in r.stdout:
         st.pop("deploying", None)
