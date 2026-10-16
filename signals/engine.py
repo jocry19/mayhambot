@@ -60,6 +60,20 @@ def recent_sol_usd(conn, n=200):
     return xs[len(xs) // 2] if xs else 0.0
 
 
+def min_net_usd(conn, cfg=settings, now=None):
+    """Net inflow minimum scaled to how big Smart buys really are: min(SIGNAL_MIN_NET_USD, SIGNAL_MIN_WALLETS x
+    median Ultra/Smart buy of the last 24h), never below SIGNAL_NET_FLOOR_USD. On the Mac a Smart buy is about
+    $140, so a fixed $500 needed four buys and passed 4 of 139 windows with 2+ Smart buyers in 10 h."""
+    now = now or int(time.time())
+    xs = sorted(r[0] for r in conn.execute(
+        """SELECT t.usd_amount FROM trades t JOIN wallets w ON w.address=t.wallet
+           WHERE w.tier IN ('ultra','smart') AND t.side='buy' AND t.usd_amount > 0 AND t.ts > ?""",
+        (now - 86400,)))
+    if len(xs) < 20:
+        return cfg.signal_min_net_usd
+    return round(min(cfg.signal_min_net_usd, max(cfg.signal_net_floor_usd, cfg.signal_min_wallets * xs[len(xs) // 2])), 0)
+
+
 def _usd(r, sol_usd):
     return r["usd_amount"] or (r["sol_amount"] or 0) * sol_usd
 
@@ -75,7 +89,7 @@ def _reason(m, cfg):
         return "no_smart"
     if m["smart_buyers"] < cfg.signal_min_wallets:
         return "few_entities"
-    if m["net_usd"] < cfg.signal_min_net_usd:
+    if m["net_usd"] < m.get("min_net", cfg.signal_min_net_usd):
         return "low_net"
     if m["score"] < m.get("min_score", cfg.signal_min_score):
         return "low_score"
@@ -304,7 +318,8 @@ def evaluate(conn, mints, cfg=settings, now=None):
     new = []
     f = last_funnel
     f.clear()
-    f.update({k: 0 for k in FUNNEL_KEYS}, max_score=0.0, min_score=None)
+    min_net = min_net_usd(conn, cfg, now)
+    f.update({k: 0 for k in FUNNEL_KEYS}, max_score=0.0, min_score=None, min_net=min_net)
     for mint in mints:
         tok = conn.execute("SELECT symbol, price_usd, mcap_usd, liquidity_usd FROM tokens WHERE mint=?",
                            (mint,)).fetchone()
@@ -323,6 +338,7 @@ def evaluate(conn, mints, cfg=settings, now=None):
              json.dumps(m["contributions"])))
         conn.commit()
 
+        m = dict(m, min_net=min_net)
         f["coins"] += 1
         f["max_score"] = max(f["max_score"], m["score"])
         f["min_score"] = m.get("min_score", cfg.signal_min_score)

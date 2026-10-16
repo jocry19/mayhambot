@@ -58,6 +58,7 @@ class Settings:
     model_signal_floor: float
     signal_min_wallets: int
     signal_min_net_usd: float
+    signal_net_floor_usd: float
     signal_cooldown_min: int
     inflow_ref_usd: float
     wallets_ref_count: float
@@ -100,6 +101,7 @@ def load_settings() -> Settings:
         model_signal_floor=_f("MODEL_SIGNAL_FLOOR", 10),
         signal_min_wallets=_i("SIGNAL_MIN_WALLETS", 2),
         signal_min_net_usd=_f("SIGNAL_MIN_NET_USD", 500),
+        signal_net_floor_usd=_f("SIGNAL_NET_FLOOR_USD", 100),
         signal_cooldown_min=_i("SIGNAL_COOLDOWN_MIN", 60),
         inflow_ref_usd=_f("INFLOW_REF_USD", 5000),
         wallets_ref_count=_f("WALLETS_REF_COUNT", 4),

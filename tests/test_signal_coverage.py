@@ -69,3 +69,19 @@ def test_sol_only_trades_count_as_usd_inflow(tmp_path):
             return w
     m = engine.token_metrics(c, "M", QC(), now)
     assert m["net_usd"] == 600.0 and m["smart_buyers"] == 2
+
+
+def test_net_minimum_follows_real_smart_buy_size(tmp_path):
+    from signals import engine
+    cfg = dataclasses.replace(run.settings, signal_min_net_usd=500, signal_net_floor_usd=100, signal_min_wallets=2)
+    c = setup(tmp_path)
+    now = 200_000
+    assert engine.min_net_usd(c, cfg, now) == 500                      # too little history: configured value
+    for i in range(30):
+        c.execute("INSERT INTO trades(sig, wallet, mint, side, ts, usd_amount) VALUES (?,'S1','M','buy',?,?)",
+                  (f"b{i}", now - 60 * i, 140))
+    c.execute("INSERT INTO trades(sig, wallet, mint, side, ts, usd_amount) VALUES ('g','G1','M','buy',?,9000)", (now,))
+    c.commit()
+    assert engine.min_net_usd(c, cfg, now) == 280                      # 2 x median Smart buy
+    assert engine.min_net_usd(c, dataclasses.replace(cfg, signal_min_net_usd=200), now) == 200   # capped
+    assert engine.min_net_usd(c, dataclasses.replace(cfg, signal_net_floor_usd=300), now) == 300  # floor

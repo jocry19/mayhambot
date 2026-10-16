@@ -40,7 +40,8 @@ def funnel(conn, hours=10, cfg=settings, now=None):
                min_score=cfg.signal_min_score, min_score_model=cfg.model_signal_min_score)
     from signals import engine
     thr_model = engine.cfg_min_model(conn, cfg)
-    out.update(min_score_model_calibrated=thr_model, model_base_rate_1h=engine._model_thr.get("base"),
+    net_min = engine.min_net_usd(conn, cfg, now)
+    out.update(min_net_calibrated=net_min, min_score_model_calibrated=thr_model, model_base_rate_1h=engine._model_thr.get("base"),
                all_pass_calibrated=0)
     model_scores, coins_pass = [], set()
     for r in rows:
@@ -58,7 +59,7 @@ def funnel(conn, hours=10, cfg=settings, now=None):
             out["all_pass"] += 1
             coins_pass.add(r["mint"])
         if (s >= (thr_model if is_model else thr) and sb >= cfg.signal_min_wallets
-                and net >= cfg.signal_min_net_usd):
+                and net >= net_min):
             out["all_pass_calibrated"] += 1
         out["max_score"] = max(out["max_score"], s)
         key = "max_score_model" if is_model else "max_score_heuristic"

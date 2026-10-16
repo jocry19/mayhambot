@@ -201,7 +201,7 @@ def cycle(conn, i):
     if fu:
         log.info("signal funnel: %d coins -> no smart buyer %d, <%d entities %d, net <$%.0f %d, score < %s %d, "
                  "safety %d, cooldown %d, fired %d (max score %.1f)", fu["coins"], fu["no_smart"],
-                 settings.signal_min_wallets, fu["few_entities"], settings.signal_min_net_usd, fu["low_net"],
+                 settings.signal_min_wallets, fu["few_entities"], fu["min_net"], fu["low_net"],
                  fu["min_score"], fu["low_score"], fu["safety_drop"], fu["cooldown"], fu["fired"], fu["max_score"])
     log.info("cycle %d: %d tokens (+%d smart-active evaluated), +%d trades, +%d backfill trades, %d smart wallets, %d signals (%.0fs)",
              i, len(watch), len(mints) - len(watch), new_trades, bf, smart, len(sigs), time.time() - t0)
