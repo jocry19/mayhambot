@@ -201,6 +201,39 @@ def _log_sizes() -> dict:
     return {str(f): f.stat().st_size for f in (ROOT / "logs").glob("*.log") if f.name != "update.log"}
 
 
+def _finish_interrupted(pend: dict, alert, health=None) -> str | None:
+    """A round stopped after `mayham.py update` may have pulled and restarted without its health check and
+    end line. If the checkout moved, check the running version now: keep it when healthy, else roll back."""
+    cur = git("rev-parse", "HEAD")
+    log(f"vorige Runde ohne Abschluss ({pend.get('head', '?')[:7]} -> {pend.get('target', '?')[:7]}), "
+        f"Checkout jetzt {cur[:7]}")
+    if cur == pend.get("head"):
+        return None    # nothing was pulled: a normal round follows
+    subject = git("log", "-1", "--format=%h %s", cur)[:90]
+    subprocess.run([_python(), "mayham.py", "restart"], cwd=ROOT, capture_output=True, timeout=300)
+    ok, detail = (health or health_check)()
+    st = _load()
+    if ok:
+        st.pop("bad", None)
+        st["red_streak"] = 0
+        st["deployed"] = cur
+        _save(st)
+        log(f"deployed {subject} (nachgeholt): {detail}")
+        alert(f"⬆️ Update eingespielt: {subject}, Tests grün, {detail} (Prüfung nach abgebrochener Runde nachgeholt).")
+        return f"eingespielt {cur[:7]} (nachgeholt)"
+    git("reset", "-q", "--hard", pend["head"])
+    subprocess.run([_python(), "-m", "pip", "install", "-q", "-r", "requirements.txt"], cwd=ROOT,
+                   capture_output=True, timeout=900)
+    subprocess.run([_python(), "mayham.py", "restart"], cwd=ROOT, capture_output=True, timeout=300)
+    ok2, detail2 = (health or health_check)()
+    st["bad"] = cur
+    _save(st)
+    log(f"rolled back after interrupted round: {subject}: {detail}; old version: {detail2}")
+    alert(f"↩️ Update zurückgerollt: {subject}. Grund: {detail} (Runde war abgebrochen). Alte Version "
+          f"{pend['head'][:7]} läuft wieder{'' if ok2 else ' NICHT sauber: ' + detail2}. Details: logs/update.log")
+    return f"zurückgerollt {cur[:7]} ({detail})"
+
+
 def run_once(alert=ops.send_alert, now=None, health=None) -> str:
     env = ops.load_env()
     now = now or time.time()
@@ -210,6 +243,12 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
         return f"aus ({why})"
     if not (ROOT / ".git").exists():
         return "kein git-Checkout"
+    pend = st.pop("deploying", None)
+    if pend:   # the previous round died between pull and its end line (exception, kill, sleep): finish it now
+        _save(st)
+        done = _finish_interrupted(pend, alert, health)
+        if done:
+            return done
     git("fetch", "-q", "origin", "main")
     head, target = git("rev-parse", "HEAD"), git("rev-parse", "origin/main")
     if head == target:
@@ -248,11 +287,13 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
                      "fehlgeschlagen. Details: logs/update.log")
     log(f"deploy {head[:7]} -> {subject}")
     st["last_deploy"] = now
+    st["deploying"] = {"head": head, "target": target, "at": now}
     _save(st)
     r = subprocess.run([_python(), "mayham.py", "update"], cwd=ROOT, capture_output=True, text=True, timeout=1800,
                        env=dict(os.environ, MAYHAM_SKIP_BACKUP="1"))  # fresh backup above, a second costs minutes
     log((r.stdout + r.stderr).strip()[-4000:])
     if r.returncode != 0 or "Update ok" not in r.stdout:
+        st.pop("deploying", None)
         # crashed (e.g. pip) or the gate failed: never leave a new checkout behind the old running processes
         if git("rev-parse", "HEAD") != head:
             git("reset", "-q", "--hard", head)
@@ -276,6 +317,7 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
                                            cwd=ROOT).returncode == 0:
         target, subject = now_head, git("log", "-1", "--format=%h %s", now_head)[:90]
     if now_head != target:
+        st.pop("deploying", None)
         st["bad"] = target
         _save(st)
         log(f"rolled back: {subject}")
@@ -295,12 +337,14 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
                        capture_output=True, timeout=900)
         subprocess.run([_python(), "mayham.py", "restart"], cwd=ROOT, capture_output=True, timeout=300)
         ok2, detail2 = (health or health_check)()
+        st.pop("deploying", None)
         st["bad"] = target
         _save(st)
         log(f"rolled back after health check: {subject}: {detail}; old version: {detail2}")
         alert(f"↩️ Update zurückgerollt: {subject}. Grund: {detail}. Alte Version {head[:7]} läuft wieder"
               f"{'' if ok2 else ' NICHT sauber: ' + detail2}. Details: logs/update.log")
         return f"zurückgerollt {target[:7]} ({detail})"
+    st.pop("deploying", None)
     st.pop("bad", None)
     st["red_streak"] = 0
     st.pop("red_tests", None)

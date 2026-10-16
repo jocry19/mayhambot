@@ -350,3 +350,21 @@ def test_send_alert_rereads_env_for_late_chat_id(tmp_path, monkeypatch):
     monkeypatch.setattr(ops.urllib.request, "urlopen", lambda url, data, timeout: seen.append(data) or Resp())
     monkeypatch.setitem(sys.modules, "signals.notifier", None)    # force the stdlib path
     assert ops.send_alert("x") and seen and b"chat_id=42" in seen[0]
+
+
+def test_interrupted_round_is_finished_next_time(repo):
+    work, push, head, alerts = repo
+    before = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=work, text=True).strip()
+    push("new")
+    sh(work, "git", "pull", "-q", "--ff-only", "origin", "main")    # the dead round got this far
+    autoupdate._save({"deploying": {"head": before, "target": "x", "at": 1.0}})
+    assert "nachgeholt" in autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"))
+    st = autoupdate._load()
+    assert "deploying" not in st and st["deployed"].startswith(head()) and "nachgeholt" in alerts[-1]
+    # unhealthy: back to the old commit
+    push("newer")
+    sh(work, "git", "pull", "-q", "--ff-only", "origin", "main")
+    mid = subprocess.check_output(["git", "rev-parse", "HEAD~1"], cwd=work, text=True).strip()
+    autoupdate._save({"deploying": {"head": mid, "target": "x", "at": 1.0}})
+    assert autoupdate.run_once(alerts.append, health=lambda: (False, "b läuft nicht")).startswith("zurückgerollt")
+    assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=work, text=True).strip() == mid
