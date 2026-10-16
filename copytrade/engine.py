@@ -86,10 +86,7 @@ class Engine:
         return seen
 
     def _on_swap(self, sw) -> None:
-        if sw.side == "buy":
-            self.strategy.on_whale_buy(sw)
-        else:
-            self.strategy.on_whale_sell(sw)
+        watch.handle_swap(self.strategy, sw)  # same rules and one decision at a time with the websocket worker
 
     def usage_line(self, force: bool = False) -> str | None:
         """Once an hour: swaps found by websocket vs. polling, and RPC calls public vs. Helius."""
@@ -170,7 +167,8 @@ class Engine:
             t0 = time.time()
             try:
                 self.poll_round()
-                self.strategy.process_pending()
+                with watch.ENTRY_LOCK:
+                    self.strategy.process_pending()
                 self.usage_line()
             except Exception as e:
                 log.warning("poll round failed: %s", e)

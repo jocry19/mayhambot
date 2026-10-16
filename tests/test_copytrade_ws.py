@@ -283,3 +283,17 @@ def test_stream_survives_answers_without_result():
     pending = {1: ("sub", W)}
     st._handle({"jsonrpc": "2.0", "id": 1}, pending, {})  # no result, no error: ignored, not a crash
     assert not st._subs and not pending
+
+
+def test_websocket_path_applies_the_same_entry_rules(env, monkeypatch):
+    """A whale buy from the websocket worker goes through Strategy.on_whale_buy with all its gates."""
+    from copytrade import watch
+    s, conn, ex, state = env
+    from copytrade import strategy as strat_mod
+    import dataclasses
+    st = strat_mod.Strategy(conn, dataclasses.replace(s, explore_unranked=False), ex)
+    from test_copytrade import whale_buy
+    watch.handle_swap(st, whale_buy())  # unranked whale: only measured, never bought (CT_EXPLORE_UNRANKED off)
+    assert conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0] == 0
+    assert watch.ENTRY_LOCK.acquire(blocking=False)  # released again after the decision
+    watch.ENTRY_LOCK.release()

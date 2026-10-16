@@ -17,6 +17,19 @@ from .config import Settings
 
 log = logging.getLogger("copytrade.watch")
 
+# whale swaps from the websocket worker and from polling go through the same Strategy rules; this lock makes
+# the decisions one at a time, so two whales buying the same coin at once cannot both pass "already in the
+# coin" / the per-coin cap / max open positions
+ENTRY_LOCK = threading.Lock()
+
+
+def handle_swap(strat, sw) -> None:
+    with ENTRY_LOCK:
+        if sw.side == "buy":
+            strat.on_whale_buy(sw)
+        else:
+            strat.on_whale_sell(sw)
+
 
 class Watcher:
     def __init__(self, s: Settings, rpc, exs, stop: threading.Event):
@@ -76,10 +89,7 @@ class Watcher:
                 sw = store.retry_locked(tracker.process_signature, conn, self.s, self.rpc, wallet, sig, 3, got)
                 if sw:
                     self.handled += 1
-                    if sw.side == "buy":
-                        strat.on_whale_buy(sw)
-                    else:
-                        strat.on_whale_sell(sw)
+                    handle_swap(strat, sw)
             except Exception as e:
                 log.debug("ws swap %s failed: %s", sig[:8], e)
             self._pending(strat)
@@ -87,7 +97,8 @@ class Watcher:
     @staticmethod
     def _pending(strat) -> None:
         try:
-            strat.process_pending()
+            with ENTRY_LOCK:
+                strat.process_pending()
         except Exception as e:
             log.debug("pending entries failed: %s", e)
 
