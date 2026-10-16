@@ -84,6 +84,7 @@ class SafetySettings:
 
     # soft rug in progress (intel features, no network)
     exit_max_age_sec: int = field(default_factory=lambda: _i("SAFETY_EXIT_MAX_AGE_SEC", 900))
+    history_fresh_sec: int = field(default_factory=lambda: _i("SAFETY_HISTORY_FRESH_SEC", 300))
     history_max_age_sec: int = field(default_factory=lambda: _i("SAFETY_HISTORY_MAX_AGE_SEC", 21600))
     history_min_funder_launches: int = field(default_factory=lambda: _i("SAFETY_HISTORY_MIN_FUNDER_LAUNCHES", 3))
     history_bot_share_warn: float = field(default_factory=lambda: _f("SAFETY_HISTORY_BOT_SHARE_WARN", 0.4))

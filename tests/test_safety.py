@@ -618,3 +618,14 @@ def test_audit_finds_buys_of_blocked_coins_and_results_per_level():
     assert a["n"] == 3 and a["leaks"] == 1 and a["leak_mints"] == ["BAD"] and a["blind"] == 1
     assert a["levels"]["critical"]["heavy_loss_share"] == 1.0 and a["levels"]["low"]["avg_pnl"] == 0.3
     assert "1 trotz Sperre gekauft" in audit.report_text(audit.audit(c))
+
+
+def test_history_falls_back_to_network_features_for_fresh_launches():
+    from sniper import store as sstore
+    c = conn()
+    sstore.ensure_schema(c)
+    rows = [(f"OLD{i}", DEV, NOW - 6 * 3600 + i, 1, -0.95) for i in range(3)] + [(MINT, DEV, NOW - 60, None, None)]
+    c.executemany("INSERT INTO sniper_launches(mint, creator, created_ts, rugged, max_ret_60m) VALUES (?,?,?,?,?)", rows)
+    c.commit()                                    # nothing in intel_latest: the new launch is not in the universe
+    h = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True).checks["history"]
+    assert h["status"] == "ok" and h["data"]["dev_launches"] == 3 and h["risk"] >= 50

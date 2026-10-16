@@ -744,6 +744,22 @@ def _intel_latest(ctx):
         return None
 
 
+def _network_features(ctx):
+    """Fresh network features straight from the DB (intel.network_features, no network, ~15 ms), for coins
+    the intel service has not (yet) put into intel_latest."""
+    try:
+        import intel
+        fn = getattr(intel, "network_features", None)
+        if fn is not None:
+            r = fn(ctx.conn, ctx.mint)
+            return (r or {}).get("features") or {}
+        from intel import network
+        feats, _ = network.network_features(ctx.conn, ctx.mint, int(ctx.now))
+        return feats
+    except Exception:  # noqa: BLE001 - intel missing or its tables not there
+        return {}
+
+
 def check_history(ctx):
     """Track record of the people behind the coin, from the intel service's network features (no network):
     the dev's earlier launches, the funder network's launches and launch wallets seen in earlier rugs.
@@ -752,10 +768,15 @@ def check_history(ctx):
     r = CheckResult("history", "Rug-Vorgeschichte")
     lt = _intel_latest(ctx)
     c = ctx.cfg
-    if not lt or ctx.now - (lt.get("ts") or 0) > c.history_max_age_sec:
-        r.status = "unknown"
-        return r.finish()
-    f = lt.get("features") or {}
+    f, src_ts = {}, None
+    if lt and ctx.now - (lt.get("ts") or 0) <= c.history_fresh_sec:
+        f, src_ts = lt.get("features") or {}, lt.get("ts")
+    else:
+        f = {k: v for k, v in _network_features(ctx).items() if v is not None}
+        src_ts = int(ctx.now) if f else None
+        if lt and ctx.now - (lt.get("ts") or 0) <= c.history_max_age_sec:
+            f = {**{k: v for k, v in (lt.get("features") or {}).items() if k.startswith("net_")}, **f}
+            src_ts = src_ts or lt.get("ts")
     dn, dr, d2 = f.get("net_dev_launches"), f.get("net_dev_rug_rate"), f.get("net_dev_hit2x_rate")
     fn, fr = f.get("net_funder_launches"), f.get("net_funder_rug_rate")
     bad, good, bots = f.get("net_early_bad"), f.get("net_early_good"), f.get("net_bot_share_60m")
@@ -763,7 +784,7 @@ def check_history(ctx):
         r.status = "unknown"
         return r.finish()
     r.data.update(dev_launches=dn, dev_rug_rate=dr, dev_hit2x_rate=d2, funder_launches=fn, funder_rug_rate=fr,
-                  early_bad=bad, early_good=good, bot_share_60m=bots, features_ts=lt.get("ts"))
+                  early_bad=bad, early_good=good, bot_share_60m=bots, features_ts=src_ts)
     if dn and dr is not None:
         rugs = round(dr * dn)
         shrunk = rugs / (dn + 2)
