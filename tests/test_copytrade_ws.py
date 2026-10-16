@@ -80,6 +80,8 @@ def test_stream_subscribes_notifies_and_reconnects():
         node.kick()  # connection lost -> reconnect with backoff and subscribe again
         assert _wait(lambda: st.stats["connects"] >= 2 and W in st.covered())
         node.notify(W, "sigB")
+        ev = st.events.get(timeout=5)
+        assert ev[1] is None and ev[3] == "catchup"  # resubscribe asks for a gap poll
         assert st.events.get(timeout=5)[1] == "sigB"
     finally:
         st.stop()
@@ -511,6 +513,7 @@ def test_kicked_stream_moves_to_the_next_endpoint():
         assert _wait(lambda: W in st.covered() and str(b.port) in st.url)
         assert st.stats["connects"] == 2 and st.stats["kicks"] == 1
         b.notify(W, "sigK")
+        assert st.events.get(timeout=5)[3] == "catchup"
         assert st.events.get(timeout=5)[1] == "sigK" and st.saw("sigK")
     finally:
         st.stop()
@@ -659,3 +662,70 @@ def test_unread_notifications_are_counted_by_reason_and_venue():
     chain.swap_from_logs(_logs(_trade_log()), WHALE, "s")
     assert chain.LOG_STATS == {"no_logs": 1, "not_pump": 1, "read": 1}
     assert chain.LOG_VENUES == {"pumpswap": 1}
+
+
+def test_catch_up_polls_a_resubscribed_wallet_at_most_every_two_minutes(tmp_path, monkeypatch):
+    from copytrade import watch
+
+    s = Settings(db_path=tmp_path / "c.db", ws_urls=["ws://n0"], ws_parallel=1)
+    conn = store.connect(s)
+    conn.execute("INSERT INTO ct_wallets(address, added_at, last_sig) VALUES (?, 1, 'old')", (W,))
+    conn.execute("INSERT INTO ct_wallets(address, added_at) VALUES ('fresh', 1)")
+    calls = []
+    monkeypatch.setattr(tracker, "poll", lambda c, st, rpc, row, prio, covered: calls.append(
+        (row["address"], prio, covered)) or ["swap"])
+    w = watch.Watcher(s, None, {}, threading.Event())
+    assert w.catch_up(conn, W, now=1000.0) == ["swap"]
+    assert calls == [(W, "bulk", True)] and w.catchups == 1  # bulk lane: never Helius
+    assert w.catch_up(conn, W, now=1100.0) == [] and len(calls) == 1
+    assert w.catch_up(conn, W, now=1121.0) == ["swap"] and w.catchups == 2
+    assert w.catch_up(conn, "fresh", now=1000.0) == []  # nothing read yet: the backfill covers it
+    assert "2 catch-ups after reconnects" in w.status()
+
+
+def test_fetchers_route_notifications_and_catch_ups_to_the_decider(tmp_path, monkeypatch):
+    from copytrade import watch
+
+    s = Settings(db_path=tmp_path / "f.db", ws_urls=["ws://n0"], ws_parallel=1)
+    store.connect(s)
+    stop = threading.Event()
+    w = watch.Watcher(s, None, {}, stop)
+    monkeypatch.setattr(w, "fetch", lambda c, wallet, sig, got, logs: f"sw-{sig}" if sig != "junk" else None)
+    monkeypatch.setattr(w, "catch_up", lambda c, wallet: [f"cu-{wallet}"])
+    threads = [threading.Thread(target=w._fetch_loop, daemon=True) for _ in range(2)]
+    for t in threads:
+        t.start()
+    w.events.put((W, "a", time.time(), None))
+    w.events.put((W, "junk", time.time(), None))
+    w.events.put((W, None, time.time(), "catchup"))
+    got = {w.decide.get(timeout=5) for _ in range(2)}
+    stop.set()
+    assert got == {"sw-a", f"cu-{W}"} and w.decide.empty()
+
+
+def test_watchdog_leaves_a_kicked_stream_alone_for_ten_minutes():
+    w = _fake_streams()
+    a, b = w.streams
+    now = time.time()
+    for i in range(6):
+        a.recent[f"s{i}"] = (now - 60 - i, W)
+    assert w.watchdog(now) == [b.name]
+    b._kick = None
+    assert w.watchdog(now + 60) == []  # same misses, still cooling down
+    for i in range(6):
+        a.recent[f"t{i}"] = (now + 590 - i, W)
+    assert w.watchdog(now + 620) == [b.name]
+    # five misses are too few to judge
+    w2 = _fake_streams()
+    a2, _ = w2.streams
+    for i in range(5):
+        a2.recent[f"s{i}"] = (now - 60 - i, W)
+    assert w2.watchdog(now) == []
+
+
+def test_status_reports_queue_wait_and_read_times():
+    w = _fake_streams(1)
+    w.waits.extend([0.1] * 9 + [4.0])
+    w.fetch_s.extend([0.5] * 9 + [3.0])
+    txt = w.status()
+    assert "queue wait p50 0.1s p90 4.0s" in txt and "transaction read p50 0.5s p90 3.0s" in txt

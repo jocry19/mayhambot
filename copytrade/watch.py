@@ -48,6 +48,15 @@ class Watcher:
         self.fast = 0  # swaps read straight from the notification logs (no getTransaction)
         self._verify: collections.deque = collections.deque(maxlen=500)  # (due_at, tries, swap)
         self._thread: threading.Thread | None = None
+        # transactions are read by several fetchers at once (a slow or rate-limited read no longer holds up the
+        # next whale), decisions stay one at a time in the decider thread
+        self.decide: queue.Queue = queue.Queue()
+        self.fetchers = max(1, int(getattr(s, "ws_fetchers", 4)))
+        self.waits: collections.deque = collections.deque(maxlen=2000)  # notification -> fetch start (s)
+        self.fetch_s: collections.deque = collections.deque(maxlen=2000)  # transaction read (s)
+        self.catchups = 0
+        self._caught: dict[str, float] = {}
+        self._kicked_at: dict[str, float] = {}
         self._last_watchdog = 0.0
         self._last_verify = 0.0
         self._last_gap_kick = 0.0
@@ -59,8 +68,10 @@ class Watcher:
         for st in self.streams:
             st.set_wallets(wallets)
             st.start()
-        self._thread = threading.Thread(target=self._work, name="wallet-ws-worker", daemon=True)
+        self._thread = threading.Thread(target=self._work, name="wallet-ws-decider", daemon=True)
         self._thread.start()
+        for i in range(self.fetchers):
+            threading.Thread(target=self._fetch_loop, name=f"wallet-ws-fetch-{i}", daemon=True).start()
         return self
 
     def stop(self) -> None:
@@ -81,6 +92,13 @@ class Watcher:
         parts = [f"{st.url.split('?')[0].replace('wss://', '')} {'up' if st.connected else 'down'} "
                  f"({len(st.covered())} wallets, {st.stats['connects']} connects, {st.stats['kicks']} watchdog)"
                  for st in self.streams]
+        def pct(xs, q):
+            xs = sorted(xs)
+            return xs[min(len(xs) - 1, int(len(xs) * q))] if xs else 0.0
+
+        parts.append(f"queue wait p50 {pct(self.waits, .5):.1f}s p90 {pct(self.waits, .9):.1f}s, transaction read "
+                     f"p50 {pct(self.fetch_s, .5):.1f}s p90 {pct(self.fetch_s, .9):.1f}s, "
+                     f"{self.catchups} catch-ups after reconnects")
         v = tracker.VERIFY
         why = ", ".join(f"{k} {n}" for k, n in chain.LOG_STATS.most_common())
         venues = ", ".join(f"{k} {n}" for k, n in chain.LOG_VENUES.most_common(6))
@@ -89,7 +107,23 @@ class Watcher:
                                               + (f"; log reading: {why}" if why else "")
                                               + (f"; unread venues: {venues}" if venues else ""))
 
-    # ------------------------------------------------------------------ worker
+    # ------------------------------------------------------------------ workers
+    def _fetch_loop(self) -> None:
+        conn = store.connect(self.s)
+        while not self._stop.is_set():
+            try:
+                wallet, sig, got, *rest = self.events.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            extra = rest[0] if rest else None
+            if sig is None and extra == "catchup":
+                for sw in self.catch_up(conn, wallet):
+                    self.decide.put(sw)
+                continue
+            sw = self.fetch(conn, wallet, sig, got, extra)
+            if sw:
+                self.decide.put(sw)
+
     def _work(self) -> None:
         from .strategy import Strategy
 
@@ -97,7 +131,7 @@ class Watcher:
         strat = Strategy(conn, self.s, self.exs)
         while not self._stop.is_set():
             try:
-                wallet, sig, got, *rest = self.events.get(timeout=0.5)
+                sw = self.decide.get(timeout=0.5)
             except queue.Empty:
                 self._pending(strat)
                 self._verify_one(conn)
@@ -105,12 +139,21 @@ class Watcher:
                     self._last_watchdog = time.time()
                     self.watchdog()
                 continue
-            self.handle(conn, strat, wallet, sig, got, rest[0] if rest else None)
+            self._decide(strat, sw)
             self._pending(strat)
 
-    def handle(self, conn, strat, wallet: str, sig: str, got: float, logs=None):
-        """One notification: pump.fun trades straight from the logs (decided within milliseconds, verified
-        against the full transaction afterwards), everything else via getTransaction."""
+    def _decide(self, strat, sw) -> None:
+        try:
+            self.handled += 1
+            handle_swap(strat, sw)
+        except Exception as e:
+            log.debug("ws decision %s failed: %s", sw.signature[:8], e)
+
+    def fetch(self, conn, wallet: str, sig: str, got: float, logs=None):
+        """One notification -> swap: pump.fun trades straight from the logs (verified against the full
+        transaction afterwards), everything else via getTransaction."""
+        start = time.time()
+        self.waits.append(max(0.0, start - got))
         sw = None
         try:
             sw = store.retry_locked(tracker.process_logs, conn, self.s, wallet, sig, logs, got)
@@ -120,12 +163,35 @@ class Watcher:
                     self._verify.append((time.time() + 3, 0, sw))
             else:
                 sw = store.retry_locked(tracker.process_signature, conn, self.s, self.rpc, wallet, sig, 3, got)
-            if sw:
-                self.handled += 1
-                handle_swap(strat, sw)
+                self.fetch_s.append(time.time() - start)
         except Exception as e:
             log.debug("ws swap %s failed: %s", sig[:8], e)
         return sw
+
+    def handle(self, conn, strat, wallet: str, sig: str, got: float, logs=None):
+        """Fetch and decide inline (one notification, start to end)."""
+        sw = self.fetch(conn, wallet, sig, got, logs)
+        if sw:
+            self._decide(strat, sw)
+        return sw
+
+    def catch_up(self, conn, wallet: str, now: float | None = None) -> list:
+        """A wallet's subscription came back after a drop: read what it did in the meantime right away instead
+        of waiting for the safety-net poll (at most once per 2 minutes per wallet)."""
+        now = now or time.time()
+        if now - self._caught.get(wallet, 0) < 120:
+            return []
+        self._caught[wallet] = now
+        try:
+            row = conn.execute("SELECT * FROM ct_wallets WHERE address=?", (wallet,)).fetchone()
+            if not row or not row["last_sig"]:
+                return []
+            out = store.retry_locked(tracker.poll, conn, self.s, self.rpc, row, "bulk", True)
+        except Exception as e:
+            log.debug("catch-up %s failed: %s", wallet[:6], e)
+            return []
+        self.catchups += 1
+        return out
 
     def watchdog(self, now: float | None = None) -> list[str]:
         """Find sockets that are connected but no longer deliver (the node stopped sending, pings still pass) and
@@ -135,15 +201,15 @@ class Watcher:
         now = now or time.time()
         kicked = []
         for a in self.streams:
-            if not a.connected or now - a.connected_at < 120:
-                continue
+            if not a.connected or now - a.connected_at < 120 or now - self._kicked_at.get(a.name, 0) < 600:
+                continue  # a reconnect costs a resubscribe ramp: at most one per stream every 10 minutes
             mine = a.covered()
             # only transactions after a's own subscription of that wallet was confirmed: while a fresh connection
             # still subscribes (2 per second), the other stream's notifications are no miss
             cand = {sig for b in self.streams if b is not a for sig, (t, w) in list(b.recent.items())
                     if w in mine and max(a.connected_at, a.sub_at.get(w, 0)) + 5 < t < now - 20 and t > now - 600}
             missed = [sig for sig in cand if not a.saw(sig)]
-            if len(cand) >= 4 and len(missed) * 2 >= len(cand):
+            if len(cand) >= 6 and len(missed) * 5 >= len(cand) * 3:  # >= 60 % of at least 6
                 a.reconnect(f"missed {len(missed)} of {len(cand)}")
                 kicked.append(a.name)
         gaps = sum(1 for src, _, _, t in list(tracker.LAG) if src == "gap" and t > now - 600)
@@ -154,6 +220,7 @@ class Watcher:
             kicked.append(a.name)
             self._last_gap_kick = now
         for name in kicked:
+            self._kicked_at[name] = now
             log.info("wallet websocket %s reconnected by the watchdog", name)
         return kicked
 

@@ -38,7 +38,7 @@ class WalletStream:
     # public nodes limit subscription *attempts* per connection/IP and close with 1013 "Too many subscriptions
     # attempted": requests are paced by a token bucket, best wallets first, and an endpoint that closed with
     # 1013 gets a lower cap (80 % of what it held) and a 10-minute rest while the stream uses the next one
-    SUBS_PER_SEC = 2.0
+    SUBS_PER_SEC = 4.0
     REST_AFTER_LIMIT_S = 600
     MIN_CAP = 20
     # shared by all streams in the process (the limit is per IP, not per connection): url -> cap / rest-until
@@ -61,6 +61,7 @@ class WalletStream:
         # signature -> (received_at, wallet) of recent notifications, so the watcher can compare streams
         self.recent: "collections.OrderedDict[str, tuple[float, str]]" = collections.OrderedDict()
         self._kick: str | None = None
+        self._ever: set[str] = set()  # wallets this stream had subscribed before (a resubscribe means a gap)
         self.sub_at: dict[str, float] = {}  # wallet -> when its subscription was confirmed (watchdog fairness)
         self._tokens, self._tok_at = 1.0, 0.0
         self.stats["limited"] = 0
@@ -214,6 +215,9 @@ class WalletStream:
                 if op == "sub":
                     self._subs[w] = msg["result"]
                     self.sub_at[w] = time.time()
+                    if w in self._ever:  # back after a drop: whatever it did meanwhile is read at once
+                        self.events.put((w, None, time.time(), "catchup"))
+                    self._ever.add(w)
                     sub_wallet[msg["result"]] = w
                 else:
                     sid = self._subs.pop(w, None)
