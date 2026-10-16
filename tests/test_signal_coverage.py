@@ -45,3 +45,27 @@ def test_watchlist_prefers_fresh_smart_buys_over_old_scores(tmp_path, monkeypatc
                                                              discover_every_cycles=10**9))
     watch = [r["mint"] for r in run.refresh_watchlist(c, 1)]
     assert watch[0] == "FRESH" and len(watch) == 2
+
+
+def test_sol_only_trades_count_as_usd_inflow(tmp_path):
+    from signals import engine
+    c = setup(tmp_path)
+    now = 100_000
+    c.execute("INSERT INTO trades(sig, wallet, mint, side, ts, sol_amount, usd_amount) VALUES ('p','G1','X','buy',?,1,150)",
+              (now - 10,))
+    for sig, w in (("s1", "S1"), ("s2", "S2")):
+        c.execute("INSERT INTO trades(sig, wallet, mint, side, ts, sol_amount, usd_amount) VALUES (?,?,'M','buy',?,2,0)",
+                  (sig, w, now - 30))
+    c.commit()
+    assert engine.recent_sol_usd(c) == 150
+
+    class QC:
+        sol_usd = 150.0
+
+        def get(self, w, mint):
+            return 70.0, {"S1": "smart", "S2": "smart"}.get(w, "good"), 5
+
+        def entity(self, w):
+            return w
+    m = engine.token_metrics(c, "M", QC(), now)
+    assert m["net_usd"] == 600.0 and m["smart_buyers"] == 2

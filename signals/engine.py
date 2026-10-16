@@ -25,6 +25,7 @@ class QualityCache:
         self.positions = scoring.load_positions(conn)
         self.meta = {r["address"]: r for r in conn.execute("SELECT address, manual, is_bot, label FROM wallets")}
         self.model_version, self.model_tiers = scoring.model_tiers(conn)  # one truth once model/ is active
+        self.sol_usd = recent_sol_usd(conn)
         self._c = {}
 
     def get(self, wallet, mint):
@@ -48,6 +49,19 @@ class QualityCache:
         """Wallets of one model cluster (same funder etc.) are one buyer."""
         c = (self.model_tiers.get(wallet) or (None, None, None))[2]
         return f"cluster:{c}" if c else wallet
+
+
+def recent_sol_usd(conn, n=200):
+    """Median USD per SOL of the latest trades that carry both: fills usd for trades stored with SOL only
+    (copytrade / wallet history while the SOL price fetch failed), so their inflow is not counted as $0."""
+    xs = sorted(r[0] for r in conn.execute(
+        "SELECT usd_amount / sol_amount FROM trades WHERE usd_amount > 0 AND sol_amount > 0 ORDER BY ts DESC LIMIT ?",
+        (n,)))
+    return xs[len(xs) // 2] if xs else 0.0
+
+
+def _usd(r, sol_usd):
+    return r["usd_amount"] or (r["sol_amount"] or 0) * sol_usd
 
 
 TIER_RANK = {"ultra": 3, "smart": 2, "good": 1}
@@ -80,11 +94,12 @@ def token_metrics(conn, mint, qc, now=None, cfg=settings):
             continue
         d = per.setdefault(r["wallet"], dict(wallet=r["wallet"], score=score, tier=tier, n_tokens=n, buy_usd=0.0,
                                              sell_usd=0.0, buy_sol=0.0, first_ts=r["ts"]))
+        usd = _usd(r, getattr(qc, "sol_usd", 0.0))
         if r["side"] == "buy":
-            d["buy_usd"] += r["usd_amount"] or 0
+            d["buy_usd"] += usd
             d["buy_sol"] += r["sol_amount"] or 0
         else:
-            d["sell_usd"] += r["usd_amount"] or 0
+            d["sell_usd"] += usd
             d["sell_sol"] = d.get("sell_sol", 0.0) + (r["sol_amount"] or 0)
         d["first_ts"] = min(d["first_ts"], r["ts"])
     smart = [d for d in per.values() if d["tier"] in ("ultra", "smart")]
