@@ -215,16 +215,27 @@ def test_api_usage(demo, tmp_path, monkeypatch, capsys):
     c = _client(demo)
     u = c.get("/api/system").json()["api_usage"]
     assert u["available"]
-    write("safety", now, 400, 54, {"credits_month": 120000, "credits_cap": 1000000})
+    write("safety", now, 400, 54, {"credits": 900, "refused": 7})
+    # shared Helius ledger: this month, safety used 120000, 3000 of them today
+    month, day = chttp._now_parts()[:2]
+    (tmp_path / "credits-helius.json").write_text(json.dumps({"month": month, "services": {
+        "safety": {"month": 120000, "days": {day: 3000}}, "research": {"month": 700000, "days": {day: 1000}}}}))
     rows = {(r["service"], r["group"]): r for r in c.get("/api/system").json()["api_usage"]["rows"]}
     s = rows[("safety", "helius")]
     assert s["calls_window"] == 300 and s["window_s"] == 300 and s["load"] == 0.9 and s["429"] == 2
-    assert s["credits_month"] == 120000 and s["credits_cap"] == 1000000
+    assert s["credits_month"] == 120000 and s["credits_today"] == 3000 and s["refused"] == 7
+    assert s["credits_cap"] and s["load_month"] == round(120000 / s["credits_cap"], 3) and s["load_day"] is not None
+    assert ("sniper", "helius") in rows and rows[("sniper", "helius")]["stale"]  # share but no process yet
+    tot = c.get("/api/system").json()["api_usage"]["credits"]
+    assert tot["used"] == 820000 and tot["limit"] == 1000000 and tot["load"] == 0.82
     assert rows[("research", "helius")]["stale"] and rows[("research", "helius")]["load"] is None
     assert rows[("safety", "api.dexscreener.com")]["load"] is None
     from cli.report import api_line
     line = api_line()
     assert "Helius 54/60" in line and "knapp: safety" in line and "research" not in line
+    from cli.report import credits_line
+    cl = credits_line()
+    assert "820.000 von 1.000.000" in cl and "yellow" in cl and "7 Aufrufe abgewiesen" in cl
 
 
 def test_wallet_tiers_from_wallets_table(demo, tmp_path, monkeypatch):

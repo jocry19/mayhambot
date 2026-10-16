@@ -42,6 +42,9 @@ def status() -> None:
     line = api_line()
     if line:
         con.print(line)
+    cl = credits_line()
+    if cl:
+        con.print(cl)
     con.print()
     _signals(s["signals"][:8])
     con.print()
@@ -161,8 +164,6 @@ def api_line() -> str:
         g["last"] += r.get("last_min") or 0
         g["budget"] += r.get("budget_per_min") or 0
         g["429"] += r.get("429") or 0
-        if r.get("credits_month") is not None:
-            g["credits"], g["cap"] = r["credits_month"], r.get("credits_cap")
     names = {"helius": "Helius", "geckoterminal": "GeckoTerminal"}
     parts = []
     for name, g in sorted(groups.items(), key=lambda kv: -kv[1]["last"])[:4]:
@@ -172,8 +173,21 @@ def api_line() -> str:
             txt += f"/{n(g['budget'])} [{'red' if ld >= 1 else 'yellow' if ld >= .8 else 'dim'}]({pct(ld)})[/]"
         if g["429"]:
             txt += f" [red]{n(g['429'])}×429[/]"
-        if g["credits"] is not None:
-            txt += f" · Credits {n(g['credits'])}" + (f"/{n(g['cap'])}" if g["cap"] else "")
         parts.append(txt)
     hot = [f"{r['service']} {escape(names.get(r['group'], r['group']))} {pct(r['load'])}" for r in rows if (r.get("load") or 0) >= .8]
     return "API letzte Minute: " + " · ".join(parts) + (f"  [b yellow]knapp: {', '.join(hot)}[/]" if hot else "")
+
+
+def credits_line() -> str:
+    """'Helius-Credits diesen Monat: c von 1.000.000 (x %)', yellow from 80 %, red from 100 %."""
+    from web import queries as Q
+
+    u = Q.api_usage()
+    t = u.get("credits")
+    if not t:
+        return ""
+    ld = t.get("load") or 0
+    st = "red" if ld >= 1 else "yellow" if ld >= .8 else "dim"
+    refused = sum(r.get("refused") or 0 for r in u.get("rows", []))
+    return (f"Helius-Credits diesen Monat: {n(t['used'])} von {n(t['limit'])} [{st}]({pct(ld, 1)})[/]"
+            + (f" · [red]{n(refused)} Aufrufe abgewiesen[/]" if refused else ""))

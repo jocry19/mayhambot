@@ -15,10 +15,34 @@ function LoadBar({ v }) {
   );
 }
 
+function CreditBar({ used, cap, v, share }) {
+  return (
+    <span className="col" style={{ gap: 2 }} title={`${n(used)} von ${n(cap)} Credits${share != null ? ` · ${n(share)} % des Monatsbudgets` : ""}`}>
+      <LoadBar v={v} />
+      <span className="dim" style={{ fontSize: 11 }}>{compact(used)} / {compact(cap)}{share != null ? ` · ${n(share)} %` : ""}</span>
+    </span>
+  );
+}
+
+/** Whole-month Helius line for the top of the page. */
+export function CreditsTotal({ t }) {
+  if (!t) return null;
+  const cls = t.load >= 1 ? "bad" : t.load >= 0.8 ? "warn" : "";
+  return (
+    <div className={`credits-total ${cls}`}>
+      <span className="b">Helius-Credits diesen Monat:</span>
+      <span className="num">{n(t.used)} von {n(t.limit)}</span>
+      <span className={`load ${cls}`}><span className="load-track wide"><span className="load-fill" style={{ width: `${Math.min(100, t.load * 100)}%` }} /></span>
+        <span className="load-num">{pct(t.load, 1)}</span></span>
+      {t.load >= 0.8 && <span className="t2">Ab 100 % lehnt Helius ab; die Dienste weichen dann auf das öffentliche RPC aus.</span>}
+    </div>
+  );
+}
+
 function ApiUsage({ u }) {
   if (!u) return null;
   const rows = u.rows || [];
-  const credits = rows.some((r) => r.credits_month != null);
+  const credits = rows.some((r) => r.credits_cap != null || r.credits_month != null);
   const win = Math.max(0, ...rows.map((r) => r.window_s || 0));
   return (
     <Card title="API-Verbrauch je Dienst" flush
@@ -35,9 +59,14 @@ function ApiUsage({ u }) {
             { k: "waited_s", l: "Wartezeit", r: true, title: "Sekunden, die der Dienst wegen Budget oder Bremse gewartet hat (seit Start)", fmt: (r) => (r.waited_s ? `${n(r.waited_s)} s` : "–") },
             { k: "budget_per_min", l: "Budget/min", r: true, fmt: (r) => (r.budget_per_min ? n(r.budget_per_min) : <span className="dim">ohne</span>) },
             { k: "load", l: "Auslastung", sort: (r) => r.load ?? -1, fmt: (r) => <LoadBar v={r.load} /> },
-            ...(credits ? [{ k: "credits_month", l: "Credits Monat", r: true, sort: (r) => (r.credits_cap ? r.credits_month / r.credits_cap : -1),
-              fmt: (r) => (r.credits_month != null ? <span title={[r.credits_cap ? `Monat ${n(r.credits_month)} von ${n(r.credits_cap)}` : "", r.credits_day_budget ? `heute ${n(r.credits_today)} von ${n(r.credits_day_budget)}` : "", r.share_pct != null ? `Anteil ${n(r.share_pct)} %` : "", r.refused ? `${n(r.refused)} Abfragen wegen Budget abgelehnt` : ""].filter(Boolean).join(" · ") || undefined}>
-                {compact(r.credits_month)}{r.credits_cap ? <> / {compact(r.credits_cap)} <LoadBar v={r.credits_month / r.credits_cap} /></> : ""}</span> : "–") }] : []),
+            ...(credits ? [
+              { k: "load_day", l: "Credits heute", title: "Helius-Credits heute gegen das Tagesbudget des Dienstes (Rest des Monatsanteils ÷ übrige Tage)", sort: (r) => r.load_day ?? -1,
+                fmt: (r) => (r.credits_day_budget != null ? <CreditBar used={r.credits_today} cap={r.credits_day_budget} v={r.load_day} /> : "–") },
+              { k: "load_month", l: "Credits Monat", title: "Helius-Credits diesen Monat gegen den Anteil des Dienstes", sort: (r) => r.load_month ?? -1,
+                fmt: (r) => (r.credits_cap != null ? <CreditBar used={r.credits_month} cap={r.credits_cap} v={r.load_month} share={r.share_pct} /> : "–") },
+              { k: "refused", l: "Abgewiesen", r: true, title: "Aufrufe, die wegen aufgebrauchter Credits nicht an Helius gingen (seit Start des Dienstes)",
+                fmt: (r) => (r.refused != null ? <span className={r.refused ? "down" : "dim"}>{n(r.refused)}</span> : "–") },
+            ] : []),
           ]} />
       )}
     </Card>
@@ -65,6 +94,7 @@ export default function System() {
         <Tile label="Letztes Modell" value={ago(d.last.model_versions)} />
         <Tile label="SOL-Preis (aus Trades)" value={`$${n(d.sol_usd, 0)}`} />
       </div>
+      <CreditsTotal t={d.api_usage?.credits} />
       <ApiUsage u={d.api_usage} />
       <div className="grid g2">
         <Card title="Dienste" sub="Prozesse der App (python mayham.py status)" flush>

@@ -1388,7 +1388,33 @@ def api_usage(now=None):
                        load=_f(last / b, 3) if b and last is not None and not stale else None)
             row["429"] = v.get("429") or 0
             out.append(row)
-    return {"available": True, "rows": out, "window_s": USAGE_WINDOW_S}
+    # Helius credits: shared monthly ledger (core.http.credits), one row per service with a share
+    total = None
+    try:
+        cred = chttp.credits() if hasattr(chttp, "credits") else {}
+    except Exception:
+        cred = {}
+    group = getattr(chttp, "CREDIT_GROUP", "helius")
+    for svc, c in sorted((cred or {}).items()):
+        if not isinstance(c, dict):
+            continue
+        row = next((r for r in out if r["service"] == svc and r["group"] == group), None)
+        if row is None:
+            row = {"service": svc, "group": group, "stale": True, "ts": None, "calls": None, "calls_window": None,
+                   "window_s": 0, "last_min": None, "budget_per_min": None, "waited_s": None, "load": None, "429": 0}
+            out.append(row)
+        for k in ("credits_today", "credits_month", "credits_cap", "credits_day_budget", "share_pct"):
+            row[k] = _f(c.get(k), 1)
+        cap, day = c.get("credits_cap"), c.get("credits_day_budget")
+        row["load_day"] = _f((c.get("credits_today") or 0) / day, 3) if day else None
+        row["load_month"] = _f((c.get("credits_month") or 0) / cap, 3) if cap else None
+        if c.get("credits_month_limit"):
+            total = {"used": _f(c.get("credits_month_all"), 0), "limit": c["credits_month_limit"],
+                     "load": _f((c.get("credits_month_all") or 0) / c["credits_month_limit"], 4)}
+    for r in out:
+        if r["group"] == group:
+            r["refused"] = r.get("refused") or 0
+    return {"available": True, "rows": out, "window_s": USAGE_WINDOW_S, "credits": total}
 
 
 def search(conn, q, limit=12):
