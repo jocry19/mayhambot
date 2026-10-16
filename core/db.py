@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS signals (
     ret_5m REAL, ret_15m REAL, ret_1h REAL, max_ret_1h REAL
 );
 CREATE INDEX IF NOT EXISTS idx_signals_mint ON signals(mint, ts);
+CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts);
 CREATE INDEX IF NOT EXISTS idx_signal_metrics_mint_ts ON signal_metrics(mint, ts);
 """
 
@@ -99,9 +100,13 @@ MIGRATIONS = [
 
 
 def _migrate(conn):
+    known = {}
     for table, col, typ in MIGRATIONS:
-        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if table not in known:
+            known[table] = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        cols = known[table]
         if col not in cols:
+            cols.add(col)
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
     conn.commit()
 
@@ -125,7 +130,25 @@ def connect(path=None) -> sqlite3.Connection:
         pass  # e.g. network filesystems
     conn.executescript(SCHEMA)
     _migrate(conn)
+    _optimize(conn)
     return conn
+
+
+_optimized = {}
+
+
+def _optimize(conn, every_s=6 * 3600):
+    """Keep the query planner's statistics fresh (without them SQLite picked idx_trades_mint_ts for a ts-range
+    query and scanned all trades). Bounded work (analysis_limit), at most every 6 h per process and file."""
+    path = conn.execute("PRAGMA database_list").fetchone()[2]
+    if time.time() - _optimized.get(path, 0) < every_s:
+        return
+    try:
+        conn.execute("PRAGMA analysis_limit=1000")
+        conn.execute("PRAGMA optimize=0x10002")  # 0x10000: also tables never analysed (fresh files)
+        _optimized[path] = time.time()
+    except sqlite3.OperationalError:
+        pass  # locked: the next connect tries again
 
 
 def retry_locked(conn, fn, attempts=4):
