@@ -84,7 +84,7 @@ def test_rollback_is_reported_and_not_retried(repo):
     before = head()
     push("broken", red=True)
     assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"), now=1e9).startswith("zurückgerollt")
-    assert head() == before and "zurückgerollt" in alerts[-1]
+    assert head() == before and "nicht eingespielt" in alerts[-1] and len(alerts) == 1
     assert "übersprungen" in autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"), now=2e9)
 
 
@@ -283,6 +283,7 @@ def test_red_streak_names_failing_tests_once(repo, monkeypatch):
         autoupdate.run_once(alerts.append, now=1e9 + i * 1000, health=lambda: (True, "ok"))
     hangs = [a for a in alerts if "hängt" in a]
     assert len(hangs) == 1 and "test_x" in hangs[0]
+    assert len([a for a in alerts if "nicht eingespielt" in a]) == 1     # only the first red round alerts
     assert autoupdate._load()["red_streak"] == 4
 
 

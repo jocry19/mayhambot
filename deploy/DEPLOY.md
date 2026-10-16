@@ -98,7 +98,7 @@ Einschalten (einmal im Terminal): `bash deploy/mac/install-updater.sh`. Dann pr�
 alle 10 min, ob auf `main` eine neue Version liegt, und spielt sie mit `mayham.py update` ein: Tests müssen grün
 sein, sonst geht es automatisch zurück auf die laufende Version. Danach `mayham.py install-autostart`.
 
-- Telegram: "⬆️ Update eingespielt: <hash>, Tests grün, 6 von 6 Dienste laufen" bzw. "↩️ Update zurückgerollt".
+- Telegram: "⬆️ Update eingespielt: <hash>, Tests grün, 9 von 9 Dienste laufen" bzw. bei roten Tests einmal "↩️ Update nicht eingespielt" (weitere rote Runden nur im Log, nach 3 Runden einmal "🔴 Auto-Update hängt" mit den Testnamen).
   Alles steht auch in `logs/update.log`.
 - Höchstens ein Deploy pro 10 min; Commits dazwischen kommen gebündelt. Vorher ein Backup mit Integritätsprüfung,
   schlägt es fehl, wartet das Update.

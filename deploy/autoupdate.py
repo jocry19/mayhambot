@@ -301,8 +301,9 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
         st["red_streak"] = st.get("red_streak", 0) + 1
         _save(st)
         log(f"rolled back: {subject} (exit {r.returncode}), red rounds in a row: {st['red_streak']}")
-        alert(f"↩️ Update zurückgerollt: {subject}. Grund: Tests rot oder Update-Fehler, alte Version "
-              f"{head[:7]} läuft weiter. Details: logs/update.log")
+        if st["red_streak"] == 1:   # later red rounds stay in the log; round 3 names the tests once
+            alert(f"↩️ Update nicht eingespielt: {subject}. Grund: Tests rot oder Update-Fehler, die laufende "
+                  f"Version {head[:7]} bleibt aktiv, der Bot läuft normal weiter. Details: logs/update.log")
         if st["red_streak"] == 3:   # stuck: name the failing tests once
             failed = _failing_tests(target)
             st["red_tests"] = failed
