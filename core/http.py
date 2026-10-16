@@ -261,6 +261,9 @@ def _maybe_log_usage(force=False):
         log.info("usage %s: %d calls, %d 429, budget %s/min%s%s (last %d min, service %s)", g, v["calls"], v["429"],
                  f"{b:.0f}" if b else "-", f", waited {v['waited_s']:.0f}s" if v["waited_s"] else "",
                  _credit_line() if g == CREDIT_GROUP else "", USAGE_LOG_EVERY // 60, _service or "?")
+    for h, methods in method_stats().items():  # since process start
+        log.info("rpc pool %s: %s", h, "; ".join(f"{m} {v['calls']} calls, {v['429']} 429, {v['avoided']} avoided"
+                                                for m, v in methods.items()))
     _write_usage_file()
 
 
@@ -752,6 +755,31 @@ POOL_FAILS_TO_DISABLE = 3
 PROBE_ADDRESS = "So11111111111111111111111111111111111111112"
 _latency = {}   # host -> EWMA ms (this process)
 _pool_fail = {}  # host -> consecutive failures (this process)
+# An endpoint can answer one method and refuse another for long stretches (api.mainnet-beta: getTransaction 429
+# all day, getSignaturesForAddress fine). Each 429 for (endpoint, method) keeps that method away from it for
+# METHOD_AVOID_BASE * 2^(n-1) s (n = 429s in a row, capped), shared by all services; a success resets n.
+METHOD_AVOID_BASE = 10
+METHOD_AVOID_MAX = 600
+_method_429 = {}    # (host, method) -> consecutive 429s (this process)
+_method_stats = {}  # (host, method) -> {"calls", "429", "avoided"} (this process)
+
+
+def _mstat(host, method, key):
+    d = _method_stats.setdefault((host, method), {"calls": 0, "429": 0, "avoided": 0})
+    d[key] += 1
+
+
+def method_stats():
+    """{host: {method: {calls, 429, avoided}}} of this process: how often each endpoint was used, refused and
+    skipped for each RPC method."""
+    out = {}
+    for (h, m), v in sorted(_method_stats.items()):
+        out.setdefault(h, {})[m] = dict(v)
+    return out
+
+
+def _avoid_until(st, host, method):
+    return (st.get(host, {}).get("avoid") or {}).get(method, 0) if method else 0
 
 
 def public_rpc_urls():
@@ -783,6 +811,11 @@ def _pool_state():
 
 
 def _pool_update(host, **fields):
+    _pool_edit(lambda st: st.setdefault(host, {}).update(fields))
+
+
+def _pool_edit(fn):
+    """Change the shared pool state under its file lock (fn mutates the dict in place)."""
     import json
     try:
         os.makedirs(_LOCK_DIR, exist_ok=True)
@@ -797,7 +830,7 @@ def _pool_update(host, **fields):
                 st = json.loads(f.read() or "{}")
             except ValueError:
                 st = {}
-            st.setdefault(host, {}).update(fields)
+            fn(st)
             f.seek(0)
             f.truncate()
             json.dump(st, f)
@@ -832,6 +865,8 @@ def pool_status():
         d["url"] = u
         if h in _latency:
             d["latency_ms"] = round(_latency[h], 1)
+        if any(k[0] == h for k in _method_stats):
+            d["methods"] = method_stats()[h]
         out[h] = d
     return out
 
@@ -886,6 +921,14 @@ def pick_public_rpc(priority="bulk", probe=None, method=None):
     not full, else 'live' = fastest measured endpoint, 'bulk' = the one with most free window."""
     _pool_hosts()
     urls = _healthy(probe=probe) or public_rpc_urls()[:1]
+    if method and method != "batch" and len(urls) > 1:
+        st, now = _pool_state(), time.time()
+        free = [u for u in urls if _avoid_until(st, urlparse(u).netloc, method) <= now]
+        for u in urls:
+            if u not in free:
+                _mstat(urlparse(u).netloc, method, "avoided")
+        # every endpoint refuses this method right now: the one whose backoff ends first
+        urls = free or [min(urls, key=lambda u: _avoid_until(st, urlparse(u).netloc, method))]
     pref = METHOD_PREFER.get(method or "")
     if pref:
         for u in urls:
@@ -909,12 +952,17 @@ def _halved(host, now=None):
     return c[1] > now
 
 
-def _pool_result(host, ok, ms=None, status=None):
+def _pool_result(host, ok, ms=None, status=None, method=None):
     """Book a pool call. 429 = back off (shared slowdown in _request, plus this endpoint's window halved for
     HALVE_SECONDS), never a reason to drop it. Timeouts / 5xx: POOL_FAILS_TO_DISABLE in a row take it out for
     POOL_COOLDOWN, unless it is the last healthy endpoint."""
+    if method:
+        _mstat(host, method, "calls")
     if ok:
         _pool_fail[host] = 0
+        if method and _method_429.get((host, method)):
+            _method_429[(host, method)] = 0
+            _pool_edit(lambda st: (st.get(host, {}).get("avoid") or {}).pop(method, None))
         if ms is not None:
             _latency[host] = ms if host not in _latency else 0.8 * _latency[host] + 0.2 * ms
             _count(host, "latency_ms_sum", ms)
@@ -923,6 +971,15 @@ def _pool_result(host, ok, ms=None, status=None):
         until = time.time() + HALVE_SECONDS
         _pool_update(host, halved_until=until)
         _halved_cache[host] = (time.time(), until)
+        if method and method != "batch":
+            _mstat(host, method, "429")
+            n = _method_429[(host, method)] = _method_429.get((host, method), 0) + 1
+            away = min(METHOD_AVOID_BASE * 2 ** (n - 1), METHOD_AVOID_MAX)
+            _pool_edit(lambda st: st.setdefault(host, {}).setdefault("avoid", {}).__setitem__(
+                method, time.time() + away))
+            if n in (3, 6) or away == METHOD_AVOID_MAX:
+                log.info("public RPC %s refuses %s (%d x 429 in a row), other endpoints for %d s",
+                         host, method, n, away)
         return
     _pool_fail[host] = _pool_fail.get(host, 0) + 1
     if _pool_fail[host] >= POOL_FAILS_TO_DISABLE:
@@ -965,14 +1022,14 @@ def _request(method, url, retries=4, timeout=20, priority="bulk", **kw):
             r = _session.request(method, url, timeout=min(timeout, POOL_TIMEOUT) if pooled else timeout, **kw)
         except requests.RequestException as e:
             if pooled:
-                _pool_result(host, False, status="error")
+                _pool_result(host, False, status="error", method=rpc_method)
             if attempt == retries:
                 raise requests.RequestException(redact(e)) from None
             log.warning("%s %s failed (%s), retry", method, host, e)
             time.sleep(min(2 ** attempt, POOL_MAX_SLEEP_429) if pooled else 2 ** attempt)
             continue
         if pooled:
-            _pool_result(host, r.status_code < 400, (time.time() - t_req) * 1000, r.status_code)
+            _pool_result(host, r.status_code < 400, (time.time() - t_req) * 1000, r.status_code, rpc_method)
         if r.status_code == 429 or r.status_code >= 500:
             if attempt == retries:
                 raise requests.HTTPError(f"{r.status_code} for {redact(r.url)}")
