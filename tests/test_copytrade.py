@@ -158,9 +158,15 @@ def _signal(conn, score=80, buyers=4, age=10, mint=MINT):
     return conn.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 1").fetchone()
 
 
+def _strict(s):
+    import dataclasses
+
+    return dataclasses.replace(s, explore=False)  # strict account only
+
+
 def test_signal_mode_auto_buys_and_respects_preset(env):
     s, conn, ex, state = env
-    st = strategy.Strategy(conn, s, ex)
+    st = strategy.Strategy(conn, _strict(s), ex)
     assert follow_signals(conn, st) == 0  # first call only sets the cursor
     _signal(conn, score=40)
     _signal(conn, score=85, mint=MINT)
@@ -262,7 +268,7 @@ def test_signal_mode_uses_model_when_trained(env, monkeypatch):
     from model.predict import ModelNotTrained
 
     s, conn, ex, state = env
-    st = strategy.Strategy(conn, s, ex)
+    st = strategy.Strategy(conn, _strict(s), ex)
     follow_signals(conn, st)
 
     def untrained(*a, **k):
@@ -773,3 +779,26 @@ def test_exploration_can_be_turned_off(env):
     s, conn, ex, state = env
     st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore=False), ex)
     assert "explore" not in st.exs
+
+
+def test_exploration_buys_signals_the_strict_gates_turn_down(env):
+    import dataclasses
+
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    follow_signals(conn, st)
+    state["snap"] = dataclasses.replace(state["snap"], liquidity_usd=8000)  # under the preset's $15k
+    _signal(conn, score=85)
+    follow_signals(conn, st)
+    rows = conn.execute("SELECT * FROM ct_positions").fetchall()
+    assert [r["mode"] for r in rows] == ["explore"] and rows[0]["size_sol"] == pytest.approx(s.explore_size_sol)
+    assert rows[0]["take_profit"] == pytest.approx(control.preset(conn, "signal").take_profit)  # same exits
+    conn.execute("DELETE FROM ct_positions")
+    state["snap"] = dataclasses.replace(state["snap"], liquidity_usd=3000)  # too thin even for exploration
+    _signal(conn, score=85)
+    follow_signals(conn, st)
+    assert not conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0]
+    state["snap"] = dataclasses.replace(state["snap"], liquidity_usd=80_000)
+    _signal(conn, score=85)
+    follow_signals(conn, st)  # every gate passes: strict buys, exploration buys beside it
+    assert sorted(r["mode"] for r in conn.execute("SELECT mode FROM ct_positions")) == ["explore", "paper"]

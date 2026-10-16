@@ -210,6 +210,10 @@ Kosten keine der 1296 Varianten im Plus. Daher:
   `ct_equity.mode='explore'`). Rug-Prüfung, Markt-, Wash- und Cluster-Filter gelten auch hier, der gelernte Filter
   nicht (sonst könnte ihn nie ein neuer Trade widerlegen); höchstens `CT_EXPLORE_MAX_OPEN` (5) offen. Nie live.
   `CT_EXPLORE=false` schaltet es ab.
+  Signale (Modus 2): die Erkundung kauft auch Signale, die Score-, Smart-Wallet-, Lern- oder Liquiditätsgrenze des
+  Presets ablehnen, ab `CT_EXPLORE_MIN_LIQ_USD` (5000 $) Liquidität; Rug-Prüfung, Market-Cap-Grenze und "seit dem
+  Signal schon +50 %" gelten weiter. Ausstiege wie beim strengen Konto (Ziel +50 %, Trailing ab +20 % mit 12 %
+  Rückgang, Stop −20 %), bis learn.py auf genug nachgespielten Signalen eine andere Regel walk-forward bestätigt.
 - `CT_REQUIRE_EDGE=true`: ein bewerteter Wal (oder sein Cluster) wird nur kopiert, wenn seine früheren Käufe mit den
   aktuellen Ausstiegen nach kalibrierten Kosten im Plus lagen (`learn.wallet_edge`, mindestens `CT_EDGE_MIN_N`=8).
 - `CT_MAX_WASH_SHARE=0.30`: kein Kauf, wenn der Rug-Schutz (Prüfung „wash“) mehr Hin-und-her-Volumen misst.

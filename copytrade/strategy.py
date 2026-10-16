@@ -364,7 +364,10 @@ class Strategy:
 
     # ------------------------------------------------------------------ mode 2: smart-money signals
     def on_signal(self, sig) -> int | None:
-        """sig: a row of core's `signals` table."""
+        """sig: a row of core's `signals` table. The strict account buys with the preset's gates; the exploration
+        account also buys the signals those gates (score, smart wallets, learned filter, liquidity) turn down, from
+        CT_EXPLORE_MIN_LIQ_USD liquidity, so signal exits get real trades to learn from (10/2026: 4 of 5 signals
+        of a day were turned down for liquidity or the run-up and never traded)."""
         m = control.mode(self.conn, "signal")
         if m == "off":
             return None
@@ -373,38 +376,47 @@ class Strategy:
         age = time.time() - sig["ts"]
         if age > p.max_signal_age_s:
             return self._skip("signal", mint, f"Signal zu alt ({age:.0f}s)")
+        expl = m == "auto" and "explore" in self.exs
+        why = None
         model = model_view(sig, self.conn)
         if model and model["informative"]:  # trained research model: its score is P(pump within 1 h) x 100
             score = model["score"]
             if score < p.min_model_score:
-                return self._skip("signal", mint, f"Modell {score:.0f} (Note {model.get('grade')}) < {p.min_model_score:.0f}")
+                why = f"Modell {score:.0f} (Note {model.get('grade')}) < {p.min_model_score:.0f}"
         else:  # model not trained yet, or only the base rate: the signal engine's own score
-            if p.require_model:
-                return self._skip("signal", mint, "Modell noch nicht trainiert" if not model
-                                  else "Modell schlägt die Basisrate nicht (keine Aussage)")
             score = sig["score"]
-            if score < p.min_score:
-                return self._skip("signal", mint, f"Signal-Score {score:.0f} < {p.min_score:.0f}")
-        if (sig["smart_buyers"] or 0) < p.min_smart_buyers:
-            return self._skip("signal", mint, f"nur {sig['smart_buyers']} Smart Wallets")
+            if p.require_model:
+                why = ("Modell noch nicht trainiert" if not model
+                       else "Modell schlägt die Basisrate nicht (keine Aussage)")
+            elif score < p.min_score:
+                why = f"Signal-Score {score:.0f} < {p.min_score:.0f}"
+        if not why and (sig["smart_buyers"] or 0) < p.min_smart_buyers:
+            why = f"nur {sig['smart_buyers']} Smart Wallets"
         feats = learn.signal_features(sig)
         if model:
             feats["grade"] = model.get("grade") or "-"
-        why = learn.blocked(self.conn, "signal", feats)
-        if why:
-            return self._skip("signal", mint, f"gelernter Filter: {why} verliert")
+        blocked = learn.blocked(self.conn, "signal", feats)
+        if not why and blocked:
+            why = f"gelernter Filter: {blocked} verliert"
+        if why and not expl:
+            return self._skip("signal", mint, why)
         snap = market.snapshot(mint, self.s)
         if not snap or snap.price_sol <= 0:
             return self._skip("signal", mint, "kein Marktpreis")
-        if snap.liquidity_usd < p.min_liquidity_usd:
-            return self._skip("signal", mint, f"Liquidität zu klein (${snap.liquidity_usd:,.0f})", snap)
+        if not why and snap.liquidity_usd < p.min_liquidity_usd:
+            why = f"Liquidität zu klein (${snap.liquidity_usd:,.0f})"
+        if why and not expl:
+            return self._skip("signal", mint, why, snap)
+        if why and snap.liquidity_usd < self.s.explore_min_liq_usd:
+            return self._skip("signal", mint, f"{why}; für die Erkundung Liquidität zu klein "
+                                              f"(${snap.liquidity_usd:,.0f})", snap)
         if snap.fdv and snap.fdv > p.max_mcap_usd:
             return self._skip("signal", mint, f"Market Cap zu groß (${snap.fdv:,.0f})", snap)
         if sig["price_usd"] and snap.price_usd / sig["price_usd"] - 1 > 0.5:
             return self._skip("signal", mint, "seit dem Signal schon +50 %", snap)
-        safe, why = self._safety("signal", mint)
-        if why:
-            return self._skip("signal", mint, why, snap, safety=safe)
+        safe, sw_why = self._safety("signal", mint)
+        if sw_why:
+            return self._skip("signal", mint, sw_why, snap, safety=safe)
         try:
             wallets = [w.get("wallet") for w in json.loads(sig["wallets_json"] or "[]")]
         except (ValueError, TypeError, AttributeError):
@@ -419,14 +431,29 @@ class Strategy:
             control.alert(self.conn, "signal", mint, snap.symbol, "signal", reason, price_sol=snap.price_sol,
                           price_usd=snap.price_usd, mcap_usd=snap.fdv, score=score, data=info)
             return None
-        size = p.size_sol
-        if model and model.get("size_factor"):
-            size *= max(0.25, min(2.0, float(model["size_factor"])))
-        block = self._risk_block("signal", p, size, mint)
-        if block:
-            return self._skip("signal", mint, block, snap)
-        return self.open("signal", m, mint, size, snap, p, reason=reason, meta=info, signal_id=sig["id"],
-                         score=score, **exits)
+        first = None
+        if not why:
+            size = p.size_sol
+            if model and model.get("size_factor"):
+                size *= max(0.25, min(2.0, float(model["size_factor"])))
+            block = self._risk_block("signal", p, size, mint)
+            if block:
+                self._skip("signal", mint, block, snap)
+            else:
+                first = self.open("signal", m, mint, size, snap, p, reason=reason, meta=info, signal_id=sig["id"],
+                                  score=score, **exits)
+        else:
+            self._skip("signal", mint, f"{why}; nur Erkundung", snap, account="explore")
+        if expl:
+            block = self._risk_block("signal", p, self.s.explore_size_sol, mint, account="explore")
+            if block:
+                self._skip("signal", mint, "[Erkundung] " + block, snap, account="explore")
+            else:
+                pid = self.open("signal", m, mint, self.s.explore_size_sol, snap, p, reason=f"Erkundung: {reason}",
+                                meta={**info, "account": "explore", "strict_skip": why}, signal_id=sig["id"],
+                                score=score, account="explore", **exits)
+                first = first or pid
+        return first
 
     # ------------------------------------------------------------------ mode 3: launches of the sniper
     def on_launch(self, row) -> int | None:

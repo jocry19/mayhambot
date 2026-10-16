@@ -119,6 +119,7 @@ class Settings:
     explore_min_sol: float = field(default_factory=lambda: _f("CT_EXPLORE_MIN_SOL", 0.5))
     explore_max_open: int = field(default_factory=lambda: _i("CT_EXPLORE_MAX_OPEN", 5))
     explore_start_balance_sol: float = field(default_factory=lambda: _f("CT_EXPLORE_START_BALANCE_SOL", 5.0))
+    explore_min_liq_usd: float = field(default_factory=lambda: _f("CT_EXPLORE_MIN_LIQ_USD", 5000))
     explore_tiers: str = field(default_factory=lambda: os.getenv("CT_EXPLORE_TIERS", "ultra,smart"))
     # copy a ranked whale only if its past buys (ct_evals, our current exits, calibrated costs) made money
     require_edge: bool = field(default_factory=lambda: _b("CT_REQUIRE_EDGE", True))
