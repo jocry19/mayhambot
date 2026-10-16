@@ -380,6 +380,14 @@ class GuardedLiveExecutor(PaperExecutor):
                     price_impact=last.get("impact", 0), fees_sol=fees / 1e9, tx=last.get("sig", ""),
                     source="live" if d else "live_quote_only")
 
+    def exit_value(self, mint: str, tokens: float, decimals: int) -> tuple[float, float] | None:
+        """(SOL a sale of `tokens` would bring now after price impact and token tax, unix ts) from a Jupiter quote,
+        None without a route. For stops on open live positions: DexScreener lags 10-30 s."""
+        q = self.jup.quote(self.s, mint, SOL_MINT, int(tokens * 10 ** decimals), self.cfg.sell_slippage_bps)
+        if not q or int(q.get("outAmount") or 0) <= 0:
+            return None
+        return int(q["outAmount"]) / 1e9, time.time()
+
     def _close_accounts(self, accs: list[dict]) -> int:
         """Closes empty token accounts, returns the rent lamports that came back (0 if anything failed)."""
         if self.dry or self.keypair is None:
