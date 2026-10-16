@@ -68,7 +68,8 @@ Telegram einrichten (einmalig, 2 Minuten):
 
 Der Bot nutzt den kostenlosen Helius-Plan (1.000.000 Credits pro Monat). Der stündliche Bericht zeigt
 "Helius-Credits: heute a von b, Monat c von 1.000.000". Bei 80 % und bei 100 % kommt je einmal eine
-Telegram-Meldung (pro Monat und Key). Ist das Kontingent leer, läuft der Bot über öffentliche RPCs weiter,
+Telegram-Meldung (pro Monat und Key). Dazu je Dienst und Tag eine Meldung, wenn ein Dienst sein Tagesbudget aufgebraucht hat oder
+hochgerechnet mehr als das 1,5-Fache davon verbrauchen würde. Ist das Kontingent leer, läuft der Bot über öffentliche RPCs weiter,
 nur langsamer.
 
 Neuen Key eintragen (nur du, nie in einen Chat oder ins Repo):

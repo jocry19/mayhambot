@@ -362,6 +362,7 @@ def watchdog(args) -> int:
 
     try:
         check_credit_alerts(st)
+        check_service_budgets(st)
     except Exception as e:  # noqa: BLE001
         print(f"credit alerts: {e}")
 
@@ -673,8 +674,10 @@ def helius_credits() -> dict | None:
     # identifies the key without ever storing it: core's 8-hex fingerprint, else our own short hash
     key = ((status or {}).get("key_fp") or led.get("key_fp")
            or hashlib.sha256(cfg("HELIUS_API_KEY", "").encode()).hexdigest()[:8])
+    per = {n: (v.get("credits_today", 0), v.get("credits_day_budget")) for n, v in (stats or {}).items()}
     return {"month": month, "month_used": month_used, "month_limit": limit, "today": today,
-            "day_budget": budget, "key": str(key), "warn_level": (status or {}).get("warn_level")}
+            "day_budget": budget, "key": str(key), "warn_level": (status or {}).get("warn_level"),
+            "per_service": per}
 
 
 def _fmt_int(x) -> str:
@@ -711,6 +714,36 @@ def check_credit_alerts(st: dict):
         if send_alert(text):
             sent.append(tag)
     st["credit_alerts"] = sent[-12:]
+
+
+def check_service_budgets(st: dict, c: dict | None = None, now: dt.datetime | None = None):
+    """Once per service and UTC day: alert when a service is on pace to blow its daily Helius share
+    (projection from the hours elapsed today, from 2 h into the day) or has already used it up."""
+    c = c if c is not None else helius_credits()
+    if not c or not c.get("per_service"):
+        return []
+    now = now or dt.datetime.now(dt.timezone.utc)
+    hours = now.hour + now.minute / 60
+    sent = st.setdefault("budget_alerts", [])
+    out = []
+    for name, (used, budget) in sorted(c["per_service"].items()):
+        if not budget:
+            continue
+        pace = used / hours * 24 if hours >= 2 else used
+        level = "over" if used > budget else ("pace" if pace > 1.5 * budget else None)
+        tag = f"{now:%Y-%m-%d}:{name}:{level}"
+        if not level or tag in sent or (level == "pace" and f"{now:%Y-%m-%d}:{name}:over" in sent):
+            continue
+        text = (f"🟠 Helius: {name} hat sein Tagesbudget aufgebraucht ({_fmt_int(used)} von {_fmt_int(budget)}); "
+                "der Dienst weicht jetzt auf öffentliche RPCs aus." if level == "over" else
+                f"🟡 Helius: {name} verbraucht zu schnell, Hochrechnung {_fmt_int(pace)} heute bei einem "
+                f"Tagesbudget von {_fmt_int(budget)} (bisher {_fmt_int(used)}).")
+        print(text)
+        if send_alert(text):
+            sent.append(tag)
+        out.append(text)
+    st["budget_alerts"] = sent[-40:]
+    return out
 
 
 # ---------------------------------------------------------------- hourly summary

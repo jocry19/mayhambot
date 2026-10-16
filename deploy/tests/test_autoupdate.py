@@ -228,3 +228,18 @@ def test_push_during_deploy_counts_as_success(repo, monkeypatch):
     res = autoupdate.run_once(alerts.append, health=lambda: (True, "ok"))
     assert res.startswith("eingespielt") and (work / "b").exists()
     assert "b" in alerts[-1] and "zurückgerollt" not in alerts[-1]
+
+
+def test_service_budget_alerts_once_per_day(monkeypatch):
+    import datetime as dt
+    sent = []
+    monkeypatch.setattr(ops, "send_alert", lambda t: sent.append(t) or True)
+    st = {}
+    noon = dt.datetime(2026, 10, 16, 12, tzinfo=dt.timezone.utc)
+    c = {"per_service": {"safety": (3000, 3750), "signals": (500, 3750), "web": (0, None)}}
+    ops.check_service_budgets(st, c, noon)          # safety on pace for 6000 > 1.5 x 3750
+    ops.check_service_budgets(st, c, noon)
+    assert len(sent) == 1 and "safety" in sent[0] and "Hochrechnung" in sent[0]
+    c["per_service"]["safety"] = (4000, 3750)
+    ops.check_service_budgets(st, c, noon)
+    assert len(sent) == 2 and "aufgebraucht" in sent[1]
