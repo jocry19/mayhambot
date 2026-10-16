@@ -6,6 +6,7 @@
   python -m copytrade add <wallet> [label]  # follow a wallet manually
   python -m copytrade stats               # paper/live results + top wallets
   python -m copytrade backtest            # walk-forward estimate from ranked history
+  python -m copytrade learn [on|off <whale|signal>]   # one learning round + what the bot has learned
   python -m copytrade reset-paper         # wipe paper positions and balance
   python -m copytrade status              # modes, presets, open positions
   python -m copytrade mode <whale|signal> <off|manual|semi|auto>
@@ -21,13 +22,13 @@ import argparse
 import logging
 import sys
 
-from . import chain, control, ranking, stats, store, tracker
+from . import chain, control, learn, ranking, stats, store, tracker
 from .config import load
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="copytrade")
-    ap.add_argument("cmd", choices=["run", "discover", "rank", "add", "stats", "backtest", "reset-paper", "status", "mode",
+    ap.add_argument("cmd", choices=["run", "discover", "rank", "add", "stats", "backtest", "learn", "reset-paper", "status", "mode",
                                        "preset", "live", "pause", "resume", "buy", "sell"])
     ap.add_argument("args", nargs="*")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -82,6 +83,24 @@ def main(argv: list[str] | None = None) -> int:
             wins = (bt["gain"] > 0).mean()
             print(f"{len(bt)} kopierte Käufe, Trefferquote {wins:.0%}, PnL {bt['pnl_sol'].sum():+.2f} SOL "
                   f"bei {s.position_size_sol} SOL pro Trade")
+    elif a.cmd == "learn":
+        if len(a.args) == 2 and a.args[0] in ("on", "off") and a.args[1] in control.STRATEGIES:
+            control.set_value(conn, f"autotune:{a.args[1]}", "1" if a.args[0] == "on" else "0")
+            print(f"Selbstlernen {a.args[1]}: {a.args[0]}")
+            return 0
+        res = learn.run(conn, s)
+        print(f"neu ausgewertet: {res['trades']} Trades, {res['whale_buys']} Wal-Käufe, {res['signals']} Signale")
+        for k, v in (res["tuned"] or {}).items():
+            if v:
+                print(f"  {k}: {'ÜBERNOMMEN' if v['accepted'] else 'verworfen'} "
+                      f"Test {v['test_gain']:+.1%} vs. bisher {v['baseline']:+.1%} pro Trade -> {v['params']}")
+        for strat, st in learn.status(conn).items():
+            act = st["active_version"]
+            print(f"{strat}: Lernen {'an' if st['autotune'] else 'aus'}, {st['total']} Einstiege ausgewertet "
+                  f"{st['evaluated']}" + (f", noch {st['needed_for_tuning']} bis zum ersten Tuning"
+                                          if st["needed_for_tuning"] else "")
+                  + (f", aktiv: Version {act['version']}" if act else ", aktiv: dein Preset")
+                  + (f", {st['wallet_versions']} Wal-spezifische Versionen" if st["wallet_versions"] else ""))
     elif a.cmd == "reset-paper":
         conn.execute("DELETE FROM ct_positions WHERE mode='paper'")
         conn.execute("DELETE FROM ct_equity WHERE mode='paper'")

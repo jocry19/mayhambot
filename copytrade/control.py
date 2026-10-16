@@ -86,6 +86,7 @@ DEFAULTS = {
     "preset:whale": "standard", "preset:signal": "standard",
     "live:whale": "0", "live:signal": "0",
     "paused": "0",
+    "autotune:whale": "1", "autotune:signal": "1",  # self-learning exits/filters (copytrade/learn.py)
 }
 
 

@@ -25,7 +25,7 @@ import json
 import logging
 import time
 
-from . import control, market, ranking, store
+from . import control, learn, market, ranking, store
 from .chain import Swap, _decimals_cache
 from .config import Settings
 
@@ -46,6 +46,7 @@ class Strategy:
             executors = {executors.mode: executors}
         self.exs = executors
         self._missing: dict[int, int] = {}
+        self._pending: list[tuple[float, Swap]] = []  # whale buys waiting for the learned entry delay
         control.init(conn)
 
     # ------------------------------------------------------------------ helpers
@@ -95,13 +96,20 @@ class Strategy:
                     data={"strategy": strategy, "mint": mint, "symbol": sym, "reason": why, **data})
 
     # ------------------------------------------------------------------ mode 1: whales
-    def on_whale_buy(self, swap: Swap) -> int | None:
+    def on_whale_buy(self, swap: Swap, deferred: bool = False) -> int | None:
         s = self.s
         m = control.mode(self.conn, "whale")
         if m == "off" or swap.sol_amount < s.min_whale_buy_sol:
             return None
         age = time.time() - swap.block_time
-        if age > s.max_entry_delay_s:
+        lp = learn.params_for(self.conn, "whale", swap.wallet)
+        if lp and not deferred and m != "manual" and lp.get("delay_s", 0) > age + 5:
+            # learned: entering a bit after the whale beats entering at once for this whale / mode
+            self._pending.append((swap.block_time + lp["delay_s"], swap))
+            store.event(self.conn, "wait", f"[whale] {swap.mint[:6]}…: warte {lp['delay_s'] - age:.0f}s "
+                                           f"(gelernte Einstiegs-Verzögerung)", data={"wallet": swap.wallet})
+            return None
+        if age > s.max_entry_delay_s + (lp or {}).get("delay_s", 0) * deferred:
             return self._skip("whale", swap.mint, f"zu spät erkannt ({age:.0f}s)", wallet=swap.wallet)
         p = control.preset(self.conn, "whale")
         ex = self.executor("whale")
@@ -139,21 +147,53 @@ class Strategy:
         elif s.exit_mode == "inflow_peak":
             tp = s.tp_max
         hold = rank["max_hold_min"] if (p.learned_tp and rank and rank["max_hold_min"]) else p.max_hold_min
+        tier = learn.wallet_tier(self.conn, swap.wallet)
+        feats = {"tier": tier, "size": learn.bucket_size(swap.sol_amount), "mcap": learn.bucket_mcap(snap.fdv),
+                 "liq": learn.bucket_liq(snap.liquidity_usd), "explore": explore}
+        why = learn.blocked(self.conn, "whale", feats)
+        if why:
+            return self._skip("whale", swap.mint, f"gelernter Filter: {why} verliert", snap, wallet=swap.wallet)
+        exits = self._learned_exits(lp, p, tp, hold, inflow=1)
         info = {"explore": explore, "whale_sol": swap.sol_amount, "delay_s": round(age, 1),
                 "wallet_score": round(rank["score"] * 100, 2) if rank else None,
-                "wallet_hit_rate": rank["hit_rate"] if rank else None}
+                "wallet_hit_rate": rank["hit_rate"] if rank else None, "model_tier": tier,
+                "param_version": exits["version"]}
         reason = (f"Wal {swap.wallet[:6]}… kaufte {swap.sol_amount:.1f} SOL"
                   + (f", Wal-Score {info['wallet_score']}" if rank else ", unbewertet"))
         if m == "manual":
             control.alert(self.conn, "whale", swap.mint, snap.symbol, "signal", reason, wallet=swap.wallet,
                           price_sol=snap.price_sol, price_usd=snap.price_usd, mcap_usd=snap.fdv,
-                          score=info["wallet_score"] or 0, data={**info, "take_profit": tp})
+                          score=info["wallet_score"] or 0, data={**info, "take_profit": exits["tp"]})
             return None
         block = self._risk_block("whale", p, size, swap.mint)
         if block:
             return self._skip("whale", swap.mint, block, snap)
-        return self.open("whale", m, swap.mint, size, snap, p, tp=tp, hold=hold, reason=reason, wallet=swap.wallet,
-                         whale=swap, meta=info, score=info["wallet_score"] or 0)
+        return self.open("whale", m, swap.mint, size, snap, p, reason=reason, wallet=swap.wallet,
+                         whale=swap, meta=info, score=info["wallet_score"] or 0, **exits)
+
+    def process_pending(self) -> int:
+        """Enter whale buys whose learned delay has passed (unless the whale already sold)."""
+        now, due, n = time.time(), [], 0
+        for item in self._pending:
+            (due if item[0] <= now else []).append(item)
+        self._pending = [x for x in self._pending if x[0] > now]
+        for _, sw in due:
+            sold = self.conn.execute("SELECT 1 FROM ct_swaps WHERE wallet=? AND mint=? AND side='sell' AND ts>=?",
+                                     (sw.wallet, sw.mint, sw.block_time)).fetchone()
+            if sold:
+                self._skip("whale", sw.mint, "Wal hat während der Wartezeit verkauft", wallet=sw.wallet)
+                continue
+            n += bool(self.on_whale_buy(sw, deferred=True))
+        return n
+
+    def _learned_exits(self, lp: dict | None, p: control.Preset, tp: float, hold: float, inflow: int) -> dict:
+        """Exit parameters for a new position: learned version (capped by the preset) or the preset."""
+        if not lp:
+            return {"tp": tp, "hold": hold, "sl": p.stop_loss, "trail": (p.trail_activate, p.trail_drawdown),
+                    "inflow": inflow, "version": None}
+        return {"tp": lp["take_profit"], "hold": min(lp["max_hold_min"], p.max_hold_min),
+                "sl": min(lp["stop_loss"], p.stop_loss), "trail": (lp["trail_activate"], lp["trail_drawdown"]),
+                "inflow": int(lp.get("inflow_exit", inflow)), "version": lp.get("version")}
 
     # ------------------------------------------------------------------ mode 2: smart-money signals
     def on_signal(self, sig) -> int | None:
@@ -179,6 +219,12 @@ class Strategy:
                 return self._skip("signal", mint, f"Signal-Score {score:.0f} < {p.min_score:.0f}")
         if (sig["smart_buyers"] or 0) < p.min_smart_buyers:
             return self._skip("signal", mint, f"nur {sig['smart_buyers']} Smart Wallets")
+        feats = learn.signal_features(sig)
+        if model:
+            feats["grade"] = model.get("grade") or "-"
+        why = learn.blocked(self.conn, "signal", feats)
+        if why:
+            return self._skip("signal", mint, f"gelernter Filter: {why} verliert")
         snap = market.snapshot(mint, self.s)
         if not snap or snap.price_sol <= 0:
             return self._skip("signal", mint, "kein Marktpreis")
@@ -192,9 +238,10 @@ class Strategy:
             wallets = [w.get("wallet") for w in json.loads(sig["wallets_json"] or "[]")]
         except (ValueError, TypeError, AttributeError):
             wallets = []
+        exits = self._learned_exits(learn.params_for(self.conn, "signal"), p, p.take_profit, p.max_hold_min, inflow=0)
         info = {"signal_id": sig["id"], "signal_score": sig["score"], "smart_buyers": sig["smart_buyers"],
                 "net_usd": sig["net_usd"], "avg_quality": sig["avg_quality"], "wallets": wallets[:20],
-                "model": model, "signal_age_s": round(age, 1)}
+                "model": model, "signal_age_s": round(age, 1), "param_version": exits["version"]}
         reason = (f"Signal-Score {sig['score']:.0f}, {sig['smart_buyers']} Smart Wallets, "
                   f"${(sig['net_usd'] or 0):,.0f} netto" + (f", Modell {score:.0f}" if model else ""))
         if m == "manual":
@@ -207,13 +254,18 @@ class Strategy:
         block = self._risk_block("signal", p, size, mint)
         if block:
             return self._skip("signal", mint, block, snap)
-        return self.open("signal", m, mint, size, snap, p, tp=p.take_profit, hold=p.max_hold_min, reason=reason,
-                         meta=info, signal_id=sig["id"], score=score)
+        return self.open("signal", m, mint, size, snap, p, reason=reason, meta=info, signal_id=sig["id"],
+                         score=score, **exits)
 
     # ------------------------------------------------------------------ open / close
     def open(self, strategy: str, managed: str, mint: str, size: float, snap, p: control.Preset, *, tp: float,
              hold: float, reason: str, wallet: str = "", whale: Swap | None = None, meta: dict | None = None,
-             signal_id: int | None = None, score: float = 0) -> int | None:
+             signal_id: int | None = None, score: float = 0, sl: float | None = None,
+             trail: tuple[float, float] | None = None, inflow: int | None = None,
+             version: int | None = None) -> int | None:
+        sl = p.stop_loss if sl is None else min(sl, p.stop_loss)  # never wider than your preset
+        trail = trail or (p.trail_activate, p.trail_drawdown)
+        inflow = (1 if strategy == "whale" else 0) if inflow is None else inflow
         ex = self.executor(strategy) if strategy in control.STRATEGIES else self.exs.get("paper")
         fill = ex.buy(mint, size, snap)
         if not fill.ok:
@@ -226,13 +278,14 @@ class Strategy:
             """INSERT INTO ct_positions(mode, strategy, managed, wallet, mint, symbol, whale_sig, whale_ts,
                  whale_price_sol, signal_id, opened_at, entry_price_sol, entry_price_usd, entry_mcap_usd, size_sol,
                  tokens, token_decimals, entry_cost_sol, take_profit, stop_loss, trail_activate, trail_drawdown,
-                 max_hold_min, high_price_sol, last_price_sol, last_buys_m5, peak_buys_m5, entry_tx, meta)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 max_hold_min, high_price_sol, last_price_sol, last_buys_m5, peak_buys_m5, entry_tx, meta,
+                 param_version, use_inflow_exit)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (ex.mode, strategy, managed, wallet, mint, snap.symbol, whale.signature if whale else None,
              whale.block_time if whale else None, whale.price_sol if whale else None, signal_id, int(time.time()),
              fill.price_sol, snap.price_usd, snap.fdv, size, fill.tokens, _decimals_cache.get(mint, 6), fill.sol,
-             tp, p.stop_loss, p.trail_activate, p.trail_drawdown, hold, snap.price_sol, snap.price_sol,
-             snap.buys_m5, snap.buys_m5, fill.tx, json.dumps(meta)),
+             tp, sl, trail[0], trail[1], hold, snap.price_sol, snap.price_sol,
+             snap.buys_m5, snap.buys_m5, fill.tx, json.dumps(meta), version, inflow),
         )
         self.conn.commit()
         pid = cur.lastrowid
@@ -332,15 +385,16 @@ class Strategy:
             gain, high_gain = price / entry - 1, high / entry - 1
             trail_act = p["trail_activate"] if p["trail_activate"] is not None else self.s.trail_activate
             trail_dd = p["trail_drawdown"] if p["trail_drawdown"] is not None else self.s.trail_drawdown
+            inflow = p["use_inflow_exit"] if p["use_inflow_exit"] is not None else p["strategy"] == "whale"
             reason = None
             if gain <= -p["stop_loss"]:
                 reason = "stop"
             elif gain >= p["take_profit"]:
                 reason = "target"
-            elif (p["strategy"] == "whale" and gain > self.s.tp_min / 2 and peak_buys >= 20
+            elif (inflow and gain > self.s.tp_min / 2 and peak_buys >= 20
                   and snap.buys_m5 < 0.6 * peak_buys):
                 reason = "inflow_peak"
-            elif high_gain >= trail_act and price <= high * (1 - trail_dd):
+            elif trail_act > 0 and high_gain >= trail_act and price <= high * (1 - trail_dd):
                 reason = "trail"
             elif p["strategy"] == "signal" and gain > 0 and self._smart_exit(p):
                 reason = "smart_exit"

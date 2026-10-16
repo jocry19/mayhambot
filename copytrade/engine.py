@@ -6,7 +6,7 @@ import signal
 import threading
 import time
 
-from . import chain, ranking, store, tracker
+from . import chain, learn, ranking, store, tracker
 from .config import Settings
 from .execution import make_executors
 from .strategy import Strategy
@@ -53,6 +53,11 @@ class Engine:
             log.info("ranking: %d buys evaluated, %d wallets ranked", n, k)
         except Exception as e:
             log.warning("ranking failed: %s", e)
+        try:
+            res = learn.run(c, s)
+            log.info("learning: %s", {k: v for k, v in res.items() if k != "tuned"})
+        except Exception as e:
+            log.warning("learning failed: %s", e)
 
     # ------------------------------------------------------------------ watching
     def poll_round(self) -> int:
@@ -126,6 +131,7 @@ class Engine:
             t0 = time.time()
             try:
                 self.poll_round()
+                self.strategy.process_pending()
             except Exception as e:
                 log.warning("poll round failed: %s", e)
             self._stop.wait(max(0.5, self.s.wallet_poll_seconds - (time.time() - t0)))

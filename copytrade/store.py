@@ -80,6 +80,9 @@ def connect(settings: Settings) -> sqlite3.Connection:
     from . import control
 
     control.init(conn)
+    from . import learn
+
+    learn.init(conn)
     return conn
 
 
@@ -91,6 +94,8 @@ POSITION_COLUMNS = {
     "trail_activate": "REAL", "trail_drawdown": "REAL",
     "last_price_usd": "REAL", "last_mcap_usd": "REAL", "exit_mcap_usd": "REAL",
     "exit_hint": "TEXT", "exit_hint_at": "INTEGER",
+    "param_version": "INTEGER",  # ct_param_versions.id the exits came from (NULL = preset)
+    "use_inflow_exit": "INTEGER",  # sell when the copy-trader rush peaks (learned per mode/whale)
 }
 
 

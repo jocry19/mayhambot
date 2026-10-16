@@ -1,0 +1,522 @@
+"""Self-learning strategy layer.
+
+1. Evaluate: every closed trade, every evaluated whale buy and every past smart-money signal is
+   replayed on 1-minute candles against the whole parameter grid (copytrade.sim): entry delay,
+   target, stop, trailing stop, hold time, sell-at-inflow-peak. One row per entry in ct_evals.
+2. Tune: per mode (whale / signal) and per whale with enough history, pick the variant with the
+   best net result on the OLDER 70 % of entries and accept it only if it also beats the current
+   settings on the NEWER 30 % (out of sample). Accepted parameters become a new version in
+   ct_param_versions; the trading loop uses the active version.
+3. Learned filters: feature buckets (model tier, model grade, market cap, liquidity, signal score,
+   whale size) that lost money in both the train and the test part are blocked.
+
+Hard limits that learning never touches: position size, max open positions, daily loss limit,
+live switch. The learned stop loss is never wider than your preset's stop, the learned hold time
+never longer than your preset's max hold. Turn learning off per mode with control
+`autotune:<strategy>` = 0.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import time
+from typing import Sequence
+
+from . import control, market, sim
+from .config import Settings
+
+log = logging.getLogger("copytrade.learn")
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS ct_candles (
+    mint TEXT, ts INTEGER, o REAL, h REAL, l REAL, c REAL, v REAL, PRIMARY KEY (mint, ts)
+);
+CREATE TABLE IF NOT EXISTS ct_evals (
+    kind TEXT, ref TEXT, strategy TEXT, wallet TEXT, mint TEXT, ts INTEGER, grid_version INTEGER,
+    gains TEXT, actual_gain REAL, sim_actual REAL, features TEXT, created_at INTEGER,
+    PRIMARY KEY (kind, ref)
+);
+CREATE INDEX IF NOT EXISTS idx_ct_evals_strategy ON ct_evals(strategy, ts);
+CREATE INDEX IF NOT EXISTS idx_ct_evals_wallet ON ct_evals(wallet, ts);
+CREATE TABLE IF NOT EXISTS ct_param_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, strategy TEXT, scope TEXT, params TEXT,
+    n_train INTEGER, n_test INTEGER, train_gain REAL, test_gain REAL, baseline_test_gain REAL,
+    accepted INTEGER, active INTEGER DEFAULT 0, notes TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ct_param_versions ON ct_param_versions(strategy, scope, active);
+"""
+
+HORIZON_S = (max(sim.HOLDS_MIN) + 10) * 60 + max(sim.DELAYS_S)  # an entry is evaluable after this
+MIN_MODE_N, MIN_MODE_TEST = 40, 12
+MIN_WALLET_N, MIN_WALLET_TEST = 20, 6
+MIN_IMPROVEMENT = 0.01  # +1 %-point net per trade out of sample
+TRAIN_SHARE = 0.7
+GAIN_CLIP = (-0.6, 2.0)
+RETRY_S = 2 * 86400  # entries without candles are retried this long, then recorded as unevaluable
+TRADE_WEIGHT = 2  # our own trades count double vs. hypothetical whale buys / signals
+
+
+def init(conn) -> None:
+    conn.executescript(SCHEMA)
+
+
+def enabled(conn, strategy: str) -> bool:
+    return control.get(conn, f"autotune:{strategy}") != "0"
+
+
+# ---------------------------------------------------------------------- candles
+def candles(conn, s: Settings, mint: str, lo: int, hi: int, pool: str | None = None) -> list[tuple]:
+    """1-minute candles: research's cache, then ours, then GeckoTerminal/Birdeye (stored in ct_candles)."""
+    need = max(1, (hi - lo) // 60)
+    for q in ("SELECT ts,o,h,l,c,v FROM research_candles WHERE mint=? AND tf_sec=60 AND ts BETWEEN ? AND ? ORDER BY ts",
+              "SELECT ts,o,h,l,c,v FROM ct_candles WHERE mint=? AND ts BETWEEN ? AND ? ORDER BY ts"):
+        try:
+            rows = [tuple(r) for r in conn.execute(q, (mint, lo, hi)).fetchall()]
+        except Exception:
+            rows = []
+        if len(rows) >= need * 0.4 and rows and rows[-1][0] >= hi - 30 * 60:
+            return rows
+    pool = pool or _pool(conn, mint)
+    try:
+        got = market.minute_candles(pool, lo, hi, s, mint=mint) if (pool or s.birdeye_api_key) else []
+    except Exception as e:
+        log.debug("candles %s failed: %s", mint[:6], e)
+        return []
+    if got:
+        conn.executemany("INSERT OR REPLACE INTO ct_candles VALUES (?,?,?,?,?,?,?)", [(mint, *c) for c in got])
+    return got
+
+
+def _pool(conn, mint: str) -> str:
+    for q in ("SELECT pool FROM ct_buy_outcomes WHERE mint=? AND pool!='' LIMIT 1",
+              "SELECT pool_address FROM tokens WHERE mint=? AND pool_address!=''"):
+        try:
+            r = conn.execute(q, (mint,)).fetchone()
+            if r and r[0]:
+                return r[0]
+        except Exception:
+            pass
+    return market.best_pool(mint)
+
+
+# ---------------------------------------------------------------------- features (for attribution + filters)
+def bucket_mcap(x) -> str:
+    if not x:
+        return "?"
+    return "<50k" if x < 5e4 else "50k-250k" if x < 2.5e5 else "250k-1M" if x < 1e6 else "1M-10M" if x < 1e7 else ">10M"
+
+
+def bucket_liq(x) -> str:
+    if not x:
+        return "?"
+    return "<20k" if x < 2e4 else "20k-50k" if x < 5e4 else "50k-200k" if x < 2e5 else ">200k"
+
+
+def bucket_size(sol) -> str:
+    sol = sol or 0
+    return "<5 SOL" if sol < 5 else "5-20 SOL" if sol < 20 else ">20 SOL"
+
+
+def signal_features(sig) -> dict:
+    """Feature buckets of a core `signals` row (same buckets for learning and for live filtering)."""
+    keys = sig.keys()
+    buyers = sig["smart_buyers"] or 0
+    return {"mcap": bucket_mcap(sig["mcap_usd"]), "score": f"{int((sig['score'] or 0) // 10 * 10)}+",
+            "buyers": str(min(buyers, 6)) + ("+" if buyers >= 6 else ""),
+            "ultra": "ja" if "n_ultra" in keys and (sig["n_ultra"] or 0) > 0 else "nein"}
+
+
+_tier_cache: dict[str, tuple[float, str]] = {}
+
+
+def wallet_tier(conn, wallet: str) -> str:
+    if not wallet:
+        return "-"
+    hit = _tier_cache.get(wallet)
+    if hit and hit[0] > time.time() - 3600:
+        return hit[1]
+    try:
+        from model import tier_of  # type: ignore
+
+        t = tier_of(wallet, conn=conn)
+        tier = (t or {}).get("tier") or "none"
+    except Exception:
+        tier = "?"
+    _tier_cache[wallet] = (time.time(), tier)
+    return tier
+
+
+# ---------------------------------------------------------------------- 1. evaluate
+def _sells_after(conn, wallet: str, mint: str, ts: int) -> list[int]:
+    if not wallet:
+        return []
+    return [r[0] for r in conn.execute(
+        "SELECT ts FROM ct_swaps WHERE wallet=? AND mint=? AND side='sell' AND ts>? ORDER BY ts", (wallet, mint, ts))]
+
+
+def _store_eval(conn, kind, ref, strategy, wallet, mint, ts, gains, features, actual=None, sim_actual=None) -> None:
+    conn.execute("INSERT OR REPLACE INTO ct_evals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (kind, str(ref), strategy, wallet or "", mint, int(ts), sim.GRID_VERSION, json.dumps(gains),
+                  actual, sim_actual, json.dumps(features), int(time.time())))
+
+
+def evaluate_trades(conn, s: Settings, limit: int = 20) -> int:
+    """Closed positions old enough to see every alternative's outcome."""
+    rows = conn.execute(
+        """SELECT p.* FROM ct_positions p WHERE p.status='closed' AND p.opened_at < ?
+           AND NOT EXISTS (SELECT 1 FROM ct_evals e WHERE e.kind='trade' AND e.ref=CAST(p.id AS TEXT))
+           ORDER BY p.opened_at LIMIT ?""", (int(time.time()) - HORIZON_S, limit)).fetchall()
+    n = 0
+    for p in rows:
+        whale = p["strategy"] == "whale" and p["whale_ts"]
+        t0 = p["whale_ts"] if whale else p["opened_at"] - sim.DELAYS_S[0]
+        cs = candles(conn, s, p["mint"], int(t0) - 20 * 60, int(t0) + HORIZON_S)
+        variants = sim.GRID if whale else sim.EXIT_GRID
+        meta = json.loads(p["meta"] or "{}")
+        feats = {"strategy": p["strategy"], "mcap": bucket_mcap(p["entry_mcap_usd"] or meta.get("fdv")),
+                 "liq": bucket_liq(meta.get("liq_usd")), "tier": meta.get("model_tier") or "-",
+                 "grade": (meta.get("model") or {}).get("grade") or "-", "explore": bool(meta.get("explore"))}
+        if not cs:
+            if p["opened_at"] > time.time() - RETRY_S:
+                continue
+            _store_eval(conn, "trade", p["id"], p["strategy"], p["wallet"], p["mint"], t0, [], feats, p["pnl_pct"])
+            continue
+        events = _sells_after(conn, p["wallet"], p["mint"], int(t0)) if whale else []
+        gains = sim.grid_gains(cs, t0, variants, events)
+        actual_v = sim.Variant(int(max(0, p["opened_at"] - t0)) if whale else sim.DELAYS_S[0], p["take_profit"],
+                               p["stop_loss"], p["trail_activate"] or 0, p["trail_drawdown"] or 0,
+                               p["max_hold_min"], int(p["use_inflow_exit"] if "use_inflow_exit" in p.keys() and
+                                                      p["use_inflow_exit"] is not None else whale))
+        sa = sim.simulate(cs, t0, actual_v, events)
+        _store_eval(conn, "trade", p["id"], p["strategy"], p["wallet"], p["mint"], t0, gains, feats,
+                    p["pnl_pct"], sa[0] if sa else None)
+        n += 1
+    return n
+
+
+def evaluate_whale_buys(conn, s: Settings, limit: int = 40) -> int:
+    """Every whale buy already measured by the ranking (ct_buy_outcomes) -> full grid."""
+    rows = conn.execute(
+        """SELECT o.* FROM ct_buy_outcomes o WHERE o.pumped IS NOT NULL AND o.ts < ?
+           AND NOT EXISTS (SELECT 1 FROM ct_evals e WHERE e.kind='whale_buy' AND e.ref=o.sig)
+           ORDER BY o.ts DESC LIMIT ?""", (int(time.time()) - HORIZON_S, limit)).fetchall()
+    tiers: dict[str, str] = {}
+    n = 0
+    for b in rows:
+        cs = candles(conn, s, b["mint"], b["ts"] - 20 * 60, b["ts"] + HORIZON_S, b["pool"])
+        w = b["wallet"]
+        if w not in tiers:
+            tiers[w] = wallet_tier(conn, w)
+        feats = {"strategy": "whale", "tier": tiers[w], "size": bucket_size(b["sol_amount"])}
+        if not cs and b["ts"] > time.time() - RETRY_S:
+            continue  # candles not available right now: try again next round
+        gains = sim.grid_gains(cs, b["ts"], sim.GRID, _sells_after(conn, w, b["mint"], b["ts"])) if cs else []
+        _store_eval(conn, "whale_buy", b["sig"], "whale", w, b["mint"], b["ts"], gains, feats)
+        n += 1
+    return n
+
+
+def evaluate_signals(conn, s: Settings, limit: int = 30) -> int:
+    """Past smart-money signals of the signal engine -> exit grid (entry after our latency)."""
+    try:
+        rows = conn.execute(
+            """SELECT g.* FROM signals g WHERE g.ts < ?
+               AND NOT EXISTS (SELECT 1 FROM ct_evals e WHERE e.kind='signal' AND e.ref=CAST(g.id AS TEXT))
+               ORDER BY g.ts DESC LIMIT ?""", (int(time.time()) - HORIZON_S, limit)).fetchall()
+    except Exception:
+        return 0
+    n = 0
+    for g in rows:
+        cs = candles(conn, s, g["mint"], g["ts"] - 20 * 60, g["ts"] + HORIZON_S)
+        feats = {"strategy": "signal", **signal_features(g)}
+        if not cs and g["ts"] > time.time() - RETRY_S:
+            continue
+        gains = sim.grid_gains(cs, g["ts"], sim.EXIT_GRID) if cs else []
+        _store_eval(conn, "signal", g["id"], "signal", "", g["mint"], g["ts"], gains, feats)
+        n += 1
+    return n
+
+
+# ---------------------------------------------------------------------- 2. tune
+def _rows(conn, strategy: str, wallet: str | None = None, min_signal_score: float | None = None) -> list[dict]:
+    q = "SELECT * FROM ct_evals WHERE strategy=? AND grid_version=? AND gains!='[]'"
+    args: list = [strategy, sim.GRID_VERSION]
+    if wallet:
+        q += " AND wallet=?"
+        args.append(wallet)
+    out = []
+    for r in conn.execute(q + " ORDER BY ts", args).fetchall():
+        f = json.loads(r["features"] or "{}")
+        if r["kind"] == "signal" and min_signal_score is not None:
+            try:
+                if int(f.get("score", "0+")[:-1]) + 10 <= min_signal_score:
+                    continue
+            except ValueError:
+                pass
+        out.append({"kind": r["kind"], "ts": r["ts"], "gains": json.loads(r["gains"]), "features": f,
+                    "w": TRADE_WEIGHT if r["kind"] == "trade" else 1, "actual": r["actual_gain"],
+                    "sim_actual": r["sim_actual"]})
+    return out
+
+
+def _means(rows: Sequence[dict], n_var: int) -> list[float]:
+    tot = [0.0] * n_var
+    wsum = sum(r["w"] for r in rows) or 1
+    for r in rows:
+        g = r["gains"]
+        if len(g) != n_var:
+            continue
+        for i, x in enumerate(g):
+            if x is not None:
+                tot[i] += r["w"] * max(GAIN_CLIP[0], min(GAIN_CLIP[1], x))
+    return [t / wsum for t in tot]
+
+
+def _allowed(variants: Sequence[sim.Variant], cap_sl: float, cap_hold: float) -> list[int]:
+    return [i for i, v in enumerate(variants) if v.stop_loss <= cap_sl + 1e-9 and v.max_hold_min <= cap_hold + 1e-9]
+
+
+def current_params(conn, strategy: str, wallet: str | None = None) -> dict:
+    """What the bot uses right now (active learned version, else the preset)."""
+    lp = params_for(conn, strategy, wallet, apply_caps=False)
+    if lp:
+        return lp
+    p = control.preset(conn, strategy)
+    return {"delay_s": sim.DELAYS_S[0], "take_profit": p.take_profit, "stop_loss": p.stop_loss,
+            "trail_activate": p.trail_activate, "trail_drawdown": p.trail_drawdown,
+            "max_hold_min": p.max_hold_min, "inflow_exit": 1 if strategy == "whale" else 0}
+
+
+def _learn_filters(rows: Sequence[dict], best: int, split: int) -> dict[str, list[str]]:
+    """Buckets that lost money with the chosen variant in train AND test."""
+    block: dict[str, list[str]] = {}
+    keys = {k for r in rows for k in r["features"] if k not in ("strategy",)}
+    for k in keys:
+        vals = {str(r["features"].get(k)) for r in rows}
+        for val in vals:
+            if val in ("?", "-", "None"):
+                continue
+            tr = [r["gains"][best] for r in rows[:split] if str(r["features"].get(k)) == val and r["gains"][best] is not None]
+            te = [r["gains"][best] for r in rows[split:] if str(r["features"].get(k)) == val and r["gains"][best] is not None]
+            if len(tr) >= 15 and len(te) >= 8 and sum(tr) / len(tr) < -0.02 and sum(te) / len(te) < -0.02:
+                block.setdefault(k, []).append(val)
+    return block
+
+
+def tune_scope(conn, strategy: str, rows: list[dict], scope: str, min_n: int, min_test: int,
+               wallet: str | None = None) -> dict | None:
+    variants = sim.GRID if strategy == "whale" else sim.EXIT_GRID
+    rows = [r for r in rows if len(r["gains"]) == len(variants)]
+    n = len(rows)
+    if n < min_n:
+        return None
+    split = int(n * TRAIN_SHARE)
+    train, test = rows[:split], rows[split:]
+    if len(test) < min_test:
+        return None
+    pre = control.preset(conn, strategy)
+    allowed = _allowed(variants, pre.stop_loss, max(pre.max_hold_min, 15))
+    if not allowed:
+        return None
+    mtr, mte = _means(train, len(variants)), _means(test, len(variants))
+    best = max(allowed, key=lambda i: mtr[i])
+    cur = current_params(conn, strategy, wallet)
+    base = sim.nearest(cur, variants)
+    accepted = int(mte[best] > mte[base] + MIN_IMPROVEMENT and mte[best] > 0)
+    params = variants[best].as_dict()
+    if scope == "mode":
+        params["block"] = _learn_filters(rows, best, split)
+    trades = [r for r in rows if r["kind"] == "trade" and r["actual"] is not None and r["sim_actual"] is not None]
+    gap = (sum(r["actual"] - r["sim_actual"] for r in trades) / len(trades)) if trades else None
+    notes = {"variants": len(variants), "baseline": variants[base].key(), "best": variants[best].key(),
+             "calibration_gap": gap, "n_trades": len(trades),
+             "kinds": {k: sum(1 for r in rows if r["kind"] == k) for k in ("trade", "whale_buy", "signal")}}
+    last = conn.execute(
+        "SELECT params, accepted FROM ct_param_versions WHERE strategy=? AND scope=? ORDER BY id DESC LIMIT 1",
+        (strategy, scope)).fetchone()
+    if last and not accepted and not last["accepted"] and json.loads(last["params"]).get("take_profit") == params["take_profit"]:
+        return None  # nothing new to record
+    if accepted:
+        conn.execute("UPDATE ct_param_versions SET active=0 WHERE strategy=? AND scope=?", (strategy, scope))
+    conn.execute(
+        """INSERT INTO ct_param_versions(ts, strategy, scope, params, n_train, n_test, train_gain, test_gain,
+             baseline_test_gain, accepted, active, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (int(time.time()), strategy, scope, json.dumps(params), len(train), len(test), mtr[best], mte[best],
+         mte[base], accepted, accepted, json.dumps(notes)))
+    if accepted:
+        from . import store
+
+        store.event(conn, "learn",
+                    f"[{strategy}{'' if scope == 'mode' else ' ' + scope[:12] + '…'}] neue Parameter gelernt: "
+                    f"{variants[best].key()} (Test {mte[best]:+.1%} statt {mte[base]:+.1%} pro Trade, "
+                    f"{len(test)} Test-Einstiege)", data={"params": params, "notes": notes})
+    return {"accepted": bool(accepted), "params": params, "test_gain": mte[best], "baseline": mte[base]}
+
+
+def tune(conn, s: Settings) -> dict:
+    out: dict = {}
+    for strategy in control.STRATEGIES:
+        if not enabled(conn, strategy):
+            continue
+        min_score = control.preset(conn, "signal").min_score if strategy == "signal" else None
+        rows = _rows(conn, strategy, min_signal_score=min_score)
+        out[strategy] = tune_scope(conn, strategy, rows, "mode", MIN_MODE_N, MIN_MODE_TEST)
+    if enabled(conn, "whale"):
+        for r in conn.execute(
+                """SELECT wallet, COUNT(*) n FROM ct_evals WHERE strategy='whale' AND wallet!='' AND gains!='[]'
+                   GROUP BY wallet HAVING n >= ?""", (MIN_WALLET_N,)).fetchall():
+            res = tune_scope(conn, "whale", _rows(conn, "whale", r["wallet"]), r["wallet"], MIN_WALLET_N,
+                             MIN_WALLET_TEST, wallet=r["wallet"])
+            if res:
+                out[f"whale:{r['wallet'][:8]}"] = res
+    return out
+
+
+def run(conn, s: Settings) -> dict:
+    """One learning round (called by the maintenance loop): evaluate new entries, then tune."""
+    init(conn)
+    n = {"trades": evaluate_trades(conn, s), "whale_buys": evaluate_whale_buys(conn, s),
+         "signals": evaluate_signals(conn, s)}
+    n["tuned"] = tune(conn, s)
+    return n
+
+
+# ---------------------------------------------------------------------- 3. use
+def params_for(conn, strategy: str, wallet: str | None = None, apply_caps: bool = True) -> dict | None:
+    """Active learned parameters (wallet-specific first, then mode), capped by the current preset."""
+    if not enabled(conn, strategy):
+        return None
+    try:
+        r = None
+        if wallet:
+            r = conn.execute("SELECT id, params FROM ct_param_versions WHERE strategy=? AND scope=? AND active=1 "
+                             "ORDER BY id DESC LIMIT 1", (strategy, wallet)).fetchone()
+        if r is None:
+            r = conn.execute("SELECT id, params FROM ct_param_versions WHERE strategy=? AND scope='mode' AND active=1 "
+                             "ORDER BY id DESC LIMIT 1", (strategy,)).fetchone()
+    except Exception:
+        return None
+    if r is None:
+        return None
+    p = json.loads(r["params"])
+    p["version"] = r["id"]
+    if apply_caps:
+        pre = control.preset(conn, strategy)
+        p["stop_loss"] = min(p["stop_loss"], pre.stop_loss)
+        p["max_hold_min"] = min(p["max_hold_min"], pre.max_hold_min)
+    return p
+
+
+def blocked(conn, strategy: str, features: dict) -> str | None:
+    """Name of a learned filter that blocks these features, or None."""
+    lp = params_for(conn, strategy)
+    for k, vals in ((lp or {}).get("block") or {}).items():
+        if str(features.get(k)) in vals:
+            return f"{k}={features.get(k)}"
+    return None
+
+
+# ---------------------------------------------------------------------- insight (dashboard / terminal)
+def versions(conn, strategy: str | None = None, scope: str | None = None):
+    """Parameter history with the paper/live P&L of the trades each version actually traded."""
+    import pandas as pd
+
+    q = "SELECT * FROM ct_param_versions WHERE 1=1"
+    args: list = []
+    if strategy:
+        q += " AND strategy=?"
+        args.append(strategy)
+    if scope:
+        q += " AND scope=?"
+        args.append(scope)
+    df = pd.read_sql_query(q + " ORDER BY id", conn, params=args)
+    if df.empty:
+        return df
+    pnl = pd.read_sql_query(
+        """SELECT param_version AS id, COUNT(*) AS trades, SUM(pnl_sol) AS pnl_sol, AVG(pnl_pct) AS avg_pct,
+                  AVG(CASE WHEN pnl_sol>0 THEN 1.0 ELSE 0 END) AS win_rate
+           FROM ct_positions WHERE status='closed' AND param_version IS NOT NULL GROUP BY param_version""", conn)
+    df = df.merge(pnl, on="id", how="left")
+    df["dt"] = pd.to_datetime(df["ts"], unit="s", utc=True)
+    return df
+
+
+def variant_surface(conn, strategy: str, x: str = "take_profit", y: str = "stop_loss"):
+    """Mean net gain per (x, y) over all evaluated entries (best over the other parameters) for a heatmap."""
+    import pandas as pd
+
+    variants = sim.GRID if strategy == "whale" else sim.EXIT_GRID
+    rows = [r for r in _rows(conn, strategy) if len(r["gains"]) == len(variants)]
+    if not rows:
+        return pd.DataFrame()
+    m = _means(rows, len(variants))
+    df = pd.DataFrame([{**v.as_dict(), "gain": m[i]} for i, v in enumerate(variants)])
+    return df.groupby([x, y])["gain"].max().reset_index().assign(n=len(rows))
+
+
+def attribution(conn, strategy: str):
+    """Mean net gain with the current parameters per feature bucket (tier, grade, mcap, liquidity, ...)."""
+    import pandas as pd
+
+    variants = sim.GRID if strategy == "whale" else sim.EXIT_GRID
+    rows = [r for r in _rows(conn, strategy) if len(r["gains"]) == len(variants)]
+    if not rows:
+        return pd.DataFrame()
+    i = sim.nearest(current_params(conn, strategy), variants)
+    recs = []
+    for r in rows:
+        g = r["gains"][i]
+        if g is None:
+            continue
+        for k, v in r["features"].items():
+            if k != "strategy":
+                recs.append({"feature": k, "bucket": str(v), "gain": g, "kind": r["kind"]})
+    df = pd.DataFrame(recs)
+    if df.empty:
+        return df
+    return (df.groupby(["feature", "bucket"])
+              .agg(n=("gain", "size"), avg_gain=("gain", "mean"), win_rate=("gain", lambda x: (x > 0).mean()))
+              .reset_index())
+
+
+def exit_rule_comparison(conn, strategy: str):
+    """For our closed trades: what each simple exit style would have returned vs. what we got."""
+    import pandas as pd
+
+    variants = sim.GRID if strategy == "whale" else sim.EXIT_GRID
+    rows = [r for r in _rows(conn, strategy) if r["kind"] == "trade" and len(r["gains"]) == len(variants)]
+    if not rows:
+        return pd.DataFrame()
+    m = _means(rows, len(variants))
+    styles = {
+        "nur Kursziel": [i for i, v in enumerate(variants) if v.trail_activate == 0 and not v.inflow_exit],
+        "Trailing-Stop": [i for i, v in enumerate(variants) if v.trail_activate > 0 and not v.inflow_exit],
+        "Copy-Ansturm-Ende": [i for i, v in enumerate(variants) if v.inflow_exit],
+        "kurz halten (≤15 min)": [i for i, v in enumerate(variants) if v.max_hold_min <= 15],
+        "lange halten (≥120 min)": [i for i, v in enumerate(variants) if v.max_hold_min >= 120],
+    }
+    actual = sum(r["actual"] for r in rows if r["actual"] is not None) / max(1, sum(r["actual"] is not None for r in rows))
+    out = [{"style": "tatsächlich", "avg_gain": actual, "best_variant": "", "n": len(rows)}]
+    for name, idx in styles.items():
+        if idx:
+            b = max(idx, key=lambda i: m[i])
+            out.append({"style": name, "avg_gain": m[b], "best_variant": variants[b].key(), "n": len(rows)})
+    return pd.DataFrame(out)
+
+
+def status(conn) -> dict:
+    """Counts for the dashboard: how much the learner has seen, what is active, what it still needs."""
+    st: dict = {}
+    for strategy in control.STRATEGIES:
+        rows = conn.execute("SELECT kind, COUNT(*) FROM ct_evals WHERE strategy=? AND gains!='[]' GROUP BY kind",
+                            (strategy,)).fetchall()
+        n = {r[0]: r[1] for r in rows}
+        total = sum(n.values())
+        act = params_for(conn, strategy, apply_caps=False)
+        st[strategy] = {"autotune": enabled(conn, strategy), "evaluated": n, "total": total,
+                        "needed_for_tuning": max(0, MIN_MODE_N - total), "active_version": act,
+                        "wallet_versions": conn.execute(
+                            "SELECT COUNT(*) FROM ct_param_versions WHERE strategy=? AND scope!='mode' AND active=1",
+                            (strategy,)).fetchone()[0]}
+    return st
+
