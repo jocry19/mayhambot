@@ -228,24 +228,33 @@ def _tier(tm, wallet):
 
 
 def flow_series(conn, since, bucket, mint=None):
-    """Net USD inflow per bucket and tier (+ 'other' = everybody else) and distinct tiered buyers."""
+    """Net USD inflow per bucket and tier (+ 'other' = everybody else) and distinct tiered buyers.
+    Totals per bucket are summed in SQL; only the tiered wallets' trades are read row by row (a 24 h overview
+    otherwise pulled every trade of the day, ~270k rows, into Python on each cache miss)."""
     tm = tier_map(conn)
-    trades = _trades_since(conn, since, [mint] if mint else None)
-    b = defaultdict(lambda: {"ultra": 0.0, "smart": 0.0, "good": 0.0, "other": 0.0, "buyers": set(),
-                             "buy_usd": 0.0, "sell_usd": 0.0, "n": 0})
-    for t in trades:
-        k = (t["ts"] // bucket) * bucket
-        b[k]["n"] += 1
-        tier = _tier(tm, t["wallet"])
-        usd = t["usd_amount"] or 0.0
-        sgn = 1 if t["side"] == "buy" else -1
-        b[k][tier] += sgn * usd
-        if tier != "other":
+    until = now_ts() + 60
+    b = defaultdict(lambda: {"ultra": 0.0, "smart": 0.0, "good": 0.0, "other": 0.0, "buyers": set(), "n": 0})
+    mf, margs = ("AND mint=?", (mint,)) if mint else ("", ())
+    for r in rows(conn, f"""SELECT (ts/?)*? k, COUNT(*) n,
+                                   SUM(CASE WHEN side='buy' THEN COALESCE(usd_amount,0) ELSE -COALESCE(usd_amount,0) END) net
+                            FROM trades WHERE ts>=? AND ts<=? {mf} GROUP BY k""", (bucket, bucket, since, until, *margs)):
+        b[r["k"]]["n"] = r["n"]
+        b[r["k"]]["other"] = r["net"] or 0.0
+    wallets = list(tm)
+    for i in range(0, len(wallets), 400):
+        chunk = wallets[i:i + 400]
+        q = ",".join("?" * len(chunk))
+        for t in rows(conn, f"""SELECT wallet, side, ts, usd_amount FROM trades
+                               WHERE wallet IN ({q}) AND ts>=? AND ts<=? {mf}""", (*chunk, since, until, *margs)):
+            k = (t["ts"] // bucket) * bucket
+            tier = _tier(tm, t["wallet"])
+            if tier == "other":
+                continue
+            v = (1 if t["side"] == "buy" else -1) * (t["usd_amount"] or 0.0)
+            b[k][tier] += v
+            b[k]["other"] -= v
             if t["side"] == "buy":
                 b[k]["buyers"].add(t["wallet"])
-                b[k]["buy_usd"] += usd
-            else:
-                b[k]["sell_usd"] += usd
     start = (since // bucket) * bucket
     end = (now_ts() // bucket) * bucket if not mint else max(b) if b else start
     out = []
@@ -262,26 +271,41 @@ def flow_series(conn, since, bucket, mint=None):
 
 
 def _mint_flows(conn, since, mints):
-    """Per mint: tiered net usd, per-tier net usd, distinct tiered net buyers, all buy/sell usd."""
+    """Per mint: tiered net usd, per-tier net usd, distinct tiered net buyers, all buy/sell usd.
+    All-wallet totals are summed in SQL; only tiered wallets' trades are read row by row."""
     tm = tier_map(conn)
+    mints = list(mints or [])
+    until = now_ts() + 60
     per = defaultdict(lambda: {"net_tiered": 0.0, "ultra": 0.0, "smart": 0.0, "good": 0.0, "buy_all": 0.0,
-                               "sell_all": 0.0, "w": defaultdict(float), "wt": {}, "traders": set()})
-    for t in _trades_since(conn, since, mints):
-        d = per[t["mint"]]
-        usd = t["usd_amount"] or 0.0
-        sgn = 1 if t["side"] == "buy" else -1
-        d["traders"].add(t["wallet"])
-        if sgn > 0:
-            d["buy_all"] += usd
-        else:
-            d["sell_all"] += usd
-        tier = _tier(tm, t["wallet"])
-        if tier == "other":
-            continue
-        d["net_tiered"] += sgn * usd
-        d[tier] += sgn * usd
-        d["w"][t["wallet"]] += sgn * usd
-        d["wt"][t["wallet"]] = tier
+                               "sell_all": 0.0, "w": defaultdict(float), "wt": {}, "traders": 0})
+    for i in range(0, len(mints), 400):
+        chunk = mints[i:i + 400]
+        q = ",".join("?" * len(chunk))
+        for r in rows(conn, f"""SELECT mint, COUNT(DISTINCT wallet) traders,
+                                       SUM(CASE WHEN side='buy' THEN COALESCE(usd_amount,0) ELSE 0 END) buy_all,
+                                       SUM(CASE WHEN side='buy' THEN 0 ELSE COALESCE(usd_amount,0) END) sell_all
+                                FROM trades WHERE mint IN ({q}) AND ts>=? AND ts<=? GROUP BY mint""",
+                            (*chunk, since, until)):
+            d = per[r["mint"]]
+            d["traders"], d["buy_all"], d["sell_all"] = r["traders"], r["buy_all"] or 0.0, r["sell_all"] or 0.0
+    want = set(mints)
+    wallets = list(tm)
+    for i in range(0, len(wallets) if want else 0, 400):
+        chunk = wallets[i:i + 400]
+        q = ",".join("?" * len(chunk))
+        for t in rows(conn, f"""SELECT wallet, mint, side, usd_amount FROM trades
+                               WHERE wallet IN ({q}) AND ts>=? AND ts<=?""", (*chunk, since, until)):
+            if t["mint"] not in want:
+                continue
+            tier = _tier(tm, t["wallet"])
+            if tier == "other":
+                continue
+            d = per[t["mint"]]
+            v = (1 if t["side"] == "buy" else -1) * (t["usd_amount"] or 0.0)
+            d["net_tiered"] += v
+            d[tier] += v
+            d["w"][t["wallet"]] += v
+            d["wt"][t["wallet"]] = tier
     out = {}
     for m, d in per.items():
         buyers = {"ultra": 0, "smart": 0, "good": 0}
@@ -291,7 +315,7 @@ def _mint_flows(conn, since, mints):
         out[m] = {"net_tiered_usd": round(d["net_tiered"], 2),
                   "net_by_tier": {k: round(d[k], 2) for k in TIERS}, "buyers": buyers,
                   "buy_usd": round(d["buy_all"], 2), "sell_usd": round(d["sell_all"], 2),
-                  "traders": len(d["traders"])}
+                  "traders": d["traders"]}
     return out
 
 
