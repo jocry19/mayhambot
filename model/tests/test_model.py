@@ -436,3 +436,13 @@ def test_one_hit_wallets_get_no_tier_and_edge_component_exists():
     assert uncopyable(dict(base, top_coin_share=0.9, net_pnl_wo_best_usd=-50)) == "one_hit"
     assert uncopyable(dict(base, top_coin_share=0.9, net_pnl_wo_best_usd=500)) is None
     assert "edge" in COMPONENTS
+
+
+def test_snapshots_from_pools_too_thin_for_their_market_cap_are_ignored():
+    from research.prices import PriceIndex
+    from research.store import ensure_schema
+    conn = ensure_schema(db.connect(os.path.join(tempfile.mkdtemp(), "p.db")))
+    conn.executemany("INSERT INTO token_prices(mint, ts, price_usd, mcap_usd, liquidity_usd) VALUES (?,?,?,?,?)",
+                     [("C", 0, 0.001, 1e6, 5e4), ("C", 60, 0.264, 2.64e8, 4e3), ("C", 120, 0.0011, 1.1e6, 5e4)])
+    idx = PriceIndex.from_db(conn)
+    assert idx.max_between("C", -1, 600) < 0.01

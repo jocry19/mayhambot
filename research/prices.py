@@ -34,6 +34,7 @@ class _Sparse:
         return self.fn(self.t[k][i], self.t[k][j - (1 << k) + 1])
 
 
+MIN_LIQ_SHARE = 0.02  # snapshot prints need liquidity >= 2 % of the market cap
 SPIKE = 5.0  # a single print 5x above (or below) both neighbours is a bad print, not a price
 
 
@@ -72,7 +73,12 @@ class PriceIndex:
         trade_pts = defaultdict(list)
         for r in conn.execute("SELECT mint, ts, price_usd, source FROM trades WHERE price_usd > 0" + cond, args):
             trade_pts[r[0]].append((r[1], r[2], r[3]))
-        for r in conn.execute("SELECT mint, ts, price_usd FROM token_prices WHERE price_usd > 0" + cond, args):
+        # snapshots whose pool is far too thin for the quoted market cap (liquidity < 2 % of it) show prices nobody
+        # can trade at (e.g. "264 M$" at 2-6 k$ liquidity); swaps and candles stay, they are real trades
+        for r in conn.execute("SELECT mint, ts, price_usd, mcap_usd, liquidity_usd FROM token_prices WHERE price_usd > 0"
+                              + cond, args):
+            if r[3] and r[4] is not None and r[4] < MIN_LIQ_SHARE * r[3]:
+                continue
             pts[r[0]].append((r[1], r[2]))
         cand = defaultdict(list)
         for r in conn.execute("SELECT mint, tf_sec, ts, h, l, c FROM research_candles WHERE c > 0" + cond, args):
