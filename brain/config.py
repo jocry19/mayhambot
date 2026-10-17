@@ -26,6 +26,10 @@ class Settings:
     start_balance_sol: float = field(default_factory=lambda: _f("BRAIN_START_SOL", 5.0))
     min_size_sol: float = field(default_factory=lambda: _f("BRAIN_MIN_SIZE_SOL", 0.1))
     max_size_sol: float = field(default_factory=lambda: _f("BRAIN_MAX_SIZE_SOL", 0.5))
+    # convinced buys: a quarter of the Kelly stake of the current account (0 = the fixed min..max size above), at
+    # most this share of the account in one trade; so the stake grows with the account
+    kelly_frac: float = field(default_factory=lambda: _f("BRAIN_KELLY_FRAC", 0.25))
+    max_stake: float = field(default_factory=lambda: _f("BRAIN_MAX_STAKE", 0.2))
     max_open: int = field(default_factory=lambda: int(_f("BRAIN_MAX_OPEN", 100)))
     max_daily_loss_sol: float = field(default_factory=lambda: _f("BRAIN_MAX_DAILY_LOSS_SOL", 0))
     # trades whose expected value is still negative but uncertain enough to be worth a look (smallest size)

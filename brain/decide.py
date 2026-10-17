@@ -43,7 +43,8 @@ def verdict(preds, s) -> tuple[int, float, float, bool]:
     return best, adj[best], p, adj[best] > s.min_edge and p >= s.min_conf
 
 
-def choose(model, kind: str, feats: dict, s, rng: random.Random | None = None) -> Decision:
+def choose(model, kind: str, feats: dict, s, rng: random.Random | None = None,
+           equity: float | None = None) -> Decision:
     """Pick the exit plan and decide.
 
     Convinced: the chosen plan's expected net return is positive and the brain is at least BRAIN_MIN_CONF sure of
@@ -72,6 +73,12 @@ def choose(model, kind: str, feats: dict, s, rng: random.Random | None = None) -
     enter = convinced or explore
     frac = max(0.0, min(1.0, (p_pos - s.min_conf) / max(1e-6, 0.95 - s.min_conf)))
     size = round(s.min_size_sol + (s.max_size_sol - s.min_size_sol) * frac, 3) if convinced else s.min_size_sol
+    if convinced and equity and equity > 0 and s.kelly_frac > 0:
+        # compounding (user, 10/2026: the account should double fast): a convinced buy stakes a fraction of the
+        # account by the Kelly rule, edge / variance of one trade's outcome, scaled down (BRAIN_KELLY_FRAC) because
+        # the edge is an estimate; never more than BRAIN_MAX_STAKE of the account, never less than the minimum
+        kelly = s.kelly_frac * mean / max(model.sigma2(i), 1e-4)
+        size = round(max(s.min_size_sol, min(s.max_stake * equity, kelly * equity)), 3)
     contrib = sorted(model.contributions(toks, i), key=lambda c: c[1])
     pros = [c for c in reversed(contrib) if c[1] > 0.004][:3]
     cons = [c for c in contrib if c[1] < -0.004][:3]

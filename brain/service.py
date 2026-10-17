@@ -59,7 +59,10 @@ class Service:
         n_open = c.execute("SELECT COUNT(*) FROM brain_positions WHERE status='open'").fetchone()[0]
         eq = self.trader.equity_snapshot()["equity_sol"]
         late, self.trader.too_late = self.trader.too_late, 0
-        return (f"{n} opportunities ({late} whale buys arrived too late), {ent} bought, {held} wanted but blocked by a gate, {n_open} open, equity {eq:.3f} SOL, "
+        ago = c.execute("SELECT equity_sol FROM brain_equity WHERE ts>=? ORDER BY ts LIMIT 1",
+                        (int(time.time()) - 3600,)).fetchone()
+        hf = f", hour factor x{eq / ago[0]:.3f}" if ago and ago[0] else ""
+        return (f"{n} opportunities ({late} whale buys arrived too late), {ent} bought, {held} wanted but blocked by a gate, {n_open} open, equity {eq:.3f} SOL{hf}, "
                 f"model {self.model.d - 1} tokens / {self.model.n:.0f} outcomes, exit model {self.xm.n:.0f} minutes "
                 f"(organic exits {'on' if self.trader.organic_on(time.time()) else 'off'}, "
                 f"replays {exits.verdict(c)['n']})")

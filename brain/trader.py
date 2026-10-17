@@ -226,7 +226,7 @@ class Trader:
                     feats["safety"] = self._safe[0]
             except Exception as e:
                 log.debug("safety %s: %s", row["mint"][:6], e)
-        d = decide.choose(self.model, kind, feats, self.s, self.rng)
+        d = decide.choose(self.model, kind, feats, self.s, self.rng, equity=self.equity())
         block = None
         wanted = d.enter and not d.explore  # convinced before the hard gates: what the honest score judges
         if d.enter:
@@ -538,6 +538,13 @@ class Trader:
         except Exception as e:
             log.exception("learning from trade %s failed: %s", p["id"], e)
         return True
+
+    def equity(self) -> float:
+        """Account value now: cash plus open positions at their last price."""
+        c = self.conn
+        val = sum((r[0] or 0) * (r[1] or 0) for r in c.execute(
+            "SELECT tokens, last_price_sol FROM brain_positions WHERE status='open'").fetchall())
+        return store.balance(c, self.s.start_balance_sol) + val
 
     def equity_snapshot(self) -> dict:
         c = self.conn
