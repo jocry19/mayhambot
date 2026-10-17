@@ -87,6 +87,11 @@ def write(conn, model, s, now: float | None = None) -> str:
         lines.append(f"Heute geschlossen: {len(trades)} Trades, {wins} im Plus, {sol:+.3f} SOL.")
     if eq:
         lines.append(f"Papierkonto: {eq[0]:.3f} SOL (Start {s.start_balance_sol:.1f}).")
+    shifts = [x for x in (store.get(conn, "regime_history", []) or []) if x.get("at", 0) >= now - 86400]
+    for x in shifts:
+        lines.append(f"Regime gewechselt um {time.strftime('%H:%M', time.gmtime(x['at']))} UTC: die letzten {x['n']} "
+                     f"Ergebnisse lagen im Schnitt {_p(x['err'])} neben der Vorhersage; altes Wissen halbiert, "
+                     f"die neuen Ergebnisse zählen mehr.")
     mult = multipliers(conn, now)
     if mult:
         lines.append(f"Tagesfaktor (Konto Tagesende zu Tagesanfang, Ziel ×{GOAL_MULT[0]}–{GOAL_MULT[1]}): heute "

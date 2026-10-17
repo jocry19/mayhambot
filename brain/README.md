@@ -113,3 +113,11 @@ dem organischen Ausstieg nachgespielt, mit dem Modell von vor diesem Coin (`brai
 (`BRAIN_ORGANIC_EXIT=auto`) erst, wenn diese Replays (mind. 30) im Schnitt die gewählten Pläne schlagen; `on`/`off`
 erzwingen. Das Tagebuch zeigt organisch gegen Pläne gegen 1 h halten, den Anteil am besten Kursanstieg
 (Einfangquote), den Auswahl-Vorsprung und den Tagesfaktor des Kontos (Ziel ×2–4).
+
+## Regime-Erkennung
+
+Der Markt verhält sich nicht immer wie die Lerndaten. Jede Lernrunde vergleicht die Ergebnisse der letzten 6 Stunden
+(mind. 30) mit dem, was das Modell beim Entscheiden für sie vorhergesagt hatte. Liegen sie systematisch daneben
+(mehr als 3 Standardfehler und mindestens 5 Prozentpunkte je Trade), halbiert das Hirn sofort alles alte Wissen,
+im Einstiegs- und im Ausstiegsmodell; die neuen Ergebnisse zählen dann doppelt so viel. Höchstens alle 3 Stunden,
+das Tagebuch meldet „Regime gewechselt“.

@@ -46,7 +46,8 @@ class Service:
         n_prior = learner.warm_start(self.conn, self.model, self.s)
         n_eval = learner.evaluate(self.conn, self.model, self.s, candles_fn, xm=self.xm)
         n_back = learner.backfill_exits(self.conn, self.xm, self.s, candles_fn)
-        if n_prior or n_eval or n_back:
+        shift = learner.regime_check(self.conn, self.model, self.xm)
+        if n_prior or n_eval or n_back or shift:
             self.dirty = True
         return {"prior": n_prior, "evaluated": n_eval, "exit_backfill": n_back}
 
