@@ -21,7 +21,7 @@ import time
 
 from copytrade import sim
 
-from . import features, store
+from . import exits, features, store
 from .plans import BASE, NAMES, PLANS, gains_from_grid, nearest_delay
 
 log = logging.getLogger("brain.learner")
@@ -244,7 +244,68 @@ def replay(conn, o, candles_fn, allow_net: bool = True, plans=None, horizon: int
 _retry: dict = {}  # opp id -> (failed network replays, next try): a dead coin without candles is retried with backoff
 
 
-def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: int | None = None) -> int:
+def _exit_step(conn, xm, s, o, candles_fn, from_min: float, final: bool, merged=None) -> int:
+    """Organic exits learn from the same coin: first (final step only) replay the organic exit with the exit model as
+    it is now, i.e. before it saw this coin, next to the chosen plan; then learn the coin's minutes from from_min on.
+    Cached candles only (the plan replay just fetched or cached them). Returns minute-samples learned."""
+    t0 = int(o["decided_at"] or o["ts"])
+    to_min = exits.MAX_HOLD_MIN if final else max(PLANS[i].max_hold_min for i in SHORT)
+    span = (to_min + exits.FWD_MIN + 5) * 60
+    cs = candles_fn(conn, o["mint"], t0 - 20 * 60, t0 + span, False)
+    if not cs:
+        return 0
+    try:
+        f = json.loads(o["features"] or "{}")
+    except ValueError:
+        f = {}
+    swaps = exits.coin_swaps(conn, o["mint"], t0 - 3600, t0 + span)
+    src = o["src_ts"] or t0
+    sells = [ts for ts, w, side in swaps if w == o["wallet"] and side == "sell" and ts > src]
+    args = (cs, t0, o["kind"], f.get("liq"), o["wallet"], swaps, sells)
+    if final and merged is not None and o["plan"] in NAMES:
+        cost = extra_cost(conn, s, o["kind"])
+        org = exits.replay(xm, *args, s, sim.ROUNDTRIP_COST + cost) if exits.mature(xm) else None
+        pg = merged[NAMES.index(o["plan"])]
+        i0 = exits._entry_index(cs, t0)
+        hold = max_up = None
+        if i0 < len(cs) - 1 and cs[i0][4] > 0:
+            e = cs[i0][4]
+            later = [c for c in cs[i0 + 1:] if c[0] - cs[i0][0] <= exits.MAX_HOLD_MIN * 60]
+            hour = [c for c in later if c[0] - cs[i0][0] <= 3600]
+            hold = hour[-1][4] / e - 1 - sim.ROUNDTRIP_COST - cost if hour else None
+            max_up = max(c[2] or c[4] for c in later) / e - 1 if later else None
+        conn.execute("INSERT OR REPLACE INTO brain_exit_evals(opp_id, ts, kind, plan, plan_gain, organic, "
+                     "organic_reason, organic_min, hold_1h, max_up, evaluated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                     (o["id"], o["ts"], o["kind"], o["plan"], None if pg is None else pg - cost,
+                      org[0] if org else None, org[2] if org else None, org[1] if org else None, hold, max_up,
+                      int(time.time())))
+    return exits.learn_path(xm, *args, from_min, to_min)
+
+
+def backfill_exits(conn, xm, s, candles_fn=None, limit: int = 150) -> int:
+    """Opportunities finished before the organic exits existed: learn their minutes (cached candles, oldest first,
+    `limit` per round) so the exit model does not start from nothing. Returns opportunities done."""
+    if xm is None:
+        return 0
+    candles_fn = candles_fn or _default_candles
+    cur = store.get(conn, "exit_backfill_id", 0) or 0
+    rows = conn.execute("SELECT * FROM brain_opps WHERE evaluated_at IS NOT NULL AND id>? AND gains!='[]' "
+                        "ORDER BY id LIMIT ?", (cur, limit)).fetchall()
+    if not rows:
+        return 0
+    xm.forget()
+    for o in rows:
+        try:
+            merged = json.loads(o["gains"]) if o["gains"] else None
+            _exit_step(conn, xm, s, o, candles_fn, 0, True, merged if merged and len(merged) == len(PLANS) else None)
+        except Exception as e:
+            log.debug("exit backfill %s failed: %s", o["id"], e)
+        cur = o["id"]
+    store.put(conn, "exit_backfill_id", cur)
+    return len(rows)
+
+
+def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: int | None = None, xm=None) -> int:
     """Replay opportunities in two steps and learn each step at once: the short plans (up to 45 min) about an hour
     after the decision, the long ones when the longest plan is over (~4.2 h). Then score the decision made back then.
     Returns the number of replays learned."""
@@ -258,6 +319,8 @@ def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: i
     if not rows:
         return 0
     model.forget(now)
+    if xm is not None:
+        xm.forget(now)
     n = 0
     hz = horizon_s()
     for o in rows:
@@ -303,6 +366,17 @@ def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: i
             if ys:
                 model.update(_toks(o["kind"], o["features"]), ys, 1.0)
                 n += 1
+            if xm is not None and not final:
+                try:
+                    _exit_step(conn, xm, s, o, candles_fn, 0, False)
+                except Exception as e:
+                    log.debug("exit learning %s failed: %s", o["id"], e)
+        if final and xm is not None and any(g is not None for g in merged):
+            try:
+                _exit_step(conn, xm, s, o, candles_fn, 0 if prev is None else max(PLANS[i].max_hold_min for i in SHORT),
+                           True, merged)
+            except Exception as e:
+                log.debug("exit learning %s failed: %s", o["id"], e)
         if final:
             if not any(g is not None for g in merged):
                 conn.execute("UPDATE brain_opps SET evaluated_at=?, gains='[]' WHERE id=?", (int(now), o["id"]))
@@ -321,6 +395,11 @@ def learn_trade(conn, model, s, pos) -> bool:
     o = conn.execute("SELECT * FROM brain_opps WHERE id=?", (pos["opp_id"],)).fetchone()
     if not o or o["learned_real"] or pos["pnl_pct"] is None or pos["plan"] not in NAMES:
         return False
+    try:
+        if json.loads(pos["meta"] or "{}").get("exit_mode") == "organic":
+            return False  # the organic exit's result is not the plan's: the plan learns from its replay
+    except (TypeError, ValueError):
+        pass
     model.forget()
     model.update(_toks(o["kind"], o["features"]), {NAMES.index(pos["plan"]): pos["pnl_pct"]}, REAL_WEIGHT)
     conn.execute("UPDATE brain_opps SET learned_real=1 WHERE id=?", (o["id"],))
@@ -330,6 +409,46 @@ def learn_trade(conn, model, s, pos) -> bool:
 def _mean(xs):
     xs = [x for x in xs if x is not None]
     return (sum(xs) / len(xs)) if xs else None
+
+
+def _capture(gain, max_up):
+    """Share of the coin's best move after the buy the exit took home (only where there was a move of 10 %+)."""
+    return gain / max_up if gain is not None and max_up and max_up >= 0.1 else None
+
+
+def _by_exit(real) -> dict:
+    """Own closed trades by who decided the exit: the plans' fixed rules or the organic exit."""
+    out = {}
+    for r in real:
+        try:
+            m = json.loads(r["meta"] or "{}") or {}
+        except (TypeError, ValueError):
+            m = {}
+        k = "organic" if m.get("exit_mode") == "organic" else "plan"
+        ref = m.get("ref_price") or r["entry_price_sol"]
+        up = (r["high_price_sol"] / ref - 1) if ref and r["high_price_sol"] else None
+        d = out.setdefault(k, {"n": 0, "pcts": [], "sol": 0.0, "caps": []})
+        d["n"] += 1
+        d["pcts"].append(r["pnl_pct"])
+        d["sol"] += r["pnl_sol"] or 0
+        d["caps"].append(_capture(r["pnl_pct"], up))
+    return {k: {"n": d["n"], "mean": _mean(d["pcts"]), "sol": round(d["sol"], 4), "capture": _mean(d["caps"])}
+            for k, d in out.items()}
+
+
+def exit_replays(conn, since: float = 0, evaluated_since: float = 0) -> dict:
+    """Out-of-sample replays of the same opportunities: organic exit vs the chosen plan vs buy and hold 1 h, and how
+    much of each coin's best move (within 4 h) each of them took home."""
+    try:
+        rows = conn.execute("SELECT organic, plan_gain, hold_1h, max_up FROM brain_exit_evals WHERE organic IS NOT NULL "
+                            "AND plan_gain IS NOT NULL AND evaluated_at>=? AND ts>=?",
+                            (int(evaluated_since), int(since))).fetchall()
+    except Exception:
+        rows = []
+    return {"n": len(rows), "organic": _mean([r[0] for r in rows]), "plan": _mean([r[1] for r in rows]),
+            "hold_1h": _mean([r[2] for r in rows]),
+            "capture_organic": _mean([_capture(r[0], r[3]) for r in rows]),
+            "capture_plan": _mean([_capture(r[1], r[3]) for r in rows])}
 
 
 def honest(conn, since: float = 0, evaluated_since: float = 0) -> dict:
@@ -352,8 +471,8 @@ def honest(conn, since: float = 0, evaluated_since: float = 0) -> dict:
     taken = [r for r in rows if r["wanted"]]
     explored = [r for r in rows if not r["wanted"] and r["explore"]]
     passed = [r for r in rows if not r["wanted"] and not r["explore"]]
-    real = conn.execute("SELECT pnl_pct, pnl_sol FROM brain_positions WHERE status='closed' AND closed_at>=?",
-                        (int(since),)).fetchall()
+    real = conn.execute("SELECT pnl_pct, pnl_sol, meta, entry_price_sol, high_price_sol FROM brain_positions "
+                        "WHERE status='closed' AND closed_at>=?", (int(since),)).fetchall()
     by_kind = {}
     for k in ("whale", "signal", "signal_v2", "launch"):
         kr = [r for r in rows if r["kind"] == k]
@@ -372,6 +491,10 @@ def honest(conn, since: float = 0, evaluated_since: float = 0) -> dict:
     by_liq = {k: seg(rs) for k, rs in (("curve", [r for r in rows if r["liq"] == "curve"]),
                                        ("pool", [r for r in rows if r["liq"] and r["liq"] != "curve"])) if rs}
     return {
+        "alpha": (None if _mean([r["realized_plan"] for r in taken]) is None or _mean([r["realized_base"] for r in rows])
+                  is None else _mean([r["realized_plan"] for r in taken]) - _mean([r["realized_base"] for r in rows])),
+        "by_exit": _by_exit(real),
+        "exit_replays": exit_replays(conn, since, evaluated_since),
         "n": len(rows),
         "n_taken": len(taken), "taken_mean": _mean([r["realized_plan"] for r in taken]),
         "taken_pred": _mean([r["pred_mean"] for r in taken]),

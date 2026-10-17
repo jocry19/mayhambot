@@ -44,6 +44,24 @@ def _p(x) -> str:
     return "–" if x is None else f"{x:+.1%}"
 
 
+GOAL_MULT = (2, 4)  # the user's goal (10/2026): the paper account x2 to x4 every day, consistently
+
+
+def multipliers(conn, now: float, days: int = 14) -> list:
+    """[(UTC day, equity at its end / equity at its start)] for the last days, today so far last."""
+    out = []
+    t_end = store.day_start(now) + 86400
+    for k in range(days - 1, -1, -1):
+        lo, hi = t_end - (k + 1) * 86400, t_end - k * 86400
+        a = conn.execute("SELECT equity_sol FROM brain_equity WHERE ts>=? AND ts<? ORDER BY ts LIMIT 1",
+                         (lo, hi)).fetchone()
+        b = conn.execute("SELECT equity_sol FROM brain_equity WHERE ts>=? AND ts<? ORDER BY ts DESC LIMIT 1",
+                         (lo, hi)).fetchone()
+        if a and b and a[0]:
+            out.append((time.strftime("%Y-%m-%d", time.gmtime(lo)), round(b[0] / a[0], 4)))
+    return out
+
+
 def write(conn, model, s, now: float | None = None) -> str:
     """Today's diary entry (UTC day), stored in brain_journal. Returns the text."""
     now = now or time.time()
@@ -69,6 +87,11 @@ def write(conn, model, s, now: float | None = None) -> str:
         lines.append(f"Heute geschlossen: {len(trades)} Trades, {wins} im Plus, {sol:+.3f} SOL.")
     if eq:
         lines.append(f"Papierkonto: {eq[0]:.3f} SOL (Start {s.start_balance_sol:.1f}).")
+    mult = multipliers(conn, now)
+    if mult:
+        lines.append(f"Tagesfaktor (Konto Tagesende zu Tagesanfang, Ziel ×{GOAL_MULT[0]}–{GOAL_MULT[1]}): heute "
+                     f"×{mult[-1][1]:.2f}" + (", die Tage davor " + ", ".join(f"×{m:.2f}" for _, m in mult[-8:-1])
+                                              if len(mult) > 1 else "") + ".")
 
     # honest score of the decisions whose outcome became known today
     h = honest(conn, evaluated_since=now - 86400)
@@ -83,6 +106,17 @@ def write(conn, model, s, now: float | None = None) -> str:
         if v2:
             lines.append(f"Signal v2 getrennt: {v2['n']} Ergebnisse, genommen {v2['n_taken']} mit Ø "
                          f"{_p(v2['taken_mean'])}, alles kopiert Ø {_p(v2['copy_all_mean'])}.")
+        if h["alpha"] is not None:
+            lines.append(f"Auswahl-Vorsprung: genommen minus alles kopiert {_p(h['alpha'])} je Trade.")
+        xr = h["exit_replays"]
+        if xr["n"]:
+            lines.append(f"Ausstieg im Vergleich ({xr['n']} nachgespielte Coins, vorher ungesehen): organisch Ø "
+                         f"{_p(xr['organic'])}, feste Pläne Ø {_p(xr['plan'])}, 1 h halten Ø {_p(xr['hold_1h'])}; "
+                         f"vom besten Kursanstieg mitgenommen organisch {_p(xr['capture_organic'])}, "
+                         f"Pläne {_p(xr['capture_plan'])}.")
+        for k, x in h["by_exit"].items():
+            lines.append(f"Eigene Trades mit {'organischem Ausstieg' if k == 'organic' else 'festen Plänen'}: "
+                         f"{x['n']}× Ø {_p(x['mean'])} ({x['sol']:+.3f} SOL), vom Hoch mitgenommen {_p(x['capture'])}.")
         segs = [(f"Wal erkannt nach {d}", x) for d, x in h["by_delay"].items()] + \
                [("Curve-Coins" if k == "curve" else "Pool-Coins", x) for k, x in h["by_liq"].items()]
         if segs:
@@ -138,7 +172,7 @@ def write(conn, model, s, now: float | None = None) -> str:
     store.put(conn, "diary_effects", {t: e for t, (e, _) in eff.items()})
     conn.execute("INSERT OR REPLACE INTO brain_journal(day, ts, text, data, sent) VALUES (?,?,?,?,"
                  "COALESCE((SELECT sent FROM brain_journal WHERE day=?),0))",
-                 (day, int(now), text, json.dumps({"honest_today": h, "honest_all": tot}), day))
+                 (day, int(now), text, json.dumps({"honest_today": h, "honest_all": tot, "multipliers": mult}), day))
     return text
 
 

@@ -12,7 +12,7 @@ import logging
 import random
 import time
 
-from . import decide, features, store
+from . import decide, exits, features, store
 from .plans import BY_NAME
 
 log = logging.getLogger("brain.trader")
@@ -28,7 +28,8 @@ RUG_LIQ_DROP = 0.8
 INFLOW_DROP = 0.6  # 5-min buys under this share of their peak while in profit: the rush is over
 EXIT_NAMES = {"target": "Ziel erreicht", "stop": "Stop-Loss", "trail": "Trailing-Stop", "time": "Zeit abgelaufen",
               "whale": "Wal verkauft", "inflow_peak": "Ansturm vorbei", "rug": "Liquidität abgezogen",
-              "no_market": "kein Markt"}
+              "no_market": "kein Markt", "organic": "Zustand des Coins gekippt"}
+VERDICT_EVERY_S = 600
 
 
 def _default_safety(conn, mint):
@@ -41,8 +42,11 @@ def _default_safety(conn, mint):
 
 class Trader:
     def __init__(self, conn, s, model, *, snapshots=None, executor=None, safety_check=None, notify=None,
-                 on_close=None, rng: random.Random | None = None, clock=time.time):
+                 on_close=None, rng: random.Random | None = None, clock=time.time, exit_model=None):
         self.conn, self.s, self.model = conn, s, model
+        self.xm = exit_model  # organic exits (exits.py); None = the plans' fixed exits only
+        self.live = exits.Live()
+        self._organic_at = (0.0, False)
         self._snapshots = snapshots
         self._executor = executor
         self.safety_check = safety_check or _default_safety
@@ -312,17 +316,108 @@ class Trader:
             log.warning("snapshots failed: %s", e)
             return 0
         now = self.clock()
+        organic = self.organic_on(now)
         n = 0
         for p in rows:
             snap = snaps.get(p["mint"])
-            reason = self._exit_reason(p, snap, now)
+            half = False
+            if organic:
+                reason, half = self._organic(p, snap, now)
+            else:
+                reason = self._exit_reason(p, snap, now)
             if snap and snap.price_sol > 0:
+                self.live.observe(p["id"], now, snap.price_sol, snap.volume_m5)
                 c.execute("UPDATE brain_positions SET last_price_sol=?, high_price_sol=MAX(high_price_sol, ?), "
                           "last_seen=?, peak_buys_m5=MAX(COALESCE(peak_buys_m5,0), ?) WHERE id=?",
                           (snap.price_sol, snap.price_sol, int(now), snap.buys_m5 or 0, p["id"]))
-            if reason:
-                n += self.close(p, snap, reason)
+            if half:
+                self.sell_half(p, snap)
+            if reason and self.close(p, snap, reason):
+                self.live.drop(p["id"])
+                n += 1
         return n
+
+    def organic_on(self, now: float) -> bool:
+        """Organic exits decide when switched on and trained; in auto mode only while their out-of-sample replays
+        beat the plans (checked every 10 min)."""
+        mode = self.s.organic_exit
+        if mode == "off" or not exits.mature(self.xm):
+            return False
+        if mode == "on":
+            return True
+        at, on = self._organic_at
+        if now - at >= VERDICT_EVERY_S:
+            on = exits.verdict(self.conn)["live"]
+            self._organic_at = (now, on)
+        return on
+
+    def _organic(self, p, snap, now: float) -> tuple[str | None, bool]:
+        """(close reason, sell half?) from the coin's state; hard guards first, then one model decision a minute."""
+        if not snap or not snap.price_sol:
+            return ("no_market" if now - (p["last_seen"] or p["opened_at"]) > NO_MARKET_S else None), False
+        entry = _ref_price(p)
+        px = snap.price_sol
+        if p["entry_liq_usd"] and snap.liquidity_usd < (1 - RUG_LIQ_DROP) * p["entry_liq_usd"]:
+            return "rug", False
+        if px <= entry * (1 - exits.CRASH_STOP):
+            return "stop", False
+        held = (now - p["opened_at"]) / 60
+        if held >= exits.MAX_HOLD_MIN:
+            return "time", False
+        if not self.live.due(p["id"], now):
+            return None, False
+        meta = _meta(p)
+        high = max(p["high_price_sol"] or entry, px)
+        ago = self.live.price_ago(p["id"], now, 60)
+        vpeak = self.live.vpeak.get(p["id"], 0.0)
+        o = self.conn.execute("SELECT features FROM brain_opps WHERE id=?", (p["opp_id"],)).fetchone()
+        try:
+            liq = json.loads(o[0] or "{}").get("liq") if o else None
+        except ValueError:
+            liq = None
+        swaps = exits.coin_swaps(self.conn, p["mint"], p["opened_at"] - 60, now)
+        whale = None
+        if p["kind"] == "whale" and p["wallet"]:
+            whale = any(w == p["wallet"] and side == "sell" and ts >= (p["src_ts"] or p["opened_at"])
+                        for ts, w, side in swaps)
+        toks = exits.tokens(p["kind"], liq, px / entry - 1, 1 - px / high if high > 0 else 0.0,
+                            px / ago - 1 if ago else None,
+                            snap.change_m5 / 100 if snap.change_m5 is not None else None,
+                            (snap.volume_m5 or 0) / vpeak if vpeak > 0 else None, held, whale,
+                            exits.smart_flow(swaps, p["opened_at"], now, p["wallet"]))
+        act, mean, pp = exits.advise(self.xm, toks, self.s, bool(meta.get("partial_sol")), px / entry - 1)
+        if meta.get("exit_mode") != "organic":
+            meta["exit_mode"] = "organic"
+            self.conn.execute("UPDATE brain_positions SET meta=? WHERE id=?", (json.dumps(meta), p["id"]))
+        if act == "sell":
+            log.info("organic exit %s: next %d min %+.1f%%, P(up) %.0f%%", p["symbol"] or p["mint"][:6],
+                     exits.FWD_MIN, mean * 100, pp * 100)
+            return "organic", False
+        return None, act == "half"
+
+    def sell_half(self, p, snap) -> bool:
+        """Take half off the table: the rest keeps running, the proceeds are booked at once."""
+        part = p["tokens"] * 0.5
+        try:
+            fill = self.executor.sell(p["mint"], part, p["decimals"] if p["decimals"] is not None else 6, snap,
+                                      p["last_price_sol"] or p["entry_price_sol"])
+        except Exception as e:
+            log.warning("paper half sell %s failed: %s", p["mint"][:6], e)
+            return False
+        if not fill or not fill.ok or getattr(fill, "source", "") == "no_route":
+            return False
+        meta = _meta(p)
+        meta["partial_sol"] = round(meta.get("partial_sol", 0.0) + fill.sol, 9)
+        meta["exit_mode"] = "organic"
+        done = self.conn.execute("UPDATE brain_positions SET tokens=?, meta=? WHERE id=? AND status='open'",
+                                 (p["tokens"] - part, json.dumps(meta), p["id"])).rowcount
+        if not done:
+            return False
+        store.adjust_balance(self.conn, fill.sol, self.s.start_balance_sol)
+        up = fill.sol / (p["size_sol"] * 0.5) - 1 if p["size_sol"] else 0.0
+        log.info("HALF %s %s %+.1f%%", p["kind"], p["symbol"] or p["mint"][:6], up * 100)
+        self.notify(f"🧠 Teilverkauf {p['symbol'] or p['mint'][:6]}: Hälfte zu {up:+.1%}, der Rest läuft weiter")
+        return True
 
     def _exit_reason(self, p, snap, now: float) -> str | None:
         held_min = (now - p["opened_at"]) / 60
@@ -367,7 +462,8 @@ class Trader:
         if getattr(fill, "source", "") == "no_route" and features.on_curve(snap):
             return False  # a coin on the bonding curve has a market; a missing quote is a hiccup, retry next round
         now = int(self.clock())
-        proceeds = fill.sol
+        partial = _meta(p).get("partial_sol", 0.0) or 0.0  # the half sold earlier was booked then
+        proceeds = fill.sol + partial
         pnl = proceeds - p["size_sol"]
         pct = pnl / p["size_sol"] if p["size_sol"] else 0.0
         done = c.execute("UPDATE brain_positions SET status='closed', closed_at=?, exit_price_sol=?, proceeds_sol=?, "
@@ -375,7 +471,7 @@ class Trader:
                          (now, fill.price_sol, proceeds, pnl, pct, reason, p["id"])).rowcount
         if not done:
             return False
-        store.adjust_balance(c, proceeds, self.s.start_balance_sol)
+        store.adjust_balance(c, fill.sol, self.s.start_balance_sol)
         held = (now - p["opened_at"]) / 60
         log.info("SELL %s %s %+.1f%% (%s)", p["kind"], p["symbol"] or p["mint"][:6], pct * 100, reason)
         self.notify(f"🧠 Verkauf {p['symbol'] or p['mint'][:6]}: {pct:+.1%} ({pnl:+.3f} SOL) nach {held:.0f} min, "
@@ -395,6 +491,13 @@ class Trader:
         ts = int(self.clock()) // 60 * 60
         c.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (ts, bal, val, bal + val))
         return {"balance_sol": bal, "open_value_sol": val, "equity_sol": bal + val}
+
+
+def _meta(p) -> dict:
+    try:
+        return json.loads(p["meta"] or "{}") or {}
+    except (TypeError, ValueError):
+        return {}
 
 
 def _ref_price(p) -> float:
