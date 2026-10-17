@@ -83,6 +83,12 @@ def write(conn, model, s, now: float | None = None) -> str:
         if v2:
             lines.append(f"Signal v2 getrennt: {v2['n']} Ergebnisse, genommen {v2['n_taken']} mit Ø "
                          f"{_p(v2['taken_mean'])}, alles kopiert Ø {_p(v2['copy_all_mean'])}.")
+        segs = [(f"Wal erkannt nach {d}", x) for d, x in h["by_delay"].items()] + \
+               [("Curve-Coins" if k == "curve" else "Pool-Coins", x) for k, x in h["by_liq"].items()]
+        if segs:
+            lines.append("Nach Segment (alles kopiert / genommen): " + "; ".join(
+                f"{name} {x['n']}× Ø {_p(x['copy_all_mean'])} / {x['n_taken']}× Ø {_p(x['taken_mean'])}"
+                for name, x in segs) + ".")
     else:
         lines.append("Heute kam noch kein Ergebnis zurück (kurze Pläne nach etwa 1 Stunde, lange nach gut 4 Stunden).")
 

@@ -338,6 +338,33 @@ def test_honest_score_keeps_explorations_apart(conn, s):
     assert (h["n_taken"], h["n_explored"], h["n_passed"]) == (1, 1, 1)
 
 
+def test_no_exploration_in_segments_that_lose_at_entry(s):
+    class Unsure:  # every plan around zero, wide: never convinced, a draw often says "could pay"
+        def predict(self, toks):
+            return [(0.0, 0.2)] * len(PLANS)
+
+        def contributions(self, toks, i):
+            return []
+    rng = random.Random(1)
+    fresh = [choose(Unsure(), "whale", {"delay": "5-15s", "liq": "10-50k"}, s, rng) for _ in range(40)]
+    late = [choose(Unsure(), "whale", {"delay": "30-90s", "liq": "10-50k"}, s, rng) for _ in range(40)]
+    curve = [choose(Unsure(), "whale", {"delay": "<5s", "liq": "curve"}, s, rng) for _ in range(40)]
+    assert any(d.explore for d in fresh)
+    assert not any(d.enter for d in late + curve)
+    assert "keine Erkundung" in late[0].why_not and "curve" in curve[0].why_not
+
+
+def test_honest_score_by_delay_and_curve(conn, s):
+    for i, (f, base) in enumerate(((("<5s", "curve"), -0.2), (("30-90s", "10-50k"), -0.1), (("<5s", "10-50k"), 0.05))):
+        conn.execute("INSERT INTO brain_opps(ts, kind, ref, mint, features, wanted, explore, evaluated_at, "
+                     "realized_plan, realized_base) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                     (int(time.time()), "whale", f"d{i}", MINT, json.dumps({"delay": f[0], "liq": f[1]}), 0, 0,
+                      int(time.time()), base, base))
+    h = learner.honest(conn)
+    assert h["by_delay"]["<5s"]["n"] == 2 and h["by_delay"]["30-90s"]["copy_all_mean"] == -0.1
+    assert h["by_liq"]["curve"]["n"] == 1 and h["by_liq"]["pool"]["n"] == 2
+
+
 def test_no_rebuy_of_a_coin_just_traded(conn, s):
     set_tier(conn, WHALE, "ultra")
     w2 = "Whale22222222222222222222222222222222222222"

@@ -342,9 +342,13 @@ def honest(conn, since: float = 0, evaluated_since: float = 0) -> dict:
         "WHERE evaluated_at>=? AND realized_plan IS NOT NULL AND ts>=?",
         (int(evaluated_since), int(since))).fetchall()]
     for r in rows:  # signal v1 and v2 are scored apart
-        if r["kind"] == "signal" and '"sig": "v2"' in (r.pop("features") or ""):
+        try:
+            f = json.loads(r.pop("features") or "{}")
+        except ValueError:
+            f = {}
+        if r["kind"] == "signal" and f.get("sig") == "v2":
             r["kind"] = "signal_v2"
-        r.pop("features", None)
+        r["delay"], r["liq"] = f.get("delay"), f.get("liq")
     taken = [r for r in rows if r["wanted"]]
     explored = [r for r in rows if not r["wanted"] and r["explore"]]
     passed = [r for r in rows if not r["wanted"] and not r["explore"]]
@@ -357,6 +361,16 @@ def honest(conn, since: float = 0, evaluated_since: float = 0) -> dict:
             kt = [r for r in kr if r["wanted"]]
             by_kind[k] = {"n": len(kr), "n_taken": len(kt), "taken_mean": _mean([r["realized_plan"] for r in kt]),
                           "copy_all_mean": _mean([r["realized_base"] for r in kr])}
+    def seg(rs):
+        st = [r for r in rs if r["wanted"]]
+        return {"n": len(rs), "n_taken": len(st), "taken_mean": _mean([r["realized_plan"] for r in st]),
+                "n_explored": sum(1 for r in rs if not r["wanted"] and r["explore"]),
+                "copy_all_mean": _mean([r["realized_base"] for r in rs])}
+    # whale copies by how late the tracker saw the buy, and curve vs pool coins: the segments BRAIN_NO_EXPLORE names
+    by_delay = {d: seg(rs) for d in ("<5s", "5-15s", "15-30s", "30-90s", ">90s")
+                if (rs := [r for r in rows if r["kind"] == "whale" and r["delay"] == d])}
+    by_liq = {k: seg(rs) for k, rs in (("curve", [r for r in rows if r["liq"] == "curve"]),
+                                       ("pool", [r for r in rows if r["liq"] and r["liq"] != "curve"])) if rs}
     return {
         "n": len(rows),
         "n_taken": len(taken), "taken_mean": _mean([r["realized_plan"] for r in taken]),
@@ -368,4 +382,6 @@ def honest(conn, since: float = 0, evaluated_since: float = 0) -> dict:
         "real_sol": sum(r["pnl_sol"] or 0 for r in real),
         "real_wins": sum(1 for r in real if (r["pnl_pct"] or 0) > 0),
         "by_kind": by_kind,
+        "by_delay": by_delay,
+        "by_liq": by_liq,
     }
