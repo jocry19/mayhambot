@@ -104,6 +104,12 @@ def headline(kind: str, raw: dict, symbol: str) -> str:
         if raw.get("call") and raw["call"] > 1:
             t += f", Call Nr. {raw['call']}"
         return t + "."
+    if kind == "market":
+        t = (f"Markt-Coin {sym} ({raw.get('dex') or '?'}): {raw.get('smart') or 0} Smart-Käufer, Kurs 5 min "
+             f"{(raw.get('pc_m5') or 0):+.0f} %, 1 h {(raw.get('pc_h1') or 0):+.0f} %, {raw.get('txns_m5') or 0} Trades in 5 min")
+        if raw.get("dip15") is not None:
+            t += f", 15 min davor {_pct(raw['dip15'])}"
+        return t + "."
     t = f"Launch {sym}: Sniper-Score {raw.get('score') or 0:.0f}, Risiko {raw.get('risk') or 0:.0f}"
     if raw.get("reasons"):
         t += f" ({'; '.join(str(r) for r in raw['reasons'])})"

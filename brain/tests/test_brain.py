@@ -788,3 +788,43 @@ def test_no_regime_shift_when_predictions_hold(conn, s):
                      "VALUES (?,?,?,?,?,?,?,?)", (int(now) - 9000, "whale", f"q{i}", MINT, "{}", 0.0, int(now) - 60,
                                                    rng.gauss(0, 0.2)))
     assert learner.regime_check(conn, model, None, now) is None
+
+
+# ---------------------------------------------------------------------- side source: market coins
+def add_shadow(conn, i, mint=MINT, ts=None, reason="no_smart"):
+    conn.execute("""CREATE TABLE IF NOT EXISTS signal_shadow (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER,
+                    mint TEXT, kind TEXT, reason TEXT, entities INTEGER, net_usd REAL, score REAL, liquidity_usd REAL,
+                    price_usd REAL, dex TEXT, mcap_usd REAL, age_min REAL, pc_m5 REAL, pc_h1 REAL, txns_m5 INTEGER,
+                    txns_h1 INTEGER, volume_h1 REAL, ret_15m_before REAL)""")
+    conn.execute("INSERT INTO signal_shadow(ts, mint, kind, reason, entities, dex, mcap_usd, age_min, pc_m5, pc_h1, "
+                 "txns_m5, volume_h1, ret_15m_before) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (int(ts or time.time()), mint, "v1", reason, 0, "pumpswap", 80_000, 90, 12.0, 40.0, 150, 60_000, -0.32))
+
+
+def test_market_coins_are_watched_not_traded_until_their_replays_earn_it(conn, s):
+    mk = Market()
+    mk.snaps[MINT] = snap(dex="pumpswap")
+    good = trained(kind="market", good=("dex=pumpswap",))
+    checks = []
+    t = make_trader(conn, s, good, mk, safety_check=lambda c, m: checks.append(m) or ("low", False, True, []))
+    add_shadow(conn, 1)
+    t.scan()  # first start: the backlog is skipped
+    add_shadow(conn, 2)
+    assert t.scan() == 0
+    o = conn.execute("SELECT * FROM brain_opps").fetchone()
+    f = json.loads(o["features"])
+    assert o["kind"] == "market" and o["wanted"] == 1 and o["decision"] == "skip"
+    assert f["dex"] == "pumpswap" and f["dip15"] == "<-30%" and f["smart"] == "0"
+    assert "Markt-Coin" in o["note"] and "Nebenquelle" in o["note"] and not checks  # no RPC spent while watching
+    now = time.time()
+    for i in range(30):  # 30 out-of-sample replays of what it wanted from the source, net positive
+        conn.execute("INSERT INTO brain_opps(ts, kind, ref, mint, features, wanted, evaluated_at, realized_plan, "
+                     "realized_base) VALUES (?,?,?,?,?,?,?,?,?)", (int(now) - 20000, "market", f"m{i}", f"M{i}", "{}",
+                                                                   1, int(now) - 100, 0.05, -0.02))
+    t._market_at = (-1e18, False)
+    assert t.market_live()
+    mint2 = "Mint2222222222222222222222222222222222222222"
+    mk.snaps[mint2] = snap(dex="pumpswap", mint=mint2)
+    add_shadow(conn, 3, mint=mint2)
+    assert t.scan() == 1 and checks == [mint2]
+    assert "Nebenquelle Markt-Coins" in journal.write(conn, good, s)

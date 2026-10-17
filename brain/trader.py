@@ -30,6 +30,7 @@ EXIT_NAMES = {"target": "Ziel erreicht", "stop": "Stop-Loss", "trail": "Trailing
               "whale": "Wal verkauft", "inflow_peak": "Ansturm vorbei", "rug": "Liquidität abgezogen",
               "no_market": "kein Markt", "organic": "Zustand des Coins gekippt"}
 VERDICT_EVERY_S = 600
+MARKET_MIN_N = 30
 
 
 def _default_safety(conn, mint):
@@ -47,6 +48,7 @@ class Trader:
         self.xm = exit_model  # organic exits (exits.py); None = the plans' fixed exits only
         self.live = exits.Live()
         self._organic_at = (0.0, False)
+        self._market_at = (-1e18, False)
         self._snapshots = snapshots
         self._executor = executor
         self.safety_check = safety_check or _default_safety
@@ -112,6 +114,15 @@ class Trader:
                     out.append(("signal", str(r["id"]), r))
             if rows:
                 store.put(c, "cursor_signal", rows[-1]["id"])
+        if store.has(c, "signal_shadow"):
+            # side source: coins the signal funnel looked at but did not call (also without smart buyers)
+            cur = self._cursor("cursor_market", "SELECT MAX(id) FROM signal_shadow")
+            rows = c.execute("SELECT * FROM signal_shadow WHERE id>? ORDER BY id LIMIT 300", (cur,)).fetchall()
+            for r in rows:
+                if now - (r["ts"] or 0) <= self.s.max_signal_age_s:
+                    out.append(("market", f"shadow{r['id']}", r))
+            if rows:
+                store.put(c, "cursor_market", rows[-1]["id"])
         if store.has(c, "sniper_launches") and store.has(c, "sniper_positions"):
             # 'enter' is written at stage 2 together with the sniper's paper position, after decided_ts (stage 1):
             # the cursor runs on the position's opened_ts, as copytrade.engine.follow_launches does
@@ -177,11 +188,12 @@ class Trader:
 
     def decide(self, kind: str, ref: str, row, entity: str, snap) -> int | None:
         now = self.clock()
-        builder = {"whale": features.whale, "signal": features.signal, "launch": features.launch}[kind]
+        builder = {"whale": features.whale, "signal": features.signal, "launch": features.launch,
+                   "market": features.market}[kind]
         feats, raw = builder(self.conn, row, snap, now)
         symbol = (snap.symbol if snap else "") or (row["symbol"] if "symbol" in row.keys() else "") or ""
         self._safe = None
-        if snap is not None and snap.price_sol:
+        if snap is not None and snap.price_sol and (kind != "market" or self.market_live()):
             # the rug verdict is part of what the brain sees (new coins have no stored verdict yet) and the gate
             # below reuses it: one quick check per priced opportunity
             try:
@@ -198,8 +210,9 @@ class Trader:
         if block:
             d.enter = False
             fl = raw.get("flip") or {}
-            log.info("PASS %s %s plan=%s%s: %s", kind, symbol or row["mint"][:6], d.plan,
-                     f" flip={fl['share']:.0%}/{fl['n']}" if fl.get("share") is not None else "", block)
+            if not block.startswith("Nebenquelle"):
+                    log.info("PASS %s %s plan=%s%s: %s", kind, symbol or row["mint"][:6], d.plan,
+                         f" flip={fl['share']:.0%}/{fl['n']}" if fl.get("share") is not None else "", block)
         note = decide.note(kind, raw, symbol, d, block or "")
         src_ts = row["entered_ts"] if kind == "launch" else row["ts"]
         cur = self.conn.execute(
@@ -218,6 +231,8 @@ class Trader:
 
     def _gate(self, kind: str, mint: str, snap, d, row=None, raw=None) -> str | None:
         """Hard limits the model never overrides: a market to trade, the rug check, risk limits."""
+        if kind == "market" and not self.market_live():
+            return "Nebenquelle: erst beobachten, bis sie im Nachspielen vorne liegt"
         if snap is None or not snap.price_sol:
             return "kein Marktpreis"
         if features.on_curve(snap):
@@ -336,6 +351,22 @@ class Trader:
                 self.live.drop(p["id"])
                 n += 1
         return n
+
+    def market_live(self) -> bool:
+        """The side source trades only once its own out-of-sample record earned it: auto = what the brain wanted from
+        it made money after costs over at least MARKET_MIN_N replays; on / off force it."""
+        mode = self.s.market_trade
+        if mode in ("on", "off"):
+            return mode == "on"
+        now = self.clock()
+        at, on = self._market_at
+        if now - at >= VERDICT_EVERY_S:
+            from .learner import honest
+
+            k = honest(self.conn).get("by_kind", {}).get("market") or {}
+            on = k.get("n_taken", 0) >= MARKET_MIN_N and (k.get("taken_mean") or 0) > 0
+            self._market_at = (now, on)
+        return on
 
     def organic_on(self, now: float) -> bool:
         """Organic exits decide when switched on and trained; in auto mode only while their out-of-sample replays

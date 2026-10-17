@@ -46,6 +46,8 @@ class Settings:
     exit_half_min_up: float = field(default_factory=lambda: _f("BRAIN_EXIT_HALF_MIN_UP", 0.10))
     # auto = organic once its out-of-sample replays beat the plans; on = always (when trained); off = plans only
     organic_exit: str = field(default_factory=lambda: _s("BRAIN_ORGANIC_EXIT", "auto").lower())
+    # side source (signals' shadow book): auto = traded once its replays earn it, on / off force it
+    market_trade: str = field(default_factory=lambda: _s("BRAIN_MARKET_TRADE", "auto").lower())
     half_life_h: float = field(default_factory=lambda: _f("BRAIN_HALF_LIFE_H", 120.0))
     # what counts as an opportunity
     min_whale_sol: float = field(default_factory=lambda: _f("BRAIN_MIN_WHALE_SOL", 0.3))
