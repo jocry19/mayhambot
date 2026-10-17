@@ -180,6 +180,7 @@ oder ≤ −50 % nach Dev-/Insider-Abverkauf. Pump-Launches mit kaputtem Basispr
 | `SNIPER_PUMPPORTAL_API_KEY` | – | PumpPortal-Key mit ≥ 0,02 SOL Guthaben (nur der Nutzer legt ihn an) |
 | `SNIPER_LAUNCH_SOURCES` / `SNIPER_STALE_SEC` | both / 180 | Launch-Quellen (`both`, `pumpportal`, `rpc`), Neuverbindung bei Stille |
 | `SNIPER_WS_URL` / `SNIPER_WS_MAX_SUBS` | wss://api.mainnet-beta.solana.com / 150 | RPC-Log-Datenstrom |
+| `SNIPER_WS_URL2` | wss://solana-rpc.publicnode.com | zweiter Programm-Datenstrom auf einem anderen RPC (füllt die Lücken der 1002-Trennungen; doppelte Trades fallen per Signatur weg); leer = aus |
 | `SNIPER_WS_SUBS_PER_SEC` | 4 | neue logsSubscribe-Anfragen pro Sekunde |
 | `SNIPER_USE_LEARNED_RULE` / `SNIPER_RESEARCH_HOURS` | 1 / 72 | angenommene Forschungsregel im Papiermodus nutzen / Fenster |
 | `SNIPER_RUG_P_BLOCK` | 0.59 | kein Kauf ab dieser Rug-Wahrscheinlichkeit des Rug-Modells |

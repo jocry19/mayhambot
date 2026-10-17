@@ -40,6 +40,11 @@ class Service:
                                     mode=cfg.trade_sub_mode, program=rpcws.PUMP_PROGRAM,
                                     stale_sec=cfg.stale_sec)
         self.logs.on_mode = self._save_mode
+        # a second program-wide stream on another RPC: the first drops its socket up to once a minute (1002) and the
+        # first seconds of a launch get lost in the gap; trades seen twice are removed by signature in the engine
+        self.logs2 = rpcws.LogStream(cfg.ws_url2, self._on_rpc_trade, 1, name="RPC-Log-Datenstrom 2", mode="program",
+                                     program=rpcws.PUMP_PROGRAM, stale_sec=cfg.stale_sec) \
+            if cfg.ws_url2 and cfg.ws_url2 != cfg.ws_url else None
         try:
             saved = json.loads(store.get_state(self.conn, "rpc_trade_mode") or "{}")
         except ValueError:
@@ -77,7 +82,7 @@ class Service:
         st = self.engine.handle(m, now)
         if st is not None:
             self.first_log[src].append(now)
-            since = self.logs.program_complete_since() if self.trades_via == "rpc" else None
+            since = self.program_since() if self.trades_via == "rpc" else None
             # the program-wide stream has run for a while: with the replay buffer, every trade since this
             # creation reaches the engine, so bundles can be read from the creation slot directly
             st.stream_complete = bool(since and now - since >= 10)
@@ -187,8 +192,10 @@ class Service:
                                     self.trades_via = "rpc"
                                     self.engine.stream_pools = {"pump"}
                                     with self.engine.lock:
-                                        self.logs.subscribe({k for k, s in self.engine.launches.items()
-                                                             if s.subscribed and s.pool == "pump"})
+                                        mints = {k for k, s in self.engine.launches.items()
+                                                 if s.subscribed and s.pool == "pump"}
+                                    for lg in self._streams():
+                                        lg.subscribe(mints)
                             if m and (m.get("txType") or "").lower() == "create":
                                 self._on_create(m, "pumpportal")
                             elif m:
@@ -231,11 +238,20 @@ class Service:
             for msg in feed.sub_msgs(sub - unsub, unsub - sub):
                 await ws.send(msg)
         else:
-            self.logs.subscribe(pump - unsub)
-            self.logs.unsubscribe(unsub)
+            for lg in self._streams():
+                lg.subscribe(pump - unsub)
+                lg.unsubscribe(unsub)
 
     def update_free_stream(self):
-        self.engine.free_stream = self.trades_via == "rpc" and self.logs.program_complete_since() is not None
+        self.engine.free_stream = self.trades_via == "rpc" and self.program_since() is not None
+
+    def _streams(self):
+        return [self.logs] + ([self.logs2] if self.logs2 else [])
+
+    def program_since(self):
+        """Since when at least one program-wide stream delivers every pump.fun trade (None if none does)."""
+        ts = [t for t in (lg.program_complete_since() for lg in self._streams()) if t is not None]
+        return min(ts) if ts else None
 
     def demote_dead_subs(self, now=None):
         """Coins whose RPC trade subscription never got confirmed (refused, over the limit) would keep a frozen
@@ -243,7 +259,7 @@ class Service:
         if self.trades_via != "rpc" or not self.logs.connected:
             return []
         now = now or time.time()
-        dead = self.logs.not_live(now)
+        dead = [m for m in self.logs.not_live(now) if not (self.logs2 and self.logs2.is_live(m))]
         if not dead:
             return []
         with self.engine.lock:
@@ -252,7 +268,8 @@ class Service:
                 if st and st.subscribed:
                     st.subscribed = False
             self.engine.counters["subs_lost"] = self.engine.counters.get("subs_lost", 0) + len(dead)
-        self.logs.unsubscribe(dead)
+        for lg in self._streams():
+            lg.unsubscribe(dead)
         return dead
 
     async def sub_loop(self):
@@ -373,7 +390,12 @@ class Service:
                         "rejects": self.logs.rejects, "reconnects": self.logs.reconnects,
                         "server_drops": self.logs.server_drops, "silent_reconnects": self.logs.silent_reconnects,
                         "decode_rejects": dict(rpcws.REJECTS),
-                        "replayed": self.logs.replayed, "trades_per_min": rpc}}
+                        "replayed": self.logs.replayed, "trades_per_min": rpc,
+                        "reject_why": dict(rpcws.REJECT_WHY),
+                        "second": ({"url": self.cfg.ws_url2.split("?")[0], "connected": self.logs2.connected,
+                                    "program": self.logs2.program_complete_since() is not None,
+                                    "server_drops": self.logs2.server_drops, "delivered": self.logs2.delivered}
+                                   if self.logs2 else None)}}
 
     def _launch_status(self, now):
         rates = self.launch_rates(now)
@@ -431,13 +453,17 @@ class Service:
                  "?" if h["trades_per_min"] is None else h["trades_per_min"], self.trades_via, self.logs.mode,
                  self.logs.active_subs(), len(self.logs.want), self.logs.rejects, " BLIND" if h["blind"] else "")
         now_m = time.monotonic()
+        l2 = self.logs2
         cur = {"decoded": self.logs.decoded, "delivered": self.logs.delivered, "replayed": self.logs.replayed,
+               "decoded2": l2.decoded if l2 else 0, "delivered2": l2.delivered if l2 else 0,
+               "drops2": l2.server_drops if l2 else 0, "dupes": c.get("dupes", 0), "trades": c.get("trades", 0),
+               **{f"why_{k}": v for k, v in rpcws.REJECT_WHY.items()},
                "rej": rpcws.REJECTS["trade"], "drops": self.logs.server_drops, "silent": self.logs.silent_reconnects,
                "s1": c.get("stage1_pump", 0), "zero": c.get("stage1_zero", 0), "def": c.get("deferred", 0),
                "found": c.get("deferred_found", 0), "lost": c.get("subs_lost", 0)}
         prev, t0 = getattr(self, "_diag", (None, None))
         if prev:
-            d = {k: cur[k] - prev[k] for k in cur}
+            d = {k: cur[k] - prev.get(k, 0) for k in cur}
             mins = max(1e-9, (now_m - t0) / 60)
             # where trades get lost: decoded from the program stream (all pump.fun coins), handed to our launches,
             # rejected by the decoder; launches decided without a single trade; coins cut off their stream
@@ -446,6 +472,11 @@ class Service:
                      "Entscheid ohne Trades: %d von %d, zweiter Blick %d (davon %d mit Trades) | Abos verloren %d",
                      mins, d["decoded"] / mins, d["delivered"] / mins, d["replayed"], d["rej"], d["drops"],
                      d["silent"], d["zero"], d["s1"], d["def"], d["found"], d["lost"])
+            why = ", ".join(f"{k[4:]} {d[k]}" for k in sorted(d) if k.startswith("why_") and d[k]) or "keine"
+            log.info("Datenstrom-Diagnose: Strom 2 %s, %.0f/min dekodiert, %.0f/min an Launches, %d Trennungen | "
+                     "Launch-Trades %d neu, %d doppelt (beide Ströme oder Dev-Kauf) | Dekoder verworfen nach Grund: %s",
+                     "aus" if not l2 else ("verbunden" if l2.connected else "getrennt"), d["decoded2"] / mins,
+                     d["delivered2"] / mins, d["drops2"], d["trades"], d["dupes"], why)
         self._diag = (cur, now_m)
         log.info("Stand: %d Launches, %d Trades, %d Migrationen | Stufe 1: %d, tief geprüft: %d, Käufe: %d | "
                  "%d im Speicher, %d im Trade-Abo (%s, RPC-Logs %d Abos), Warteschlange %d | Calls gesamt RPC %d, API/Metadaten %d | offen %d, "
@@ -460,6 +491,7 @@ class Service:
         tasks = [asyncio.create_task(self.ws_loop()), asyncio.create_task(self.tick_loop()),
                  asyncio.create_task(self.sub_loop()),
                  asyncio.create_task(self.logs.run(stop_ev)),
+                 *([asyncio.create_task(self.logs2.run(stop_ev))] if self.logs2 else []),
                  *([asyncio.create_task(self.creates.run(stop_ev))] if self.creates else []),
                  asyncio.create_task(self.every(300, self.sol_round)),
                  asyncio.create_task(self.every(10, self.heartbeat, 1)),
@@ -481,6 +513,8 @@ class Service:
             for t in tasks:
                 t.cancel()
             self.connected = self.logs.connected = False
+            if self.logs2:
+                self.logs2.connected = False
             if self.creates:
                 self.creates.connected = False
             try:

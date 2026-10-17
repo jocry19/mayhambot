@@ -34,6 +34,9 @@ class SniperSettings:
     # per-coin trades: PumpPortal only with a funded key; without one the free RPC log stream is used
     trade_source: str = field(default_factory=lambda: _s("SNIPER_TRADE_SOURCE", "auto"))   # auto | pumpportal | rpc
     ws_url: str = field(default_factory=lambda: _s("SNIPER_WS_URL", "wss://api.mainnet-beta.solana.com"))
+    # second program-wide trade stream on another public RPC: the first one drops its socket up to once a minute and
+    # then misses the first seconds of launches; both feed the engine, duplicates are removed by signature. "" = off
+    ws_url2: str = field(default_factory=lambda: _s("SNIPER_WS_URL2", "wss://solana-rpc.publicnode.com"))
     # launches: PumpPortal and the RPC create stream run side by side; the first to deliver a mint wins (no gap
     # when one fails). both | pumpportal | rpc
     launch_sources: str = field(default_factory=lambda: _s("SNIPER_LAUNCH_SOURCES", "both"))

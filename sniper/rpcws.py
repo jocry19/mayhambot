@@ -34,6 +34,16 @@ def b58(b):
 # value produced paper buys at "MCAP 0.4 SOL" that were stopped out at -100 % a second later
 V_SOL_RANGE, V_TOK_RANGE = (25.0, 200.0), (1.0e8, 1.2e9)
 REJECTS = {"trade": 0, "create": 0}
+REJECT_WHY = {}          # reason -> count (virtual SOL / token reserves below or above the range)
+_SAMPLES = []            # the first rejected events, logged once with their values
+
+
+def _reject_reason(v_sol, v_tok):
+    if v_sol < V_SOL_RANGE[0]:
+        return "sol_low"
+    if v_sol > V_SOL_RANGE[1]:
+        return "sol_high"
+    return "tok_low" if v_tok < V_TOK_RANGE[0] else "tok_high"
 
 
 def reserves_ok(v_sol, v_tok):
@@ -56,6 +66,12 @@ def decode_trade(data_b64):
     ts, vsol, vtok = struct.unpack_from("<qQQ", raw, 89)
     if not reserves_ok(vsol / 1e9, vtok / 1e6):
         REJECTS["trade"] += 1     # a layout we do not know (or garbage): a broken price must not reach the engine
+        why = _reject_reason(vsol / 1e9, vtok / 1e6)
+        REJECT_WHY[why] = REJECT_WHY.get(why, 0) + 1
+        if len(_SAMPLES) < 5:
+            _SAMPLES.append(why)
+            log.warning("TradeEvent verworfen (%s): mint %s, v_sol %.3f SOL, v_tok %.0f, sol %.4f, tok %.0f, len %d",
+                        why, mint, vsol / 1e9, vtok / 1e6, sol / 1e9, tok / 1e6, len(raw))
         return None
     return {"mint": mint, "sol_lamports": sol, "token_raw": tok, "is_buy": is_buy, "user": user, "ts": ts,
             "v_sol_lamports": vsol, "v_tok_raw": vtok}

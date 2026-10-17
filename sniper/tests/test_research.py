@@ -483,3 +483,42 @@ def test_fixed_two_condition_candidate_is_walk_forward_tested():
             for i in range(300)]
     out = research.signature_test(rows, {}, c, conds=[("mcap_decide_sol", 50), ("n_buyers", 5)])
     assert out["n"] == 100 and out["holds"] is False and len(out["folds"]) == 3
+
+
+def test_second_program_stream_fills_gaps_without_double_trades(tmp_path):
+    """Data review: in hours with many 1002 drops 80-93 % of launches had no trade at 20 s. A second RPC stream
+    feeds the same engine; a trade both deliver counts once; a coin live on the second is not demoted."""
+    from sniper import rpcws
+    from sniper.service import Service
+    c = cfg(trade_source="rpc", ws_url2="wss://second.example")
+    svc = Service(c, db_path=str(tmp_path / "s.db"))
+    assert svc.logs2 is not None and svc.logs2.mode == "program"
+    eng = svc.engine
+    cv = Curve("TWICE")
+    eng.handle(cv.create(), T0)
+    m = cv.buy("w1", 0.5)
+    ev = {"mint": "TWICE", "sol_lamports": int(0.5e9), "token_raw": int(m["tokenAmount"] * 1e6), "is_buy": True,
+          "user": "w1", "ts": 0, "v_sol_lamports": int(m["vSolInBondingCurve"] * 1e9),
+          "v_tok_raw": int(m["vTokensInBondingCurve"] * 1e6)}
+    msg = rpcws.to_stream_msg(ev, "SIG1", 100)
+    for lg in svc._streams():
+        lg.subscribe({"TWICE"})
+        lg.on_msg(dict(msg))
+    assert eng.launches["TWICE"].n_seen == 1 and eng.counters["dupes"] == 1
+    svc.trades_via = "rpc"
+    svc.logs.connected, svc.logs._conn_since, svc.logs.want_ts["TWICE"] = True, 0, 0
+    svc.logs2.subs = {rpcws.PUMP_PROGRAM: 1}
+    eng.launches["TWICE"].subscribed = True
+    assert svc.demote_dead_subs(now=10_000) == []                  # first stream lost it, the second still has it
+    assert svc.program_since() is None or svc.program_since() > 0
+
+
+def test_decoder_rejects_are_counted_by_reason():
+    import base64
+    import struct
+    from sniper import rpcws
+    before = dict(rpcws.REJECT_WHY)
+    raw = rpcws.TRADE_DISC + b"\1" * 32 + struct.pack("<QQ", 1, 1) + b"\1" + b"\2" * 32 + \
+        struct.pack("<qQQ", 0, int(30e9), int(2.1e9 * 1e6))
+    assert rpcws.decode_trade(base64.b64encode(raw).decode()) is None
+    assert rpcws.REJECT_WHY.get("tok_high", 0) == before.get("tok_high", 0) + 1
