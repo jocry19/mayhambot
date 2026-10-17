@@ -216,6 +216,9 @@ def write_report(conn, path=None, now=None):
     rep["plan_next"] = plan.levels(conn, now)
     rep["plan_next_v2"] = plan.levels(conn, now, kind="v2")
     rep["confidence_7d"] = by_confidence(conn, 168, now)
+    from signals import exits  # exit rules replayed on the calls; switch only once verdict() says it is decidable
+    rep["exits_7d"] = exits.compare(conn, 7, now, kind="v1")
+    rep["exits_verdict_14d"] = exits.verdict(conn, 14, now, kind="v1")
     from signals import shadow  # rejected coins by reason and what they did next (calls: outcomes_* above)
     rep.update(shadow_24h=shadow.summary(conn, 24, now), shadow_7d=shadow.summary(conn, 168, now),
                shadow_v2_7d=shadow.summary(conn, 168, now, kind="v2"))

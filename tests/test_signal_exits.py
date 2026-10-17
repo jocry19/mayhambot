@@ -26,3 +26,17 @@ def test_dead_coin_books_dead_ret_and_compare_runs(tmp_path):
     c.commit()
     res = exits.compare(c, 1, NOW)
     assert res["tp+50 sl-35, no trail"]["n"] == 1 and res["tp+50 sl-35, no trail"]["mean_after_cost"] == 0.44
+
+
+def test_verdict_needs_enough_calls_and_both_halves(tmp_path):
+    c = db.connect(str(tmp_path / "v.db"))
+    t = NOW - 6 * 3600
+    for i in range(4):
+        c.execute("INSERT INTO signals(ts, mint, symbol, score, price_usd, outcome_flag) VALUES (?,?,?,?,?,?)",
+                  (t - i * 600, f"A{i}", "A", 50, 1.0, "ok"))
+        for dt, p in PATH:
+            c.execute("INSERT INTO token_prices(mint, ts, price_usd) VALUES (?,?,?)", (f"A{i}", t - i * 600 + 60 + dt, p))
+    c.commit()
+    assert exits.verdict(c, 1, NOW)["switch_to"] is None                     # 4 calls: not decidable
+    v = exits.verdict(c, 1, NOW, min_n=4)
+    assert v["switch_to"] is not None and v["switch_to"] != exits.CURRENT     # same dip-then-pump path in both halves

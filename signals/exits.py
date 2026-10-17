@@ -73,7 +73,7 @@ def paths(conn, days=7, now=None, kind=None):
     q = ("SELECT id, ts, mint, symbol, price_usd, outcome_flag FROM signals WHERE ts>=? AND ts<=? AND price_usd>0"
          + (" AND COALESCE(kind,'v1')=?" if kind else ""))
     out = []
-    for s in conn.execute(q, (now - days * 86400, now - HOURS * 3600) + ((kind,) if kind else ())).fetchall():
+    for s in conn.execute(q + " ORDER BY ts", (now - days * 86400, now - HOURS * 3600) + ((kind,) if kind else ())).fetchall():
         t0, p0 = s[1], s[4]
         snap = conn.execute("SELECT ts, price_usd FROM token_prices WHERE mint=? AND ts>? AND ts<=? AND price_usd>0",
                             (s[2], t0, t0 + HOURS * 3600)).fetchall()
@@ -85,6 +85,37 @@ def paths(conn, days=7, now=None, kind=None):
         path = [(t - t0 - ENTRY_DELAY_S, p) for t, p in clean if t >= t0 + ENTRY_DELAY_S]
         if path or s[5] == "dead":
             out.append(dict(id=s[0], symbol=s[3], pe=pe, path=path, dead=s[5] == "dead"))
+    return out
+
+
+MIN_N_DECIDE = 30
+CURRENT = "paper now (tp+50 sl-20 trail 20/12)"
+
+
+def _score(ps, r):
+    xs = [min(simulate(p["path"], p["pe"], r, p["dead"]), CAP) - COST for p in ps]
+    return sum(xs) / len(xs) if xs else None
+
+
+def verdict(conn, days=14, now=None, kind=None, min_n=MIN_N_DECIDE):
+    """Which rule to switch to, only when it is decidable: at least min_n calls, the same rule best in the older
+    and the newer half (time split), and better than the current paper exit by 5+ points in both halves."""
+    ps = paths(conn, days, now, kind)
+    out = dict(n=len(ps), min_n=min_n, switch_to=None)
+    if len(ps) < min_n:
+        out["why"] = f"zu wenige Calls ({len(ps)} < {min_n})"
+        return out
+    halves = (ps[:len(ps) // 2], ps[len(ps) // 2:])
+    best = []
+    for h in halves:
+        sc = {k: _score(h, r) for k, r in RULES.items()}
+        b = max(sc, key=sc.get)
+        best.append((b, sc[b] - sc[CURRENT]))
+    out["best_per_half"] = [(b, round(d, 3)) for b, d in best]
+    if best[0][0] == best[1][0] and best[0][0] != CURRENT and min(d for _, d in best) >= 0.05:
+        out["switch_to"] = best[0][0]
+    else:
+        out["why"] = "keine Regel in beiden Hälften klar besser als der jetzige Ausstieg"
     return out
 
 
