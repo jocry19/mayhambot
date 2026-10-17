@@ -7,6 +7,7 @@ import json
 import time
 
 from sniper.engine import SKIP_LABELS
+from sniper.research import MIN_BASE_MCAP
 
 HIT = 1.0     # max_ret_60m >= +100 % (2x) counts as a winner
 RUG = -0.8    # ret_60m <= -80 % counts as a rug / dead coin
@@ -34,6 +35,15 @@ def _group(rows):
     return out
 
 
+def _clean(r):
+    """A pump launch decided below the curve's start price had a broken quote: its returns (+4,800,000 % on
+    average) are no outcome. It still counts as a launch, just not as measured."""
+    if r.get("pool") == "pump" and r.get("mcap_decide_sol") is not None and r["mcap_decide_sol"] < MIN_BASE_MCAP:
+        for k in ("ret_1m", "ret_5m", "ret_15m", "ret_60m", "max_ret_60m", "rugged"):
+            r[k] = None
+    return r
+
+
 def _has(conn):
     return conn.execute("SELECT 1 FROM sqlite_master WHERE name='sniper_launches'").fetchone() is not None
 
@@ -44,8 +54,9 @@ def stats(conn, hours=24, now=None):
     if not _has(conn):
         return {"available": False}
     cols = "mint, stage, decision, skip_reason, score, risk, momentum, bundle_flag, insider_flag, " \
-           "ret_1m, ret_5m, ret_15m, ret_60m, max_ret_60m, rugged, calls_rpc, calls_api, source"
-    rows = [dict(r) for r in conn.execute(f"SELECT {cols} FROM sniper_launches WHERE decided_ts >= ?", (since,))]
+           "ret_1m, ret_5m, ret_15m, ret_60m, max_ret_60m, rugged, calls_rpc, calls_api, source, pool, mcap_decide_sol"
+    rows = [_clean(dict(r)) for r in conn.execute(f"SELECT {cols} FROM sniper_launches WHERE decided_ts >= ?",
+                                                  (since,))]
     entered = [r for r in rows if r["decision"] == "enter"]
     stage2 = [r for r in rows if r["stage"] == 2]
     skipped2 = [r for r in stage2 if r["decision"] != "enter"]

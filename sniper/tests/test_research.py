@@ -408,3 +408,13 @@ def test_silent_trade_stream_counts_as_dead():
     assert m.silence_limit() is None                   # three quiet coins can be silent
     m.subs = {f"m{i}": i for i in range(12)}
     assert m.silence_limit() == 180
+
+
+def test_stats_ignore_outcomes_of_broken_bases(conn):
+    """Data review: skipped launches averaged max_ret_60m 48,243 (broken quotes at MCAP 0.x) and counted as winners."""
+    from sniper import analytics
+    for i, (base, mx) in enumerate([(0.4, 48000.0), (30.0, 0.2), (30.0, 1.5)]):
+        store.save_launch(conn, {"mint": f"B{i}", "pool": "pump", "decided_ts": int(T0), "stage": 2, "decision": "skip",
+                                 "skip_reason": "bundle", "mcap_decide_sol": base, "max_ret_60m": mx, "ret_60m": 0.0})
+    b = next(f for f in analytics.stats(conn, hours=0, now=T0 + 10)["filters"] if f["code"] == "bundle")
+    assert b["n"] == 3 and b["n_measured"] == 2 and b["missed_winners"] == 1
