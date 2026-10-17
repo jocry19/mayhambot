@@ -31,6 +31,7 @@ EXIT_NAMES = {"target": "Ziel erreicht", "stop": "Stop-Loss", "trail": "Trailing
               "no_market": "kein Markt", "organic": "Zustand des Coins gekippt"}
 VERDICT_EVERY_S = 600
 MARKET_MIN_N = 30
+MARKET_WINDOW_S = 3 * 86400
 MOMENTUM_MIN_M5 = 5.0  # DexScreener 5-min change in percent: a move is on (wide on purpose, the brain only watches
 MOMENTUM_MIN_TX = 30  # and learns this source until its replays earn it)
 
@@ -386,7 +387,8 @@ class Trader:
         if now - at >= VERDICT_EVERY_S:
             from .learner import honest
 
-            k = honest(self.conn).get("by_kind", {}).get("market") or {}
+            # recent results only (3 days): a pattern that stops working switches the source off again by itself
+            k = honest(self.conn, evaluated_since=now - MARKET_WINDOW_S).get("by_kind", {}).get("market") or {}
             on = k.get("n_taken", 0) >= MARKET_MIN_N and (k.get("taken_mean") or 0) > 0
             self._market_at = (now, on)
         return on
