@@ -22,13 +22,14 @@ das Trailing scharf erst nach einer Minute.
 
 - **Überzeugt** (Erwartung > 0 und zu ≥ `BRAIN_MIN_CONF` = 75 % sicher): Kauf, Größe 0,1 SOL bei 75 % bis 0,5 SOL
   bei 95 % Sicherheit.
-- **Erkunden** (nicht überzeugt, aber eine Ziehung aus dem Posterior sagt „könnte sich lohnen“, Thompson Sampling):
+- **Erkunden** (nicht überzeugt, aber eine Ziehung aus dem Posterior sagt „könnte sich lohnen“, Thompson Sampling,
+  oder der beste Plan ist zu ≥ `BRAIN_EXPLORE_MIN_P` = 25 % im Plus):
   0,1 SOL, ohne Tageskontingent (Papier hat kein Budget; `BRAIN_EXPLORE_PER_DAY` > 0 setzt eins).
 - Sonst **auslassen**. Auch ausgelassene Gelegenheiten werden später nachgespielt und gelernt.
 
 Harte Grenzen, die das Modell nie übergeht: Marktpreis vorhanden (ein Coin ohne DexScreener-Paar bekommt 30 s),
 Liquidität ≥ `BRAIN_MIN_LIQ_USD` bzw. auf der pump.fun-Bonding-Curve (dort meldet DexScreener $0 Liquidität)
-Market Cap ≥ `BRAIN_MIN_CURVE_MCAP_USD` (8000), Rug-Prüfung
+Market Cap ≥ `BRAIN_MIN_CURVE_MCAP_USD` (5000), Rug-Prüfung
 (`safety.assess` quick, ohne Ergebnis kein Kauf), eine Position je Coin, technische Obergrenze `BRAIN_MAX_OPEN` (100
 offene Positionen, wegen der Preisabfragen). Papier hat kein Budget: kein Tagesverlust-Limit, keine Guthaben-Prüfung
 (das Papierkonto darf ins Minus); `BRAIN_MAX_DAILY_LOSS_SOL` > 0 schaltet ein Limit wieder ein. Dazu bei Wal-Käufen: kein Kopieren, wenn der Wal schon wieder verkauft hat
@@ -52,8 +53,9 @@ Versionen. Alte Ergebnisse verblassen mit Halbwertszeit `BRAIN_HALF_LIFE_H` (120
 
 1. **Vorwissen:** alle Wal-Käufe und Signale, die copytrade vor dem Start schon auf Minutenkerzen nachgespielt hat
    (`ct_evals`), auf die sechs Pläne abgebildet (es sind Punkte von copytrades Gitter), ältere schwächer gewichtet.
-2. **Jede Gelegenheit**, auch die ausgelassenen: wenn der längste Plan vorbei ist (~4,2 h), wird jeder Plan
-   nachgespielt (`copytrade.sim`, echte Wal-Verkäufe als Zwangsausstieg; Tracker-Ausfälle machen eine Wal-Gelegenheit
+2. **Jede Gelegenheit**, auch die ausgelassenen, in zwei Schritten: die kurzen Pläne (bis 45 min) etwa eine Stunde
+   nach der Entscheidung, die langen, wenn der längste Plan vorbei ist (~4,2 h); jeder Schritt wird sofort gelernt. Jeder
+   Plan wird nachgespielt (`copytrade.sim`, echte Wal-Verkäufe als Zwangsausstieg; Tracker-Ausfälle machen eine Wal-Gelegenheit
    unbewertbar). Kerzen aus den vorhandenen Caches, sonst höchstens `BRAIN_EVALS_PER_ROUND` Abrufe je Runde.
 3. **Eigener Trade, sofort beim Schließen:** der echte Papier-Fill (Jupiter-Quote, Slippage, Gebühren) für den
    genommenen Plan, doppelt gewichtet; das spätere Nachspielen lässt diesen Plan aus.

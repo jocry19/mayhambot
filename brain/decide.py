@@ -48,8 +48,8 @@ def choose(model, kind: str, feats: dict, s, rng: random.Random | None = None) -
 
     Convinced: the chosen plan's expected net return is positive and the brain is at least BRAIN_MIN_CONF sure of
     that; the size grows from the minimum at that certainty to the maximum at 95 %.
-    Exploring (Thompson sampling): not convinced, but one draw from the posterior says it could pay; bought with
-    the minimum size, capped per day by the trader. Everything else is passed (and still learned from)."""
+    Exploring (Thompson sampling): not convinced, but one draw from the posterior says it could pay, or the best
+    plan is at least BRAIN_EXPLORE_MIN_P likely to be positive; bought with the minimum size. Everything else is passed (and still learned from)."""
     rng = rng or random
     toks = F.tokens(kind, feats)
     preds = model.predict(toks)
@@ -63,7 +63,8 @@ def choose(model, kind: str, feats: dict, s, rng: random.Random | None = None) -
     i = best if convinced else max(range(len(PLANS)), key=lambda k: draws[k])
     mean, sd = adj[i], preds[i][1]
     p_pos = _phi(mean / sd) if sd > 0 else float(mean > 0)
-    explore = not convinced and draws[i] > s.min_edge
+    # paper learns from its own fills: also try what is merely plausible (P(best plan > 0) >= BRAIN_EXPLORE_MIN_P)
+    explore = not convinced and (draws[i] > s.min_edge or p_best >= s.explore_min_p)
     enter = convinced or explore
     frac = max(0.0, min(1.0, (p_pos - s.min_conf) / max(1e-6, 0.95 - s.min_conf)))
     size = round(s.min_size_sol + (s.max_size_sol - s.min_size_sol) * frac, 3) if convinced else s.min_size_sol
