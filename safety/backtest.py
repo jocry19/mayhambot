@@ -37,12 +37,13 @@ FEATURES = {
     "bundle_wallets": [1, 3, 5],
     "dev_launches_24h": [1, 2, 5],
     "known_bad": [1, 2],
+    "block0_wallets": [1, 3, 5],   # sniper's count of the block0 signature (None = stream incomplete)
 }
 LABEL_DE = {
     "bundle_pct": "Bundle-Anteil %", "top10_pct": "Top-10-Anteil %", "unseen_pct": "unbekannte Holder %",
     "dev_buy_pct": "Dev-Kauf %", "dev_sold_pct": "Dev verkauft %", "fast_buyers": "Schnellkäufer",
     "n_buyers": "Käufer", "bundle_wallets": "Bundle-Wallets", "dev_launches_24h": "Dev-Launches 24 h",
-    "known_bad": "Wallets früherer Rugs",
+    "known_bad": "Wallets früherer Rugs", "block0_wallets": "Mini-Käufer in den ersten 5 s",
 }
 PRIOR_N = 20          # shrinkage of a bin's rug rate toward the base rate (pseudo launches)
 FA_TARGETS = [0.05, 0.10, 0.20]
