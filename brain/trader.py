@@ -31,6 +31,8 @@ EXIT_NAMES = {"target": "Ziel erreicht", "stop": "Stop-Loss", "trail": "Trailing
               "no_market": "kein Markt", "organic": "Zustand des Coins gekippt"}
 VERDICT_EVERY_S = 600
 MARKET_MIN_N = 30
+MOMENTUM_MIN_M5 = 5.0  # DexScreener 5-min change in percent: a move is on (wide on purpose, the brain only watches
+MOMENTUM_MIN_TX = 30  # and learns this source until its replays earn it)
 
 
 def _default_safety(conn, mint):
@@ -123,6 +125,27 @@ class Trader:
                     out.append(("market", f"shadow{r['id']}", r))
             if rows:
                 store.put(c, "cursor_market", rows[-1]["id"])
+        if store.has(c, "tokens"):
+            # side source: coins the signals service keeps fresh from DexScreener with a 5-min move and trading going
+            # on (momentum), whether smart money is in or not; the brain learns which of them run
+            cur = self._cursor("cursor_momentum", "SELECT MAX(last_updated) FROM tokens")
+            try:
+                rows = c.execute(
+                    f"""SELECT mint, last_updated AS ts, dex, mcap_usd, price_change_m5 AS pc_m5,
+                               price_change_h1 AS pc_h1, txns_m5, volume_h1, 'momentum' AS reason,
+                               CASE WHEN pair_created_at > 0 THEN (? - pair_created_at /
+                                   (CASE WHEN pair_created_at > 1e11 THEN 1000 ELSE 1 END)) / 60.0 END AS age_min
+                        FROM tokens WHERE last_updated>? AND price_change_m5>=? AND COALESCE(txns_m5,0)>=?
+                        ORDER BY last_updated LIMIT 300""",
+                    (now, cur, MOMENTUM_MIN_M5, MOMENTUM_MIN_TX)).fetchall()
+            except Exception as e:  # an older tokens table without txns: no momentum source
+                log.debug("momentum source: %s", e)
+                rows = []
+            for r in rows:
+                if now - (r["ts"] or 0) <= self.s.max_signal_age_s:
+                    out.append(("market", f"mom{r['mint']}{int(r['ts']) // 3600}", r))
+            if rows:
+                store.put(c, "cursor_momentum", rows[-1]["ts"])
         if store.has(c, "sniper_launches") and store.has(c, "sniper_positions"):
             # 'enter' is written at stage 2 together with the sniper's paper position, after decided_ts (stage 1):
             # the cursor runs on the position's opened_ts, as copytrade.engine.follow_launches does

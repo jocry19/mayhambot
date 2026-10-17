@@ -828,3 +828,27 @@ def test_market_coins_are_watched_not_traded_until_their_replays_earn_it(conn, s
     add_shadow(conn, 3, mint=mint2)
     assert t.scan() == 1 and checks == [mint2]
     assert "Nebenquelle Markt-Coins" in journal.write(conn, good, s)
+
+
+def test_momentum_coins_from_the_tokens_table_are_a_side_source(conn, s):
+    conn.execute("""CREATE TABLE IF NOT EXISTS tokens (mint TEXT PRIMARY KEY, symbol TEXT, dex TEXT, mcap_usd REAL,
+                    liquidity_usd REAL, pair_created_at INTEGER, price_change_m5 REAL, price_change_h1 REAL,
+                    volume_h1 REAL, txns_m5 INTEGER, last_updated INTEGER)""")
+    mk = Market()
+    mk.snaps[MINT] = snap(dex="pumpswap")
+    t = make_trader(conn, s, trained(kind="market"), mk)
+    t.scan()  # first start: backlog skipped
+    now = int(time.time()) + 1
+    cols = "(mint, symbol, dex, mcap_usd, liquidity_usd, pair_created_at, price_change_m5, price_change_h1, volume_h1, " \
+           "txns_m5, last_updated)"
+    conn.execute(f"INSERT INTO tokens{cols} VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                 (MINT, "TST", "pumpswap", 90_000, 40_000, (now - 3600) * 1000, 18.0, 60.0, 80_000, 220, now))
+    conn.execute(f"INSERT INTO tokens{cols} VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                 ("Flat1111111111111111111111111111111111111111", "FL", "pumpswap", 90_000, 40_000, 0, 1.0, 2.0,
+                  5_000, 220, now))
+    t.scan()
+    rows = conn.execute("SELECT * FROM brain_opps").fetchall()
+    assert len(rows) == 1 and rows[0]["kind"] == "market" and rows[0]["mint"] == MINT
+    f = json.loads(rows[0]["features"])
+    assert f["why"] == "momentum" and f["tx5"] == "100-300" and f["pc1h"] == "20..100%"
+    assert rows[0]["decision"] == "skip"  # watched until its replays earn it
