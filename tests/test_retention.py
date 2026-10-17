@@ -41,3 +41,13 @@ def test_log_sizes_keeps_hourly_then_daily_and_reports_growth(tmp_path):
     assert grow["trades"][1] > 0                   # rows per day went up
     text = retention.size_report(sizes, fstats, grow)
     assert text.splitlines()[1].startswith("trades:") and "Zeilen" in text
+
+
+def test_estimate_without_dbstat_is_close(tmp_path, monkeypatch):
+    c, now = _db(tmp_path)
+    c.executemany("INSERT INTO trades VALUES (?,?,?)", [(f"x{i}" * 20, now + i, "w" * 44) for i in range(20000)])
+    c.commit()
+    real = retention.table_sizes(c)["trades"]["bytes"]
+    est = retention._estimate_bytes(c, "trades", c.execute("SELECT COUNT(*) FROM trades").fetchone()[0])
+    if real:
+        assert 0.6 * real < est < 1.6 * real, (real, est)

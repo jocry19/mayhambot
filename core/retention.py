@@ -21,24 +21,56 @@ def _time_col(conn, table):
     return next((c for c in TIME_COLS if c in cols), None)
 
 
+def _val_len(v) -> int:
+    """Approximate stored size of one value in a SQLite record (payload + header byte)."""
+    if v is None:
+        return 1
+    if isinstance(v, (int, float)):
+        return 9 if isinstance(v, float) or abs(v) > 2 ** 31 else 5
+    return len(v if isinstance(v, bytes) else str(v).encode()) + 2
+
+
+def _estimate_bytes(conn, table, rows, sample=2000) -> int:
+    """Table + index bytes from the newest `sample` rows' value sizes (SQLite builds without dbstat, e.g. the
+    Mac's Python). B-trees fill pages to ~75-90 %: count 1.25x. Rough, but ranks the tables right."""
+    if not rows:
+        return 0
+    try:
+        cols = [r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')]
+        recs = conn.execute(f'SELECT * FROM "{table}" ORDER BY rowid DESC LIMIT {sample}').fetchall()
+    except sqlite3.Error:
+        return 0
+    if not recs:
+        return 0
+    lens = [[_val_len(v) for v in r] for r in recs]
+    avg = {c: sum(x[i] for x in lens) / len(lens) for i, c in enumerate(cols)}
+    per_row = sum(avg.values()) + 6
+    for (idx,) in conn.execute(f'SELECT name FROM pragma_index_list("{table}")').fetchall():
+        per_row += sum(avg.get(r[2], 5) for r in conn.execute(f'PRAGMA index_info("{idx}")')) + 9
+    return int(rows * per_row * 1.25)
+
+
 def table_sizes(conn, recent_s: int = 86400) -> dict:
     """{table: {"rows", "bytes" (table + its indexes), "recent" (rows with a time column in the last recent_s
-    before that table's newest row, None without one)}}. Read-only; reads every page once. Without dbstat in the
-    SQLite build the bytes stay 0 and only the rows are counted."""
+    before that table's newest row, None without one), "est" (True: bytes estimated from a sample, no dbstat)}}.
+    Read-only; with dbstat it reads every page once."""
     owner = {r[0]: r[1] for r in conn.execute("SELECT name, tbl_name FROM sqlite_master WHERE type IN ('table','index')")}
+    est = False
     try:
         pages = conn.execute("SELECT name, SUM(pgsize) FROM dbstat GROUP BY name").fetchall()
     except sqlite3.Error:
-        pages = [(n, 0) for n, t in owner.items() if n == t]
+        pages, est = [(n, 0) for n, t in owner.items() if n == t], True
     out = {}
     for name, size in pages:
         t = owner.get(name, name)
-        out.setdefault(t, {"rows": 0, "bytes": 0, "recent": None})["bytes"] += size or 0
+        out.setdefault(t, {"rows": 0, "bytes": 0, "recent": None, "est": est})["bytes"] += size or 0
     for t in list(out):
         if t.startswith("sqlite_") or t not in owner:
             continue
         try:
             out[t]["rows"] = conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+            if est:
+                out[t]["bytes"] = _estimate_bytes(conn, t, out[t]["rows"])
             tc = _time_col(conn, t)
             if tc:
                 mx = conn.execute(f'SELECT MAX({tc}) FROM "{t}"').fetchone()[0]
@@ -107,7 +139,7 @@ def _mb(b) -> str:
     return f"{b / 1e6:.1f}".replace(".", ",") + " MB"
 
 
-def size_report(sizes: dict, fstats: dict | None = None, grow: dict | None = None, top: int = 12) -> str:
+def size_report(sizes: dict, fstats: dict | None = None, grow: dict | None = None, top: int = 100) -> str:
     grow = grow or {}
     lines = []
     if fstats:
@@ -115,7 +147,7 @@ def size_report(sizes: dict, fstats: dict | None = None, grow: dict | None = Non
                      f"auto_vacuum {fstats['auto_vacuum']}")
     for t, v in sorted(sizes.items(), key=lambda kv: -kv[1]["bytes"])[:top]:
         g = grow.get(t)
-        lines.append(f"{t}: {_mb(v['bytes'])}, {_n(v['rows'])} Zeilen"
+        lines.append(f"{t}: {'~' if v.get('est') else ''}{_mb(v['bytes'])}, {_n(v['rows'])} Zeilen"
                      + (f", {_n(v['recent'])} in 24 h" if v.get("recent") is not None else "")
                      + (f", +{_mb(g[0])}/Tag" if g and g[0] > 0 else ""))
     return "\n".join(lines)

@@ -676,7 +676,7 @@ def log_db_sizes(path: Path) -> str | None:
             sizes, fstats, grow = retention.log_sizes(c, ROOT / "data" / "db_sizes.json")
         finally:
             c.close()
-        text = retention.size_report(sizes, fstats, grow, top=40)
+        text = retention.size_report(sizes, fstats, grow)
         (ROOT / "logs").mkdir(exist_ok=True)
         with open(ROOT / "logs" / "dbsize.log", "a") as fh:
             fh.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')}\n{text}\n")
