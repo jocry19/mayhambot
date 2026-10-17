@@ -333,7 +333,7 @@ def test_bonding_curve_coins_and_late_pairs_are_tradable(conn, s):
     w2, w3 = "W2" + "2" * 41, "W3" + "3" * 41
     set_tier(conn, w2, "ultra")
     set_tier(conn, w3, "ultra")
-    mk.snaps[m2] = snap(liq=0, dex="pumpfun", fdv=5_000, mint=m2)
+    mk.snaps[m2] = snap(liq=0, dex="pumpfun", fdv=4_000, mint=m2)
     add_whale_buy(conn, "small", wallet=w2, mint=m2, ts=clock[0])
     add_whale_buy(conn, "nopair", wallet=w3, mint=m3, ts=clock[0])
     t.scan()
@@ -430,6 +430,26 @@ def test_counterfactual_replay_scores_and_teaches(conn, s):
     assert model.n == 2 and model.predict(tokens("signal", {"score": "70+"}))[NAMES.index("runner")][0] > 0
     h = learner.honest(conn)
     assert h["n"] == 2 and h["n_taken"] == 1 and h["n_passed"] == 1 and h["copy_all_mean"] is not None
+
+
+def test_short_plans_are_learned_after_an_hour(conn, s):
+    model = Brain(len(PLANS))
+    t0 = time.time() - learner.short_horizon_s() - 300
+    conn.execute("INSERT INTO brain_opps(ts, decided_at, kind, ref, mint, wallet, entity, src_ts, features, decision,"
+                 " wanted, plan) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (int(t0), t0, "signal", "s1", MINT, "", "signal", int(t0), json.dumps({"score": "70+"}), "skip", 0,
+                  "pump"))
+    assert learner.evaluate(conn, model, s, candles_up, limit=5) == 1
+    o = conn.execute("SELECT * FROM brain_opps").fetchone()
+    g = json.loads(o["gains"])
+    assert o["evaluated_at"] is None and all(g[i] is not None for i in learner.SHORT)
+    assert all(g[i] is None for i in range(len(PLANS)) if i not in learner.SHORT)
+    assert learner.evaluate(conn, model, s, candles_up, limit=5) == 0  # nothing new until the long plans are over
+    later = t0 + learner.horizon_s() + learner.CACHE_GRACE_S + 60
+    assert learner.evaluate(conn, model, s, candles_up, now=later, limit=5) == 1
+    o = conn.execute("SELECT * FROM brain_opps").fetchone()
+    assert o["evaluated_at"] and all(x is not None for x in json.loads(o["gains"]))
+    assert o["realized_plan"] is not None and model.n > 1.9  # two steps (forgetting trims n a little)
 
 
 def test_no_candles_retries_then_gives_up(conn, s):
