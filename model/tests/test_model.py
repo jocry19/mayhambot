@@ -325,3 +325,17 @@ def test_seed_file_user_lines_get_top_priority(tmp_path, monkeypatch):
     assert seeds.from_files(conn) == 2
     pr = dict(conn.execute("SELECT address, priority FROM research_wallets"))
     assert pr[a] == 100.0 and pr[b] == 80.0
+
+
+def test_exit_study_keeps_out_of_sample_check_when_long_holds_are_not_complete(monkeypatch):
+    from research import exits
+    evs = [dict(mint=f"M{i}", ts=i, p=1.0) for i in range(100)]
+
+    def fake(pidx, mint, t, r):
+        if r["hold"] == "6h":
+            return None if t >= 60 else 0.5  # best on the old part, but recent 6 h outcomes are open
+        return 0.1 * r["tp"]
+
+    monkeypatch.setattr(exits, "replay", fake)
+    o = exits.study(evs, None, top_share=1.0)["out_of_sample"]
+    assert o and o["rule"]["hold"] != "6h" and o["n"] >= 10

@@ -61,12 +61,14 @@ def study(events, pidx, score_key="p", top_share=0.2, min_n=30):
     cut = int(len(evs) * 0.6)
     old_top = [j for j in top_idx if j < cut]
     new_top = [j for j in top_idx if j >= cut]
-    picked = table(old_top)[:1]
     oos = None
-    if picked:
-        i = GRID.index(picked[0]["rule"])
+    # best older-part rule that can be judged on the newer part (long holds of recent signals may not be
+    # complete yet; skipping to the next rule keeps the check instead of silently dropping it)
+    for cand in table(old_top):
+        i = GRID.index(cand["rule"])
         xs = [nets[i][j] for j in new_top if nets[i][j] is not None]
-        if xs:
-            oos = dict(rule=picked[0]["rule"], n=len(xs), mean_net=_mean(xs),
-                       win_rate=sum(1 for x in xs if x > 0) / len(xs), in_sample_mean=picked[0]["mean_net"])
+        if len(xs) >= 10:
+            oos = dict(rule=cand["rule"], n=len(xs), mean_net=_mean(xs),
+                       win_rate=sum(1 for x in xs if x > 0) / len(xs), in_sample_mean=cand["mean_net"])
+            break
     return dict(n=len(evs), n_top=len(top_idx), all=table(all_idx)[:5], top=table(top_idx)[:5], out_of_sample=oos)
