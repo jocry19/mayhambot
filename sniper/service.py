@@ -586,6 +586,12 @@ class Service:
                      "Launch-Trades %d neu, %d doppelt (beide Ströme oder Dev-Kauf) | Dekoder verworfen nach Grund: %s",
                      "aus" if not l2 else ("verbunden" if l2.connected else "getrennt"), d["decoded2"] / mins,
                      d["delivered2"] / mins, d["drops2"], d["trades"], d["dupes"], why)
+        # do the rejected trades belong to our own launches (then they are why launches get decided without trades)?
+        cut = time.time() - 300
+        with e.lock:
+            own = [m for t, m in list(rpcws.REJECTED) if t >= cut and m in e.launches]
+        log.info("Dekoder-Verwürfe (5 min): %d Trades eigener Launches (%d Launches) | nach Instruktion: %s",
+                 len(own), len(set(own)), ", ".join(f"{k} {v}" for k, v in sorted(rpcws.REJECT_IX.items())) or "keine")
         if self.logs_bonk:
             b = self.logs_bonk
             log.info("Bonk-Datenstrom: %s, %d Pools im Abo, %d Trades dekodiert, %d an Launches (%d nachgereicht) | "

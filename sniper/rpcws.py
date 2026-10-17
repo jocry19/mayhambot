@@ -35,7 +35,19 @@ def b58(b):
 V_SOL_RANGE, V_TOK_RANGE = (25.0, 200.0), (1.0e8, 1.2e9)
 REJECTS = {"trade": 0, "create": 0}
 REJECT_WHY = {}          # reason -> count (virtual SOL / token reserves below or above the range)
+REJECT_IX = {}           # instruction name at the end of the rejected event (buy, sell, buy_exact_sol_in, ...) -> count
+REJECTED = deque(maxlen=20000)   # (time, mint) of rejected trades: the service counts those of its own launches
 _SAMPLES = []            # the first rejected events, logged once with their values
+
+
+def ix_name(raw):
+    """The Anchor string at the end of newer pump.fun TradeEvents (u32 length + ascii), or ''."""
+    for n in range(1, 33):
+        if len(raw) >= n + 4 and int.from_bytes(raw[-n - 4:-n], "little") == n:
+            t = raw[-n:]
+            if all(48 <= c <= 122 for c in t):
+                return t.decode()
+    return ""
 
 
 def _reject_reason(v_sol, v_tok):
@@ -68,10 +80,17 @@ def decode_trade(data_b64):
         REJECTS["trade"] += 1     # a layout we do not know (or garbage): a broken price must not reach the engine
         why = _reject_reason(vsol / 1e9, vtok / 1e6)
         REJECT_WHY[why] = REJECT_WHY.get(why, 0) + 1
-        if len(_SAMPLES) < 5:
+        ix = ix_name(raw)
+        REJECT_IX[ix or "?"] = REJECT_IX.get(ix or "?", 0) + 1
+        import time as _t
+        REJECTED.append((_t.time(), mint))
+        if len(_SAMPLES) < 8:
             _SAMPLES.append(why)
-            log.warning("TradeEvent verworfen (%s): mint %s, v_sol %.3f SOL, v_tok %.0f, sol %.4f, tok %.0f, len %d",
-                        why, mint, vsol / 1e9, vtok / 1e6, sol / 1e9, tok / 1e6, len(raw))
+            rs, rt = struct.unpack_from("<QQ", raw, 113) if len(raw) >= 129 else (0, 0)
+            log.warning("TradeEvent verworfen (%s): mint %s, v_sol %.3f SOL, v_tok %.0f, real_sol %.3f, real_tok %.0f, "
+                        "sol %.4f, tok %.0f, ix %s, len %d%s", why, mint, vsol / 1e9, vtok / 1e6, rs / 1e9, rt / 1e6,
+                        sol / 1e9, tok / 1e6, ix or "?", len(raw),
+                        (", roh " + base64.b64encode(raw).decode()) if len(_SAMPLES) <= 3 else "")
         return None
     return {"mint": mint, "sol_lamports": sol, "token_raw": tok, "is_buy": is_buy, "user": user, "ts": ts,
             "v_sol_lamports": vsol, "v_tok_raw": vtok}

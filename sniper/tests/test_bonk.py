@@ -101,3 +101,13 @@ def test_paper_and_research_use_the_launch_fee():
     flat = research.trade_returns([row], path, rule, side, tx)[0]
     dear = research.trade_returns([dict(row, fee_pct=5.75)], path, rule, side, tx)[0]
     assert dear < flat - 0.08
+
+
+def test_rejected_pump_events_are_counted_by_mint_and_instruction():
+    import base64
+    import struct
+    raw = rpcws.TRADE_DISC + bytes(range(1, 33)) + struct.pack("<QQ", 0, 2_000_000_000_000) + b"\1" + bytes(32) \
+        + struct.pack("<qQQQQ", 1, 0, 886_000_000_000_000, 0, 0) + bytes(200) + struct.pack("<I", 3) + b"buy"
+    n = rpcws.REJECT_IX.get("buy", 0)
+    assert rpcws.decode_trade(base64.b64encode(raw).decode()) is None
+    assert rpcws.REJECT_IX["buy"] == n + 1 and rpcws.REJECTED[-1][1] == rpcws.b58(bytes(range(1, 33)))
