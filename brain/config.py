@@ -40,6 +40,12 @@ class Settings:
     # round-trip costs on top of the simulator's 3 %: copy 5.5 % in total, sniper launches 9 %
     extra_cost_copy: float = field(default_factory=lambda: _f("BRAIN_EXTRA_COST_COPY", 0.025))
     extra_cost_launch: float = field(default_factory=lambda: _f("BRAIN_EXTRA_COST_LAUNCH", 0.06))
+    # organic exits (brain/exits.py): sell the rest below this P(next 10 min > 0), half below exit_half_p when up
+    exit_sell_p: float = field(default_factory=lambda: _f("BRAIN_EXIT_SELL_P", 0.35))
+    exit_half_p: float = field(default_factory=lambda: _f("BRAIN_EXIT_HALF_P", 0.5))
+    exit_half_min_up: float = field(default_factory=lambda: _f("BRAIN_EXIT_HALF_MIN_UP", 0.10))
+    # auto = organic once its out-of-sample replays beat the plans; on = always (when trained); off = plans only
+    organic_exit: str = field(default_factory=lambda: _s("BRAIN_ORGANIC_EXIT", "auto").lower())
     half_life_h: float = field(default_factory=lambda: _f("BRAIN_HALF_LIFE_H", 120.0))
     # what counts as an opportunity
     min_whale_sol: float = field(default_factory=lambda: _f("BRAIN_MIN_WHALE_SOL", 0.3))
@@ -66,6 +72,10 @@ class Settings:
     @property
     def model_path(self) -> Path:
         return Path(self.db_path).parent / "brain" / "model.npz"
+
+    @property
+    def exit_model_path(self) -> Path:
+        return Path(self.db_path).parent / "brain" / "exit_model.npz"
 
     def extra_cost(self, kind: str) -> float:
         return self.extra_cost_launch if kind == "launch" else self.extra_cost_copy

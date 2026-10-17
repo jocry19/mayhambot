@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS brain_equity (
 CREATE TABLE IF NOT EXISTS brain_journal (
     day TEXT PRIMARY KEY, ts INTEGER, text TEXT, data TEXT, sent INTEGER DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS brain_exit_evals (
+    opp_id INTEGER PRIMARY KEY, ts INTEGER, kind TEXT, plan TEXT, plan_gain REAL, organic REAL, organic_reason TEXT,
+    organic_min REAL, hold_1h REAL, max_up REAL, evaluated_at INTEGER
+);
 CREATE TABLE IF NOT EXISTS brain_state (key TEXT PRIMARY KEY, value TEXT);
 """
 
