@@ -42,6 +42,9 @@ class ResearchSettings:
     enhanced_backfill: int = _i("RESEARCH_ENHANCED_BACKFILL", 1)  # tiered/user wallets via Helius Enhanced (100 cr)
     # measured cost of one round trip (fees, slippage, priority) used for every "after costs" number
     cost_roundtrip: float = _f("MODEL_COST_ROUNDTRIP", 0.06)
+    # a signal is acted on only after the next scoring cycle plus execution: labels and exit replays start
+    # at the price this long after the wallet trade, not at the wallet's own fill
+    entry_delay_s: float = _f("MODEL_ENTRY_DELAY_S", 60)
     default_supply: float = _f("RESEARCH_DEFAULT_SUPPLY", 1e9)  # pump.fun standard supply when unknown
 
 

@@ -351,3 +351,14 @@ def test_candle_high_before_the_entry_does_not_count_as_reached_after_it():
     assert idx.first_time_reaching("M", 100, 3600, 1.15) == 599  # counts at the candle end
     assert idx.max_between("M", -1, 3600) == 2.0  # whole candle inside the window: its high counts
     assert idx.max_between("M", 300, 500) is None or idx.max_between("M", 300, 500) <= 1.1  # candle not finished
+
+
+def test_labels_start_at_the_realistic_entry_after_the_delay():
+    from research import events as ev
+    from research.prices import PriceIndex
+    idx = PriceIndex()
+    idx._add("J", [(0, 1.0), (30, 1.6), (900, 1.6), (4000, 1.6)])  # jumped before we could have bought
+    hz = [("15m", 900, 0.5)]
+    assert ev.labels_at("J", 0, idx, hz, delay=0)["15m"]["pumped"] == 1
+    lab = ev.labels_at("J", 0, idx, hz, delay=60)["15m"]
+    assert lab["pumped"] == 0 and lab["net"] < 0

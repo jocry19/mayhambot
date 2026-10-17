@@ -46,7 +46,7 @@ def study(events, pidx, score_key="p", top_share=0.2, min_n=30):
     thr = sorted((e[score_key] for e in evs), reverse=True)[k - 1]
     nets = {}
     for i, r in enumerate(GRID):
-        nets[i] = [replay(pidx, e["mint"], e["ts"], r) for e in evs]
+        nets[i] = [replay(pidx, e["mint"], e["ts"] + rsettings.entry_delay_s, r) for e in evs]  # realistic entry
 
     def table(sel):
         rows = []

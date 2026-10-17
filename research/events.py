@@ -171,8 +171,10 @@ def _structure(f, t, window, history, tiers, buyers, created_at):
     f["early_sell"] = min(2.0, es / eb) if eb else 0.0
 
 
-def labels_at(mint, t, pidx, horizons):
-    """horizon name -> dict(max_ret, ret, pumped) or None when price data does not reach t + h yet."""
+def labels_at(mint, t, pidx, horizons, delay=None):
+    """horizon name -> dict(max_ret, ret, pumped) or None when price data does not reach t + h yet.
+    The outcome is measured from our realistic entry: `delay` seconds after the trade at t (see entry_delay_s)."""
+    t = t + (rsettings.entry_delay_s if delay is None else delay)
     p0 = pidx.price_at(mint, t)
     out = {}
     cov = pidx.coverage_until(mint)
