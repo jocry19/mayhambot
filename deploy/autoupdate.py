@@ -9,7 +9,8 @@ Spielt nichts ein, wenn
   - data/NO_AUTO_UPDATE existiert oder AUTO_UPDATE=0 in .env steht (Not-Aus),
   - LIVE_TRADING=true in .env steht oder offene Echtgeld-Positionen in der DB sind,
   - der Checkout lokale Änderungen hat oder nicht vorspulbar ist,
-  - der letzte Deploy weniger als AUTO_UPDATE_MIN (10) Minuten her ist,
+  - der letzte Deploy weniger als AUTO_UPDATE_MIN (30) Minuten her ist (Bündelung; 10 min nach einer roten
+    Runde oder bei [sofort]/[urgent]/hotfix in einer Commit-Zeile),
   - das Backup vor dem Update fehlschlägt (Integritätsprüfung),
 Nach dem Neustart müssen alle Dienste 3 min stabil laufen (gleiche PID) und das Dashboard antworten,
 sonst geht es automatisch zurück auf den alten Stand (Telegram-Meldung, Commit wird nicht wieder probiert).
@@ -314,6 +315,19 @@ def _foreground():
         log(f"priority: still in background band ({e})")
 
 
+URGENT_MARKS = ("[sofort]", "[urgent]", "hotfix")
+
+
+def _urgent(st: dict, head: str, target: str) -> str | None:
+    """Why this target should not wait for the bundling interval, or None."""
+    if st.get("red_streak"):
+        return "Fix nach roter Runde"
+    for line in git("log", "--format=%s", f"{head}..{target}").splitlines():
+        if any(m in line.lower() for m in URGENT_MARKS):
+            return line[:60]
+    return None
+
+
 def run_once(alert=ops.send_alert, now=None, health=None) -> str:
     env = ops.load_env()
     now = now or time.time()
@@ -355,9 +369,14 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
                      "Einspielen von Hand mit `.venv/bin/python mayham.py update`.")
     # launchd fires every 600 s counted from the previous start; without slack a deploy every 10 min would
     # often see 599 s and wait a whole extra round
-    gap = ops.cfg("AUTO_UPDATE_MIN", 10) * 60 - 90
+    # Every deploy restarts all services (stream connections, hourly stats and in-memory state start over): on
+    # 17.10. five deploys in 90 min. Pushes are bundled to one deploy per AUTO_UPDATE_MIN (30); a fix after a red
+    # round or a commit marked [sofort]/[urgent]/hotfix goes in after AUTO_UPDATE_URGENT_MIN (10).
+    urgent = _urgent(st, head, target)
+    mins = ops.cfg("AUTO_UPDATE_URGENT_MIN", 10) if urgent else ops.cfg("AUTO_UPDATE_MIN", 30)
+    gap = mins * 60 - 90
     if now - st.get("last_deploy", 0) < gap:
-        return "warte (höchstens ein Deploy pro 10 min)"
+        return f"warte (höchstens ein Deploy pro {mins:g} min, gebündelt)"
 
     # no deploy without a fresh, verified backup (integrity_check in ops.backup; a damaged copy is never written).
     # The hourly backup job counts when it is young enough: a backup of the grown DB takes ~10 min on the Mac.

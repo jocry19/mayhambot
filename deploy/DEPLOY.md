@@ -100,7 +100,7 @@ sein, sonst geht es automatisch zurück auf die laufende Version. Danach `mayham
 
 - Telegram: "⬆️ Update eingespielt: <hash>, Tests grün, 9 von 9 Dienste laufen" bzw. bei roten Tests einmal "↩️ Update nicht eingespielt" (weitere rote Runden nur im Log, nach 3 Runden einmal "🔴 Auto-Update hängt" mit den Testnamen).
   Alles steht auch in `logs/update.log`.
-- Höchstens ein Deploy pro 10 min; Commits dazwischen kommen gebündelt. Vorher ein Backup mit Integritätsprüfung,
+- Höchstens ein Deploy pro 30 min (`AUTO_UPDATE_MIN`), Commits dazwischen kommen gebündelt: jeder Deploy startet alle Dienste neu. Nach einer roten Runde oder bei `[sofort]`, `[urgent]` oder `hotfix` in einer Commit-Zeile schon nach 10 min (`AUTO_UPDATE_URGENT_MIN`). Vorher ein Backup mit Integritätsprüfung,
   schlägt es fehl, wartet das Update. Ist das stündliche Backup jünger als `AUTO_UPDATE_BACKUP_MAX_AGE_MIN`
   (60 min), wird es genommen (ein Backup der großen Datenbank dauert auf dem Mac ~10 min).
 - Die Tests laufen in einer frischen Kopie des Codes (git worktree) ohne `data/`, `logs/` und `.env` des Bots

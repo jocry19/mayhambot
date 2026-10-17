@@ -57,12 +57,12 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setattr(ops, "check_processes", lambda: {"signals": True, "web": True})
     alerts = []
 
-    def push(name, red=False):
+    def push(name, red=False, msg=None):
         (dev / name).write_text("x")
         if red:
             (dev / "RED").write_text("x")
         sh(dev, "git", "add", ".")
-        sh(dev, "git", "commit", "-qm", name)
+        sh(dev, "git", "commit", "-qm", msg or name)
         sh(dev, "git", "push", "-q", "origin", "HEAD:main")
 
     def head():
@@ -134,8 +134,21 @@ def test_one_deploy_per_interval(repo):
     push("a")
     assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"), now=1e9).startswith("eingespielt")
     push("b")
-    assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"), now=1e9 + 60).startswith("warte")
-    assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"), now=1e9 + 601).startswith("eingespielt")
+    ok = lambda: (True, "2 von 2 Dienste laufen stabil")   # noqa: E731
+    assert autoupdate.run_once(alerts.append, health=ok, now=1e9 + 60).startswith("warte")
+    assert autoupdate.run_once(alerts.append, health=ok, now=1e9 + 601).startswith("warte")   # bundled: 30 min
+    push("c")
+    assert autoupdate.run_once(alerts.append, health=ok, now=1e9 + 1801).startswith("eingespielt")   # b and c at once
+
+
+def test_urgent_commit_skips_the_bundling(repo):
+    work, push, head, alerts = repo
+    ok = lambda: (True, "2 von 2 Dienste laufen stabil")   # noqa: E731
+    push("a")
+    assert autoupdate.run_once(alerts.append, health=ok, now=1e9).startswith("eingespielt")
+    push("b", msg="safety: [sofort] rug check back on")
+    assert autoupdate.run_once(alerts.append, health=ok, now=1e9 + 300).startswith("warte")
+    assert autoupdate.run_once(alerts.append, health=ok, now=1e9 + 601).startswith("eingespielt")
 
 
 def test_dirty_checkout_waits(repo):
@@ -550,3 +563,13 @@ def test_hot_inserts_name_their_columns():
     for rel in ("core/db.py", "copytrade/store.py", "safety/store.py", "copytrade/strategy.py", "copytrade/ranking.py",
                 "copytrade/control.py", "copytrade/learn.py"):
         assert not bare.findall((root / rel).read_text()), rel
+
+
+def test_fix_after_a_red_round_skips_the_bundling(repo):
+    work, push, head, alerts = repo
+    ok = lambda: (True, "2 von 2 Dienste laufen stabil")   # noqa: E731
+    push("a", red=True)
+    assert autoupdate.run_once(alerts.append, health=ok, now=1e9).startswith("zurückgerollt")
+    push("fix")
+    r = autoupdate.run_once(alerts.append, health=ok, now=1e9 + 601)
+    assert not r.startswith("warte"), r          # tested after 10 min, not 30 (red or green does not matter here)
