@@ -54,6 +54,9 @@ class Service:
                                          name="RPC-Bonk-Datenstrom", mode="program", program=rpcws.LAUNCHLAB_PROGRAM,
                                          stale_sec=cfg.stale_sec) \
             if cfg.bonk_ws_url and rpcws.bonk_pool(rpcws.WSOL_MINT) else None
+        if cfg.bonk_ws_url and not self.logs_bonk:
+            log.warning("Bonk-Datenstrom aus: Paket 'solders' fehlt (pip install -r requirements.txt), "
+                        "bonk-Launches bleiben no_stream")
         try:
             saved = json.loads(store.get_state(self.conn, "rpc_trade_mode") or "{}")
         except ValueError:
