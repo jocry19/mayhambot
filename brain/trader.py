@@ -51,6 +51,7 @@ class Trader:
         self.rng = rng or random.Random()
         self.clock = clock
         self._safe = None  # the rug verdict of the opportunity being decided
+        self.too_late = 0  # whale buys the tracker delivered after max_whale_delay_s
         self.pending: dict[tuple[str, str], tuple] = {}  # (kind, ref) -> (row, entity, first seen): waiting for a pair
 
     # ------------------------------------------------------------------ wiring
@@ -92,9 +93,11 @@ class Trader:
             rows = c.execute("SELECT rowid AS rid, * FROM ct_swaps WHERE rowid>? ORDER BY rowid LIMIT 500",
                              (cur,)).fetchall()
             for r in rows:
-                if (r["side"] == "buy" and (r["sol_amount"] or 0) >= self.s.min_whale_sol
-                        and now - (r["ts"] or 0) <= self.s.max_whale_delay_s):
-                    out.append(("whale", r["sig"], r))
+                if r["side"] == "buy" and (r["sol_amount"] or 0) >= self.s.min_whale_sol:
+                    if now - (r["ts"] or 0) <= self.s.max_whale_delay_s:
+                        out.append(("whale", r["sig"], r))
+                    else:  # the tracker saw it too late (RPC rate limits): counted in the hourly line
+                        self.too_late += 1
             if rows:
                 store.put(c, "cursor_whale", rows[-1]["rid"])
         if store.has(c, "signals"):

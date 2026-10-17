@@ -50,7 +50,8 @@ class Service:
                                  (int(since),)).fetchone()
         n_open = c.execute("SELECT COUNT(*) FROM brain_positions WHERE status='open'").fetchone()[0]
         eq = self.trader.equity_snapshot()["equity_sol"]
-        return (f"{n} opportunities, {ent} bought, {held} wanted but blocked by a gate, {n_open} open, equity {eq:.3f} SOL, "
+        late, self.trader.too_late = self.trader.too_late, 0
+        return (f"{n} opportunities ({late} whale buys arrived too late), {ent} bought, {held} wanted but blocked by a gate, {n_open} open, equity {eq:.3f} SOL, "
                 f"model {self.model.d - 1} tokens / {self.model.n:.0f} outcomes")
 
     def save(self) -> None:

@@ -9,7 +9,7 @@ Jede Gelegenheit wird einzeln entschieden, mit allem, was der Bot in dem Moment 
 
 | Quelle | Gelegenheit | Kontext (Auszug) |
 |---|---|---|
-| `ct_swaps` (Copy-Tracker) | Wal-Kauf ≥ `BRAIN_MIN_WHALE_SOL`, höchstens `BRAIN_MAX_WHALE_DELAY_S` alt | Wal-Stufe und Cluster, Wal-Bilanz nach Kosten (`learn.wallet_edge`), Launch-Bot, Kaufgröße, weitere Smart Wallets im Coin (30 min), Signal auf dem Coin (6 h), Zentrale-Merkmale des Wals |
+| `ct_swaps` (Copy-Tracker) | Wal-Kauf ≥ `BRAIN_MIN_WHALE_SOL`, höchstens `BRAIN_MAX_WHALE_DELAY_S` (300 s) alt, spätere zählt die Stundenzeile | Wal-Stufe und Cluster, Wal-Bilanz nach Kosten (`learn.wallet_edge`), Launch-Bot, Kaufgröße, weitere Smart Wallets im Coin (30 min), Signal auf dem Coin (6 h), Zentrale-Merkmale des Wals |
 | `signals` | Smart-Money-Signal | Score, Smart Wallets, Ultra dabei, Signal-EV, Call-Nummer |
 | `sniper_launches` + `sniper_positions` | Sniper-Einstieg | Sniper-Score und -Risiko, Bundle, Insider, Dev-Launches, Top-10, Socials, Modell-Chance |
 | alle | | Liquidität, Market Cap, Coin-Alter, Kurs 5 min, Kaufdruck, Preis seit Auslöser, Verzögerung, Rug-Urteil (`safety.get`), Marktphase (`market.context.phase`), walk-forward-bestätigte Zentrale-Merkmale (`intel.trusted_at`), Tageszeit, eigene Form |
