@@ -28,7 +28,7 @@ SKIP_LABELS = {
     "score": "Score zu niedrig",
     "safety": "Rug-Schutz",
     "rug_p": "Rug-Modell (Wahrscheinlichkeit zu hoch)",
-    "capacity": "kein Platz (Limits, Guthaben)",
+    "capacity": "technische Obergrenze oder kein Fill",
     "budget": "API-Budget erschöpft, nicht tief geprüft",
     "external": "Pool außerhalb pump.fun (nur beobachtet)",
     "no_stream": "kein Trade-Datenstrom für diese Plattform (bonk)",

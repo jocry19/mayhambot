@@ -217,21 +217,22 @@ class Trader:
             fl = (raw or {}).get("flip") or {}
             if fl.get("n", 0) >= 5 and fl.get("share", 0) >= FLIP_MAX:
                 return f"Wal verkauft meist sofort wieder ({fl['share']:.0%} seiner Käufe binnen 2 min)"
+        # paper has no budget (user, 10/2026): no daily loss stop, no exploration quota, no balance check (the paper
+        # balance may go below zero). Each stays available as a setting (0 = off); max_open is a technical ceiling only
         n_open = c.execute("SELECT COUNT(*) FROM brain_positions WHERE status='open'").fetchone()[0]
-        if n_open >= self.s.max_open:
-            return f"schon {n_open} Positionen offen"
+        if self.s.max_open and n_open >= self.s.max_open:
+            return f"technische Obergrenze: {n_open} Positionen offen"
         t0 = store.day_start(self.clock())
-        lost = c.execute("SELECT COALESCE(SUM(pnl_sol),0) FROM brain_positions WHERE status='closed' AND closed_at>=?",
-                         (t0,)).fetchone()[0]
-        if lost <= -self.s.max_daily_loss_sol:
-            return f"Tagesverlust-Limit erreicht ({lost:+.2f} SOL)"
-        if d.explore:
+        if self.s.max_daily_loss_sol:
+            lost = c.execute("SELECT COALESCE(SUM(pnl_sol),0) FROM brain_positions WHERE status='closed' "
+                             "AND closed_at>=?", (t0,)).fetchone()[0]
+            if lost <= -self.s.max_daily_loss_sol:
+                return f"Tagesverlust-Limit erreicht ({lost:+.2f} SOL)"
+        if d.explore and self.s.explore_per_day:
             n = c.execute("SELECT COUNT(*) FROM brain_opps WHERE explore=1 AND decision='enter' AND ts>=?",
                           (t0,)).fetchone()[0]
             if n >= self.s.explore_per_day:
                 return f"Erkundungs-Budget für heute verbraucht ({n})"
-        if store.balance(c, self.s.start_balance_sol) < d.size_sol + 0.01:
-            return "Guthaben zu klein"
         try:
             level, blocked, checked, reasons = self.safety_check(c, mint)
         except Exception as e:

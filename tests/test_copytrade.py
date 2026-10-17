@@ -909,16 +909,20 @@ def test_sale_is_credited_once_even_if_booking_fails_midway(env, monkeypatch):
     assert ex.balance(conn) == pytest.approx(bal + sold)  # credited exactly once
 
 
-def test_buys_in_flight_reserve_their_size(env):
+def test_paper_has_no_budget(env):
+    # user, 10/2026: paper buys never stop on balance, open positions or the daily loss; the balance may go negative
     s, conn, ex, state = env
     st = strategy.Strategy(conn, s, ex)
     store.set_state(conn, "paper_balance_sol", 0.6)
     conn.execute("INSERT INTO ct_positions(mode, strategy, managed, mint, symbol, opened_at, size_sol, tokens, "
                  "entry_cost_sol, status) VALUES ('paper','signal','auto','OTHER','X',?,0.5,0,0,'opening')",
                  (int(time.time()),))
+    conn.execute("INSERT INTO ct_positions(mode, strategy, managed, mint, symbol, opened_at, closed_at, size_sol, "
+                 "tokens, entry_cost_sol, status, pnl_sol) VALUES ('paper','whale','auto','LOSS','L',?,?,1,0,0,"
+                 "'closed',-50)", (int(time.time()), int(time.time())))
     p = control.preset(conn, "whale")
-    assert st.open("whale", "auto", MINT, 0.5, state["snap"], p, tp=0.5, hold=60, reason="t") is None
-    assert any("andere Käufe" in r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'"))
+    assert st._risk_block("whale", p, 5.0, MINT) is None
+    assert st.open("whale", "auto", MINT, 0.5, state["snap"], p, tp=0.5, hold=60, reason="t") is not None
 
 
 def test_metrics_count_rugs_drawdowns_and_each_whale_buy_once(env):
