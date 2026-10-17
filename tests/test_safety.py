@@ -745,3 +745,30 @@ def test_block0_dust_buy_signature_warns_only_when_we_saw_the_first_moments():
     c.execute("UPDATE sniper_launches SET created_ts=?", (NOW - 86400,))
     c.commit()
     assert safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True).checks["block0"]["status"] == "unknown"
+
+
+def test_staged_pump_warns_on_fast_confirmed_mcap_and_fast_migration():
+    c = conn()
+    c.execute("CREATE TABLE sniper_launches (mint TEXT, created_ts INTEGER, migrated_ts INTEGER)")
+    c.execute("INSERT INTO sniper_launches VALUES (?, ?, NULL)", (MINT, NOW - 3600))
+    c.executemany("INSERT INTO token_prices(mint, ts, price_usd, mcap_usd, liquidity_usd) VALUES (?,?,?,?,?)",
+                  [(MINT, NOW - 3600 + t, 0.0004, 400000, 52000) for t in (180, 400, 700)])
+    c.commit()
+    a = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
+    st = a.checks["staged"]
+    assert st["status"] == "ok" and st["risk"] == 50 and st["data"]["fast_after_sec"] == 180 and not a.blocked
+    # one unconfirmed snapshot only: weaker; a snapshot with too little liquidity does not count at all
+    c.execute("DELETE FROM token_prices WHERE ts > ?", (NOW - 3600 + 180,))
+    c.execute("INSERT INTO token_prices VALUES (?,?,?,?,?)", (MINT, NOW - 3600 + 500, 0.0004, 400000, 3000))
+    c.commit()
+    assert safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True).checks["staged"]["risk"] == 30
+    # slow coin, but migrated 2 min after launch
+    c.execute("DELETE FROM token_prices")
+    c.execute("UPDATE sniper_launches SET migrated_ts=?", (NOW - 3600 + 120,))
+    c.commit()
+    st = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True).checks["staged"]
+    assert st["risk"] == 35 and st["data"]["migrated_after_sec"] == 120
+    c.execute("UPDATE sniper_launches SET migrated_ts=NULL")
+    c.commit()
+    st = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True).checks["staged"]
+    assert st["risk"] == 0 and st["status"] == "ok"

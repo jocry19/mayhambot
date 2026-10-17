@@ -104,6 +104,12 @@ class SafetySettings:
     block0_max_sol: float = field(default_factory=lambda: _f("SAFETY_BLOCK0_MAX_SOL", 0.03))
     block0_min_wallets: int = field(default_factory=lambda: _i("SAFETY_BLOCK0_MIN_WALLETS", 3))
     block0_max_first_seen_sec: int = field(default_factory=lambda: _i("SAFETY_BLOCK0_MAX_FIRST_SEEN_SEC", 300))
+    # staged pump: big market cap or migration within minutes of the launch (check staged)
+    staged_window_sec: int = field(default_factory=lambda: _i("SAFETY_STAGED_WINDOW_SEC", 300))
+    staged_confirm_sec: int = field(default_factory=lambda: _i("SAFETY_STAGED_CONFIRM_SEC", 900))
+    staged_min_mcap: float = field(default_factory=lambda: _f("SAFETY_STAGED_MIN_MCAP", 250000))
+    staged_min_liq: float = field(default_factory=lambda: _f("SAFETY_STAGED_MIN_LIQ", 20000))
+    staged_min_snapshots: int = field(default_factory=lambda: _i("SAFETY_STAGED_MIN_SNAPSHOTS", 3))
     bad_wallets_file: str = field(default_factory=lambda: os.getenv("SAFETY_BAD_WALLETS_FILE", ""))  # "" = safety/bad_wallets.txt
     use_rugcheck: bool = field(default_factory=lambda: _b("SAFETY_USE_RUGCHECK", True))
 

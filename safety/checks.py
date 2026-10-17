@@ -975,6 +975,57 @@ def check_block0(ctx):
     return r.finish(cap=60)
 
 
+def check_staged(ctx):
+    """Staged pump (no network): the coin reached a big market cap within minutes of its launch, or migrated off
+    the bonding curve that fast. Backup 2026-10-17: launches at >= 250 k$ market cap within 5 min (mostly borrowed
+    brand names: Coca-Cola, GTA6, Apple, SpaceX ...; liquidity only 12-15 % of the market cap) ended at <= 0.6 % of
+    their peak with ~1.9 k$ left in 15 of 16 cases, several after pumping to 1-4 M$ first; coins reaching 250 k$
+    slowly drained in 57 % (31/54). Migration within 1-5 min rugged 56-62 % (n=211) vs 36-43 % for slower
+    migrations and 12 % overall. The name itself adds nothing the speed does not already say, so it is not used.
+    A market-cap snapshot only counts with liquidity >= 20 k$ and >= 2 % of the market cap, and a high only counts
+    when SAFETY_STAGED_MIN_SNAPSHOTS such snapshots confirm it. Warning, no block."""
+    r = CheckResult("staged", "Inszenierter Pump")
+    c = ctx.cfg
+    created = _created_ts(ctx)
+    if not created:
+        r.status = "unknown"
+        return r.finish()
+    try:
+        rows = ctx.conn.execute(
+            "SELECT ts, mcap_usd, liquidity_usd FROM token_prices WHERE mint=? AND ts>=? AND ts<=? "
+            "AND mcap_usd>=? AND liquidity_usd>=? AND liquidity_usd>=0.02*mcap_usd ORDER BY ts",
+            (ctx.mint, created, created + c.staged_window_sec + c.staged_confirm_sec, c.staged_min_mcap,
+             c.staged_min_liq)).fetchall()
+    except Exception:  # noqa: BLE001
+        rows = []
+    try:
+        mig = ctx.conn.execute("SELECT migrated_ts FROM sniper_launches WHERE mint=?", (ctx.mint,)).fetchone()
+        mig = int(mig[0]) - created if mig and mig[0] else None
+    except Exception:  # noqa: BLE001
+        mig = None
+    fast = [x for x in rows if x[0] <= created + c.staged_window_sec]
+    r.data.update(created_ts=created, migrated_after_sec=mig, n_snapshots=len(rows))
+    if fast:
+        ts, mcap, liq = fast[0]
+        r.data.update(fast_mcap_usd=mcap, fast_after_sec=ts - created, liq_mcap=round(liq / mcap, 3))
+        txt = (f"{mcap / 1000:,.0f} k$ Market Cap schon {max(1, (ts - created) // 60)} min nach dem Start, "
+               f"Liquidität nur {100 * liq / mcap:.0f} % davon").replace(",", ".")
+        if len(rows) >= c.staged_min_snapshots:
+            r.add(50, txt + ": Muster eines inszenierten Pumps. Solche Coins fielen in unseren Daten in 15 von 16 "
+                            "Fällen auf Restliquidität.")
+        else:
+            r.add(30, txt + " (noch nicht bestätigt): mögliches Pump-Muster.")
+    if mig is not None and 0 <= mig <= c.staged_window_sec:
+        r.add(35, f"Schon {max(1, mig // 60)} min nach dem Start von der Bonding-Curve migriert: solche Coins "
+                  "ruggten in unseren Daten zu rund 60 % (sonst 12 %).")
+    if not r.reasons:
+        if not rows and mig is None and ctx.now - created < c.staged_window_sec:
+            r.status = "unknown"   # too early to say
+        else:
+            r.positives.append("Kein auffällig schneller Anstieg direkt nach dem Start.")
+    return r.finish(cap=60)
+
+
 def check_exit(ctx):
     """Soft rug in progress, from the intel service's latest coin features (no network): insiders selling,
     liquidity leaving, smart buyers getting out. Most rugs of young coins with burned LP look like this."""
@@ -1012,5 +1063,5 @@ def check_exit(ctx):
 
 QUICK = [check_authorities, check_sell_sim, check_liquidity, check_lp, check_socials, check_wash,
          check_rugcheck, check_holders, check_exit, check_history, check_watchlist,
-         check_block0]
+         check_block0, check_staged]
 DEEP = [check_dev, check_insiders, check_bundles]
