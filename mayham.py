@@ -180,12 +180,16 @@ def _compact_if_flagged(db=None):
     flag = db.parent / "COMPACT_DB"
     if not flag.exists() or not db.exists():
         return None
+    busy = db.parent / "COMPACTING"   # watchdog and auto-updater wait while this exists (deploy/ops.py compacting)
+    busy.write_text(str(os.getpid()))
     try:
         from core import retention
         msg = retention.compact(db)
     except Exception as e:  # noqa: BLE001 - a failed VACUUM leaves the file as it was; services start anyway
         msg = f"Verdichtung fehlgeschlagen: {type(e).__name__}: {e}"
-    flag.unlink(missing_ok=True)
+    finally:
+        busy.unlink(missing_ok=True)
+    flag.unlink(missing_ok=True)   # skipped or failed: the nightly retention pass sets it again when still useful
     print(msg, flush=True)
     return msg
 

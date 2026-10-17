@@ -160,6 +160,21 @@ def test_index_only_problems_are_repairable(tmp_path):
     c.commit()
     c.close()
     assert ops._repair_indexes(db) == []
+    assert ops._broken_indexes(["row 5 missing from index idx_trades_wallet_ts",
+                                "row 9 missing from index idx_trades_wallet_ts",
+                                "wrong # of entries in index sqlite_autoindex_trades_1"]) == [
+        "idx_trades_wallet_ts", "sqlite_autoindex_trades_1"]
+    stmts = []
+    real = sqlite3.connect
+
+    def spy(*a, **k):
+        c = real(*a, **k)
+        c.set_trace_callback(stmts.append)
+        return c
+    import unittest.mock
+    with unittest.mock.patch.object(ops.sqlite3, "connect", spy):
+        assert ops._repair_indexes(db, names=["i"], check=False) == []
+    assert 'REINDEX "i"' in stmts and "REINDEX" not in stmts      # named only, never the whole live database
 
 
 def test_failed_backup_blocks_deploy(repo):
@@ -511,3 +526,16 @@ def test_prune_backups_hourly_over_days_keeps_dailies(tmp_path, monkeypatch):
     assert sum(a < 6 for a in ages) == 6
     assert 4 <= sum(6 <= a < 24 for a in ages) <= 6     # 18 h touch at most 6 fixed 4-h windows
     assert sum(a >= 24 for a in ages) >= 3          # one per earlier day survives
+
+
+def test_health_check_starts_after_the_startup_vacuum(repo, monkeypatch):
+    """Services start only after the VACUUM; down while it runs must not roll back a good commit."""
+    work, push, head, alerts = repo
+    clock = FakeClock()
+    monkeypatch.setattr(autoupdate, "time", clock)
+    monkeypatch.setattr(autoupdate, "_services_now", lambda: ["a"])
+    monkeypatch.setattr(ops, "check_dashboard", lambda: True)
+    done_at = clock.t + 600                                   # a 10-min VACUUM
+    monkeypatch.setattr(ops, "compacting", lambda now=None: clock.t < done_at)
+    monkeypatch.setattr(autoupdate, "_pids", lambda names: {"a": 1 if clock.t >= done_at else None})
+    assert autoupdate.health_check(window=180, interval=15)[0]

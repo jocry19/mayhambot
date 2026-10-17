@@ -135,6 +135,9 @@ def health_check(window=None, interval=15) -> tuple[bool, str]:
     window grows once by PLANNED_GRACE_S so the new process can come up. Returns (ok, detail)."""
     window = window if window is not None else ops.cfg("AUTO_UPDATE_HEALTH_S", 180)
     names = _services_now()
+    waited = time.time()
+    while ops.compacting() and time.time() - waited < ops.cfg("COMPACT_MAX_MIN", 120) * 60:
+        time.sleep(interval)    # the supervisor VACUUMs before starting the services: the window starts after
     t0 = time.time()
     end = t0 + window
     stable_since, last, detail = None, None, "noch nicht geprüft"

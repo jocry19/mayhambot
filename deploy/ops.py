@@ -38,6 +38,7 @@ import argparse
 import datetime as dt
 import gzip
 import json
+import re
 import os
 import platform
 import shutil
@@ -558,6 +559,23 @@ def ops_report() -> str:
     return "🛠 <b>Betrieb</b>\n" + "\n".join(lines)
 
 
+COMPACTING = "COMPACTING"   # written by mayham.py next to the DB while the one-time VACUUM runs before the services
+
+
+def compacting(now: float | None = None) -> bool:
+    """True while the supervisor compacts the database before starting the services (no service is up then)."""
+    f = db_path().parent / COMPACTING
+    try:
+        return 0 <= (now or time.time()) - f.stat().st_mtime < cfg("COMPACT_MAX_MIN", 120) * 60
+    except OSError:
+        return False
+
+
+def supervised() -> bool:
+    """The launchd agent runs `mayham.py run`, which restarts a crashed service on its own (with backoff)."""
+    return IS_MAC and launchd_loaded(APP_LABEL)
+
+
 def update_in_progress(now: float | None = None) -> bool:
     """True while an auto-update round is between its pull/gate and the end of its health check."""
     try:
@@ -580,6 +598,11 @@ def watchdog(args) -> int:
 
     rotate_logs(quiet=True)
     r = collect()
+    if compacting(now):
+        # services wait for the VACUUM; a restart now would kill it half way and start it over on the next start
+        for k in ("app_down", "service_down", "dashboard_down", "feed_stalled", "copytrade_stalled",
+                  "sniper_stalled", "service_hung"):
+            r["problems"].pop(k, None)
     locks = new_lock_errors(st)
     if locks > cfg("LOCK_ALERT_PER_RUN", 20):
         r["problems"]["db_locked"] = f"Datenbank überlastet: {locks}× 'database is locked' in 2 min."
@@ -595,7 +618,10 @@ def watchdog(args) -> int:
         p["msg"] = msg
         if p["count"] < CONFIRM_RUNS:
             continue
-        if key in restartable:
+        if key in restartable and not (key == "service_down" and supervised()
+                                       and now - p["first"] < cfg("SERVICE_DOWN_RESTART_MIN", 15) * 60):
+            # one service in its crash backoff is the supervisor's job; restarting the whole app for it would
+            # stop the 9 healthy ones too. Only when it stays down past the backoff does the watchdog step in.
             need_restart.append(key)
         if not p["alerted"] or now - p["alerted"] > repeat:
             if send_alert(f"🔴 {msg}"):
@@ -662,12 +688,26 @@ def _index_only(problems) -> bool:
     return bool(problems) and all(any(k in p for k in INDEX_ONLY) for p in problems)
 
 
-def _repair_indexes(path: Path, timeout: float = 60) -> list[str]:
-    """REINDEX the database (seconds for ~200k rows, waits for the services' write lock), then re-check."""
-    c = sqlite3.connect(path, timeout=timeout)
+def _broken_indexes(problems) -> list[str]:
+    """Index names from integrity_check lines like 'row 5 missing from index idx_x'."""
+    names = []
+    for p in problems:
+        m = re.search(r"\bindex (\S+)\s*$", p)
+        if m and m.group(1) not in names:
+            names.append(m.group(1))
+    return names
+
+
+def _repair_indexes(path: Path, timeout: float = 60, names=None, check=True) -> list[str]:
+    """REINDEX (all, or only the named indexes one at a time: each holds the write lock just for its own rebuild,
+    not one lock across every index of the live database), then re-check unless check=False."""
+    c = sqlite3.connect(path, timeout=timeout, isolation_level=None)
     try:
         c.execute(f"PRAGMA busy_timeout={int(timeout * 1000)}")
-        c.execute("REINDEX")
+        for stmt in ([f'REINDEX "{n}"' for n in names] if names else ["REINDEX"]):
+            c.execute(stmt)
+        if not check:
+            return []
         return [r[0] for r in c.execute("PRAGMA integrity_check").fetchall() if r[0] != "ok"]
     finally:
         c.close()
@@ -694,9 +734,13 @@ def _snapshot_db(src: Path, dst: Path):
         left = _repair_indexes(dst)
         if left:
             raise RuntimeError(f"Integritätsprüfung der Kopie fehlgeschlagen nach REINDEX: {left[0]}")
-        live_left = _repair_indexes(src)
+        # live: only the broken indexes, one by one, and no full integrity_check on the live file (the next
+        # hourly backup checks its copy again and repeats this if something is still off)
+        names = _broken_indexes(problems)
+        _repair_indexes(src, names=names or None, check=False)
         msg = (f"🛠️ Datenbank: {len(problems)} kaputte Index-Einträge neu aufgebaut "
-               f"({'Live-DB jetzt ok' if not live_left else 'Live-DB noch: ' + live_left[0]}), keine Daten verloren.")
+               f"({', '.join(names) or 'alle Indizes'}; Live-DB repariert, das nächste Backup prüft nach), "
+               "keine Daten verloren.")
         print(msg)
         try:
             send_alert(msg)

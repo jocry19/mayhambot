@@ -1,3 +1,4 @@
+import os
 import types
 import sqlite3
 import sys
@@ -171,3 +172,50 @@ def test_retention_counts_only_when_switched_off(tmp_path, monkeypatch):
     c = sqlite3.connect(p)
     assert c.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
     assert c.execute("SELECT SUM(n) FROM trades_hourly").fetchone()[0] == 10
+
+
+def _watchdog_env(tmp_path, monkeypatch, problems):
+    _setup(tmp_path, monkeypatch)
+    state, restarts, clock = {"last_summary": 2e9}, [], [1_000_000.0]
+    monkeypatch.setattr(ops.time, "time", lambda: clock[0])
+    monkeypatch.setattr(ops, "load_state", lambda: state)
+    monkeypatch.setattr(ops, "save_state", lambda s: None)
+    monkeypatch.setattr(ops, "send_alert", lambda m: True)
+    monkeypatch.setattr(ops, "restart_app", lambda why: restarts.append(why) or "App neu gestartet")
+    monkeypatch.setattr(ops, "rotate_logs", lambda **k: 0)
+    monkeypatch.setattr(ops, "new_lock_errors", lambda st: 0)
+    monkeypatch.setattr(ops, "collect", lambda: {"problems": dict(problems)})
+    monkeypatch.setattr(ops, "build_summary", lambda: "x")
+    for name in ("nightly_maintenance", "check_planned_restarts", "check_credit_alerts", "check_service_budgets"):
+        monkeypatch.setattr(ops, name, lambda *a, **k: None)
+    monkeypatch.setattr(ops, "RESTART_COOLDOWN", 0)
+    return restarts, clock, types.SimpleNamespace(no_restart=False)
+
+
+def test_watchdog_waits_for_the_startup_vacuum(tmp_path, monkeypatch):
+    """The supervisor compacts the DB before starting services; app_down then is expected, not a reason to kill it."""
+    restarts, clock, args = _watchdog_env(tmp_path, monkeypatch, {"app_down": "mayhambot läuft nicht"})
+    busy = tmp_path / "data" / ops.COMPACTING
+    busy.write_text("1")
+    os.utime(busy, (clock[0], clock[0]))
+    for _ in range(4):
+        ops.watchdog(args)
+        clock[0] += 120
+    assert restarts == []
+    busy.unlink()
+    ops.watchdog(args)
+    ops.watchdog(args)
+    assert restarts
+
+
+def test_supervised_single_crash_loop_is_left_to_the_supervisor(tmp_path, monkeypatch):
+    restarts, clock, args = _watchdog_env(tmp_path, monkeypatch, {"service_down": "Teil-Ausfall: brain läuft nicht."})
+    monkeypatch.setattr(ops, "supervised", lambda: True)
+    for _ in range(7):                       # 12 min: the supervisor's backoff is at most 5 min
+        ops.watchdog(args)
+        clock[0] += 120
+    assert restarts == []
+    for _ in range(2):
+        ops.watchdog(args)
+        clock[0] += 120
+    assert len(restarts) == 1                # still down after 15 min: the watchdog steps in
