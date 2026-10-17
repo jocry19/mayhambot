@@ -821,10 +821,14 @@ _latency = {}   # host -> EWMA ms (this process)
 _pool_fail = {}  # host -> consecutive failures (this process)
 # An endpoint can answer one method and refuse another for long stretches (api.mainnet-beta: getTransaction 429
 # all day, getSignaturesForAddress fine). Each 429 for (endpoint, method) keeps that method away from it for
-# METHOD_AVOID_BASE * 2^(n-1) s (n = 429s in a row, capped), shared by all services; a success resets n.
+# METHOD_AVOID_BASE * 2^(n-1) s (capped), shared by all services. n is a strike score: +1 per 429, times
+# METHOD_AVOID_DECAY per success, so an endpoint that refuses a method every few calls stays away for longer
+# instead of being reset by each odd success (17.10.: getTransaction on mainnet-beta banned and freed
+# thousands of times). A success never lifts a running ban; it runs out on its own.
 METHOD_AVOID_BASE = 10
 METHOD_AVOID_MAX = 600
-_method_429 = {}    # (host, method) -> consecutive 429s (this process)
+METHOD_AVOID_DECAY = 0.75
+_method_429 = {}    # (host, method) -> strike score (this process)
 _method_stats = {}  # (host, method) -> {"calls", "429", "avoided"} (this process)
 
 
@@ -1025,8 +1029,8 @@ def _pool_result(host, ok, ms=None, status=None, method=None):
     if ok:
         _pool_fail[host] = 0
         if method and _method_429.get((host, method)):
-            _method_429[(host, method)] = 0
-            _pool_edit(lambda st: (st.get(host, {}).get("avoid") or {}).pop(method, None))
+            n = _method_429[(host, method)] * METHOD_AVOID_DECAY
+            _method_429[(host, method)] = n if n >= 0.25 else 0
         if ms is not None:
             _latency[host] = ms if host not in _latency else 0.8 * _latency[host] + 0.2 * ms
             _count(host, "latency_ms_sum", ms)
@@ -1038,11 +1042,11 @@ def _pool_result(host, ok, ms=None, status=None, method=None):
         if method and method != "batch":
             _mstat(host, method, "429")
             n = _method_429[(host, method)] = _method_429.get((host, method), 0) + 1
-            away = min(METHOD_AVOID_BASE * 2 ** (n - 1), METHOD_AVOID_MAX)
+            away = round(min(METHOD_AVOID_BASE * 2 ** (n - 1), METHOD_AVOID_MAX))
             _pool_edit(lambda st: st.setdefault(host, {}).setdefault("avoid", {}).__setitem__(
                 method, time.time() + away))
-            if n in (3, 6) or away == METHOD_AVOID_MAX:
-                log.info("public RPC %s refuses %s (%d x 429 in a row), other endpoints for %d s",
+            if any(n - 1 < k <= n for k in (3, 6)) or away == METHOD_AVOID_MAX:
+                log.info("public RPC %s refuses %s (strike score %.1f), other endpoints for %d s",
                          host, method, n, away)
         return
     _pool_fail[host] = _pool_fail.get(host, 0) + 1

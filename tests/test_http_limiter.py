@@ -472,12 +472,29 @@ def test_endpoint_refusing_one_method_is_avoided_for_it(monkeypatch, tmp_path):
     assert calls[-1] == ("https://a.example", "getSlot")
     st = http.method_stats()["a.example"]["getTransaction"]
     assert st["429"] == 1 and st["avoided"] == 4  # the retry plus three calls
-    # backoff doubles per 429 in a row and a success clears it
+    # backoff doubles per 429 in a row; a success does not lift the running ban
     http._pool_result("a.example", False, status=429, method="getTransaction")
     away = http.pool_status()["a.example"]["avoid"]["getTransaction"] - http.time.time()
-    assert 2 * http.METHOD_AVOID_BASE - 1 < away <= 2 * http.METHOD_AVOID_BASE
+    assert 2 * http.METHOD_AVOID_BASE - 2 < away <= 2 * http.METHOD_AVOID_BASE
     http._pool_result("a.example", True, 5.0, 200, method="getTransaction")
-    assert "getTransaction" not in http.pool_status()["a.example"]["avoid"]
+    assert "getTransaction" in http.pool_status()["a.example"]["avoid"]
+
+
+def test_method_ban_grows_when_429s_and_successes_alternate(monkeypatch, tmp_path):
+    """17.10.: mainnet-beta answered getTransaction now and then, each success reset the ban to 10 s, so it was
+    banned and freed thousands of times. Successes now only wear the strike score down."""
+    _fresh(monkeypatch, tmp_path)
+    monkeypatch.setenv("PUBLIC_RPC_URLS", "https://a.example,https://c.example")
+    monkeypatch.setattr(http, "_method_429", {})
+    monkeypatch.setattr(http, "_method_stats", {})
+    for _ in range(8):
+        http._pool_result("a.example", True, 5.0, 200, method="getTransaction")
+        http._pool_result("a.example", False, status=429, method="getTransaction")
+    away = http.pool_status()["a.example"]["avoid"]["getTransaction"] - http.time.time()
+    assert away > 4 * http.METHOD_AVOID_BASE
+    for _ in range(30):  # a long healthy run wears it off completely
+        http._pool_result("a.example", True, 5.0, 200, method="getTransaction")
+    assert http._method_429[("a.example", "getTransaction")] == 0
 
 
 def test_own_transactions_keep_helius_when_share_used_up(monkeypatch, tmp_path):
