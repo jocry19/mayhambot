@@ -204,3 +204,22 @@ def test_wash_trading_vetoes_a_call(monkeypatch):
     assert engine._reason(dict(out, ev=0.2), cfg) == "safety_drop"          # also when the EV table decides
     a.override = "allow"                                                     # manual release wins
     assert engine._reason(engine.apply_safety(None, "K", m), cfg) is None
+
+
+def test_token_refresh_keeps_watch_flags(tmp_path, monkeypatch):
+    from core.models import Token
+    from signals import run
+    c = conn(tmp_path)
+    c.execute("INSERT INTO tokens(mint, tracked, last_updated) VALUES ('W', 1, 0)")
+    c.execute("INSERT INTO tokens(mint, tracked, last_updated) VALUES ('S', 0, 0)")
+    c.execute("INSERT INTO signals(ts, mint, score, price_usd) VALUES (?, 'S', 40, 1.0)", (int(__import__('time').time()) - 600,))
+    c.commit()
+    asked = []
+
+    def info(mints):
+        asked.extend(mints)
+        return [Token(mint=m, symbol=m, price_usd=2.0, price_change_m5=7.0, txns_m5=40) for m in mints]
+    monkeypatch.setattr(run.market, "token_info", info)
+    assert run.refresh_tokens(c) == 2 and sorted(asked) == ["S", "W"]
+    r = {x["mint"]: x for x in c.execute("SELECT * FROM tokens")}
+    assert r["S"]["tracked"] == 0 and r["W"]["tracked"] == 1 and r["W"]["txns_m5"] == 40 and r["S"]["last_updated"] > 0

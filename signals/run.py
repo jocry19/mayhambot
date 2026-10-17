@@ -8,6 +8,7 @@
 """
 import argparse
 import logging
+import os
 import time
 
 from core import db, scoring, wallets
@@ -197,7 +198,50 @@ class Backfiller:
             time.sleep(max(5, self.every - (time.time() - t0)))
 
 
+TOKEN_REFRESH_S = int(os.getenv("TOKEN_REFRESH_SECONDS", 60))
+TOKEN_REFRESH_MAX = 900  # mints per round: 30 per DexScreener request, 30 requests of the 300/min pair limit
+
+
+def refresh_tokens(conn, now=None):
+    """Prices, momentum and activity (price_change_m5, txns_m5, volume_h1, last_updated) of every watched coin and
+    of the calls still followed, written to tokens (+ a token_prices snapshot) without touching the watch flags."""
+    now = now or int(time.time())
+    mints = [r[0] for r in conn.execute("SELECT mint FROM tokens WHERE tracked=1 ORDER BY last_updated DESC")]
+    mints += [r[0] for r in conn.execute("SELECT DISTINCT mint FROM signals WHERE ts > ?",
+                                         (now - plan.FOLLOW_HOURS * 3600,))]
+    mints = list(dict.fromkeys(mints))[:TOKEN_REFRESH_MAX]
+    infos = market.token_info(mints)
+    db.retry_locked(conn, lambda: db.upsert_tokens(conn, infos, tracked=False))
+    return len(infos)
+
+
+class TokenRefresher:
+    """refresh_tokens() every TOKEN_REFRESH_S in its own thread and DB connection: the cycle (trades, scoring,
+    signals) takes 2-3 min, and the brain and the shadow book read tokens as a minute-fresh market view."""
+
+    def __init__(self, every=TOKEN_REFRESH_S):
+        import threading
+        self.every, self.last_n, self.last_error = every, 0, None
+        self._t = threading.Thread(target=self._loop, name="token-refresh", daemon=True)
+
+    def start(self):
+        self._t.start()
+        return self
+
+    def _loop(self):
+        conn = db.connect()
+        while True:
+            t0 = time.time()
+            try:
+                self.last_n = refresh_tokens(conn)
+            except Exception as e:  # noqa: BLE001
+                self.last_error = e
+                log.warning("token refresh failed: %s", e)
+            time.sleep(max(10, self.every - (time.time() - t0)))
+
+
 _backfiller = None
+_token_refresher = None
 
 
 def cycle(conn, i):
@@ -315,6 +359,8 @@ def main():
     if not a.once:
         engine.model_guard.start(conn)
         _backfiller = Backfiller().start()
+        global _token_refresher
+        _token_refresher = TokenRefresher().start()
     i = 0
     while True:
         t_cycle = time.time()
