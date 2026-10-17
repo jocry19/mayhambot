@@ -18,6 +18,7 @@ import random
 import time
 
 from . import store
+from .state import MIN_TRADABLE_MCAP, STANDARD_BASE_MCAP
 
 # features as stored in sniper_launches (stage 1 values at decision time) plus a few derived ones
 BASE_FEATURES = ["n_trades", "n_buyers", "n_sellers", "buy_sol", "sell_sol", "net_sol", "momentum", "prescore",
@@ -57,9 +58,10 @@ def _div(a, b, sub=0.0):
 
 
 # ------------------------------------------------------------------ data
-# a pump.fun coin on its curve is never worth less than at its creation (30 virtual SOL / 1.073e9 tokens =
-# 27.96 SOL); a lower decision price is a broken quote, and a later normal price against it looked like +4,500 %
-MIN_BASE_MCAP = 27.9
+# a pump.fun coin on its curve is never worth less than at its creation (most curves: 30 virtual SOL / 1.073e9
+# tokens = 27.96 SOL, some start lower, see rpcws.curve_ok); a lower decision price is a broken quote, and a later
+# normal price against it looked like +4,500 %
+MIN_BASE_MCAP = STANDARD_BASE_MCAP   # rows without a known curve start (sniper.state.base_floor for the rest)
 MAX_TRADE_NET = 5.0     # one trade counts at most +500 % in means (a single 50x must not carry a rule)
 
 
@@ -85,11 +87,12 @@ def load(conn, since=None, min_trades=1, limit=30000):
     cur = conn.execute(
         "SELECT * FROM sniper_launches WHERE ret_60m IS NOT NULL AND source = 'pumpportal' "
         # pump.fun curves start at about 28 SOL (below: a broken base); bonk curves start lower (about 5 SOL)
-        "AND (mcap_decide_sol >= ? OR (COALESCE(pool, 'pump') != 'pump' AND mcap_decide_sol > 0)) "
+        "AND (mcap_decide_sol >= COALESCE(max(?, 0.99 * start_mcap_sol), ?) "
+        "OR (COALESCE(pool, 'pump') != 'pump' AND mcap_decide_sol > 0)) "
         # decided on a finished curve (migration before the decision): the base is the curve's end value
         "AND COALESCE(curve_progress, 0) < 0.95 AND COALESCE(migrated_ts, 9e18) > COALESCE(decided_ts, 0) "
         "AND COALESCE(n_trades, 0) >= ? AND COALESCE(created_ts, 0) >= ? ORDER BY created_ts DESC LIMIT ?",
-        (MIN_BASE_MCAP, min_trades, since, limit))
+        (MIN_TRADABLE_MCAP, MIN_BASE_MCAP, min_trades, since, limit))
     cols = [c[0] for c in cur.description]
     rows = []
     for t in cur.fetchall():

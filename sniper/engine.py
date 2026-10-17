@@ -302,7 +302,7 @@ class Engine:
                    mcap_decide_sol=st.base_mcap_sol, mcap_decide_usd=(st.base_mcap_sol or 0) * sol_usd or None,
                    sol_usd=sol_usd or None, reasons_json=store.j(a.reasons[:8]), positives_json=store.j(a.positives[:6]),
                    migrated=int(st.migrated), rug_p=F.get("rug_p"), block0_wallets=F.get("block0_wallets"),
-                   fee_pct=st.fee_pct)
+                   fee_pct=st.fee_pct, start_mcap_sol=st.start_mcap_sol)
         if stage >= 2:
             row["features_json"] = store.j(dict(F, momentum_parts=a.momentum_parts, insiders=a.insiders))
         return row
@@ -329,7 +329,7 @@ class Engine:
         if not F.get("n_trades"):
             self.counters["stage1_zero"] = self.counters.get("stage1_zero", 0) + 1
         reason = None
-        if st.pool == "pump" and (st.base_mcap_sol or 0) < research.MIN_BASE_MCAP:
+        if st.pool == "pump" and (st.base_mcap_sol or 0) < st.base_floor():
             reason = "no_price"   # below the curve's start price: a broken quote, neither tradable nor measurable
         elif (self.stream_pools is not None and st.pool not in self.stream_pools) or \
                 (not self.trades_live and not F.get("n_trades")):
@@ -388,7 +388,7 @@ class Engine:
             r60 = upd.get(f"ret_{last}m")
             dev_sold = self.conn.execute("SELECT dev_sold_pct FROM sniper_launches WHERE mint=?", (st.mint,)).fetchone()
             dump = (dev_sold and (dev_sold[0] or 0) >= 50) or any(s >= 0.5 for w, s in st.insider_sold.items())
-            if not base or (st.pool == "pump" and base < research.MIN_BASE_MCAP):
+            if not base or (st.pool == "pump" and base < st.base_floor()):
                 upd["rugged"] = None     # broken base: returns are meaningless, keep it out of every rug model
             else:
                 # a crash to -90% inside the hour is a rug even if a dead-cat bounce lifts the 60m price again
@@ -505,7 +505,7 @@ class Engine:
             reason = self._gates(st, a, enr, p_rug, conn, now)
             if reason is None and safety_res.get("blocked"):
                 reason = "safety"
-        if reason is None and st.pool == "pump" and st.current_mcap_sol() < research.MIN_BASE_MCAP:
+        if reason is None and st.pool == "pump" and st.current_mcap_sol() < st.base_floor():
             reason = "no_price"   # a buy at "MCAP 0.0" happened on a broken curve state
         qf = None
         if reason is None and self.quote_fn:  # quote outside the lock: the stream keeps flowing meanwhile

@@ -7,7 +7,7 @@ import json
 import time
 
 from sniper.engine import SKIP_LABELS
-from sniper.research import MIN_BASE_MCAP
+from sniper.state import base_floor
 
 HIT = 1.0     # max_ret_60m >= +100 % (2x) counts as a winner
 RUG = -0.8    # ret_60m <= -80 % counts as a rug / dead coin
@@ -50,7 +50,7 @@ def _clean(r):
     ext_broken = r.get("pool") not in (None, "pump") and max(r.get("max_ret_60m") or 0, r.get("ret_60m") or 0) \
         > MAX_EXTERNAL_RET
     if ext_broken or r.get("pool") == "pump" and r.get("mcap_decide_sol") is not None \
-            and r["mcap_decide_sol"] < MIN_BASE_MCAP:
+            and r["mcap_decide_sol"] < base_floor(r.get("start_mcap_sol")):
         for k in ("ret_1m", "ret_5m", "ret_15m", "ret_60m", "max_ret_60m", "rugged"):
             r[k] = None
     return r
@@ -67,6 +67,8 @@ def stats(conn, hours=24, now=None):
         return {"available": False}
     cols = "mint, stage, decision, skip_reason, score, risk, momentum, bundle_flag, insider_flag, " \
            "ret_1m, ret_5m, ret_15m, ret_60m, max_ret_60m, rugged, calls_rpc, calls_api, source, pool, mcap_decide_sol"
+    if "start_mcap_sol" in {r[1] for r in conn.execute("PRAGMA table_info(sniper_launches)")}:
+        cols += ", start_mcap_sol"   # added by the sniper service (store.ensure_schema); the web may read first
     rows = [_clean(dict(r)) for r in conn.execute(f"SELECT {cols} FROM sniper_launches WHERE decided_ts >= ?",
                                                   (since,))]
     entered = [r for r in rows if r["decision"] == "enter"]

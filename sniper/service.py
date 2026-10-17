@@ -590,8 +590,9 @@ class Service:
         cut = time.time() - 300
         with e.lock:
             own = [m for t, m in list(rpcws.REJECTED) if t >= cut and m in e.launches]
-        log.info("Dekoder-Verwürfe (5 min): %d Trades eigener Launches (%d Launches) | nach Instruktion: %s",
-                 len(own), len(set(own)), ", ".join(f"{k} {v}" for k, v in sorted(rpcws.REJECT_IX.items())) or "keine")
+        log.info("Dekoder-Verwürfe (5 min): %d Trades eigener Launches (%d Launches) | nach Instruktion (gesamt): %s | "
+                 "Kurven mit weniger als 30 virtuellen SOL angenommen (gesamt): %d", len(own), len(set(own)),
+                 ", ".join(f"{k} {v}" for k, v in sorted(rpcws.REJECT_IX.items())) or "keine", rpcws.LOW_START["trades"])
         if self.logs_bonk:
             b = self.logs_bonk
             log.info("Bonk-Datenstrom: %s, %d Pools im Abo, %d Trades dekodiert, %d an Launches (%d nachgereicht) | "

@@ -41,7 +41,13 @@ _SAMPLES = []            # the first rejected events, logged once with their val
 
 
 def ix_name(raw):
-    """The Anchor string at the end of newer pump.fun TradeEvents (u32 length + ascii), or ''."""
+    """The instruction name in newer pump.fun TradeEvents (u32 length + ascii at byte 258, after track_volume and
+    four u64; 117 more bytes follow it in the 382/383-byte events of 10/2026), or ''."""
+    if len(raw) >= 263:
+        n = int.from_bytes(raw[258:262], "little")
+        t = raw[262:262 + n]
+        if 0 < n <= 32 and len(t) == n and all(48 <= c <= 122 for c in t):
+            return t.decode()
     for n in range(1, 33):
         if len(raw) >= n + 4 and int.from_bytes(raw[-n - 4:-n], "little") == n:
             t = raw[-n:]
@@ -62,6 +68,18 @@ def reserves_ok(v_sol, v_tok):
     return V_SOL_RANGE[0] <= v_sol <= V_SOL_RANGE[1] and V_TOK_RANGE[0] <= v_tok <= V_TOK_RANGE[1]
 
 
+PUMP_TOKEN_OFFSET = 279_900_000.0   # virtual minus real token reserves of every pump.fun curve
+LOW_START = {"trades": 0}           # accepted events of curves that start below 30 virtual SOL
+
+
+def curve_ok(v_sol, v_tok, r_sol, r_tok):
+    """A pump.fun curve with fewer than 30 virtual SOL (seen 10/2026 on about half of all launches: the token side
+    is the standard one, virtual tokens = real tokens + 279.9e6, but the virtual SOL sit at 0 to 25). The event is
+    self-consistent (its trade price equals v_sol / v_tok), so it is a real price, only a low one."""
+    return (0 < v_sol <= V_SOL_RANGE[1] and 0 <= r_sol <= v_sol and V_TOK_RANGE[0] <= v_tok <= V_TOK_RANGE[1]
+            and abs(v_tok - r_tok - PUMP_TOKEN_OFFSET) <= 1e6)
+
+
 def decode_trade(data_b64):
     """pump.fun TradeEvent -> dict, or None for other events. Layout (Anchor): disc 8, mint 32, sol_amount u64,
     token_amount u64, is_buy bool, user 32, timestamp i64, virtual_sol_reserves u64, virtual_token_reserves u64."""
@@ -76,7 +94,12 @@ def decode_trade(data_b64):
     is_buy = raw[56] == 1
     user = b58(raw[57:89])
     ts, vsol, vtok = struct.unpack_from("<qQQ", raw, 89)
-    if not reserves_ok(vsol / 1e9, vtok / 1e6):
+    rsol, rtok = struct.unpack_from("<QQ", raw, 113) if len(raw) >= 129 else (None, None)
+    ok = reserves_ok(vsol / 1e9, vtok / 1e6)
+    if not ok and rsol is not None and curve_ok(vsol / 1e9, vtok / 1e6, rsol / 1e9, rtok / 1e6):
+        ok = True
+        LOW_START["trades"] += 1
+    if not ok:
         REJECTS["trade"] += 1     # a layout we do not know (or garbage): a broken price must not reach the engine
         why = _reject_reason(vsol / 1e9, vtok / 1e6)
         REJECT_WHY[why] = REJECT_WHY.get(why, 0) + 1
@@ -86,14 +109,14 @@ def decode_trade(data_b64):
         REJECTED.append((_t.time(), mint))
         if len(_SAMPLES) < 8:
             _SAMPLES.append(why)
-            rs, rt = struct.unpack_from("<QQ", raw, 113) if len(raw) >= 129 else (0, 0)
+            rs, rt = rsol or 0, rtok or 0
             log.warning("TradeEvent verworfen (%s): mint %s, v_sol %.3f SOL, v_tok %.0f, real_sol %.3f, real_tok %.0f, "
                         "sol %.4f, tok %.0f, ix %s, len %d%s", why, mint, vsol / 1e9, vtok / 1e6, rs / 1e9, rt / 1e6,
                         sol / 1e9, tok / 1e6, ix or "?", len(raw),
                         (", roh " + base64.b64encode(raw).decode()) if len(_SAMPLES) <= 3 else "")
         return None
     return {"mint": mint, "sol_lamports": sol, "token_raw": tok, "is_buy": is_buy, "user": user, "ts": ts,
-            "v_sol_lamports": vsol, "v_tok_raw": vtok}
+            "v_sol_lamports": vsol, "v_tok_raw": vtok, "r_sol_lamports": rsol}
 
 
 def to_stream_msg(ev, signature, slot=None):
@@ -103,7 +126,8 @@ def to_stream_msg(ev, signature, slot=None):
             "txType": "buy" if ev["is_buy"] else "sell", "tokenAmount": ev["token_raw"] / 1e6,
             "solAmount": ev["sol_lamports"] / 1e9, "newTokenBalance": None, "vSolInBondingCurve": v_sol,
             "vTokensInBondingCurve": v_tok, "marketCapSol": v_sol / v_tok * 1e9 if v_tok else 0.0,
-            "pool": "pump", "slot": slot, "chainTs": ev["ts"], "src": "rpc_logs"}
+            "pool": "pump", "slot": slot, "chainTs": ev["ts"], "src": "rpc_logs",
+            "rSolInBondingCurve": ev["r_sol_lamports"] / 1e9 if ev.get("r_sol_lamports") is not None else None}
 
 
 def decode_create(data_b64):
@@ -180,7 +204,8 @@ def parse_creates(m):
         buy = next((t for t in trades if t["mint"] == c["mint"] and t["is_buy"]), None)
         if buy:
             v_sol, v_tok = buy["v_sol_lamports"] / 1e9, buy["v_tok_raw"] / 1e6
-        elif c.get("v_tok_raw") and reserves_ok(c["v_sol_lamports"] / 1e9, c["v_tok_raw"] / 1e6):
+        elif c.get("v_tok_raw") and (reserves_ok(c["v_sol_lamports"] / 1e9, c["v_tok_raw"] / 1e6) or curve_ok(
+                c["v_sol_lamports"] / 1e9, c["v_tok_raw"] / 1e6, 0.0, c["v_tok_raw"] / 1e6 - PUMP_TOKEN_OFFSET)):
             v_sol, v_tok = c["v_sol_lamports"] / 1e9, c["v_tok_raw"] / 1e6
         else:
             if c.get("v_tok_raw"):

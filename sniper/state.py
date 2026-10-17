@@ -5,6 +5,17 @@ PUMP_SUPPLY = 1_000_000_000.0          # every pump.fun / bonk launch has 1e9 to
 PUMP_DECIMALS = 6
 PUMP_REAL_TOKENS = 793_100_000.0      # tokens sold through the curve until migration
 PUMP_TOKEN_OFFSET = 279_900_000.0     # virtual minus real token reserves (constant)
+PUMP_START_TOKENS = PUMP_TOKEN_OFFSET + PUMP_REAL_TOKENS   # 1.073e9 virtual tokens at the start
+STANDARD_BASE_MCAP = 27.9             # 30 virtual SOL / 1.073e9 tokens = 27.96 SOL (most pump.fun curves)
+MIN_TRADABLE_MCAP = 2.0               # below this a curve is dust: neither tradable nor measurable
+
+
+def base_floor(start_mcap_sol):
+    """Lowest sound decision price of a pump.fun curve: its start price (known from an event with real reserves),
+    else the standard 27.9 SOL. A lower price is a broken quote."""
+    if start_mcap_sol is None:
+        return STANDARD_BASE_MCAP
+    return max(MIN_TRADABLE_MCAP, 0.99 * start_mcap_sol)
 
 
 def f(v, default=0.0):
@@ -143,6 +154,7 @@ class LaunchState:
     learned: bool = False                             # picked by the accepted research rule (sniper.research)
     create_slot: int | None = None                    # slot of the creation (RPC create stream), bundle reference
     path: PricePath | None = None                     # bucketed mcap path for exit replays (sniper_paths)
+    start_mcap_sol: float | None = None               # pump: market cap at the curve's start (v_sol - real_sol)
     fee_pct: float | None = None                      # curve fee seen in the trades (bonk: per platform, ~1-6 %)
 
     def __post_init__(self):
@@ -193,6 +205,9 @@ class LaunchState:
         self.n_seen += 1
         if m.get("src"):
             self.trade_src = m["src"]
+        if m.get("rSolInBondingCurve") is not None and t.v_sol > 0 and self.pool == "pump":
+            # 30 virtual SOL for most curves, fewer for some (rpcws.curve_ok): the start price is the floor
+            self.start_mcap_sol = max(0.0, t.v_sol - f(m["rSolInBondingCurve"])) / PUMP_START_TOKENS * self.supply
         if m.get("feePct") is not None:
             self.fee_pct = f(m["feePct"], None)
         self.seen_net_tokens += t.tokens if side == "buy" else -t.tokens
@@ -249,6 +264,9 @@ class LaunchState:
     @property
     def age(self):
         return self.last_trade_ts - self.created_ts if self.last_trade_ts else 0.0
+
+    def base_floor(self):
+        return base_floor(self.start_mcap_sol) if self.pool == "pump" else 0.0
 
     def current_mcap_sol(self):
         if (self.migrated or not self.subscribed) and self.external_mcap_sol:

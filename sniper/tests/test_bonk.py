@@ -111,3 +111,31 @@ def test_rejected_pump_events_are_counted_by_mint_and_instruction():
     n = rpcws.REJECT_IX.get("buy", 0)
     assert rpcws.decode_trade(base64.b64encode(raw).decode()) is None
     assert rpcws.REJECT_IX["buy"] == n + 1 and rpcws.REJECTED[-1][1] == rpcws.b58(bytes(range(1, 33)))
+
+
+# three rejected pump.fun TradeEvents from the night of 17/18.10.2026 (public chain data): 30 virtual SOL is not
+# every curve's start any more, the token side is the standard one
+LOW = ["vdt/007mYe70Ud4h6UiUm418+ZarBg3tTVNqZOXacu/T+xt9/NxY3+lSRQAAAAAAWQybV8A3AAABCduhPqUZDZWUd0Hj8cUSmLKWuCnNHZ4AcqkbPQjKkZfV+NNqAAAAAOpexgIAAAAACEcBOIoDAgAgQsABAAAAAAiv7uv4BAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABfAAAAAAAAAJmoAAAAAAAA3zALMhmqEPMNAnhiPJKMGtxjwOdrhB9bglwKP4yd+y8eAAAAAAAAAD41AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAGJ1eQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOlSRQAAAAAA6l7GAgAAAAAgQsABAAAAAAAAAAAAAAAAAAAAAAAAAACC0TAAAAAAAA==",  # noqa: E501
+       "vdt/007mYe6caVOXx/ba5dzpenutGPrGcN5R2WcK9giVR6X9R/W6D6IrYgAAAAAAJK6jtw4BAAAAootf0mq0eaapzGy/awsj62GIWjceASCsqRO+7z0TinjV+NNqAAAAAEslnygBAAAAP6uQmNmOAwDe8FYDAAAAAD8TfkxIkAIA6JMUH7GOnxV02BDheOGeMGBOMXWqLkoy38hgByfRBwkAAAAAAAAAAAAAAAAAAAAA1D2YZ7NESE++EWuay0dUa1+HC1mbtb+SXmTuOt3T2XMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAHNlbGwBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACiK2IAAAAAAEslnygBAAAA3vBWAwAAAAAAAAAAAAAAAAAAAAAAAAAAnlEFAAAAAAA=",  # noqa: E501
+       "vdt/007mYe4jdIqoMPM7KIX1SFyuc9LcppgXTEFAhLPPC0prNlEXb1Y+oQEAAAAAiYYtoysBAAAASP2yUsfuvZN2fL8ZkhjZz60UGENi2qC6U3W9hgSYVnzV+NNqAAAAAIixWkIFAAAAwZjDDwnIAwAqSvsMAAAAAMEAscN3yQIA6JMUH7GOnxV02BDheOGeMGBOMXWqLkoy38hgByfRBwlfAAAAAAAAAL32AwAAAAAAnjr50NQBgRM+974cj22yYOF1RiclgtRTHtUWAve3ogEeAAAAAAAAAHJAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAHNlbGwBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABWPqEBAAAAAIixWkIFAAAAKkr7DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="]  # noqa: E501
+
+
+def test_low_start_pump_curves_are_decoded():
+    from sniper.state import base_floor
+    evs = [rpcws.decode_trade(e) for e in LOW]
+    assert all(evs)
+    a, b, c = evs
+    assert a["is_buy"] and not b["is_buy"] and not c["is_buy"]
+    assert rpcws.ix_name(__import__("base64").b64decode(LOW[0])) == "buy"
+    for ev in evs:   # the trade price is the reserves' price: a real quote, not a misread offset
+        price = ev["sol_lamports"] / 1e9 / (ev["token_raw"] / 1e6)
+        assert price == pytest.approx(ev["v_sol_lamports"] / 1e9 / (ev["v_tok_raw"] / 1e6), rel=0.12)
+    m = rpcws.to_stream_msg(c, "S3")
+    assert m["marketCapSol"] == pytest.approx(21.22, abs=0.01) and m["rSolInBondingCurve"] == pytest.approx(0.2178, abs=1e-4)
+    st = LaunchState(mint=m["mint"], created_ts=T0)
+    st.apply_trade(m, T0 + 5)
+    assert st.start_mcap_sol == pytest.approx(20.85, abs=0.01)     # (22.588 - 0.218) / 1.073e9 * 1e9
+    assert st.base_floor() == pytest.approx(0.99 * 20.85, abs=0.01) and st.mcap_sol > st.base_floor()
+    assert base_floor(None) == 27.9 and base_floor(0.01) == 2.0   # dust curves stay untradable
+    # garbage stays out: a token side that is not pump.fun's
+    assert not rpcws.curve_ok(5.0, 900e6, 0.1, 100e6) and not rpcws.curve_ok(0.0, 900e6, 0.0, 620.1e6)
