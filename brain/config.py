@@ -26,10 +26,10 @@ class Settings:
     start_balance_sol: float = field(default_factory=lambda: _f("BRAIN_START_SOL", 5.0))
     min_size_sol: float = field(default_factory=lambda: _f("BRAIN_MIN_SIZE_SOL", 0.1))
     max_size_sol: float = field(default_factory=lambda: _f("BRAIN_MAX_SIZE_SOL", 0.5))
-    max_open: int = field(default_factory=lambda: int(_f("BRAIN_MAX_OPEN", 5)))
-    max_daily_loss_sol: float = field(default_factory=lambda: _f("BRAIN_MAX_DAILY_LOSS_SOL", 1.0))
+    max_open: int = field(default_factory=lambda: int(_f("BRAIN_MAX_OPEN", 100)))
+    max_daily_loss_sol: float = field(default_factory=lambda: _f("BRAIN_MAX_DAILY_LOSS_SOL", 0))
     # trades whose expected value is still negative but uncertain enough to be worth a look (smallest size)
-    explore_per_day: int = field(default_factory=lambda: int(_f("BRAIN_EXPLORE_PER_DAY", 30)))
+    explore_per_day: int = field(default_factory=lambda: int(_f("BRAIN_EXPLORE_PER_DAY", 0)))
     min_edge: float = field(default_factory=lambda: _f("BRAIN_MIN_EDGE", 0.0))
     min_conf: float = field(default_factory=lambda: _f("BRAIN_MIN_CONF", 0.75))  # P(mean > 0) for a real buy
     # round-trip costs on top of the simulator's 3 %: copy 5.5 % in total, sniper launches 9 %

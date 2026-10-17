@@ -42,6 +42,7 @@ EXIT_NAMES = {"target": "Ziel erreicht", "inflow_peak": "Copy-Ansturm vorbei", "
 UNCONFIRMED = "unbestätigt:"  # live.executor.UNCONFIRMED: a buy that may still land keeps its 'opening' row
 RUG_LIQ_DROP = 0.8  # liquidity this far under its value at entry: the pool was pulled, exit at once
 PAPER_MODES = ("paper", "explore")  # simulated accounts: strict paper (the live rules) and exploration
+PAPER_TECH_MAX_OPEN = 100  # not a budget: open paper positions are re-priced every few seconds (DexScreener, 30 per call)
 # coin already up this much in the 5 min before the copy (intel px_ret_5m): strict size x RUN5_SIZE. Walk-forward on
 # 106 whale coin-hours 10/16-17 (net after costs, train 2/3, test 1/3): Spearman -0.37 train (q 0.08 over 28
 # features), -0.35 test; up >5 %: -9 to -20 % net vs about 0 % for coins flat or down. The only feature that held.
@@ -157,6 +158,12 @@ class Strategy:
         # the exploration account holds its own positions: it neither blocks nor is blocked by the strict one
         if any(r["mint"] == mint and (r["mode"] == "explore") == explore for r in self.open_positions()):
             return "schon im Coin"
+        if ex.mode in PAPER_MODES:
+            # paper has no budget (user, 10/2026): no position cap, no daily loss stop, no balance check; the paper
+            # balance may go below zero. Only a technical ceiling stays, so price polling stays inside the API limits
+            if len(self.open_positions(strategy, ex.mode)) >= PAPER_TECH_MAX_OPEN:
+                return f"technische Obergrenze: {PAPER_TECH_MAX_OPEN} offene Papier-Positionen"
+            return None
         cap = self.s.explore_max_open if explore else p.max_open
         if len(self.open_positions(strategy, ex.mode)) >= cap:
             return f"max. {cap} offene Positionen"
@@ -556,13 +563,6 @@ class Strategy:
             if any(b[1] == "opening" for b in busy) or (strategy != "whale" and busy):
                 why = "Kauf läuft schon" if any(b[1] == "opening" for b in busy) else f"schon gehalten ({busy[0][0]})"
                 self._skip(strategy, mint, f"Coin {why}", snap)
-                return None
-            # buys in flight on other threads hold their size too: two buys must not both pass a balance check
-            # that only one of them fits (10/2026 audit: 0.6 SOL balance, two 0.5 SOL buys, -0.4 left)
-            reserved = self.conn.execute("SELECT COALESCE(SUM(size_sol), 0) FROM ct_positions WHERE status='opening' "
-                                         "AND mode=?", (ex.mode,)).fetchone()[0]
-            if ex.mode in PAPER_MODES and ex.balance(self.conn) - reserved < size + 0.01:
-                self._skip(strategy, mint, "Guthaben zu klein (andere Käufe laufen)", snap)
                 return None
             try:
                 pid = self.conn.execute(

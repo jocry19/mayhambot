@@ -101,8 +101,10 @@ class SniperSettings:
     # ---- paper trading (fills and fees like the copy trader)
     paper_start_sol: float = field(default_factory=lambda: _f("SNIPER_PAPER_START_SOL", 5.0))
     size_sol: float = field(default_factory=lambda: _f("SNIPER_SIZE_SOL", 0.1))
-    max_open: int = field(default_factory=lambda: _i("SNIPER_MAX_OPEN", 5))
-    max_entries_per_hour: int = field(default_factory=lambda: _i("SNIPER_MAX_ENTRIES_PER_HOUR", 12))
+    # paper has no budget (user, 10/2026): 0 = no limit. max_open stays as a technical ceiling only, every open
+    # position holds a PumpPortal trade subscription
+    max_open: int = field(default_factory=lambda: _i("SNIPER_MAX_OPEN", 100))
+    max_entries_per_hour: int = field(default_factory=lambda: _i("SNIPER_MAX_ENTRIES_PER_HOUR", 0))
     curve_fee_pct: float = field(default_factory=lambda: _f("SNIPER_CURVE_FEE_PCT", 1.25))   # pump.fun protocol + creator fee
     adverse_slippage: float = field(default_factory=lambda: _f("SNIPER_ADVERSE_SLIPPAGE", 0.03))
     priority_fee_sol: float = field(default_factory=lambda: _f("SNIPER_PRIORITY_FEE_SOL", 0.001))

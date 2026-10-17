@@ -23,14 +23,15 @@ das Trailing scharf erst nach einer Minute.
 - **Überzeugt** (Erwartung > 0 und zu ≥ `BRAIN_MIN_CONF` = 75 % sicher): Kauf, Größe 0,1 SOL bei 75 % bis 0,5 SOL
   bei 95 % Sicherheit.
 - **Erkunden** (nicht überzeugt, aber eine Ziehung aus dem Posterior sagt „könnte sich lohnen“, Thompson Sampling):
-  0,1 SOL, höchstens `BRAIN_EXPLORE_PER_DAY` (30) am Tag.
+  0,1 SOL, ohne Tageskontingent (Papier hat kein Budget; `BRAIN_EXPLORE_PER_DAY` > 0 setzt eins).
 - Sonst **auslassen**. Auch ausgelassene Gelegenheiten werden später nachgespielt und gelernt.
 
 Harte Grenzen, die das Modell nie übergeht: Marktpreis vorhanden (ein Coin ohne DexScreener-Paar bekommt 30 s),
 Liquidität ≥ `BRAIN_MIN_LIQ_USD` bzw. auf der pump.fun-Bonding-Curve (dort meldet DexScreener $0 Liquidität)
 Market Cap ≥ `BRAIN_MIN_CURVE_MCAP_USD` (8000), Rug-Prüfung
-(`safety.assess` quick, ohne Ergebnis kein Kauf), eine Position je Coin, `BRAIN_MAX_OPEN`, Tagesverlust
-`BRAIN_MAX_DAILY_LOSS_SOL`, Guthaben. Dazu bei Wal-Käufen: kein Kopieren, wenn der Wal schon wieder verkauft hat
+(`safety.assess` quick, ohne Ergebnis kein Kauf), eine Position je Coin, technische Obergrenze `BRAIN_MAX_OPEN` (100
+offene Positionen, wegen der Preisabfragen). Papier hat kein Budget: kein Tagesverlust-Limit, keine Guthaben-Prüfung
+(das Papierkonto darf ins Minus); `BRAIN_MAX_DAILY_LOSS_SOL` > 0 schaltet ein Limit wieder ein. Dazu bei Wal-Käufen: kein Kopieren, wenn der Wal schon wieder verkauft hat
 oder meist binnen 2 min wieder raus ist, wenn der Coin in den 5 min davor schon über 5 % gestiegen ist („schon gelaufen“), (≥ 60 % seiner letzten Käufe, mindestens 5), und kein zweiter Kauf in einem
 Coin, den das Hirn in den letzten 6 h schon gehandelt hat. Die Flip-Quote des Wals ist zusätzlich ein Merkmal
 (`flip`), aus dem das Modell lernt.

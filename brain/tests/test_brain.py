@@ -180,6 +180,26 @@ def test_hard_gates_override_the_model(conn, s):
     assert o["decision"] == "skip" and "Rug-Schutz" in o["note"]
 
 
+def test_paper_has_no_budget(conn, s):
+    from brain import store as bstore
+
+    set_tier(conn, WHALE, "ultra")
+    mk = Market()
+    t = make_trader(conn, s, trained(), mk)
+    t.scan()
+    bstore.put(conn, "balance_sol", -3.0)  # paper account deep in the red after a bad day
+    conn.execute("INSERT INTO brain_positions(mint, status, closed_at, pnl_sol) VALUES ('old', 'closed', ?, -4.0)",
+                 (int(time.time()),))
+    for i in range(8):
+        m = f"Coin{i}" + "1" * 39
+        mk.snaps[m] = snap(mint=m)
+        add_whale_buy(conn, f"b{i}", wallet=f"W{i}" + "1" * 42, mint=m)
+        set_tier(conn, f"W{i}" + "1" * 42, "ultra")
+    t.scan()
+    assert conn.execute("SELECT COUNT(*) FROM brain_positions WHERE status='open'").fetchone()[0] == 8
+    assert bstore.balance(conn, s.start_balance_sol) < -3.0
+
+
 def test_exits_and_learning_from_the_closed_trade(conn, s):
     set_tier(conn, WHALE, "ultra")
     mk = Market()

@@ -44,13 +44,14 @@ class PaperBook:
         conn.execute("UPDATE sniper_state SET value = CAST(value AS REAL) + ? WHERE key='paper_balance_sol'", (delta,))
 
     def capacity(self, conn, now):
-        if len(self.open) >= self.cfg.max_open:
-            return f"schon {len(self.open)} offene Positionen (Maximum {self.cfg.max_open})"
-        n = conn.execute("SELECT COUNT(*) FROM sniper_positions WHERE opened_ts >= ?", (now - 3600,)).fetchone()[0]
-        if n >= self.cfg.max_entries_per_hour:
-            return f"{n} Käufe in der letzten Stunde (Maximum {self.cfg.max_entries_per_hour})"
-        if self.balance(conn) < self.cfg.size_sol:
-            return "Papier-Guthaben zu klein"
+        """Paper has no budget: no balance check (the paper balance may go below zero), entries per hour only when
+        set explicitly; max_open is the technical ceiling of trade subscriptions."""
+        if self.cfg.max_open and len(self.open) >= self.cfg.max_open:
+            return f"technische Obergrenze: {len(self.open)} offene Positionen (Maximum {self.cfg.max_open})"
+        if self.cfg.max_entries_per_hour:
+            n = conn.execute("SELECT COUNT(*) FROM sniper_positions WHERE opened_ts >= ?", (now - 3600,)).fetchone()[0]
+            if n >= self.cfg.max_entries_per_hour:
+                return f"{n} Käufe in der letzten Stunde (Maximum {self.cfg.max_entries_per_hour})"
         return None
 
     # ---- fills
