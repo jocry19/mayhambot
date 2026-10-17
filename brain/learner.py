@@ -22,13 +22,15 @@ import time
 from copytrade import sim
 
 from . import features, store
-from .plans import BASE, NAMES, PLANS, gains_from_grid
+from .plans import BASE, NAMES, PLANS, gains_from_grid, nearest_delay
 
 log = logging.getLogger("brain.learner")
 
 RETRY_S = 2 * 86400
 CACHE_GRACE_S = 30 * 60
 REAL_WEIGHT = 2.0
+PRIOR_DELAY_S = 60  # copytrade's grid delay used for prior whale replays: the brain enters ~30-90 s after the whale
+SIGNAL_CT_MAX_DELAY_S = 30  # copytrade replays signals 15 s after the signal; a later brain decision replays itself
 
 
 def horizon_s() -> int:
@@ -83,10 +85,16 @@ def warm_start(conn, model, s, now: float | None = None, limit: int = 5000) -> i
         started = int(now)
         store.put(conn, "started_at", started)
     cur = store.get(conn, "prior_cursor", -1)
-    if model.n == 0 and model.d <= 1 and cur != -1:  # model file lost or reset: the prior knowledge is relearned
+    if model.n == 0 and model.d <= 1 and (cur != -1 or store.get(conn, "relearned_at") is None):
+        # model file lost, damaged or reset: relearn the prior knowledge and everything the brain itself replayed or
+        # traded (all stored in brain_opps / brain_positions), no network needed
         cur = -1
         store.put(conn, "prior_check", {})
         store.put(conn, "prior_rows", 0)
+        n_own = relearn(conn, model, s, now)
+        store.put(conn, "relearned_at", int(now))
+        if n_own:
+            log.info("model was empty: relearned %d own outcomes from brain_opps/brain_positions", n_own)
     rows = conn.execute(
         """SELECT e.kind, e.ref, e.ts, e.gains, e.features, e.created_at FROM ct_evals e
            WHERE e.kind IN ('whale_buy','signal') AND e.grid_version=? AND e.gains!='[]' AND e.created_at>?
@@ -101,7 +109,7 @@ def warm_start(conn, model, s, now: float | None = None, limit: int = 5000) -> i
         kind = "whale" if r["kind"] == "whale_buy" else "signal"
         grid = sim.GRID if kind == "whale" else sim.EXIT_GRID
         try:
-            gains = gains_from_grid(json.loads(r["gains"]), grid)
+            gains = gains_from_grid(json.loads(r["gains"]), grid, PRIOR_DELAY_S if kind == "whale" else None)
         except ValueError:
             continue
         cost = extra_cost(conn, s, kind)
@@ -119,16 +127,55 @@ def warm_start(conn, model, s, now: float | None = None, limit: int = 5000) -> i
     return n
 
 
+def relearn(conn, model, s, now: float | None = None) -> int:
+    """Rebuild an empty model from the brain's own stored outcomes: every replay (brain_opps.gains, also the short
+    step) and every closed paper trade (double weight), older ones weighted less like the forgetting would."""
+    now = now or time.time()
+
+    def w(ts):
+        return 0.5 ** (max(0.0, now - (ts or now)) / 3600 / s.half_life_h) if s.half_life_h > 0 else 1.0
+
+    n = 0
+    for o in conn.execute("SELECT * FROM brain_opps WHERE gains IS NOT NULL AND gains!='[]' ORDER BY ts").fetchall():
+        try:
+            gains = json.loads(o["gains"])
+        except ValueError:
+            continue
+        cost = extra_cost(conn, s, o["kind"])
+        ys = {i: g - cost for i, g in enumerate(gains[:len(PLANS)]) if g is not None}
+        if o["learned_real"] and o["plan"] in NAMES:
+            ys.pop(NAMES.index(o["plan"]), None)
+        if ys:
+            model.update(_toks(o["kind"], o["features"]), ys, w(o["ts"]))
+            n += 1
+    for p in conn.execute("""SELECT o.kind, o.features, p.plan, p.pnl_pct, p.closed_at FROM brain_positions p
+                             JOIN brain_opps o ON o.id = p.opp_id WHERE p.status='closed' AND o.learned_real=1
+                             AND p.pnl_pct IS NOT NULL""").fetchall():
+        if p["plan"] in NAMES:
+            model.update(_toks(p["kind"], p["features"]), {NAMES.index(p["plan"]): p["pnl_pct"]},
+                         REAL_WEIGHT * w(p["closed_at"]))
+            n += 1
+    return n
+
+
 def _ct_gains(conn, o) -> list | None:
     """The plans' gains from copytrade's replay of the same buy/signal, when it already has one."""
     kind = {"whale": "whale_buy", "signal": "signal"}.get(o["kind"])
     if not kind or not store.has(conn, "ct_evals"):
         return None
+    # the plans must start when the brain decided, not when copytrade's replay entered: whale buys take copytrade's
+    # grid delay nearest to the brain's own, signals decided later than copytrade's entry replay themselves
+    delay = (o["decided_at"] or o["ts"]) - (o["src_ts"] or o["ts"])
+    if o["kind"] == "signal" and delay > SIGNAL_CT_MAX_DELAY_S:
+        return None
     r = conn.execute("SELECT gains FROM ct_evals WHERE kind=? AND ref=? AND grid_version=? AND gains!='[]'",
                      (kind, o["ref"], sim.GRID_VERSION)).fetchone()
     if not r:
         return None
-    g = gains_from_grid(json.loads(r[0]), sim.GRID if o["kind"] == "whale" else sim.EXIT_GRID)
+    if o["kind"] == "whale":
+        g = gains_from_grid(json.loads(r[0]), sim.GRID, nearest_delay(delay))
+    else:
+        g = gains_from_grid(json.loads(r[0]), sim.EXIT_GRID)
     return g if any(x is not None for x in g) else None
 
 
@@ -287,14 +334,16 @@ def _mean(xs):
 
 def honest(conn, since: float = 0, evaluated_since: float = 0) -> dict:
     """Out-of-sample scorecard: decisions made before their outcome was known, judged by the replay after costs.
-    taken = what the brain entered (or would have, where a gate stopped it); passed = what it let go;
+    taken = what the brain was convinced of (entered, or would have where a gate stopped it); explored = its small
+    exploration buys (or tries a gate stopped); passed = what it let go;
     copy_all = every opportunity with the reference plan (a dumb copier). Plus the real paper trades."""
     rows = [dict(r) for r in conn.execute(
         "SELECT kind, wanted, explore, pred_mean, realized_plan, realized_base FROM brain_opps "
         "WHERE evaluated_at>=? AND realized_plan IS NOT NULL AND ts>=?",
         (int(evaluated_since), int(since))).fetchall()]
     taken = [r for r in rows if r["wanted"]]
-    passed = [r for r in rows if not r["wanted"]]
+    explored = [r for r in rows if not r["wanted"] and r["explore"]]
+    passed = [r for r in rows if not r["wanted"] and not r["explore"]]
     real = conn.execute("SELECT pnl_pct, pnl_sol FROM brain_positions WHERE status='closed' AND closed_at>=?",
                         (int(since),)).fetchall()
     by_kind = {}
@@ -309,6 +358,7 @@ def honest(conn, since: float = 0, evaluated_since: float = 0) -> dict:
         "n_taken": len(taken), "taken_mean": _mean([r["realized_plan"] for r in taken]),
         "taken_pred": _mean([r["pred_mean"] for r in taken]),
         "n_passed": len(passed), "passed_mean": _mean([r["realized_plan"] for r in passed]),
+        "n_explored": len(explored), "explored_mean": _mean([r["realized_plan"] for r in explored]),
         "copy_all_mean": _mean([r["realized_base"] for r in rows]),
         "real_n": len(real), "real_mean": _mean([r["pnl_pct"] for r in real]),
         "real_sol": sum(r["pnl_sol"] or 0 for r in real),

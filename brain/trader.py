@@ -50,6 +50,7 @@ class Trader:
         self.on_close = on_close or (lambda pos: None)
         self.rng = rng or random.Random()
         self.clock = clock
+        self._safe = None  # the rug verdict of the opportunity being decided
         self.pending: dict[tuple[str, str], tuple] = {}  # (kind, ref) -> (row, entity, first seen): waiting for a pair
 
     # ------------------------------------------------------------------ wiring
@@ -172,6 +173,16 @@ class Trader:
         builder = {"whale": features.whale, "signal": features.signal, "launch": features.launch}[kind]
         feats, raw = builder(self.conn, row, snap, now)
         symbol = (snap.symbol if snap else "") or (row["symbol"] if "symbol" in row.keys() else "") or ""
+        self._safe = None
+        if snap is not None and snap.price_sol:
+            # the rug verdict is part of what the brain sees (new coins have no stored verdict yet) and the gate
+            # below reuses it: one quick check per priced opportunity
+            try:
+                self._safe = self.safety_check(self.conn, row["mint"])
+                if self._safe[2]:
+                    feats["safety"] = self._safe[0]
+            except Exception as e:
+                log.debug("safety %s: %s", row["mint"][:6], e)
         d = decide.choose(self.model, kind, feats, self.s, self.rng)
         block = None
         wanted = d.enter and not d.explore  # convinced before the hard gates: what the honest score judges
@@ -218,6 +229,8 @@ class Trader:
                          (row["wallet"], mint, row["ts"])).fetchone():
                 return "Wal hat schon wieder verkauft"
             run5 = ((raw or {}).get("intel") or {}).get("px_ret_5m")
+            if run5 is None and snap.change_m5 is not None:
+                run5 = snap.change_m5 / 100  # fresh coins have no price history in intel yet: DexScreener's 5 min
             if run5 is not None and run5 >= RAN_5M_MAX:
                 return f"schon gelaufen ({run5:+.0%} in 5 min vor dem Kauf)"
             fl = (raw or {}).get("flip") or {}
@@ -240,7 +253,7 @@ class Trader:
             if n >= self.s.explore_per_day:
                 return f"Erkundungs-Budget für heute verbraucht ({n})"
         try:
-            level, blocked, checked, reasons = self.safety_check(c, mint)
+            level, blocked, checked, reasons = self._safe or self.safety_check(c, mint)
         except Exception as e:
             log.debug("safety %s: %s", mint[:6], e)
             return "Rug-Prüfung nicht möglich (kein Kauf ohne Prüfung)"

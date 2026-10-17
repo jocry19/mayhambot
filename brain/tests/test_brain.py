@@ -293,6 +293,30 @@ def test_no_copy_when_the_coin_already_ran(conn, s, monkeypatch):
     assert json.loads(o["features"])["run5"] == ">5%"
 
 
+def test_fresh_coin_run_and_rug_verdict_reach_the_brain(conn, s):
+    set_tier(conn, WHALE, "ultra")
+    mk = Market()
+    sn = snap()
+    sn.change_m5 = 9.0  # DexScreener: +9 % in 5 min, intel has no price history for this coin yet
+    mk.snaps[MINT] = sn
+    t = make_trader(conn, s, trained(), mk, safety_check=lambda c, m: ("medium", False, True, []))
+    t.scan()
+    add_whale_buy(conn, "n")
+    t.scan()
+    o = conn.execute("SELECT decision, note, features FROM brain_opps").fetchone()
+    assert o["decision"] == "skip" and "schon gelaufen (+9% in 5 min" in o["note"]
+    assert json.loads(o["features"])["safety"] == "medium"
+
+
+def test_honest_score_keeps_explorations_apart(conn, s):
+    for i, (wanted, explore) in enumerate(((1, 0), (0, 1), (0, 0))):
+        conn.execute("INSERT INTO brain_opps(ts, kind, ref, mint, features, wanted, explore, evaluated_at, "
+                     "realized_plan, realized_base) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                     (int(time.time()), "whale", f"h{i}", MINT, "{}", wanted, explore, int(time.time()), 0.1 * i, 0.0))
+    h = learner.honest(conn)
+    assert (h["n_taken"], h["n_explored"], h["n_passed"]) == (1, 1, 1)
+
+
 def test_no_rebuy_of_a_coin_just_traded(conn, s):
     set_tier(conn, WHALE, "ultra")
     w2 = "Whale22222222222222222222222222222222222222"
@@ -465,11 +489,11 @@ def test_warm_start_from_copytrade_replays(conn, s):
     started = int(time.time())
     store.put(conn, "started_at", started)
     gains = [None] * len(sim.GRID)
-    for p in PLANS:
-        gains[grid_index(p)] = 0.25
     bad = [None] * len(sim.GRID)
     for p in PLANS:
-        bad[grid_index(p)] = -0.2
+        for dl in sim.DELAYS_S:
+            gains[grid_index(p, delay_s=dl)] = 0.25
+            bad[grid_index(p, delay_s=dl)] = -0.2
     for i in range(40):
         g, tier = (gains, "ultra") if i % 2 else (bad, "none")
         conn.execute("INSERT INTO ct_evals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -484,6 +508,35 @@ def test_warm_start_from_copytrade_replays(conn, s):
     assert good > 0 > bad_
     chk = store.get(conn, "prior_check")
     assert chk["n"] == 40 and chk.get("n_base") == 40
+
+
+def test_whale_replays_use_the_brains_own_delay(conn, s):
+    from brain.plans import nearest_delay
+
+    assert nearest_delay(10) == 15 and nearest_delay(75) == 60 and nearest_delay(150) == 180
+    g = [0.0] * len(sim.GRID)
+    for p in PLANS:
+        g[grid_index(p, delay_s=15)] = 0.5  # copytrade's fast entry caught the pump
+        g[grid_index(p, delay_s=60)] = -0.1  # a minute later it was gone
+    conn.execute("INSERT INTO ct_evals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("whale_buy", "sig9", "whale", WHALE, MINT, 1000, sim.GRID_VERSION, json.dumps(g), None, None, "{}",
+                  2000))
+    conn.execute("INSERT INTO brain_opps(ts, decided_at, kind, ref, mint, wallet, src_ts, features) "
+                 "VALUES (1070, 1070, 'whale', 'sig9', ?, ?, 1000, '{}')", (MINT, WHALE))
+    o = conn.execute("SELECT * FROM brain_opps WHERE ref='sig9'").fetchone()
+    assert set(learner._ct_gains(conn, o)) == {-0.1}
+
+
+def test_empty_model_relearns_own_outcomes(conn, s):
+    gains = [0.3] * len(PLANS)
+    for i in range(6):
+        conn.execute("INSERT INTO brain_opps(ts, kind, ref, mint, features, evaluated_at, gains) VALUES (?,?,?,?,?,?,?)",
+                     (int(time.time()) - 3600, "whale", f"r{i}", MINT, json.dumps({"tier": "ultra"}),
+                      int(time.time()), json.dumps(gains)))
+    store.put(conn, "prior_cursor", 123)  # the brain ran before; its model file is gone or damaged
+    model = Brain(len(PLANS))
+    learner.warm_start(conn, model, s)
+    assert model.n > 5 and model.predict(tokens("whale", {"tier": "ultra"}))[0][0] > 0
 
 
 def test_journal_reads_like_a_diary(conn, s):
