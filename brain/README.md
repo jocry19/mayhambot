@@ -105,7 +105,8 @@ Statt fester Prozentmarken entscheidet ein zweites Modell einmal pro Minute aus 
 dem Kauf, Abstand zum Hoch, letzte Minute und letzte 5 Minuten, ob das Volumen trägt oder austrocknet, Haltedauer, ob
 der kopierte Wal verkauft hat, ob die übrigen Smart Wallets zu- oder abfließen. Gefragt wird: was macht der Kurs in
 den nächsten 10 Minuten? Halten, die Hälfte verkaufen (im Plus ≥ `BRAIN_EXIT_HALF_MIN_UP`, P(steigt) < `BRAIN_EXIT_HALF_P`)
-oder den Rest verkaufen (P < `BRAIN_EXIT_SELL_P`). Harte Grenzen bleiben: Crash-Stop −30 %, Rug-Prüfung, max. 4 h.
+oder den Rest verkaufen (P < `BRAIN_EXIT_SELL_P`). Harte Grenzen bleiben: Crash-Stop −30 %, Rug-Prüfung, max. 4 h, und nach einer Verdopplung ein Trailing-Stop von 30 %
+unter dem Hoch (Gewinner-Studie 17.10.).
 
 Gelernt wird aus jeder nachgespielten Gelegenheit (jede Minute ein Beispiel, dieselben Minutenkerzen wie die
 Plan-Replays) und einmalig aus den schon fertigen (`backfill_exits`). Jede fertige Gelegenheit wird zusätzlich mit
@@ -128,7 +129,9 @@ Coins, die der Signal-Trichter angesehen, aber nicht gemeldet hat (Schattenbuch 
 Smart-Käufer), werden als eigene Gelegenheitsart entschieden: Handelsplatz, Kurs 5 min / 1 h, Trades 5 min,
 Volumen 1 h, Kurs 15 min davor (Rücksetzer), Market Cap, Alter, Liquidität, Grund ohne Signal. Dazu Momentum-Coins
 aus der `tokens`-Tabelle, die der Signal-Dienst von DexScreener frisch hält (Kurs 5 min ≥ +5 %, ≥ 30 Trades in 5 min,
-Grund „momentum“); je Coin höchstens eine Gelegenheit in 6 h. Die Gewinner-Studie
+Grund „momentum“; einmal pro Minute die in den letzten 3 min aktualisierten Zeilen, ohne Cursor auf dem
+Zeitstempel); je Coin höchstens eine Gelegenheit in 6 h. Freigeschaltet wird nach dem, was es aus der Quelle gewollt
+oder erkundet hat. Die Gewinner-Studie
 (17.10.) fand die großen Läufer nicht über Smart Money, sondern nur über Zustand und Momentum. Gehandelt wird die
 Quelle erst, wenn das, was das Hirn aus ihr gewollt hätte, in mindestens 30 nachgespielten Fällen nach Kosten im
 Plus lag, gezählt über die letzten 3 Tage: lässt das Muster nach, schaltet sich die Quelle von selbst wieder ab

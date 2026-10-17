@@ -849,9 +849,18 @@ def test_momentum_coins_from_the_tokens_table_are_a_side_source(conn, s):
     conn.execute(f"INSERT INTO tokens{cols} VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                  ("Flat1111111111111111111111111111111111111111", "FL", "pumpswap", 90_000, 40_000, 0, 1.0, 2.0,
                   5_000, 220, now))
+    conn.execute("INSERT INTO tokens(mint, symbol, dex, mcap_usd, liquidity_usd, pair_created_at, price_change_m5, "
+                 "price_change_h1, volume_h1, txns_m5, last_updated) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                 ("Futr1111111111111111111111111111111111111111", "FU", "pumpswap", 90_000, 40_000, 0, 20.0, 2.0,
+                  5_000, 220, now + 3000))  # stamped ahead of the clock: must not hide the others
+    mk.snaps["Futr1111111111111111111111111111111111111111"] = snap(dex="pumpswap",
+                                                                  mint="Futr1111111111111111111111111111111111111111")
+    t._momentum_at = -1e18
     t.scan()
     rows = conn.execute("SELECT * FROM brain_opps").fetchall()
-    assert len(rows) == 1 and rows[0]["kind"] == "market" and rows[0]["mint"] == MINT
+    assert {r["mint"] for r in rows} == {MINT, "Futr1111111111111111111111111111111111111111"}
+    rows = [r for r in rows if r["mint"] == MINT]
+    assert rows[0]["kind"] == "market"
     f = json.loads(rows[0]["features"])
     assert f["why"] == "momentum" and f["tx5"] == "100-300" and f["pc1h"] == "20..100%"
     assert rows[0]["decision"] == "skip"  # watched until its replays earn it
@@ -910,3 +919,29 @@ def test_heartbeat_reads_the_hour_factor_from_the_db(conn, s):
     conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (h0 + 10, 5.0, 0, 5.0))
     conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (h0 + 3500, 6.0, 0, 6.0))
     assert "hour factor x1.200" in svc.heartbeat(h0)
+
+
+def test_organic_exit_keeps_a_late_trail_on_a_doubled_coin(conn, s):
+    class Bullish:
+        n = 10_000
+
+        def predict(self, toks):
+            return [(0.1, 0.05)]
+    s.organic_exit = "on"
+    set_tier(conn, WHALE, "ultra")
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    clock = [time.time()]
+    t = make_trader(conn, s, trained(), mk, clock=lambda: clock[0], exit_model=Bullish())
+    t.scan()
+    add_whale_buy(conn, "n", ts=clock[0])
+    t.scan()
+    p = conn.execute("SELECT * FROM brain_positions").fetchone()
+    ref = json.loads(p["meta"])["ref_price"]
+    mk.snaps[MINT] = snap(price=ref * 2.5)
+    clock[0] += 120
+    assert t.manage() == 0  # +150 % and the model still bullish: it runs
+    mk.snaps[MINT] = snap(price=ref * 1.7)  # 32 % off the high
+    clock[0] += 5
+    assert t.manage() == 1
+    assert conn.execute("SELECT exit_reason FROM brain_positions").fetchone()[0] == "trail"
