@@ -60,7 +60,11 @@ def test_trades_profile(tmp_path):
             ("b1", "multi", "B", "buy", 3, "geckoterminal"), ("c1", "multi", "C", "buy", 4, "geckoterminal"),
             ("b2", "one3", "B", "buy", 5, "geckoterminal"), ("d1", "hist", "D", "buy", 6, "rpc")]
     c.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?)", rows)
+    c.execute("CREATE TABLE token_prices (mint, ts, price_usd, mcap_usd, liquidity_usd)")
+    c.executemany("INSERT INTO token_prices VALUES (?,?,?,?,?)",
+                  [("A", 3600 * 10 + 60 * i, 1 + (i % 7), 0, 100 - i) for i in range(60)])
     p = retention.trades_profile(c)
+    assert p["prices_rows"] == 60 and p["prices_thin_rows"] <= 4
     assert p["oneoff_wallets"] == 3 and p["oneoff_rows"] == 3      # hist was backfilled: not one-off
     assert p["oneoff_coin_rows"] == 2                              # coin A: only one-off wallets
     assert "Einmal-Wallets" in retention.profile_report(p)

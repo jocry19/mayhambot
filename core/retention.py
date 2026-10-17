@@ -153,6 +153,16 @@ def size_report(sizes: dict, fstats: dict | None = None, grow: dict | None = Non
     return "\n".join(lines)
 
 
+# token_prices rows a thinning keeps per coin and hour: highest and lowest price, lowest liquidity, newest row.
+# Peaks (wallet scoring's "2x after the buy", signal outcomes) and liquidity drops (safety labels) survive.
+PRICE_KEEP_SQL = """SELECT rowid FROM (SELECT rowid,
+    ROW_NUMBER() OVER (PARTITION BY mint, ts / 3600 ORDER BY price_usd DESC) AS hi,
+    ROW_NUMBER() OVER (PARTITION BY mint, ts / 3600 ORDER BY price_usd ASC) AS lo,
+    ROW_NUMBER() OVER (PARTITION BY mint, ts / 3600 ORDER BY liquidity_usd ASC) AS lq,
+    ROW_NUMBER() OVER (PARTITION BY mint, ts / 3600 ORDER BY ts DESC) AS la
+    FROM token_prices {where}) WHERE hi = 1 OR lo = 1 OR lq = 1 OR la = 1"""
+
+
 def trades_profile(conn) -> dict:
     """What the trades table is made of, for the retention decision (read-only, on the backup's copy):
     rows per source, rows of one-off wallets (one coin ever and only seen in a pool feed, never backfilled, so never scored: tiers need 2+ coins), and rows on
@@ -173,6 +183,11 @@ def trades_profile(conn) -> dict:
     out["wallets"] = conn.execute("SELECT COUNT(DISTINCT wallet) FROM trades").fetchone()[0]
     out["mints"] = conn.execute("SELECT COUNT(DISTINCT mint) FROM trades").fetchone()[0]
     conn.execute("DROP TABLE _ret_oneoff")
+    try:
+        out["prices_rows"] = conn.execute("SELECT COUNT(*) FROM token_prices").fetchone()[0]
+        out["prices_thin_rows"] = conn.execute(f"SELECT COUNT(*) FROM ({PRICE_KEEP_SQL.format(where='')})").fetchone()[0]
+    except sqlite3.Error:
+        pass
     return out
 
 
@@ -181,4 +196,6 @@ def profile_report(p: dict) -> str:
     return (f"trades: {_n(p['rows'])} Zeilen, {_n(p['wallets'])} Wallets, {_n(p['mints'])} Coins; Quellen "
             + ", ".join(f"{k or '?'} {pct(v)}" for k, v in sorted(p["by_source"].items(), key=lambda kv: -kv[1]))
             + f"\nEinmal-Wallets (nur 1 Coin): {_n(p['oneoff_wallets'])} mit {pct(p['oneoff_rows'])} der Zeilen; "
-            f"Coins nur mit Einmal-Wallets: {pct(p['oneoff_coin_rows'])} der Zeilen")
+            f"Coins nur mit Einmal-Wallets: {pct(p['oneoff_coin_rows'])} der Zeilen"
+            + (f"\ntoken_prices: {_n(p['prices_rows'])} Zeilen, nach Ausdünnen auf Stundenextreme "
+               f"{_n(p['prices_thin_rows'])}" if "prices_rows" in p else ""))
