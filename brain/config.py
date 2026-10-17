@@ -39,7 +39,7 @@ class Settings:
     half_life_h: float = field(default_factory=lambda: _f("BRAIN_HALF_LIFE_H", 120.0))
     # what counts as an opportunity
     min_whale_sol: float = field(default_factory=lambda: _f("BRAIN_MIN_WHALE_SOL", 0.3))
-    max_whale_delay_s: float = field(default_factory=lambda: _f("BRAIN_MAX_WHALE_DELAY_S", 90))
+    max_whale_delay_s: float = field(default_factory=lambda: _f("BRAIN_MAX_WHALE_DELAY_S", 300))
     max_signal_age_s: float = field(default_factory=lambda: _f("BRAIN_MAX_SIGNAL_AGE_S", 180))
     max_launch_age_s: float = field(default_factory=lambda: _f("BRAIN_MAX_LAUNCH_AGE_S", 60))
     min_liquidity_usd: float = field(default_factory=lambda: _f("BRAIN_MIN_LIQ_USD", 3000))

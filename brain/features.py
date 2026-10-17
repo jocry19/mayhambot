@@ -217,7 +217,7 @@ def whale(conn, sw, snap, now: float) -> tuple[dict, dict]:
     ib, iraw = learn.intel_context(conn, mint, w, now)
     f.update(ib)
     delay = now - sw["ts"]
-    f["delay"] = b(delay, (5, 15, 30), ("<5s", "5-15s", "15-30s", ">30s"))
+    f["delay"] = b(delay, (5, 15, 30, 90), ("<5s", "5-15s", "15-30s", "30-90s", ">90s"))
     run = (snap.price_sol / sw["price_sol"] - 1) if snap and snap.price_sol and sw["price_sol"] else None
     f["run"] = b(run, (0, 0.05, 0.15), ("<0%", "0-5%", "5-15%", ">15%"))
     crowd, sigcall = _crowd(conn, mint, w, now)

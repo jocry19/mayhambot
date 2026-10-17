@@ -308,6 +308,20 @@ def test_fresh_coin_run_and_rug_verdict_reach_the_brain(conn, s):
     assert json.loads(o["features"])["safety"] == "medium"
 
 
+def test_late_whale_buys_are_still_decided(conn, s):
+    set_tier(conn, WHALE, "ultra")
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    t = make_trader(conn, s, trained(), mk)
+    t.scan()
+    add_whale_buy(conn, "late", ts=time.time() - 200)  # the tracker lagged behind (RPC rate limits)
+    add_whale_buy(conn, "toolate", mint="Mint9" + "9" * 39, ts=time.time() - 400)
+    t.scan()
+    o = conn.execute("SELECT features FROM brain_opps WHERE ref='late'").fetchone()
+    assert json.loads(o["features"])["delay"] == ">90s"
+    assert conn.execute("SELECT 1 FROM brain_opps WHERE ref='toolate'").fetchone() is None and t.too_late == 1
+
+
 def test_signal_v2_learns_apart_from_v1():
     t1 = tokens("signal", {"sig": "v1", "score": "70+", "mom": "0-10%"})
     t2 = tokens("signal", {"sig": "v2", "score": "70+", "mom": "0-10%"})
