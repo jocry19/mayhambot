@@ -59,9 +59,8 @@ class Service:
         n_open = c.execute("SELECT COUNT(*) FROM brain_positions WHERE status='open'").fetchone()[0]
         eq = self.trader.equity_snapshot()["equity_sol"]
         late, self.trader.too_late = self.trader.too_late, 0
-        ago = c.execute("SELECT equity_sol FROM brain_equity WHERE ts>=? ORDER BY ts LIMIT 1",
-                        (int(time.time()) - 3600,)).fetchone()
-        hf = f", hour factor x{eq / ago[0]:.3f}" if ago and ago[0] else ""
+        last_hour = journal.hour_factors(c, time.time(), 1)  # from brain_equity: survives restarts
+        hf = f", hour factor x{last_hour[0][1]:.3f}" if last_hour else ""
         return (f"{n} opportunities ({late} whale buys arrived too late), {ent} bought, {held} wanted but blocked by a gate, {n_open} open, equity {eq:.3f} SOL{hf}, "
                 f"model {self.model.d - 1} tokens / {self.model.n:.0f} outcomes, exit model {self.xm.n:.0f} minutes "
                 f"(organic exits {'on' if self.trader.organic_on(time.time()) else 'off'}, "
@@ -91,8 +90,7 @@ class Service:
         except Exception as e:
             log.exception("warm start failed: %s", e)
         self.save()
-        last = {"price": 0.0, "learn": time.time(), "save": time.time(), "eq": 0.0, "diary": 0.0,
-                "hour": time.time()}
+        last = {"price": 0.0, "learn": time.time(), "save": time.time(), "eq": 0.0, "diary": 0.0}
         while not stop.is_set():
             now = time.time()
             try:
@@ -113,9 +111,12 @@ class Service:
                     self.save()  # the diary reads the model; make sure what it says is on disk too
                     if journal.daily(self.conn, self.model, self.s):
                         log.info("diary written")
-                if now - last["hour"] >= HEARTBEAT_S:
-                    last["hour"] = now
-                    log.info("brain hour: %s", self.heartbeat(now - HEARTBEAT_S))
+                hour = int(now) // HEARTBEAT_S
+                if hour != store.get(self.conn, "heartbeat_hour"):
+                    # on the clock hour, kept in the DB: deploys restart the service often, a timer from the start
+                    # never reached a full hour (no line, no hour factor from 21:38 to 01:00 on 17.10.)
+                    store.put(self.conn, "heartbeat_hour", hour)
+                    log.info("brain hour: %s", self.heartbeat(hour * HEARTBEAT_S - HEARTBEAT_S))
                 if now - last["save"] >= SAVE_EVERY_S:
                     last["save"] = now
                     self.save()
