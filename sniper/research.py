@@ -490,6 +490,19 @@ def signature_test(rows, paths, cfg, feat="block0_wallets", thr=3, blocks=5, min
     return out
 
 
+def fixed_rule(test, min_test_n=30):
+    """A fixed candidate that held walk-forward (>= 2 of 3 folds positive after costs, positive test medians, enough
+    test trades) becomes the learned rule: paper entries with the exit chosen on the latest older data."""
+    if not test or not test.get("holds"):
+        return None
+    folds = [f for f in test.get("folds") or [] if "test_net" in f]
+    if not folds or sum(f["n"] for f in folds) < min_test_n:
+        return None
+    return {"conditions": [[f, ">", v - 1e-6] for f, v in test["conditions"]], "exit": folds[-1]["exit"],
+            "accepted": True, "source": "fixed_candidate", "test_net": round(mean([f["test_net"] for f in folds]), 4),
+            "test_n": sum(f["n"] for f in folds)}
+
+
 def run(conn, cfg=None, hours=0, save=False, now=None):
     from .config import SniperSettings
     cfg = cfg or SniperSettings()
@@ -514,7 +527,7 @@ def run(conn, cfg=None, hours=0, save=False, now=None):
         rep["mc50_buyers5"] = signature_test(rows, paths, cfg, conds=[("mcap_decide_sol", 50), ("n_buyers", 5)])
     if save:
         store.set_state(conn, "research_report", json.dumps(rep))
-        acc = (rep.get("rules") or {}).get("accepted")
+        acc = (rep.get("rules") or {}).get("accepted") or fixed_rule(rep.get("mc50_buyers5"))
         store.set_state(conn, "learned_rule", json.dumps({"ts": rep["ts"], **acc}) if acc else "")
     return rep
 

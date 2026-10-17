@@ -535,3 +535,16 @@ def test_stats_drop_unit_mismatch_outside_pump_and_cap_the_mean(conn):
     assert f["no_stream"]["n"] == 3 and f["no_stream"]["n_measured"] == 2
     assert abs(f["no_stream"]["mean_ret_60m_capped"]) < 1e-9          # (+0.5 - 0.5) / 2
     assert f["activity"]["mean_ret_60m_capped"] == 5.0                  # +900 % counted as +500 %
+
+
+def test_fixed_candidate_that_holds_becomes_the_learned_rule():
+    ex = {"tp1_pct": 40, "tp1_frac": 1.0, "trail_pct": 15, "stop_pct": 30, "time_stop_min": 3, "max_hold_min": 60}
+    held = {"holds": True, "conditions": [("mcap_decide_sol", 50), ("n_buyers", 5)],
+            "folds": [{"fold": k, "n": 12, "exit": ex, "test_net": 0.05, "test_median": 0.02, "ok": True}
+                      for k in (2, 3, 4)]}
+    rule = research.fixed_rule(held)
+    assert rule["accepted"] and rule["exit"] == ex
+    assert research.matches(rule, {"mcap_decide_sol": 50.0, "n_buyers": 5})
+    assert not research.matches(rule, {"mcap_decide_sol": 49.0, "n_buyers": 9})
+    assert research.fixed_rule(dict(held, holds=False)) is None
+    assert research.fixed_rule(dict(held, folds=held["folds"][:1])) is None        # 12 test trades are too few
