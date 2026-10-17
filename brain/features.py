@@ -27,7 +27,7 @@ LABELS = {
     "ev": "Signal-EV", "call": "Call Nr.", "lscore": "Sniper-Score", "lrisk": "Sniper-Risiko",
     "bundle": "Bundle", "insider": "Insider", "devl": "Dev-Launches", "top10": "Top-10-Anteil",
     "socials": "Socials", "lsmart": "Smart Wallets im Launch", "modelp": "Modell-Chance", "form": "eigene Form",
-    "flip": "Wal verkauft binnen 2 min", "run5": "Kurs 5 min vor dem Kauf",
+    "flip": "Wal verkauft binnen 2 min", "sig": "Signal-Art", "run5": "Kurs 5 min vor dem Kauf",
 }
 
 
@@ -48,12 +48,19 @@ SHARED = {"hour", "age", "mom", "pressure", "safety", "phase", "form", "delay", 
 def tokens(kind: str, feats: dict) -> list[str]:
     """Sparse context tokens of one opportunity."""
     out = [f"kind={kind}"]
+    # signal v2 (smart money accumulating over hours) is a different call than v1 (a burst): its own tokens for
+    # everything signal-specific, so the two never share what they learn; only the market context generalizes
+    v2 = kind == "signal" and feats.get("sig") == "v2"
+    scope = "signal_v2" if v2 else kind
+    if v2:
+        out.append("sig=v2")
     for k, v in sorted(feats.items()):
-        if k in ("kind", "strategy", "explore", "gap") or v in MISSING or isinstance(v, bool):
+        if k in ("kind", "strategy", "explore", "gap", "sig") or v in MISSING or isinstance(v, bool):
             continue
-        out.append(f"{k}={v}")
-        if k in SHARED or k.startswith("t_"):
-            out.append(f"{kind}:{k}={v}")
+        shared = k in SHARED or k.startswith("t_")
+        out.append(f"{k}={v}" if shared or not v2 else f"v2:{k}={v}")
+        if shared:
+            out.append(f"{scope}:{k}={v}")
     return out
 
 
@@ -243,6 +250,7 @@ def signal(conn, sig, snap, now: float) -> tuple[dict, dict]:
 
     keys = sig.keys()
     f = dict(learn.signal_features(sig))
+    f["sig"] = "v2" if "kind" in keys and sig["kind"] == "v2" else "v1"
     ev = sig["ev"] if "ev" in keys else None
     f["ev"] = b(ev, (-0.05, 0, 0.05), ("<-5%", "-5-0%", "0-5%", ">5%"))
     call = sig["call_no"] if "call_no" in keys else None
@@ -256,7 +264,7 @@ def signal(conn, sig, snap, now: float) -> tuple[dict, dict]:
     f.update(market_feats(conn, sig["mint"], snap, now, "signal"))
     raw = {"score": sig["score"], "buyers": sig["smart_buyers"], "net_usd": sig["net_usd"], "ev": ev, "call": call,
            "delay_s": round(delay, 1), "run": run,
-           "n_ultra": sig["n_ultra"] if "n_ultra" in keys else None}
+           "n_ultra": sig["n_ultra"] if "n_ultra" in keys else None, "sig": f["sig"]}
     return f, raw
 
 

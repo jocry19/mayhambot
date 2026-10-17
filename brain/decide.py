@@ -92,7 +92,7 @@ def headline(kind: str, raw: dict, symbol: str) -> str:
             t += f", {raw['crowd']} weitere Smart Wallets im Coin"
         return t + "."
     if kind == "signal":
-        t = (f"Signal {sym}: Score {raw.get('score') or 0:.0f}, {raw.get('buyers') or 0} Smart Wallets, "
+        t = (f"Signal{' v2' if raw.get('sig') == 'v2' else ''} {sym}: Score {raw.get('score') or 0:.0f}, {raw.get('buyers') or 0} Smart Wallets, "
              f"${(raw.get('net_usd') or 0):,.0f} netto")
         if raw.get("ev") is not None:
             t += f", EV {raw['ev']:+.1%}"
