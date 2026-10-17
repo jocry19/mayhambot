@@ -93,11 +93,14 @@ def compute(ds, cutoff, min_position_usd=None, use_flags=True):
     pidx = ds.pidx
     bots = set(flags)
     per = defaultdict(list)
+    hind, found = getattr(ds, "hindsight", {}), getattr(ds, "early_found", set())
     for (w, m), a in agg.items():
         if a[6] > settings.bot_max_trades_per_token:
             bots.add(w)
         if a[1] <= 0 or a[0] < min_pos:
             continue
+        if w in found and a[4] is not None and a[4] < hind.get(m, 0):
+            continue  # the pump we found this wallet through says nothing about its skill (selection bias)
         buy_usd, buy_tok, sell_usd, sell_tok, fts, fpx, n, sell_ts = a
         avg = buy_usd / buy_tok
         sold = min(sell_tok, buy_tok)

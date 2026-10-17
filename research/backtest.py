@@ -44,6 +44,8 @@ def _wallet_events(ds, stats_k, a, b, h_name, horizons, limit=4000, rng=None):
         buys = rng.sample(buys, limit)
     hz = [h for h in horizons if h[0] == h_name]
     for w, mint, ts, px in buys:
+        if ts < getattr(ds, "hindsight", {}).get(mint, 0):
+            continue  # the wallet was found as an early buyer of this coin because it pumped
         lab = ev.labels_at(mint, ts, ds.pidx, hz).get(h_name)
         if lab is None:
             continue
@@ -65,6 +67,8 @@ def _coin_events(ds, tmap, a, b, ms):
             continue
         if t.ts - last.get(t.mint, -10 ** 12) < ms.event_dedupe_min * 60:
             continue
+        if t.ts < getattr(ds, "hindsight", {}).get(t.mint, 0):
+            continue  # coin was picked for research by its later move: no events from before the pick
         f, wallets = ev.features_at(t.mint, t.ts, ds.window(t.mint, t.ts - W, t.ts), tmap, ds.pidx,
                                     ds.created.get(t.mint), ds.to_sol, ms.window_min,
                                     history=ds.window(t.mint, 0, t.ts), intel=getattr(ds, "intel", None))
@@ -103,7 +107,7 @@ def run(ds, ms=msettings, max_points=24):
         res["wallet_events"].extend(wev)
         for x in wallet_stats.first_buys(ds, c, nxt):
             tier = (tmap.get(x[0]) or (None,))[0] or "none"
-            if x[0] not in st:
+            if x[0] not in st or x[2] < getattr(ds, "hindsight", {}).get(x[1], 0):
                 continue
             lab = ev.labels_at(x[1], x[2], ds.pidx, [h for h in ms.horizons if h[0] == h_wallet]).get(h_wallet)
             if lab is None:

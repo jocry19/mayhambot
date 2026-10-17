@@ -33,6 +33,10 @@ class Dataset:
         self.manual = manual
         self.sol_usd = sol_usd
         self.funding = {}  # wallet -> (funder, ts) from research.funding
+        # coins picked for research because of how they later moved (pumped, or calm controls): mint -> pick time.
+        # Model events on them before that time would be chosen by their outcome (selection bias).
+        self.hindsight = {}
+        self.early_found = set()  # wallets found as early buyers of such coins (their find coin is not counted)
         self.intel = None  # research.intel_features.Source, set by load()
         self.by_mint = defaultdict(list)
         for t in self.trades:
@@ -141,6 +145,13 @@ def load(conn, since_ts=0, mints=None, shared=None):
         ds.intel = Source(conn)  # point-in-time coin features from intel/ (neutral when unavailable)
     if mints is not None:
         return ds
+    try:
+        ds.hindsight = {r[0]: int(r[1]) for r in conn.execute(
+            "SELECT mint, early_fetched_at FROM research_tokens WHERE early_fetched_at > 0")}
+        ds.early_found = {r[0] for r in conn.execute(
+            "SELECT address FROM research_wallets WHERE discovered_via IN ('early_pumped', 'pumpfun_early')")}
+    except Exception:  # noqa: BLE001
+        pass
     try:
         ds.funding = {r[0]: (r[1], int(r[2] or 0)) for r in conn.execute(
             "SELECT wallet, funder, ts FROM research_funding WHERE funder IS NOT NULL")}

@@ -395,3 +395,26 @@ def test_trades_are_valued_on_one_sol_scale():
     ds = data.load(conn)
     usd = {t.wallet: t.usd for t in ds.trades}
     assert usd["W1"] == usd["W2"] and abs(usd["W3"] - 2 * usd["W1"]) < 1e-9
+
+
+def test_no_model_events_from_before_a_coin_was_picked_by_its_pump(market):
+    from model.config import msettings
+    from research import backtest
+    conn, truth, now, vid = market
+    ds = data.load(conn)
+    mint = ds.trades[len(ds.trades) // 2].mint
+    ds.hindsight = {mint: now + 10 ** 9}
+    tmap = {t.wallet: ("ultra", 90.0, 0.0, None, None) for t in ds.trades}
+    evs = backtest._coin_events(ds, tmap, 0, now + 1, msettings)
+    assert evs and all(e["mint"] != mint for e in evs)
+
+
+def test_wallet_found_through_a_pump_is_not_credited_for_it(market):
+    conn, truth, now, vid = market
+    ds = data.load(conn)
+    w = next(a for a, t in truth.items() if t == "ultra")
+    before = wallet_stats.compute(ds, now + 1)[0][w]["n_tokens"]
+    mints = {t.mint for t in ds.trades if t.wallet == w and t.side == "buy"}
+    m = sorted(mints)[0]
+    ds.hindsight, ds.early_found = {m: now + 10 ** 9}, {w}
+    assert wallet_stats.compute(ds, now + 1)[0][w]["n_tokens"] == before - 1
