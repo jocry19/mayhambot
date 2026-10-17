@@ -85,6 +85,9 @@ class Settings:
     # independent websocket connections on different endpoints watching the same wallets (one drop is no gap)
     ws_parallel: int = field(default_factory=lambda: _i("CT_WS_PARALLEL", 2))
     ws_fetchers: int = field(default_factory=lambda: _i("CT_WS_FETCHERS", 4))  # parallel transaction reads
+    # websocket reads of any wallet go to the main RPC right after one failed public try while more than this share
+    # of the day's Helius budget is left (below it: only Ultra/Smart/manual wallets, on the last try)
+    ws_main_reserve_pct: float = field(default_factory=lambda: _f("CT_WS_MAIN_RESERVE_PCT", 25.0))
     discover_every_s: float = field(default_factory=lambda: _f("CT_DISCOVER_EVERY_SECONDS", 1800))
     poll_warm_seconds: float = field(default_factory=lambda: _f("CT_POLL_WARM_SECONDS", 60))
     poll_cold_seconds: float = field(default_factory=lambda: _f("CT_POLL_COLD_SECONDS", 300))

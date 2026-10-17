@@ -372,7 +372,7 @@ def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, 
         return None  # duplicate notification (both sockets) or already polled
     _inflight.add(sig)
     try:
-        sw = _read_and_store(conn, rpc, wallet, sig, tries, received_at, solusd)
+        sw = _read_and_store(conn, rpc, wallet, sig, tries, received_at, solusd, s)
     except Exception:
         _release(sig)  # e.g. database locked: retry_locked calls again, or the polling net picks it up
         raise
@@ -381,17 +381,48 @@ def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, 
     return sw
 
 
-def _read_and_store(conn, rpc, wallet, sig, tries, received_at, solusd):
+_budget_cache: dict = {"at": 0.0, "ok": False}
+MAIN_READS = {"early": 0}  # websocket reads sent to the main RPC after one failed public try (budget rich)
+
+
+def main_budget_ok(s: Settings | None, now: float | None = None) -> bool:
+    """More than CT_WS_MAIN_RESERVE_PCT of today's Helius budget left (checked at most every 30 s)."""
+    now = now or time.time()
+    if now - _budget_cache["at"] < 30:
+        return _budget_cache["ok"]
+    ok = False
+    try:
+        from core import http as core_http  # type: ignore
+
+        st = core_http.credits("copytrade") or {}
+        budget, left = st.get("credits_day_budget"), core_http.credits_left_today("copytrade")
+        pct = getattr(s, "ws_main_reserve_pct", 25.0) if s is not None else 25.0
+        ok = bool(budget) and left is not None and left > budget * pct / 100
+    except Exception as e:
+        log.debug("credit check failed: %s", e)
+    _budget_cache.update(at=now, ok=ok)
+    return ok
+
+
+def _read_and_store(conn, rpc, wallet, sig, tries, received_at, solusd, s=None):
     tx = None
-    # main RPC credits only for wallets worth them, and only on the last try; anyone else is read on the public
-    # pool and, if that fails, picked up by the polling net a little later
+    # main RPC credits: while the day's budget is rich, for every wallet right after one failed public try (the
+    # public pool answers 429 for minutes at times, and a late whale buy is worth less than a credit); otherwise
+    # only for wallets worth them, and only on the last try. Anyone else is picked up by the polling net later
     key = _key_wallet(conn, wallet)
+    params = [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}]
     for i in range(tries):
+        if i == 1 and hasattr(rpc, "call") and main_budget_ok(s):
+            try:
+                tx = rpc.call("getTransaction", params, "live")
+                MAIN_READS["early"] += 1
+            except Exception as e:
+                log.debug("ws tx %s on main failed: %s", sig[:8], e)
+            if tx:
+                break
         last_try = key and i == tries - 1
         try:
-            tx = rpc.read("getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
-                                                    "commitment": "confirmed"}], main_if_empty=last_try,
-                          priority="live", main_on_error=last_try)
+            tx = rpc.read("getTransaction", params, main_if_empty=last_try, priority="live", main_on_error=last_try)
         except Exception as e:
             log.debug("ws tx %s failed: %s", sig[:8], e)
         if tx:

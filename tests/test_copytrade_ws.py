@@ -11,6 +11,12 @@ from copytrade.config import Settings
 
 from test_copytrade import MINT, W, env, parsed_tx  # noqa: F401  (fixture)
 
+
+@pytest.fixture(autouse=True)
+def _lean_helius_budget(monkeypatch):
+    """The real credit ledger of the machine must not decide how a test reads: budget 'tight' unless a test says so."""
+    monkeypatch.setattr(tracker, "main_budget_ok", lambda *a, **kw: False)
+
 websockets = pytest.importorskip("websockets")
 
 
@@ -790,3 +796,45 @@ def test_decimals_are_learnt_from_reads_and_strict_mode_never_guesses():
     with pytest.raises(chain.DecimalsUnknown):
         chain.token_decimals(Down(), "MintY", strict=True)
     assert "MintY" not in chain._decimals_cache
+
+
+def test_rich_budget_sends_any_wallet_to_main_after_one_failed_public_try(env, monkeypatch):
+    s, conn, ex, state = env
+    calls = []
+
+    class Pub:
+        counts, hosts = {}, {}
+
+        def call(self, method, params, priority="bulk"):
+            calls.append("public")
+            raise RuntimeError("429")
+
+    rpc = chain.Rpc(Settings(rpc_url="https://mainnet.helius-rpc.com/?api-key=k", poll_rpc_url=""))
+    rpc.public = Pub()
+    monkeypatch.setattr(chain.Rpc, "call", lambda self, m, p, priority="live": calls.append("main") or parsed_tx(
+        -3_000_000_000, 0, 1_000_000))
+    monkeypatch.setattr(tracker.time, "sleep", lambda x: None)
+    monkeypatch.setattr(tracker, "main_budget_ok", lambda *a, **kw: True)
+    store.add_wallets(conn, [W], "auto")  # unranked: no main credits on a tight budget
+    store._winfo_cache.clear()
+    tracker._seen.clear()
+    n = tracker.MAIN_READS["early"]
+    assert tracker.process_signature(conn, s, rpc, W, "sigN", 3)
+    assert calls == ["public", "main"] and tracker.MAIN_READS["early"] == n + 1
+
+
+def test_main_budget_check_keeps_a_reserve(monkeypatch):
+    from core import http as core_http
+
+    monkeypatch.undo()  # the real check, with a faked ledger
+    left = {"v": 2000.0}
+    monkeypatch.setattr(core_http, "credits", lambda svc=None: {"credits_day_budget": 7500.0})
+    monkeypatch.setattr(core_http, "credits_left_today", lambda svc=None: left["v"])
+    tracker._budget_cache.update(at=0.0, ok=False)
+    assert tracker.main_budget_ok(Settings(), now=1000.0)  # 2000 > 25 % of 7500
+    left["v"] = 1800.0
+    assert tracker.main_budget_ok(Settings(), now=1010.0)  # cached for 30 s
+    assert not tracker.main_budget_ok(Settings(), now=1031.0)
+    left["v"] = None
+    assert not tracker.main_budget_ok(Settings(), now=1200.0)  # no budget known: stay lean
+    tracker._budget_cache.update(at=0.0, ok=False)

@@ -101,8 +101,10 @@ class Engine:
                 + f"; rpc calls public {pub}"
                 + (f" ({', '.join(f'{h} {n}' for h, n in sorted(self.rpc.endpoints().items(), key=lambda x: -x[1]))})"
                    if self.rpc.endpoints() else "")
-                + f", helius {hel}, fallbacks {self.rpc.fallbacks}, public bulk failures {self.rpc.bulk_failures}")
+                + f", helius {hel} ({tracker.MAIN_READS['early']} early websocket reads), fallbacks "
+                  f"{self.rpc.fallbacks}, public bulk failures {self.rpc.bulk_failures}")
         tracker.DETECTED.update(wslog=0, ws=0, poll=0, gap=0)
+        tracker.MAIN_READS["early"] = 0
         self.rpc.fallbacks = self.rpc.bulk_failures = 0
         tracker.WS_LATENCY.clear()
         chain.LOG_STATS.clear()
