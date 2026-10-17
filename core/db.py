@@ -112,7 +112,17 @@ MIGRATIONS = [
     ("signals", "stop_hit_ts", "INTEGER"),          # first time the price fell to the stop before the target
     ("signals", "lag_first_s", "INTEGER"),          # seconds from the first smart buy in the window to the call
     ("signals", "lag_last_s", "INTEGER"),           # seconds from the newest smart buy to the call (data + cycle lag)
-    ("signals", "kind", "TEXT"),                    # NULL/'v1' = smart buying now, 'v2' = smart money accumulating (signals.accum)
+    ("signals", "kind", "TEXT"),
+    # signal_shadow: market state at the rejection, so momentum / dip / venue can be checked as a later signal type
+    ("signal_shadow", "dex", "TEXT"),
+    ("signal_shadow", "mcap_usd", "REAL"),
+    ("signal_shadow", "age_min", "REAL"),                # minutes since the pool was created
+    ("signal_shadow", "pc_m5", "REAL"),                  # DexScreener price change 5 min / 1 h (percent)
+    ("signal_shadow", "pc_h1", "REAL"),
+    ("signal_shadow", "txns_m5", "INTEGER"),
+    ("signal_shadow", "txns_h1", "INTEGER"),
+    ("signal_shadow", "volume_h1", "REAL"),
+    ("signal_shadow", "ret_15m_before", "REAL"),         # own prices: move over the 15 min before (dip or run-up)                    # NULL/'v1' = smart buying now, 'v2' = smart money accumulating (signals.accum)
     ("signal_metrics", "ev", "REAL"),
     ("signal_metrics", "model_exp_net", "REAL"),   # model's expected 1h return after costs (for later replays)
 ]

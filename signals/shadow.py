@@ -21,7 +21,7 @@ from signals.backtest import DEAD_RET, confirmed, price_near
 EVERY_S = 3600
 ENTRY_DELAY_S = 60
 DEAD_LIQ_USD = 1000.0
-SKIP = ("no_smart",)
+SKIP = ()  # no_smart kept too: the big runners had at most one smart buyer (winner study 17.10.)
 KEEP_DAYS = 14
 
 
@@ -33,11 +33,21 @@ def record(conn, mint, reason, m, price, now, kind="v1"):
                     (mint, reason, kind, now - EVERY_S)).fetchone():
         return False
     sp = m.get("safety") or {}
+    t = conn.execute("SELECT dex, mcap_usd, pair_created_at, price_change_m5, price_change_h1, txns_m5, txns_h1, "
+                     "volume_h1 FROM tokens WHERE mint=?", (mint,)).fetchone()
+    before = price_near(_points(conn, mint, now - 1500, now - 300), now - 900, 300)
+    created = t[2] if t else None
+    if created and created > now * 10:  # DexScreener gives milliseconds
+        created /= 1000
     conn.execute("INSERT INTO signal_shadow(ts, mint, kind, reason, entities, net_usd, score, min_net, min_score, "
-                 "safety_risk, liquidity_usd, price_usd, model_exp_net) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 "safety_risk, liquidity_usd, price_usd, model_exp_net, dex, mcap_usd, age_min, pc_m5, pc_h1, txns_m5, "
+                 "txns_h1, volume_h1, ret_15m_before) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (now, mint, kind, reason, m.get("entities", m.get("smart_buyers")), m.get("net_usd"), m.get("score"),
                   m.get("min_net"), m.get("min_score"), sp.get("risk"), m.get("liquidity_usd"), price,
-                  m.get("model_exp_net")))
+                  m.get("model_exp_net"), t[0] if t else None, t[1] if t else None,
+                  (now - created) / 60 if created else None, t[3] if t else None, t[4] if t else None,
+                  t[5] if t else None, t[6] if t else None, t[7] if t else None,
+                  price / before - 1 if before else None))
     return True
 
 
@@ -126,6 +136,14 @@ def groups(rows):
     sd = [r for r in by.get("safety_drop", []) if r["safety_risk"] is not None]
     out["safety_drop: risk < 45"] = _stats([r for r in sd if r["safety_risk"] < 45])
     out["safety_drop: risk >= 45"] = _stats([r for r in sd if r["safety_risk"] >= 45])
+    # momentum / venue hypotheses (winner study 17.10.: 3x coins dipped ~32 % in the 15 min before; only pumpswap ran 3x)
+    col = lambda r, k: r[k] if k in r.keys() else None  # noqa: E731 - retro rows lack these
+    for d in sorted({col(r, "dex") for r in rows if col(r, "dex")}):
+        out[f"dex {d}"] = _stats([r for r in rows if col(r, "dex") == d])
+    out["dip >= 20 % in 15 min before"] = _stats([r for r in rows if (col(r, "ret_15m_before") or 0) <= -0.2])
+    out["run-up >= 20 % in 15 min before"] = _stats([r for r in rows if (col(r, "ret_15m_before") or 0) >= 0.2])
+    out["txns 5 min >= 2x hour pace"] = _stats([r for r in rows if col(r, "txns_m5") and col(r, "txns_h1")
+                                                 and col(r, "txns_m5") * 12 >= 2 * col(r, "txns_h1")])
     # confidence hypotheses (see funnel.CONFIDENCE_GROUPS): the same features among the rejected coins
     ent = lambda r: (r["entities"] or 0) if "entities" in r.keys() else 0  # noqa: E731 - retro rows have none
     out["any reason: entities>=3"] = _stats([r for r in rows if ent(r) >= 3])

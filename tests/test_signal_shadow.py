@@ -11,12 +11,12 @@ def test_rejected_coin_recorded_once_per_hour_and_rated(tmp_path):
     assert shadow.record(c, "A", "few_entities", m, 1.0, t)
     assert not shadow.record(c, "A", "few_entities", m, 1.0, t + 600)     # same reason within the hour
     assert shadow.record(c, "A", "low_net", m, 1.0, t + 600)
-    assert not shadow.record(c, "B", "no_smart", m, 1.0, t)                # nothing to learn
+    assert shadow.record(c, "B", "no_smart", m, 1.0, t)                    # kept: big runners had <= 1 smart buyer
     c.execute("INSERT INTO tokens(mint, liquidity_usd, last_updated) VALUES ('A', 40000, ?)", (NOW - 60,))
     for dt, p in ((120, 1.1), (1200, 1.8), (3600, 1.3), (3 * 3600, 2.5)):
         c.execute("INSERT INTO token_prices(mint, ts, price_usd) VALUES ('A',?,?)", (t + dt, p))
     c.commit()
-    assert shadow.update(c, NOW) == 2
+    assert shadow.update(c, NOW) == 3
     r = c.execute("SELECT * FROM signal_shadow WHERE reason='few_entities'").fetchone()
     assert round(r["max_ret_1h"], 3) == round(1.8 / 1.1 - 1, 3) and round(r["max_ret_4h"], 3) == round(2.5 / 1.1 - 1, 3)
     g = shadow.summary(c, 24, NOW)
@@ -46,3 +46,18 @@ def test_retro_from_signal_metrics(tmp_path):
     g = shadow.retro(c, 100, 40, hours=24, now=NOW)
     assert g["few_entities"]["n"] == 1 and g["few_entities"]["hit_50"] == 1.0
     assert g["low_net"]["n"] == 1 and g["score_or_safety"]["n"] == 1
+
+
+def test_momentum_and_venue_features_recorded(tmp_path):
+    c = db.connect(str(tmp_path / "s.db"))
+    t = NOW - 5 * 3600
+    c.execute("INSERT INTO tokens(mint, dex, mcap_usd, pair_created_at, txns_m5, txns_h1, volume_h1) "
+              "VALUES ('D','pumpswap',900000,?,60,120,50000)", ((t - 3600) * 1000,))
+    c.execute("INSERT INTO token_prices(mint, ts, price_usd) VALUES ('D',?,1.5)", (t - 900,))
+    c.commit()
+    shadow.record(c, "D", "few_entities", dict(entities=1), 1.0, t)
+    r = c.execute("SELECT * FROM signal_shadow").fetchone()
+    assert r["dex"] == "pumpswap" and round(r["ret_15m_before"], 3) == round(1 / 1.5 - 1, 3) and r["age_min"] == 60
+    g = shadow.groups(c.execute("SELECT * FROM signal_shadow").fetchall())
+    assert g["dex pumpswap"]["n"] == 1 and g["dip >= 20 % in 15 min before"]["n"] == 1
+    assert g["txns 5 min >= 2x hour pace"]["n"] == 1
