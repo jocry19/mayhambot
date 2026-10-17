@@ -197,6 +197,9 @@ class Service:
             if pool:
                 self.bonk_pools[pool], self.bonk_mints[m] = m, pool
                 self.logs_bonk.subscribe({pool})   # replays the pool's buffered trades (outside the engine lock)
+                # few bonk launches arrive (about one per 5 min): one line each, so a pool that never trades is visible
+                log.info("Bonk-Launch %s im Abo (Pool %s, SOL-Quote), %d Trades aus dem Puffer", m, pool,
+                         self.engine.launches[m].n_seen if m in self.engine.launches else 0)
         for m in unsub:
             pool = self.bonk_mints.pop(m, None)
             if pool:
