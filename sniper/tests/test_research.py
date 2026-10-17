@@ -325,3 +325,19 @@ def test_migrated_coin_with_a_frozen_price_exits_as_no_market(conn):
     assert eng.book.check(conn, st, T0 + 210, None, quoted=True) is None     # fresh price, no exit rule hit
     assert eng.book.check(conn, st, T0 + 210 + PaperBook.STALE_SEC + 1, None, quoted=True) == "no_market"
     assert p["status"] == "closed" and p["realized_sol"] == 0.0
+
+
+def test_replay_stop_through_a_gap_fills_at_the_crash_not_at_the_stop():
+    # a rug on the curve: the bucket gaps from 100 to 9 and closes at 10; live PaperBook sells after the crash
+    net, why = research.replay([[20, 100, 100, 100], [25, 10, 9, 100]], 20, 100, RULE, 0.0, 0.0)
+    assert why == "stop" and net < -0.85
+    # a wick through the stop that closes above it still fills at 5 % under the stop
+    net, _ = research.replay([[20, 100, 100, 100], [25, 90, 60, 100]], 20, 100, RULE, 0.0, 0.0)
+    assert abs(net - (0.7 * 0.95 - 1)) < 1e-9
+
+
+def test_dev_history_counts_each_bad_launch_once_and_not_the_current_one(conn):
+    store.save_launch(conn, {"mint": "OLD", "creator": "DEV", "created_ts": T0 - 7200, "rugged": 1, "dev_sold_pct": 95})
+    store.save_launch(conn, {"mint": "NEW", "creator": "DEV", "created_ts": T0})
+    h = store.creator_history(conn, "DEV", T0, exclude_mint="NEW")
+    assert h["n"] == 1 and h["bad"] == 1

@@ -129,7 +129,9 @@ def replay(points, dt_entry, entry_mcap, rule, side_cost, tx_cost):
         held = (k - dt_entry) / 60
         last = lst
         if not tp_done and lo <= stop_lvl:
-            got += left * max(lo, stop_lvl * 0.95) / entry_mcap
+            # a bucket that gaps through the stop and closes below it fills at its close (a rug on the curve is
+            # sold after the crash, as PaperBook.check does), a wick that recovers at 5 % under the stop; never below lo
+            got += left * max(lo, min(stop_lvl * 0.95, lst)) / entry_mcap
             left, txs, reason = 0.0, txs + 1, "stop"
             break
         if not tp_done and hi >= entry_mcap * (1 + tp1 / 100):
@@ -144,7 +146,7 @@ def replay(points, dt_entry, entry_mcap, rule, side_cost, tx_cost):
             peak = max(peak, hi)
             lvl = peak * (1 - trail / 100)
             if lo <= lvl:
-                got += left * max(lo, lvl * 0.95) / entry_mcap
+                got += left * max(lo, min(lvl * 0.95, lst)) / entry_mcap
                 left, txs, reason = 0.0, txs + 1, "trail"
                 break
         if not tp_done and held >= tstop:

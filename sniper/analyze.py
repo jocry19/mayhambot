@@ -204,7 +204,7 @@ def analyze(st, cfg, enr=None, tiers=None, now=None):
     coins = enr.get("dev_coins") or {}
     n_launch = max(int(hist.get("n") or 0), int(coins.get("n") or 0))
     n24 = max(int(hist.get("n24") or 0), int(coins.get("n24") or 0))
-    rugs = int(hist.get("rugs") or 0) + int(hist.get("dumps") or 0)
+    rugs = int(hist["bad"] if "bad" in hist else (hist.get("rugs") or 0) + (hist.get("dumps") or 0))
     F.update(dev_launches=n_launch, dev_launches_24h=n24, dev_rugs=rugs,
              dev_migrated=max(int(hist.get("mig") or 0), int(coins.get("n_complete") or 0)))
     if n24 >= cfg.dev_max_launches_24h:

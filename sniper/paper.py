@@ -203,7 +203,17 @@ class PaperBook:
             return reason
         p["price_ts"] = now
         p["last_price_sol"] = price
+        new_peak = price > p["peak_price_sol"]
         p["peak_price_sol"] = max(p["peak_price_sol"], price)
+        if new_peak or now - p.get("_saved_ts", 0) >= 30:
+            # persist the open position's price (dashboard P&L) and peak (the trailing stop after a restart)
+            p["_saved_ts"] = now
+            try:
+                conn.execute("UPDATE sniper_positions SET last_price_sol=?, peak_price_sol=? WHERE id=?",
+                             (price, p["peak_price_sol"], p["id"]))
+                conn.commit()
+            except Exception as e:  # noqa: BLE001 - a locked DB only delays this; the next tick writes it
+                log.debug("sniper position %s price not saved: %s", p.get("id"), e)
         base = p.get("insider_base") or {}
         if c.exit_on_insider_sell and any(100 * (s - base.get(w, 0.0)) >= c.insider_sell_min_pct
                                           for w, s in st.insider_sold.items()):

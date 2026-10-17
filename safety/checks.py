@@ -516,7 +516,9 @@ def check_bundles(ctx):
         return r.finish()
     creator = la.get("creator")
     same_block = [b for b in buyers if b["slot"] == la["created_slot"] and b["wallet"] != creator]
-    total_pct = 100 * sum(b["tokens"] for b in buyers) / supply
+    # the dev's own buy is judged by check_dev; counting it here too reported a 10 % dev buy plus one 6 % sniper as a
+    # 16 % bundle (the sniper also leaves the creator out of its bundle share)
+    total_pct = 100 * sum(b["tokens"] for b in buyers if b["wallet"] != creator) / supply
     others = sorted((b for b in buyers if b["wallet"] != creator), key=lambda b: -b["tokens"])[:5]
     profiles = {b["wallet"]: ctx.profile(b["wallet"]) for b in others}
     groups = defaultdict(list)
@@ -526,7 +528,7 @@ def check_bundles(ctx):
             groups[f].append(w)
     shared = {f: ws for f, ws in groups.items() if len(ws) >= 2 or f == creator}
     held = {h["owner"]: h["pct"] for h in ctx.holders()}
-    still = sum(held.get(b["wallet"], 0.0) for b in buyers)
+    still = sum(held.get(b["wallet"], 0.0) for b in buyers if b["wallet"] != creator)
     r.data.update(n_buyers=len(buyers), n_same_block=len(same_block), launch_pct=round(total_pct, 2),
                   still_held_pct=round(still, 2), shared_funders=shared, creator=creator)
     c = ctx.cfg

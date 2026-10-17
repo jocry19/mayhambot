@@ -249,7 +249,8 @@ class Engine:
         if now - self._rug_model[0] > 600:
             try:
                 from safety import backtest, store as sstore
-                self._rug_model = (now, sstore.cache_get(self.conn, "launch_model", 86400 * 2), backtest.predict)
+                self._rug_model = (now, sstore.cache_get(self.conn, "launch_model", 86400 * 2),
+                                  lambda m, f: backtest.predict(m, backtest._clean(f)))  # cleaned as the training rows
             except Exception as e:  # noqa: BLE001 - the sniper works without the model
                 log.debug("launch_model not available: %s", e)
                 self._rug_model = (now, None, None)
@@ -332,7 +333,7 @@ class Engine:
         if st.decided_ts is None or st.done:
             return
         base = st.base_mcap_sol
-        upd = {}
+        upd, new = {}, False
         for h in self.cfg.horizons_min:
             if h in st.outcomes or now < st.decided_ts + h * 60:
                 continue
@@ -340,9 +341,10 @@ class Engine:
             if not v:      # no price yet (restarted stub): wait for one instead of recording a total loss
                 continue
             st.outcomes[h] = v
+            new = True
             if base:
                 upd[f"ret_{h}m"] = round(v / base - 1, 4)
-        if not upd:
+        if not new:        # without a base there are no returns, but the launch must still finish (and leave memory)
             return
         last = max(self.cfg.horizons_min)
         if base:
@@ -356,7 +358,7 @@ class Engine:
             r60 = upd.get(f"ret_{last}m")
             dev_sold = self.conn.execute("SELECT dev_sold_pct FROM sniper_launches WHERE mint=?", (st.mint,)).fetchone()
             dump = (dev_sold and (dev_sold[0] or 0) >= 50) or any(s >= 0.5 for w, s in st.insider_sold.items())
-            if st.pool == "pump" and (base or 0) < research.MIN_BASE_MCAP:
+            if not base or (st.pool == "pump" and base < research.MIN_BASE_MCAP):
                 upd["rugged"] = None     # broken base: returns are meaningless, keep it out of every rug model
             else:
                 # a crash to -90% inside the hour is a rug even if a dead-cat bounce lifts the 60m price again
@@ -430,6 +432,9 @@ class Engine:
             st.stage = 2
             a = analyze(st, self.cfg, enr, self.tiers, now)
             st.insiders.update(a.insiders)
+            for w in a.wallets:   # insiders' bags we never saw bought, so their sells can trigger the insider exit
+                if w.get("role") in ("bundle", "insider") and (w.get("tokens") or 0) > 0:
+                    st.insider_base.setdefault(w["wallet"], float(w["tokens"]))
             reason = a.skip_reason(self.cfg)
             p_rug = self.rug_p(a.features, now)
             a.features["rug_p"] = p_rug

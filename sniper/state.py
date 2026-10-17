@@ -125,6 +125,7 @@ class LaunchState:
     min_mcap_sol: float = 0.0
     peak_mcap_sol: float = 0.0                        # high since creation (drawdown feature before the decision)
     insiders: dict = field(default_factory=dict)      # wallet -> role (bundle/insider/dev) for exit rules
+    insider_base: dict = field(default_factory=dict)  # wallet -> tokens an insider got before we watched (enrichment)
     insider_sold: dict = field(default_factory=dict)  # wallet -> share of its buy sold after the decision
     curve: list = field(default_factory=list)         # (ts, mcap_sol, v_sol, n_trades), 2 s resolution
     external_mcap_sol: float | None = None            # DexScreener after migration / unsubscribe
@@ -210,8 +211,9 @@ class LaunchState:
             if side == "buy":
                 self.bought[t.wallet] = self.bought.get(t.wallet, 0.0) + t.tokens
                 self.first_buy_ts.setdefault(t.wallet, now)
-            elif t.wallet in self.insiders and self.bought.get(t.wallet):
-                got = self.bought[t.wallet]
+            elif t.wallet in self.insiders and (self.bought.get(t.wallet) or self.insider_base.get(t.wallet)):
+                # a bundle wallet bought in the creation slot, before our stream: its base comes from the enrichment
+                got = self.bought.get(t.wallet) or self.insider_base[t.wallet]
                 self.insider_sold[t.wallet] = min(1.0, self.insider_sold.get(t.wallet, 0.0) + t.tokens / got)
         self.last_trade_ts = now
         self.path.add(now, self.mcap_sol)

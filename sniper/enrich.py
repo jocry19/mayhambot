@@ -215,7 +215,7 @@ class Enricher:
 
         # 1. own tables
         wallets = self._first_wallets(st, enr)
-        enr["creator_hist"] = store.creator_history(conn, st.creator, now) if st.creator else {}
+        enr["creator_hist"] = store.creator_history(conn, st.creator, now, exclude_mint=st.mint) if st.creator else {}
         enr["known_bad"] = store.known_bad(conn, wallets)
         funders = store.cached_funders(conn, wallets)
         enr["clusters"] = store.wallet_clusters(conn, wallets)

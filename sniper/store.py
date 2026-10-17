@@ -197,14 +197,17 @@ def set_state(conn, key, value):
     db.retry_locked(conn, write)
 
 
-def creator_history(conn, creator, now=None):
-    """What our own records say about earlier launches of this dev (no network)."""
+def creator_history(conn, creator, now=None, exclude_mint=None):
+    """What our own records say about earlier launches of this dev (no network). exclude_mint: the launch being
+    judged (its own stage-1 row is already stored). bad: earlier launches that rugged OR were dumped by the dev,
+    each launch once (a dump that then rugged is one bad launch, not two)."""
     now = now or time.time()
     r = conn.execute(
         """SELECT COUNT(*) n, SUM(created_ts >= ?) n24, SUM(COALESCE(rugged,0)) rugs, SUM(COALESCE(migrated,0)) mig,
-                  MAX(mcap_max_sol) best, SUM(dev_sold_pct >= 50) dumps
-           FROM sniper_launches WHERE creator=?""", (now - 86400, creator)).fetchone()
-    return {k: (r[k] or 0) for k in ("n", "n24", "rugs", "mig", "best", "dumps")}
+                  MAX(mcap_max_sol) best, SUM(dev_sold_pct >= 50) dumps,
+                  SUM(CASE WHEN rugged=1 OR dev_sold_pct>=50 THEN 1 ELSE 0 END) bad
+           FROM sniper_launches WHERE creator=? AND mint IS NOT ?""", (now - 86400, creator, exclude_mint)).fetchone()
+    return {k: (r[k] or 0) for k in ("n", "n24", "rugs", "mig", "best", "dumps", "bad")}
 
 
 def known_bad(conn, wallets):
