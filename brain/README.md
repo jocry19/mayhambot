@@ -31,7 +31,7 @@ Liquidität ≥ `BRAIN_MIN_LIQ_USD` bzw. auf der pump.fun-Bonding-Curve (dort me
 Market Cap ≥ `BRAIN_MIN_CURVE_MCAP_USD` (8000), Rug-Prüfung
 (`safety.assess` quick, ohne Ergebnis kein Kauf), eine Position je Coin, `BRAIN_MAX_OPEN`, Tagesverlust
 `BRAIN_MAX_DAILY_LOSS_SOL`, Guthaben. Dazu bei Wal-Käufen: kein Kopieren, wenn der Wal schon wieder verkauft hat
-oder meist binnen 2 min wieder raus ist (≥ 60 % seiner letzten Käufe, mindestens 5), und kein zweiter Kauf in einem
+oder meist binnen 2 min wieder raus ist, wenn der Coin in den 5 min davor schon über 5 % gestiegen ist („schon gelaufen“), (≥ 60 % seiner letzten Käufe, mindestens 5), und kein zweiter Kauf in einem
 Coin, den das Hirn in den letzten 6 h schon gehandelt hat. Die Flip-Quote des Wals ist zusätzlich ein Merkmal
 (`flip`), aus dem das Modell lernt.
 

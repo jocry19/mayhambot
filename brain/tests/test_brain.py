@@ -251,6 +251,28 @@ def test_no_copy_when_the_whale_is_already_out_or_flips(conn, s, caplog):
     assert conn.execute("SELECT COUNT(*) FROM brain_positions").fetchone()[0] == 0
 
 
+def test_no_copy_when_the_coin_already_ran(conn, s, monkeypatch):
+    from copytrade import learn
+
+    real = learn.intel_context
+
+    def ran(conn, mint, wallet, now):
+        ib, iraw = real(conn, mint, wallet, now)
+        return {**ib, "run5": ">5%"}, {**iraw, "px_ret_5m": 0.08}
+
+    monkeypatch.setattr(learn, "intel_context", ran)
+    set_tier(conn, WHALE, "ultra")
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    t = make_trader(conn, s, trained(), mk)
+    t.scan()
+    add_whale_buy(conn, "n")
+    t.scan()
+    o = conn.execute("SELECT decision, note, features FROM brain_opps").fetchone()
+    assert o["decision"] == "skip" and "schon gelaufen (+8% in 5 min" in o["note"]
+    assert json.loads(o["features"])["run5"] == ">5%"
+
+
 def test_no_rebuy_of_a_coin_just_traded(conn, s):
     set_tier(conn, WHALE, "ultra")
     w2 = "Whale22222222222222222222222222222222222222"

@@ -21,7 +21,8 @@ DEDUP_S = 6 * 3600  # one opportunity per (whale entity or kind, coin) in this w
 REENTRY_S = 6 * 3600  # no second brain position in a coin within this window: a coin we just lost on is no new idea
 TRAIL_MIN_HOLD_S = 60  # the trail arms after a minute: the first quotes after a buy are noise, not a run
 PRICE_RETRY_S = 30  # a coin without a DexScreener pair yet gets this long to show one before it is decided
-FLIP_MAX = 0.6  # wallets that sell this share of their buys within FLIP_S are gone before a copy can follow
+FLIP_MAX = 0.6
+RAN_5M_MAX = 0.05  # 10/2026: whale copies after >5 % in the 5 min before lost 9-20 % on average, flat ones about 0  # wallets that sell this share of their buys within FLIP_S are gone before a copy can follow
 NO_MARKET_S = 15 * 60  # an open position without any price this long is closed as "kein Markt"
 RUG_LIQ_DROP = 0.8
 INFLOW_DROP = 0.6  # 5-min buys under this share of their peak while in profit: the rush is over
@@ -210,6 +211,9 @@ class Trader:
             if c.execute("SELECT 1 FROM ct_swaps WHERE wallet=? AND mint=? AND side='sell' AND ts>=?",
                          (row["wallet"], mint, row["ts"])).fetchone():
                 return "Wal hat schon wieder verkauft"
+            run5 = ((raw or {}).get("intel") or {}).get("px_ret_5m")
+            if run5 is not None and run5 >= RAN_5M_MAX:
+                return f"schon gelaufen ({run5:+.0%} in 5 min vor dem Kauf)"
             fl = (raw or {}).get("flip") or {}
             if fl.get("n", 0) >= 5 and fl.get("share", 0) >= FLIP_MAX:
                 return f"Wal verkauft meist sofort wieder ({fl['share']:.0%} seiner Käufe binnen 2 min)"
