@@ -121,6 +121,18 @@ class Brain:
         self._cache.clear()
         return lam
 
+    def fade(self, lam: float) -> None:
+        """Extra forgetting on demand (the market changed): keep this share of all evidence."""
+        P = np.diag(self.prior)
+        self.A = P + lam * (self.A - P)
+        self.b *= lam
+        self.ss *= lam
+        self.sw *= lam
+        self.n *= lam
+        for k in self.counts:
+            self.counts[k] *= lam
+        self._cache.clear()
+
     def update(self, tokens, ys: dict[int, float], w: float = 1.0) -> None:
         """Learn one outcome: ys = {plan index: net return}. Plans without a value are left alone."""
         if not ys or w <= 0:

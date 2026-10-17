@@ -761,3 +761,30 @@ def test_diary_shows_the_daily_multiplier(conn, s):
     m = journal.multipliers(conn, now)
     assert [x for _, x in m] == [0.9, 2.0]
     assert "Tagesfaktor" in journal.write(conn, Brain(len(PLANS)), s, now) and "×2.00" in journal.write(conn, Brain(len(PLANS)), s, now)
+
+
+def test_regime_shift_fades_old_evidence_once(conn, s):
+    model, xm = trained(), exits.new_model(120)
+    xm.update(["kind=whale"], {0: 0.1})
+    now = time.time()
+    rng = random.Random(5)
+    for i in range(40):  # predicted +10 %, the market now delivers -10 %
+        conn.execute("INSERT INTO brain_opps(ts, kind, ref, mint, features, pred_mean, evaluated_at, realized_plan) "
+                     "VALUES (?,?,?,?,?,?,?,?)", (int(now) - 9000, "whale", f"r{i}", MINT, "{}", 0.1, int(now) - 60,
+                                                   -0.1 + rng.gauss(0, 0.05)))
+    n0, x0 = model.n, xm.n
+    shift = learner.regime_check(conn, model, xm, now)
+    assert shift and shift["err"] < -0.15 and model.n == pytest.approx(n0 / 2) and xm.n == pytest.approx(x0 / 2)
+    assert learner.regime_check(conn, model, xm, now + 60) is None  # cooldown: once, not every round
+    assert "Regime gewechselt" in journal.write(conn, model, s, now)
+
+
+def test_no_regime_shift_when_predictions_hold(conn, s):
+    model = trained()
+    now = time.time()
+    rng = random.Random(6)
+    for i in range(40):
+        conn.execute("INSERT INTO brain_opps(ts, kind, ref, mint, features, pred_mean, evaluated_at, realized_plan) "
+                     "VALUES (?,?,?,?,?,?,?,?)", (int(now) - 9000, "whale", f"q{i}", MINT, "{}", 0.0, int(now) - 60,
+                                                   rng.gauss(0, 0.2)))
+    assert learner.regime_check(conn, model, None, now) is None

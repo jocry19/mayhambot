@@ -282,6 +282,44 @@ def _exit_step(conn, xm, s, o, candles_fn, from_min: float, final: bool, merged=
     return exits.learn_path(xm, *args, from_min, to_min)
 
 
+REGIME_WINDOW_S = 6 * 3600
+REGIME_MIN_N = 30
+REGIME_Z = 3.0  # the last hours' outcomes miss the predictions by more than 3 standard errors
+REGIME_MIN_ERR = 0.05  # and by at least 5 percentage points per trade
+REGIME_KEEP = 0.5  # then halve all old evidence at once (the half-life alone would take 120 h)
+REGIME_COOLDOWN_S = 3 * 3600
+
+
+def regime_check(conn, model, xm, now: float | None = None) -> dict | None:
+    """The market is not always what the brain learned. Compare the last hours' replayed outcomes with what the model
+    predicted for them when it decided (out of sample): a systematic miss in one direction means the regime changed,
+    so old evidence is faded at once and the recent outcomes weigh more. Returns the shift, or None."""
+    now = now or time.time()
+    last = store.get(conn, "regime", {}) or {}
+    if now - (last.get("at") or 0) < REGIME_COOLDOWN_S:
+        return None
+    rows = conn.execute("SELECT realized_plan, pred_mean FROM brain_opps WHERE evaluated_at>=? AND realized_plan IS "
+                        "NOT NULL AND pred_mean IS NOT NULL", (int(now - REGIME_WINDOW_S),)).fetchall()
+    if len(rows) < REGIME_MIN_N:
+        return None
+    errs = [r[0] - r[1] for r in rows]
+    n = len(errs)
+    m = sum(errs) / n
+    sd = (sum((e - m) ** 2 for e in errs) / (n - 1)) ** 0.5
+    z = m / (sd / n ** 0.5) if sd > 0 else 0.0
+    if abs(z) < REGIME_Z or abs(m) < REGIME_MIN_ERR:
+        return None
+    model.fade(REGIME_KEEP)
+    if xm is not None:
+        xm.fade(REGIME_KEEP)
+    shift = {"at": int(now), "n": n, "err": round(m, 4), "z": round(z, 2)}
+    store.put(conn, "regime", shift)
+    hist = (store.get(conn, "regime_history", []) or [])[-29:] + [shift]
+    store.put(conn, "regime_history", hist)
+    log.info("regime shift: last %d outcomes %+.1f%% vs predicted (z %.1f): old evidence halved", n, m * 100, z)
+    return shift
+
+
 def backfill_exits(conn, xm, s, candles_fn=None, limit: int = 150) -> int:
     """Opportunities finished before the organic exits existed: learn their minutes (cached candles, oldest first,
     `limit` per round) so the exit model does not start from nothing. Returns opportunities done."""
