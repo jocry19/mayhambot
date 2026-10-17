@@ -859,6 +859,34 @@ def test_bonding_curve_coins_only_explored_and_late_copies_skipped(env, monkeypa
     assert st.on_whale_buy(late) is None
 
 
+def test_curve_depth_from_price_lets_exploration_buy_a_curve_coin(env, monkeypatch):
+    import dataclasses
+
+    # at launch a pump.fun curve holds 30 virtual SOL: depth 2 x 30 SOL
+    assert market.curve_liquidity_usd("pumpfun", 30 / 1.073e9, 100.0) == pytest.approx(6000)
+    assert market.curve_liquidity_usd("pumpswap", 30 / 1.073e9, 100.0) == 0
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path), ex)
+    monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": "smart"})
+    state["snap"] = dataclasses.replace(state["snap"], dex_id="pumpfun", liquidity_usd=0.0)
+    assert st.on_whale_buy(whale_buy(sol=1.0)) is None  # DexScreener's $0 and no curve depth: no buy
+    assert any("($0)" in r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'"))
+    state["snap"] = dataclasses.replace(state["snap"], curve_liq_usd=9000.0)
+    assert st.on_whale_buy(whale_buy(sol=1.0))
+    assert [r[0] for r in conn.execute("SELECT mode FROM ct_positions")] == ["explore"]
+
+
+def test_buys_under_the_copy_minimum_leave_a_summary_line(env, monkeypatch):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path), ex)
+    assert st.on_whale_buy(whale_buy(sol=0.3)) is None
+    assert not conn.execute("SELECT 1 FROM ct_events WHERE kind='small'").fetchone()
+    st._small[2] -= strategy.SMALL_SUMMARY_S
+    assert st.on_whale_buy(whale_buy(sol=0.5)) is None
+    row = conn.execute("SELECT message FROM ct_events WHERE kind='small'").fetchone()
+    assert row and "2 Wal-Käufe" in row[0] and st._small[0] == 0
+
+
 def test_paper_target_needs_a_sellable_price_and_slippage_survives_a_restart(env, monkeypatch):
     import dataclasses
     import json as _json
@@ -1029,3 +1057,13 @@ def test_jupiter_client_error_is_final_a_429_is_not():
     assert market._transient(RuntimeError("GET x failed: 400 Client Error: Bad Request for url")) is False
     assert market._transient(RuntimeError("GET x failed: 429 Too Many Requests")) is True
     assert market._transient(RuntimeError("GET x failed: HTTPSConnectionPool timed out")) is True
+
+
+def test_ranking_evaluates_buys_from_the_exploration_minimum(env, monkeypatch):
+    s, conn, ex, state = env
+    old = int(time.time()) - s.pump_window_min * 60 - 600
+    store.save_swaps(conn, [chain.Swap(f"sig{x}", W, old, "buy", MINT, 1e6, x, 3e-6) for x in (0.3, 0.6, 3.0)])
+    monkeypatch.setattr(market, "best_pool", lambda m: "pool")
+    monkeypatch.setattr(market, "minute_candles", lambda *a, **k: [])
+    assert ranking.evaluate_pending(conn, s) == 2  # 0.6 and 3 SOL: a wallet's 0.5-2 SOL buys count as samples
+    assert {r[0] for r in conn.execute("SELECT sig FROM ct_buy_outcomes")} == {"sig0.6", "sig3.0"}

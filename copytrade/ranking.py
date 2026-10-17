@@ -124,16 +124,21 @@ def evaluate_buy(candles: Sequence[Candle], t0: int, s: Settings) -> dict | None
 
 
 def evaluate_pending(conn, s: Settings, max_mints: int = 25, min_sol: float | None = None) -> int:
-    """Evaluate whale buys that are old enough and not evaluated yet. Returns count."""
-    min_sol = s.min_whale_buy_sol if min_sol is None else min_sol
+    """Evaluate whale buys that are old enough and not evaluated yet. Returns count.
+
+    From the exploration minimum on, not only from the copy minimum: on 17.10. 16 of 27 copy decisions ended at
+    'Wallet noch nicht bewertet' because a wallet's 0.5-2 SOL buys (5x as many as its 2+ SOL ones) never counted
+    as samples. Buys at the copy minimum still go first."""
+    min_sol = min(s.min_whale_buy_sol, s.explore_min_sol) if min_sol is None else min_sol
     horizon = int(time.time()) - s.pump_window_min * 60
     rows = conn.execute(
         """SELECT s.sig, s.wallet, s.mint, s.ts, s.sol_amount FROM ct_swaps s
            LEFT JOIN ct_buy_outcomes o ON o.sig = s.sig
            WHERE s.side='buy' AND s.ts < ? AND s.ts > ? AND s.sol_amount >= ?
              AND (o.sig IS NULL OR (o.pumped IS NULL AND o.candles = 0 AND o.evaluated_at < ? AND s.ts > ?))
-           ORDER BY o.sig IS NOT NULL, s.ts DESC""",  # failed candle fetches retried every 2 h for 2 days, new first
-        (horizon, horizon - 30 * 86400, min_sol, int(time.time()) - RETRY_EVERY_S, int(time.time()) - RETRY_FOR_S),
+           ORDER BY o.sig IS NOT NULL, s.sol_amount < ?, s.ts DESC""",  # failed fetches retried every 2 h for 2 days
+        (horizon, horizon - 30 * 86400, min_sol, int(time.time()) - RETRY_EVERY_S, int(time.time()) - RETRY_FOR_S,
+         s.min_whale_buy_sol),
     ).fetchall()
     by_mint: dict[str, list] = {}
     for r in rows:

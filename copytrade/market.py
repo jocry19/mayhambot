@@ -37,6 +37,12 @@ class PairSnapshot:
     change_h1: float
     pair_created_ms: int
     ts: float
+    curve_liq_usd: float = 0.0  # pump.fun bonding curve depth (DexScreener gives curves no liquidity_usd)
+
+    @property
+    def depth_usd(self) -> float:
+        """Liquidity a trade meets: the pool's, else the bonding curve's."""
+        return self.liquidity_usd or self.curve_liq_usd
 
     @property
     def age_hours(self) -> float:
@@ -79,6 +85,18 @@ def _jup_headers(settings: Settings | None) -> dict:
     return {}
 
 
+PUMP_CURVE_K = 30 * 1.073e9  # pump.fun curve: virtual SOL x virtual tokens (whole units) at launch
+
+
+def curve_liquidity_usd(dex_id: str, price_sol: float, solusd: float) -> float:
+    """Depth of a pump.fun bonding curve from its price: the curve is constant product on virtual reserves, so
+    v_sol = sqrt(price x k) and a trade meets 2 x v_sol. DexScreener reports no liquidity for curve pairs (17.10.:
+    5209 of 5209 pumpfun tokens at $0), which read as 'Liquidität zu klein ($0)'."""
+    if dex_id != "pumpfun" or price_sol <= 0 or solusd <= 0:
+        return 0.0
+    return 2 * (price_sol * PUMP_CURVE_K) ** 0.5 * solusd
+
+
 def _snapshot(p: dict, solusd: float) -> PairSnapshot:
     tx = p.get("txns") or {}
     vol = p.get("volume") or {}
@@ -106,6 +124,7 @@ def _snapshot(p: dict, solusd: float) -> PairSnapshot:
         change_h1=float(ch.get("h1") or 0),
         pair_created_ms=int(p.get("pairCreatedAt") or 0),
         ts=time.time(),
+        curve_liq_usd=curve_liquidity_usd(p.get("dexId", ""), price_sol, solusd),
     )
 
 

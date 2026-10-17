@@ -54,6 +54,7 @@ MAX_ENTRY_AGE_S = 30
 # coins still on the pump.fun bonding curve: research 10/17 (44 h, 6 % costs) -17 % net and 13 % pump rate (n 418)
 # vs -6.5 % and 28 % after migration (n 449); the strict account skips them, exploration keeps measuring
 CURVE_DEX = "pumpfun"
+SMALL_SUMMARY_S = 600  # one summary line for the whale buys under the copy minimum
 
 
 class ExploreExecutor:
@@ -102,6 +103,7 @@ class Strategy:
         self._missing: dict[int, int] = {}
         self._noroute: dict[int, float] = {}  # last 'no sell route' alarm per live position
         self._pending: list[tuple[float, Swap]] = []  # whale buys waiting for the learned entry delay
+        self._small = [0, 0.0, time.time()]  # whale buys too small for either account since the last summary
         control.init(conn)
         try:  # the measured paper slippage from the last learning round, before the first buy after a restart
             # (10/2026: auto-updates restart the app often, and buys before the first maintenance round were
@@ -215,6 +217,20 @@ class Strategy:
         tiers = {t.strip() for t in s.explore_tiers.split(",") if t.strip()}
         return (store.wallet_info(self.conn, swap.wallet).get("tier") or "none") in tiers
 
+    def _count_small(self, swap: Swap) -> None:
+        """Buys under the copy minimum end without a skip line; one summary every SMALL_SUMMARY_S says how many
+        (17.10.: 99 tracked buys gave 27 decisions, the other 72 were these and left no trace)."""
+        sm = self._small
+        sm[0] += 1
+        sm[1] += swap.sol_amount
+        if time.time() - sm[2] >= SMALL_SUMMARY_S:
+            store.event(self.conn, "small", f"[whale] {sm[0]} Wal-Käufe unter der Kopier-Grenze übergangen "
+                                            f"(Ø {sm[1] / sm[0]:.2f} SOL; Kopie ab {self.s.min_whale_buy_sol:g} SOL, "
+                                            f"Erkundung ab {self.s.explore_min_sol:g} SOL bei {self.s.explore_tiers})",
+                        data={"n": sm[0], "sol": round(sm[1], 2), "since": int(sm[2])})
+            self._small = [0, 0.0, time.time()]
+        return None
+
     def on_whale_buy(self, swap: Swap, deferred: bool = False) -> int | None:
         """Copy a whale buy into the strict account (the live rules) and/or the exploration account. The returned id
         is the strict position if there is one."""
@@ -224,7 +240,7 @@ class Strategy:
             return None
         expl = m == "auto" and self._explore_ok(swap)
         if swap.sol_amount < s.min_whale_buy_sol and not expl:
-            return None
+            return self._count_small(swap)
         age = time.time() - swap.block_time
         lp = learn.params_for(self.conn, "whale", swap.wallet)
         if lp and not deferred and m != "manual" and lp.get("delay_s", 0) > age + 5:
@@ -276,15 +292,16 @@ class Strategy:
         snap = market.snapshot(swap.mint, s)
         if not snap or snap.price_sol <= 0:
             return self._skip("whale", swap.mint, "kein Marktpreis")
-        if snap.liquidity_usd < p.min_liquidity_usd:
+        liq = snap.depth_usd  # a pump.fun curve has no pool liquidity, its depth is the curve's
+        if liq < p.min_liquidity_usd:
             # exploration buys from CT_EXPLORE_MIN_LIQ_USD: on 10/16 28 of 38 ultra/smart buys sat at $4-15k
-            if "explore" in accounts and snap.liquidity_usd >= s.explore_min_liq_usd:
+            if "explore" in accounts and liq >= s.explore_min_liq_usd:
                 if "paper" in accounts:
                     accounts.remove("paper")
-                    self._skip("whale", swap.mint, f"Liquidität zu klein (${snap.liquidity_usd:,.0f}); nur Erkundung",
+                    self._skip("whale", swap.mint, f"Liquidität zu klein (${liq:,.0f}); nur Erkundung",
                                snap, account="explore")
             else:
-                return self._skip("whale", swap.mint, f"Liquidität zu klein (${snap.liquidity_usd:,.0f})", snap)
+                return self._skip("whale", swap.mint, f"Liquidität zu klein (${liq:,.0f})", snap)
         if snap.dex_id == CURVE_DEX and "paper" in accounts:
             accounts.remove("paper")
             if not accounts:
@@ -458,15 +475,16 @@ class Strategy:
         snap = market.snapshot(mint, self.s)
         if not snap or snap.price_sol <= 0:
             return self._skip("signal", mint, "kein Marktpreis")
-        if not why and snap.liquidity_usd < p.min_liquidity_usd:
-            why = f"Liquidität zu klein (${snap.liquidity_usd:,.0f})"
+        liq = snap.depth_usd
+        if not why and liq < p.min_liquidity_usd:
+            why = f"Liquidität zu klein (${liq:,.0f})"
         if not why and snap.dex_id == CURVE_DEX:
             why = "noch auf der Bonding Curve (pump.fun)"
         if why and not expl:
             return self._skip("signal", mint, why, snap)
-        if why and snap.liquidity_usd < self.s.explore_min_liq_usd:
+        if why and liq < self.s.explore_min_liq_usd:
             return self._skip("signal", mint, f"{why}; für die Erkundung Liquidität zu klein "
-                                              f"(${snap.liquidity_usd:,.0f})", snap)
+                                              f"(${liq:,.0f})", snap)
         if snap.fdv and snap.fdv > p.max_mcap_usd:
             return self._skip("signal", mint, f"Market Cap zu groß (${snap.fdv:,.0f})", snap)
         if sig["price_usd"] and snap.price_usd / sig["price_usd"] - 1 > 0.5:
