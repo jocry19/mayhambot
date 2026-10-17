@@ -134,12 +134,13 @@ def test_backup_logs_table_sizes(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch, {"BACKUP_DIR": str(tmp_path / "bk")})
     c = sqlite3.connect(tmp_path / "data" / "mayhambot.db")
     c.execute("PRAGMA journal_mode=WAL")
-    c.execute("CREATE TABLE trades(sig TEXT, ts INTEGER)")
-    c.executemany("INSERT INTO trades VALUES (?,?)", [(str(i), 1_760_000_000 + i) for i in range(100)])
+    c.execute("CREATE TABLE trades(sig TEXT, wallet TEXT, mint TEXT, ts INTEGER, source TEXT)")
+    c.executemany("INSERT INTO trades VALUES (?,?,?,?,?)",
+                  [(str(i), f"w{i % 7}", f"m{i % 3}", 1_760_000_000 + i, "geckoterminal") for i in range(100)])
     c.commit()
     c.close()
     monkeypatch.setattr(ops, "backup_dir", lambda: tmp_path / "bk")
     assert ops.backup(None) == 0
     log = (tmp_path / "logs" / "dbsize.log").read_text()
-    assert "trades:" in log and "100 Zeilen" in log
+    assert "trades:" in log and "100 Zeilen" in log and "Einmal-Wallets" in log
     assert (tmp_path / "data" / "db_sizes.json").exists()

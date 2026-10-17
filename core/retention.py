@@ -151,3 +151,34 @@ def size_report(sizes: dict, fstats: dict | None = None, grow: dict | None = Non
                      + (f", {_n(v['recent'])} in 24 h" if v.get("recent") is not None else "")
                      + (f", +{_mb(g[0])}/Tag" if g and g[0] > 0 else ""))
     return "\n".join(lines)
+
+
+def trades_profile(conn) -> dict:
+    """What the trades table is made of, for the retention decision (read-only, on the backup's copy):
+    rows per source, rows of one-off wallets (one coin ever and only seen in a pool feed, never backfilled, so never scored: tiers need 2+ coins), and rows on
+    coins where every wallet is one-off (no scored wallet ever touched them, so no training event or influence)."""
+    out = {"rows": conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]}
+    out["by_source"] = dict(conn.execute("SELECT COALESCE(source,''), COUNT(*) FROM trades GROUP BY 1").fetchall())
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _ret_oneoff(wallet TEXT PRIMARY KEY)")
+    conn.execute("DELETE FROM _ret_oneoff")
+    conn.execute("""INSERT INTO _ret_oneoff SELECT wallet FROM trades GROUP BY wallet
+                    HAVING COUNT(DISTINCT mint) = 1
+                       AND SUM(COALESCE(source, '') NOT IN ('geckoterminal', 'rpc_early', 'test_pool')) = 0""")
+    out["oneoff_wallets"] = conn.execute("SELECT COUNT(*) FROM _ret_oneoff").fetchone()[0]
+    out["oneoff_rows"] = conn.execute(
+        "SELECT COUNT(*) FROM trades WHERE wallet IN (SELECT wallet FROM _ret_oneoff)").fetchone()[0]
+    out["oneoff_coin_rows"] = conn.execute(
+        """SELECT COUNT(*) FROM trades WHERE mint NOT IN
+               (SELECT DISTINCT mint FROM trades WHERE wallet NOT IN (SELECT wallet FROM _ret_oneoff))""").fetchone()[0]
+    out["wallets"] = conn.execute("SELECT COUNT(DISTINCT wallet) FROM trades").fetchone()[0]
+    out["mints"] = conn.execute("SELECT COUNT(DISTINCT mint) FROM trades").fetchone()[0]
+    conn.execute("DROP TABLE _ret_oneoff")
+    return out
+
+
+def profile_report(p: dict) -> str:
+    pct = lambda n: f"{100 * n / p['rows']:.0f} %" if p["rows"] else "-"  # noqa: E731
+    return (f"trades: {_n(p['rows'])} Zeilen, {_n(p['wallets'])} Wallets, {_n(p['mints'])} Coins; Quellen "
+            + ", ".join(f"{k or '?'} {pct(v)}" for k, v in sorted(p["by_source"].items(), key=lambda kv: -kv[1]))
+            + f"\nEinmal-Wallets (nur 1 Coin): {_n(p['oneoff_wallets'])} mit {pct(p['oneoff_rows'])} der Zeilen; "
+            f"Coins nur mit Einmal-Wallets: {pct(p['oneoff_coin_rows'])} der Zeilen")

@@ -674,9 +674,11 @@ def log_db_sizes(path: Path) -> str | None:
         c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
         try:
             sizes, fstats, grow = retention.log_sizes(c, ROOT / "data" / "db_sizes.json")
+            text = retention.size_report(sizes, fstats, grow)
+            if "trades" in sizes:
+                text += "\n" + retention.profile_report(retention.trades_profile(c))
         finally:
             c.close()
-        text = retention.size_report(sizes, fstats, grow)
         (ROOT / "logs").mkdir(exist_ok=True)
         with open(ROOT / "logs" / "dbsize.log", "a") as fh:
             fh.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')}\n{text}\n")
