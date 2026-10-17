@@ -362,3 +362,24 @@ def test_labels_start_at_the_realistic_entry_after_the_delay():
     assert ev.labels_at("J", 0, idx, hz, delay=0)["15m"]["pumped"] == 1
     lab = ev.labels_at("J", 0, idx, hz, delay=60)["15m"]
     assert lab["pumped"] == 0 and lab["net"] < 0
+
+
+def test_intel_source_survives_a_locked_read(monkeypatch):
+    import sqlite3
+    import types
+    from research import intel_features as itf
+    calls = {"n": 0}
+
+    def features_at(kind, mint, ts, conn=None):
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise sqlite3.OperationalError("database is locked")
+        return {"features": {}}
+
+    monkeypatch.setitem(sys.modules, "intel", types.SimpleNamespace(features_at=features_at))
+    monkeypatch.setattr(itf.time, "sleep", lambda s: None)
+    src = itf.Source(None)
+    src.ok = True
+    assert src("M", 0)["i_coverage"] == 0  # neutral after 3 locked tries
+    assert src.ok  # still on
+    assert "i_coverage" in src("M", 120) and calls["n"] == 4

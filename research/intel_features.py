@@ -8,6 +8,7 @@ every candidate is also tested without the 'intel' group on the newest 30 % of c
 """
 import logging
 import math
+import time
 
 log = logging.getLogger("research.intel_features")
 
@@ -58,10 +59,13 @@ def neutral():
 class Source:
     """Callable (mint, ts) -> dict of model features; switches itself off when intel is not usable."""
 
+    MAX_FAILS = 20
+
     def __init__(self, conn):
         self.conn = conn
         self.ok = True
         self.cache = {}
+        self.fails = 0  # consecutive failures; off only after MAX_FAILS (one locked read must not neutralise a retrain)
         try:
             import intel  # noqa: F401
         except Exception:  # noqa: BLE001
@@ -74,12 +78,22 @@ class Source:
         if k in self.cache:
             return self.cache[k]
         import intel
-        try:
-            raw = intel.features_at("coin", mint, int(ts), conn=self.conn).get("features") or {}
-        except Exception as e:  # noqa: BLE001
-            log.info("intel features unavailable (%s), using neutral values", str(e)[:120])
-            self.ok = False
-            return neutral()
+        raw = None
+        for attempt in range(3):
+            try:
+                raw = intel.features_at("coin", mint, int(ts), conn=self.conn).get("features") or {}
+                break
+            except Exception as e:  # noqa: BLE001
+                busy = "locked" in str(e).lower() or "busy" in str(e).lower()
+                if busy and attempt < 2:
+                    time.sleep(0.2 * (attempt + 1))
+                    continue
+                self.fails += 1
+                if self.fails >= self.MAX_FAILS:
+                    log.info("intel features unavailable (%s), using neutral values from now on", str(e)[:120])
+                    self.ok = False
+                return neutral()  # not cached: the next call tries again
+        self.fails = 0
         out, known = {}, 0
         for name, _, fn, nv in SPEC:
             v = raw.get(name)
