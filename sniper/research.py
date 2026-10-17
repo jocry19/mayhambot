@@ -457,12 +457,15 @@ def rule_search(rows, paths, cfg, train_share=0.7, min_n=30, top_singles=10):
             "split_ts": train[-1]["created_ts"], "candidates": results, "walk_forward": folds, "accepted": acc}
 
 
-def signature_test(rows, paths, cfg, feat="block0_wallets", thr=3, blocks=5, min_test=5):
-    """A fixed entry condition (feat >= thr) instead of a searched one: the best exit is picked on older launches
-    and traded on the next block (walk-forward), so the exit choice cannot see its own test data."""
+def signature_test(rows, paths, cfg, feat="block0_wallets", thr=3, blocks=5, min_test=5, conds=None):
+    """A fixed entry condition (feat >= thr, or all of `conds` [(feature, min), ...]) instead of a searched one:
+    the best exit is picked on older launches and traded on the next block (walk-forward), so the exit choice
+    cannot see its own test data."""
     side_cost, tx_cost = costs(cfg)
-    sig = [r for r in rows if (r.get(feat) or 0) >= thr]
-    out = {"feature": feat, "min": thr, "n": len(sig), "measured": sum(1 for r in rows if r.get(feat) is not None)}
+    conds = conds or [(feat, thr)]
+    sig = [r for r in rows if all((r.get(f) or 0) >= v for f, v in conds)]
+    out = {"feature": feat, "min": thr, "conditions": conds, "n": len(sig),
+           "measured": sum(1 for r in rows if all(r.get(f) is not None for f, _ in conds))}
     if not sig:
         return out
     out.update(rug=round(mean([r["rug"] for r in sig]), 3), x2=round(mean([r["x2"] for r in sig]), 3))
@@ -507,6 +510,8 @@ def run(conn, cfg=None, hours=0, save=False, now=None):
         rep["risk"] = calibrate_risk(rows)
         rep["rules"] = rule_search(rows, paths, cfg)
         rep["block0"] = signature_test(rows, paths, cfg)
+        # candidate from the winners study: a running curve (MC >= 50 SOL) with >= 5 buyers at the decision
+        rep["mc50_buyers5"] = signature_test(rows, paths, cfg, conds=[("mcap_decide_sol", 50), ("n_buyers", 5)])
     if save:
         store.set_state(conn, "research_report", json.dumps(rep))
         acc = (rep.get("rules") or {}).get("accepted")
@@ -582,9 +587,12 @@ def summary(rep, top=8):
                      "festen Regeln.")
     elif rs:
         L.append(f"\nRegelsuche: {rs.get('status')}.")
-    b0 = rep.get("block0")
-    if b0:
-        L.append(f"\nBlock-0-Signatur (>= {b0['min']} Mini-Käufe in 5 s): {b0['n']} von {b0['measured']} gemessenen "
+    for key, title in (("block0", "Block-0-Signatur (>= 3 Mini-Käufe in 5 s)"),
+                       ("mc50_buyers5", "MC >= 50 SOL und >= 5 Käufer beim Entscheid")):
+        b0 = rep.get(key)
+        if not b0:
+            continue
+        L.append(f"\n{title}: {b0['n']} von {b0['measured']} gemessenen "
                  f"Launches" + (f", Rug {100 * b0['rug']:.0f} %, Verdopplung {100 * b0['x2']:.0f} %" if b0["n"] else ""))
         for f in b0.get("folds") or []:
             L.append(f"  Block {f['fold']}: " + (f"Test {100 * f['test_net']:+.1f} % (Median {100 * f['test_median']:+.1f} %, "

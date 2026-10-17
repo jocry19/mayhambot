@@ -188,6 +188,7 @@ oder ≤ −50 % nach Dev-/Insider-Abverkauf. Pump-Launches mit kaputtem Basispr
 | `SNIPER_PUMP_API_PER_MIN` | 40 | pump.fun-API-Deckel |
 | `SNIPER_DEEP_PER_MIN` | 4 | tief geprüfte Launches je Minute |
 | `SNIPER_DECIDE_SEC` | 20 | erste Entscheidung nach der Erstellung |
+| `SNIPER_RECHECK_SEC` | 75 | ohne einen einzigen Trade beim ersten Blick: zweiter Blick bis hierhin, danach `no_trades` (keine Daten, kein Urteil über Aktivität) |
 | `SNIPER_MIN_BUYERS` / `SNIPER_MIN_INFLOW_SOL` / `SNIPER_PRESCORE_MIN` | 5 / 1,0 / 25 | Stufe 1 |
 | `SNIPER_BUNDLE_WARN_PCT` / `_BLOCK_PCT` / `_MIN_WALLETS` / `SNIPER_BUNDLE_SLOTS` | 5 / 15 / 3 / 1 | Bundle |
 | `SNIPER_DEV_WARN_PCT` / `_BLOCK_PCT`, `SNIPER_TOP10_WARN_PCT` / `_BLOCK_PCT` | 5 / 20, 30 / 60 | Dev, Konzentration |

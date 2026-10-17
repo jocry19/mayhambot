@@ -188,6 +188,8 @@ class LogStream:
         self.reconnects = 0
         self.server_drops = 0                  # closes by the RPC with an invalid close code (1002)
         self.silent_reconnects = 0             # reconnects because nothing arrived for silence_limit() seconds
+        self.decoded, self.delivered = 0, 0
+        self._conn_since = None      # trade events parsed / handed to the engine (wanted coins)
         self.recent, self._buffered, self.replayed = {}, 0, 0   # program mode: recent trades of unwanted coins
         self._program_since = None
         self.ws = None
@@ -221,6 +223,13 @@ class LogStream:
     def not_live(self, now, grace=30):
         """Mints wanted for longer than `grace` seconds without a confirmed subscription (refused, over the
         subscription limit, or the connection is down)."""
+        if self.mode == "program":
+            # one subscription for all coins: while it is (re)connecting nothing is "dead" per coin. The public RPC
+            # drops the socket about once a minute (1002); demoting every coin in that gap cut all of them off
+            # their stream for the rest of their life. Only a program subscription refused for `grace` counts.
+            if not self.connected or self.program in self.pending.values() or self._conn_since is None \
+                    or now - self._conn_since <= grace or self.program in self.subs:
+                return []
         return [m for m in list(self.want_ts) if now - self.want_ts[m] > grace and not self.is_live(m)]
 
     def active_subs(self):
@@ -277,9 +286,11 @@ class LogStream:
         import time as _t
         now = now or _t.time()
         for msg in msgs:
+            self.decoded += 1
             if self.mode == "program" and msg.get("mint") not in self.want:
                 self._buffer(msg, now)
                 continue
+            self.delivered += 1
             self.on_msg(msg)
 
     def _buffer(self, msg, now):
@@ -318,6 +329,7 @@ class LogStream:
                 async with websockets.connect(self.url, ping_interval=20, ping_timeout=20, max_size=2 ** 22,
                                               open_timeout=15) as ws:
                     self.connected, self.subs, self.pending = True, {}, {}
+                    self._conn_since = _t.time()
                     self._program_since = None
                     up_since = _t.monotonic()
                     self.reconnects += 1

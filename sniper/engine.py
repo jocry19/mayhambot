@@ -35,6 +35,7 @@ SKIP_LABELS = {
     "no_price": "kein Preis für den Einstieg",
     "unverified": "Launch-Daten nicht prüfbar (pump.fun und RPC ohne Antwort)",
     "market": "Marktphase (Risk-off, höherer Mindest-Score)",
+    "no_trades": "keine Trades gesehen (auch beim zweiten Blick)",
 }
 
 
@@ -208,6 +209,14 @@ class Engine:
         with self.lock:
             for mint, st in list(self.launches.items()):
                 if st.decision == "pending" and now - st.created_ts >= self.cfg.decide_sec:
+                    if not st.n_seen and st.source == "pumpportal" and st.pool == "pump" and self.trades_live \
+                            and now - st.created_ts < self.cfg.recheck_sec:
+                        if not getattr(st, "_deferred", False):
+                            st._deferred = True       # no trade yet: a second look later instead of "activity"
+                            self.counters["deferred"] = self.counters.get("deferred", 0) + 1
+                        continue
+                    if getattr(st, "_deferred", False) and st.n_seen:
+                        self.counters["deferred_found"] = self.counters.get("deferred_found", 0) + 1
                     self._stage1(st, now)
                     if st.decision == "queued":
                         cands.append(st)
@@ -307,12 +316,17 @@ class Engine:
         a = analyze(st, self.cfg, None, self.tiers, now)
         st.prescore = round(a.momentum * (1 - a.risk / 100), 1)
         F = a.features
+        self.counters["stage1_pump"] = self.counters.get("stage1_pump", 0) + 1
+        if not F.get("n_trades"):
+            self.counters["stage1_zero"] = self.counters.get("stage1_zero", 0) + 1
         reason = None
         if st.pool == "pump" and (st.base_mcap_sol or 0) < research.MIN_BASE_MCAP:
             reason = "no_price"   # below the curve's start price: a broken quote, neither tradable nor measurable
         elif (self.stream_pools is not None and st.pool not in self.stream_pools) or \
                 (not self.trades_live and not F.get("n_trades")):
             reason = "no_stream"
+        elif not F.get("n_trades"):
+            reason = "no_trades"  # nothing seen at the second look either: no data is no verdict on activity
         elif F["dev_sold_pct"] >= 50:
             reason = "dev_sold"
         elif self.learned and research.matches(self.learned, dict(F, mcap_decide_sol=st.base_mcap_sol, risk=a.risk)):

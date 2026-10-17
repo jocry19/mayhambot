@@ -242,7 +242,8 @@ def test_broken_base_is_not_bought(conn):
     eng.handle(cv.create(), T0)
     st = eng.launches["ZERO"]
     st.mcap_sol, st.v_tok = 0.0, 0.0
-    assert eng.tick(T0 + c.decide_sec + 1) == []
+    assert eng.tick(T0 + c.decide_sec + 1) == []          # no trade yet: second look
+    assert eng.tick(T0 + c.recheck_sec + 1) == []
     assert conn.execute("SELECT skip_reason FROM sniper_launches WHERE mint='ZERO'").fetchone()[0] == "no_price"
 
 
@@ -441,3 +442,44 @@ def test_block0_signature_is_measured_and_tested_walk_forward(conn):
     assert all("test_net" in f for f in out["folds"])
     assert "Block-0-Signatur" in research.summary({"n": 400, "with_path": 0, "cost_round_trip": 0.1, "base": {},
                                                    "block0": out})
+
+
+def test_launch_without_trades_gets_a_second_look_and_no_activity_verdict(conn):
+    """Data review: 80 % of launches had 0 trades at 20 s and were booked as 'activity' (19 of 20 million runs)."""
+    c = cfg()
+    eng = Engine(c, conn, enricher=FakeEnricher())
+    quiet, late = Curve("QUIET"), Curve("LATE")
+    eng.handle(quiet.create(), T0)
+    eng.handle(late.create(), T0)
+    eng.tick(T0 + c.decide_sec + 1)
+    assert eng.launches["QUIET"].decision == eng.launches["LATE"].decision == "pending"
+    organic(eng, late, T0 + 30, n=30)                     # the run starts after the first look
+    cands = eng.tick(T0 + c.recheck_sec + 1)
+    assert [s.mint for s in cands] == ["LATE"]
+    r = conn.execute("SELECT skip_reason FROM sniper_launches WHERE mint='QUIET'").fetchone()
+    assert r["skip_reason"] == "no_trades"
+    assert eng.counters["deferred"] == 2 and eng.counters["deferred_found"] == 1
+
+
+def test_program_stream_reconnect_does_not_cut_coins_off():
+    """Log review: the RPC closes the socket about once a minute (1002); in the gap every coin counted as dead."""
+    from sniper import rpcws
+    s = rpcws.LogStream("wss://x", lambda m: None, 150, mode="program", program=rpcws.PUMP_PROGRAM)
+    s.subscribe({"A", "B"}, now=100)
+    s.connected, s._conn_since, s.subs = True, 1000, {}          # reconnected, program subscription pending
+    s.pending = {7: rpcws.PUMP_PROGRAM}
+    assert s.not_live(1001) == [] and s.not_live(1100) == []
+    s.pending = {}
+    assert s.not_live(1010) == []                                # just connected: not refused yet
+    assert set(s.not_live(1100)) == {"A", "B"}                   # connected long, program never confirmed
+    s.subs = {rpcws.PUMP_PROGRAM: 1}
+    assert s.not_live(1100) == []
+
+
+def test_fixed_two_condition_candidate_is_walk_forward_tested():
+    c = cfg()
+    rows = [{"mint": f"C{i}", "created_ts": i, "decided_ts": i + 20, "mcap_decide_sol": 60.0 if i % 3 == 0 else 30.0,
+             "n_buyers": 6, "ret_1m": -0.1, "ret_5m": -0.3, "ret_15m": -0.6, "ret_60m": -0.9, "rug": 1, "x2": 0}
+            for i in range(300)]
+    out = research.signature_test(rows, {}, c, conds=[("mcap_decide_sol", 50), ("n_buyers", 5)])
+    assert out["n"] == 100 and out["holds"] is False and len(out["folds"]) == 3

@@ -430,6 +430,23 @@ class Service:
         log.info("Trade-Datenstrom: %s Trades/min, Quelle %s, RPC %s (%d Abos von %d gewünscht, %d Ablehnungen)%s",
                  "?" if h["trades_per_min"] is None else h["trades_per_min"], self.trades_via, self.logs.mode,
                  self.logs.active_subs(), len(self.logs.want), self.logs.rejects, " BLIND" if h["blind"] else "")
+        now_m = time.monotonic()
+        cur = {"decoded": self.logs.decoded, "delivered": self.logs.delivered, "replayed": self.logs.replayed,
+               "rej": rpcws.REJECTS["trade"], "drops": self.logs.server_drops, "silent": self.logs.silent_reconnects,
+               "s1": c.get("stage1_pump", 0), "zero": c.get("stage1_zero", 0), "def": c.get("deferred", 0),
+               "found": c.get("deferred_found", 0), "lost": c.get("subs_lost", 0)}
+        prev, t0 = getattr(self, "_diag", (None, None))
+        if prev:
+            d = {k: cur[k] - prev[k] for k in cur}
+            mins = max(1e-9, (now_m - t0) / 60)
+            # where trades get lost: decoded from the program stream (all pump.fun coins), handed to our launches,
+            # rejected by the decoder; launches decided without a single trade; coins cut off their stream
+            log.info("Datenstrom-Diagnose (%.0f min): Programm %.0f Trades/min dekodiert, %.0f/min an Launches, "
+                     "%d aus dem Puffer nachgereicht, %d vom Dekoder verworfen, %d Trennungen (1002), %d still | "
+                     "Entscheid ohne Trades: %d von %d, zweiter Blick %d (davon %d mit Trades) | Abos verloren %d",
+                     mins, d["decoded"] / mins, d["delivered"] / mins, d["replayed"], d["rej"], d["drops"],
+                     d["silent"], d["zero"], d["s1"], d["def"], d["found"], d["lost"])
+        self._diag = (cur, now_m)
         log.info("Stand: %d Launches, %d Trades, %d Migrationen | Stufe 1: %d, tief geprüft: %d, Käufe: %d | "
                  "%d im Speicher, %d im Trade-Abo (%s, RPC-Logs %d Abos), Warteschlange %d | Calls gesamt RPC %d, API/Metadaten %d | offen %d, "
                  "Papier-Guthaben %.3f SOL", c["creates"], c["trades"], c["migrations"], c["stage1"], c["stage2"],

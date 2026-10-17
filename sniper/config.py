@@ -64,6 +64,7 @@ class SniperSettings:
 
     # ---- watching
     decide_sec: int = field(default_factory=lambda: _i("SNIPER_DECIDE_SEC", 20))            # first look after creation
+    recheck_sec: int = field(default_factory=lambda: _i("SNIPER_RECHECK_SEC", 75))          # second look without trades
     quiet_unsub_sec: int = field(default_factory=lambda: _i("SNIPER_QUIET_UNSUB_SEC", 120))
     max_watch_sec: int = field(default_factory=lambda: _i("SNIPER_MAX_WATCH_SEC", 3900))
     max_subscribed: int = field(default_factory=lambda: _i("SNIPER_MAX_SUBSCRIBED", 150))
