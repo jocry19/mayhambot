@@ -160,12 +160,12 @@ http.CreditsExhausted             # raised instead of calling when today's share
 
 - Ledger `data/ratelimit/credits-helius.json`, shared by all processes, survives restarts, resets with the UTC month.
 - Month budget `HELIUS_CREDITS_MONTH` (1,000,000) minus reserve `HELIUS_CREDITS_RESERVE_PCT` (10 %), split into shares
-  per service (`HELIUS_SHARE_<SERVICE>`, percent): research 50, signals 12.5, safety 12.5, copytrade 12.5, sniper 12.5
+  per service (`HELIUS_SHARE_<SERVICE>`, percent): research 45, signals 12.5, safety 12.5, copytrade 12.5, sniper 12.5, brain 5 (its rug checks)
   (with 1,000,000 and 10 % reserve: 30,000 credits a day in total, research 15,000, the others 3,750 each).
 - Daily budget = (share − used before today) / days left in the month incl. today, so unused credits carry over.
   safety and sniper may use 1.5x their day budget for events, never more than their month share.
 - Lending: a service past its own day budget may borrow up to `HELIUS_BORROW_PCT` (50 %) of what the other services
-  leave unused today (research usually spends little of its 50 %), only while the whole plan is not ahead of the
+  leave unused today (research usually spends little of its 45 %), only while the whole plan is not ahead of the
   calendar (used <= usable x day / days in month). The lender's own share is never refused. `HELIUS_BORROW_PCT=0` = off.
 - Used up today: `post_json` sends standard RPC methods (1 credit) to the public RPC instead; DAS / Enhanced calls
   raise `CreditsExhausted` (callers already treat it as a failed request) instead of emptying the month early.

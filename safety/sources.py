@@ -86,13 +86,21 @@ class Fetcher:
             raise BudgetExceeded(f"call budget {self.max_calls} used up")
         self.calls += n
 
-    def _targets(self):
+    def _targets(self, method=None):
         """RPC endpoints in order of preference, each with its own per-minute budget. The refresher goes to the
         public RPC first and uses the configured (usually Helius) RPC only as overflow; live paths
         (priority) prefer the faster configured RPC. Only standard 1-credit JSON-RPC methods are used."""
         c = self.cfg
         own = (self.rpc_url, _host(self.rpc_url))
-        pub = (c.public_rpc_url, _host(c.public_rpc_url))
+        pub_url = c.public_rpc_url
+        if pub_url == getattr(http, "PUBLIC_RPC", None) and hasattr(http, "pick_public_rpc"):
+            # the default public node is mainnet-beta, which refuses getTokenLargestAccounts in long 429 runs:
+            # take core's pool pick for this method instead (publicnode first, healthy endpoints only)
+            try:
+                pub_url = http.pick_public_rpc(self.lane, method=method)
+            except Exception:  # noqa: BLE001 - pool state unreadable: keep the configured node
+                pub_url = c.public_rpc_url
+        pub = (pub_url, _host(pub_url))
         if own[1] == pub[1] or c.public_per_min <= 0:
             return [own]
         return [own, pub] if self.priority else [pub, own]
@@ -114,7 +122,7 @@ class Fetcher:
         self._spend()
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
         last, exhausted = None, False
-        for url, host in self._targets():
+        for url, host in self._targets(method):
             if not self._take(host, method):
                 continue
             self.rpc_calls[host] += 1

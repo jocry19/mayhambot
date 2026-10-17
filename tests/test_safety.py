@@ -772,3 +772,21 @@ def test_staged_pump_warns_on_fast_confirmed_mcap_and_fast_migration():
     c.commit()
     st = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True).checks["staged"]
     assert st["risk"] == 0 and st["status"] == "ok"
+
+
+def test_rug_snapshot_falls_back_to_the_pool_pick_not_mainnet_beta(monkeypatch):
+    """Helius first; when it cannot take the call, the method's preferred public node (publicnode for
+    getTokenLargestAccounts), not the fixed mainnet-beta that refuses it in long 429 runs."""
+    from core import http
+    from safety import sources
+    picked = []
+    monkeypatch.setattr(http, "pick_public_rpc",
+                        lambda lane="bulk", probe=None, method=None: picked.append(method)
+                        or "https://solana-rpc.publicnode.com")
+    cfg = type("C", (), {"public_rpc_url": http.PUBLIC_RPC, "public_per_min": 30, "max_calls_per_token": 9})()
+    f = sources.Fetcher(cfg, rpc_url="https://mainnet.helius-rpc.com/?api-key=x", priority=True)
+    urls = [u for u, _ in f._targets("getTokenLargestAccounts")]
+    assert urls[0].startswith("https://mainnet.helius-rpc.com") and urls[1] == "https://solana-rpc.publicnode.com"
+    assert picked == ["getTokenLargestAccounts"]
+    cfg.public_rpc_url = "https://my.own.node"          # an explicitly configured node is kept
+    assert [u for u, _ in f._targets("getTokenLargestAccounts")][1] == "https://my.own.node"

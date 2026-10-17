@@ -143,7 +143,7 @@ def _lend_env(monkeypatch, tmp_path, service):
     """31,000 a month, no reserve, day 1 of 31: research 50 % = 500/day, signals 10 % = 100/day."""
     _credit_env(monkeypatch, tmp_path, service, day=1)
     monkeypatch.setenv("HELIUS_BORROW_PCT", "50")
-    for svc, pct in (("research", 50), ("signals", 10), ("safety", 0), ("copytrade", 0), ("sniper", 0)):
+    for svc, pct in (("research", 50), ("signals", 10), ("safety", 0), ("copytrade", 0), ("sniper", 0), ("brain", 0)):
         monkeypatch.setenv(f"HELIUS_SHARE_{svc.upper()}", str(pct))
 
 
@@ -229,7 +229,15 @@ def test_unnamed_process_is_counted_not_limited(monkeypatch, tmp_path):
 
 
 def test_default_shares_fit_the_month():
-    assert sum(http.DEFAULT_CREDIT_SHARES.values()) == 100 and http.DEFAULT_CREDIT_SHARES["research"] == 50
+    assert sum(http.DEFAULT_CREDIT_SHARES.values()) == 100 and http.DEFAULT_CREDIT_SHARES["research"] == 45
+
+
+def test_brain_has_its_own_helius_share(monkeypatch, tmp_path):
+    """The rug check of every brain paper buy goes to Helius first instead of only borrowing (then mainnet-beta)."""
+    _credit_env(monkeypatch, tmp_path, "brain")
+    st = http.credits("brain")
+    assert st["credits_day_budget"] and st["credits_day_budget"] > 0
+    assert http.credits_left_today("brain") > 0
 
 
 def test_das_and_enhanced_share_one_fixed_spacing(monkeypatch, tmp_path):
