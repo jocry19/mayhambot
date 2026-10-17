@@ -823,11 +823,14 @@ def prune_backups(out: Path) -> int:
     removed = 0
     kept = []
     for f in sorted(out.glob("mayhambot-*.tar.gz"), reverse=True):   # newest first
-        age = now - f.stat().st_mtime
+        mtime = f.stat().st_mtime
+        age = now - mtime
         if age < keep_h * 3600:
             slot = None
         elif age < 86400:
-            slot = ("h", int(age // (every_h * 3600)))
+            # fixed clock windows, not age windows: an age window moves every hour, so each new backup crossing
+            # into it pushed out the one already there and nothing ever lived to become a daily backup
+            slot = ("h", int(mtime // (every_h * 3600)))
         elif age < keep_d * 86400:
             slot = ("d", f.name[10:18])
         else:

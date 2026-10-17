@@ -476,7 +476,7 @@ def test_prune_backups_thins_hours_before_days(tmp_path, monkeypatch):
     ops.prune_backups(tmp_path)
     ages = sorted((now - p.stat().st_mtime) / 3600 for p in tmp_path.iterdir())
     assert sum(a < 6 for a in ages) == 6
-    assert 4 <= sum(6 <= a < 24 for a in ages) <= 5
+    assert 4 <= sum(6 <= a < 24 for a in ages) <= 6     # 18 h touch at most 6 fixed 4-h windows
     days = {p.name[10:18] for p in tmp_path.iterdir() if now - p.stat().st_mtime >= 86400}
     assert len(days) >= 4                                               # one per older day survives
 
@@ -491,3 +491,23 @@ def test_prune_backups_leaves_free_disk(tmp_path, monkeypatch):
         os.utime(f, (now - h * 3600, now - h * 3600))
     ops.prune_backups(tmp_path)
     assert len(list(tmp_path.iterdir())) == 3                           # 5 kB kept - 2 kB reserve, newest 3 stay
+
+
+def test_prune_backups_hourly_over_days_keeps_dailies(tmp_path, monkeypatch):
+    """Run pruning after every hourly backup for 4 days: the tiers must hold still, not rotate everything away."""
+    monkeypatch.setattr(ops, "ENV", {})
+    monkeypatch.setattr(ops.shutil, "disk_usage", lambda p: types.SimpleNamespace(free=10**12))
+    clock = [1_760_000_000.0]
+    monkeypatch.setattr(ops.time, "time", lambda: clock[0])
+    for _ in range(24 * 4):
+        t = clock[0]
+        f = tmp_path / ("mayhambot-" + time.strftime("%Y%m%d-%H%M%S", time.localtime(t)) + ".tar.gz")
+        f.write_bytes(b"x")
+        os.utime(f, (t, t))
+        ops.prune_backups(tmp_path)
+        clock[0] += 3600
+    clock[0] -= 3600
+    ages = sorted((clock[0] - p.stat().st_mtime) / 3600 for p in tmp_path.iterdir())
+    assert sum(a < 6 for a in ages) == 6
+    assert 4 <= sum(6 <= a < 24 for a in ages) <= 6     # 18 h touch at most 6 fixed 4-h windows
+    assert sum(a >= 24 for a in ages) >= 3          # one per earlier day survives
