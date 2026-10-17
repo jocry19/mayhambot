@@ -213,6 +213,10 @@ def brain_line(b: dict | None) -> str:
     res = a.get("result_sol")
     head = (f"Entscheider (Papier): Equity {sol(a.get('equity_sol'), 2)} ({_c(sol(res, 2, True), tone(res))}), {n(a.get('open'))} offen, "
             f"{n(b['last24']['n'])} Entscheidungen 24 h, {n(b['last24']['entered'])} gekauft")
+    g = b.get("goal") or {}
+    if g.get("today") is not None:
+        lo, hi = (g.get("mult") or (2, 4))[:2]
+        head += f", Tagesfaktor heute {_c('×' + n(g['today'], 2), 'green' if g['today'] >= lo else 'red' if g['today'] < 1 else '')} (Ziel ×{lo}–{hi})"
     if not h.get("n"):
         return head + " · noch nichts nachgeprüft"
     return (head + f" · ehrlich: genommen Ø {_c(pct(h.get('taken_mean'), 1, True), tone(h.get('taken_mean')))}"
