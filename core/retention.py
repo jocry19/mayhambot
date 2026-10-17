@@ -274,7 +274,7 @@ def cleanup(conn, now=None, delete=False, trades_days=30, prices_days=7, batch=2
 
     def drop_trades(ids):
         q = ",".join("?" * len(ids))
-        conn.execute(f"""INSERT INTO trades_hourly
+        conn.execute(f"""INSERT INTO trades_hourly(mint, hour, side, n, usd, sol, price_lo, price_hi)
             SELECT mint, ts / 3600 * 3600, side, COUNT(*), SUM(usd_amount), SUM(sol_amount),
                    MIN(NULLIF(price_usd, 0)), MAX(price_usd) FROM trades WHERE rowid IN ({q}) GROUP BY 1, 2, 3
             ON CONFLICT(mint, hour, side) DO UPDATE SET n = n + excluded.n, usd = usd + excluded.usd,
@@ -300,7 +300,7 @@ def cleanup(conn, now=None, delete=False, trades_days=30, prices_days=7, batch=2
         n_p += _batches(conn, sel, (hour, hour + 3600) * 2, drop("token_prices"), 10 ** 6, 0, deadline)
         hour += 3600
         conn.execute("CREATE TABLE IF NOT EXISTS retention_state (key TEXT PRIMARY KEY, value TEXT)")
-        conn.execute("INSERT OR REPLACE INTO retention_state VALUES ('prices_done_until', ?)", (str(hour),))
+        conn.execute("INSERT OR REPLACE INTO retention_state(key, value) VALUES ('prices_done_until', ?)", (str(hour),))
     out["prices"] = n_p
     out.update(reclaim(conn, deadline, vacuum_pages, pause_s))
     return out
