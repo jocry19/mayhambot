@@ -41,7 +41,7 @@ NET_REF_USD = 3000.0
 HOLDERS_REF = 4.0
 MODEL_VERSION = "accum-v2"
 
-FUNNEL_KEYS = ("coins", "few_holders", "low_share", "low_net", "short_span", "stale", "stale_price", "thin_liq",
+FUNNEL_KEYS = ("coins", "bonding_curve", "few_holders", "low_share", "low_net", "short_span", "stale", "stale_price", "thin_liq",
                "safety_drop", "cooldown", "fired")
 last_funnel = {}
 
@@ -173,6 +173,8 @@ def metrics(conn, mint, qc, recv, now):
 
 
 def _reason(m, min_net, now, tok):
+    if tok and tok["dex"] in engine.SKIP_DEX:
+        return "bonding_curve"
     if m["holders"] < MIN_HOLDERS:
         return "few_holders"
     if m["share"] < HOLD_SHARE:
@@ -231,7 +233,7 @@ def evaluate(conn, cfg=settings, now=None):
     f["min_net"] = NET_MULT * min_net
     new, lv = [], None
     for mint in candidates(conn, tiered | set(recv), now):
-        tok = conn.execute("SELECT symbol, name, price_usd, mcap_usd, liquidity_usd, last_updated FROM tokens WHERE mint=?",
+        tok = conn.execute("SELECT symbol, name, price_usd, mcap_usd, liquidity_usd, last_updated, dex FROM tokens WHERE mint=?",
                            (mint,)).fetchone()
         if engine.not_a_memecoin(tok):
             continue

@@ -101,7 +101,7 @@ def _usd(r, sol_usd):
 
 TIER_RANK = {"ultra": 3, "smart": 2, "good": 1}
 last_cluster_stats = {"wallets": 0, "entities": 0}
-FUNNEL_KEYS = ("coins", "no_smart", "few_entities", "low_net", "low_score", "low_ev", "thin_liq", "safety_drop", "cooldown",
+FUNNEL_KEYS = ("coins", "no_smart", "bonding_curve", "few_entities", "low_net", "low_score", "low_ev", "thin_liq", "safety_drop", "cooldown",
                "fired")
 last_funnel = {}  # per evaluate(): where coins dropped out (first failing condition), see signals.funnel
 
@@ -160,6 +160,9 @@ def explain(m, cfg=settings):
     return out
 
 
+# coins still on the pump.fun bonding curve: 13 % reached +50 % in 1 h and -17 % net after costs (n 418), against
+# 28 % and -6.5 % once migrated to pumpswap (n 449; all signal_metrics snapshots of ~44 h, data thread 17.10.)
+SKIP_DEX = {d.strip() for d in os.getenv("SIGNAL_SKIP_DEX", "pumpfun").split(",") if d.strip()}
 MODEL_MIN_EXP_NET = float(os.getenv("SIGNAL_MODEL_MIN_EXP_NET", 0.0))
 MIN_LIQ_USD = float(os.getenv("SIGNAL_MIN_LIQ_USD", 3000))  # ~2 % price impact for a 0.5 SOL buy
 
@@ -169,6 +172,8 @@ def _reason(m, cfg, strict=False):
     safety factor too (before that it still gets its quick check instead of an early veto)."""
     if m["smart_buyers"] <= 0:
         return "no_smart"
+    if m.get("dex") in SKIP_DEX:
+        return "bonding_curve"
     if (m.get("safety") or {}).get("red_flags"):
         return "safety_drop"
     if m.get("ev") is not None:  # an out-of-sample-checked EV table replaces wallets / net / score minimums
@@ -578,13 +583,13 @@ def evaluate(conn, mints, cfg=settings, now=None):
     model_guard.reset()
     lv = None  # trade plan levels, computed once when the first signal of this cycle fires
     for mint in mints:
-        tok = conn.execute("SELECT symbol, name, price_usd, mcap_usd, liquidity_usd FROM tokens WHERE mint=?",
+        tok = conn.execute("SELECT symbol, name, price_usd, mcap_usd, liquidity_usd, dex FROM tokens WHERE mint=?",
                            (mint,)).fetchone()
         if not_a_memecoin(tok):
             f["excluded"] = f.get("excluded", 0) + 1
             continue
         m = apply_market(conn, mint, apply_safety(conn, mint, apply_model(conn, mint, now, token_metrics(conn, mint, qc, now, cfg))), now)
-        m = dict(m, min_net=min_net, liquidity_usd=tok["liquidity_usd"] if tok else None)
+        m = dict(m, min_net=min_net, liquidity_usd=tok["liquidity_usd"] if tok else None, dex=tok["dex"] if tok else None)
         if ev_table:
             e, n, k = ev_mod.predict(ev_table, m.get("entities", m["smart_buyers"]), m["net_usd"], m.get("sellers", 0),
                                      m.get("prediction"))

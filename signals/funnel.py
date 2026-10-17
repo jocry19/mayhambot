@@ -86,6 +86,7 @@ def funnel(conn, hours=10, cfg=settings, now=None):
     return out
 
 
+RET_CAP = 3.0  # a mean is capped at +300 % per call: three +3,000 % prints turned a -14 % backtest into +1 %
 COST = 0.06  # round trip: fees + slippage + priority, as in copytrade paper trading
 
 
@@ -134,7 +135,7 @@ def outcomes(conn, hours=168, cost=COST, now=None, bands=(0, 20, 30, 40, 50, 60,
         d = dict(band=name, n=len(b),
                  hit_50=round(sum(1 for r in b if (r["max_ret_1h"] or 0) >= 0.5) / len(b), 3),
                  median_max_ret_1h=round(mx[len(mx) // 2], 3),
-                 mean_ret_1h_after_cost=round(sum(r["ret_1h"] for r in b) / len(b) - cost, 3),
+                 mean_ret_1h_after_cost=round(sum(min(r["ret_1h"], RET_CAP) for r in b) / len(b) - cost, 3),
                  dead=sum(1 for r in b if r["ret_1h"] <= -0.9))
         d.update(peak_after_call(b))
         if name == "all":  # unmeasured calls (no price near +1 h, not provably dead) count as misses here

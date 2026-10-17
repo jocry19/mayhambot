@@ -134,3 +134,13 @@ def test_vanished_coin_counts_as_dead_not_unmeasured(tmp_path):
     c.commit()
     engine.update_outcomes(c, now=now)
     assert c.execute("SELECT ret_1h FROM signals").fetchone()[0] is None
+
+
+def test_bonding_curve_coins_are_not_called(c):
+    c.execute("UPDATE tokens SET dex='pumpfun'")
+    c.commit()
+    trade(c, "S1", "buy", 800, 300)
+    trade(c, "S2", "buy", 700, 150)
+    trade(c, "S3", "buy", 900, 20)
+    assert accum.evaluate(c, now=NOW) == [] and accum.last_funnel["bonding_curve"] == 1
+    assert engine._reason(dict(smart_buyers=2, dex="pumpfun", net_usd=1e4, score=90), None) == "bonding_curve"
