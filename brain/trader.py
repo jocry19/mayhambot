@@ -35,7 +35,9 @@ MARKET_WINDOW_S = 3 * 86400
 MARKET_CHALLENGE_PER_H = 12  # challenge: exploration buys from the unproven side sources per hour
 CHALLENGE_PAUSE_S = 6 * 3600
 MOMENTUM_MIN_M5 = 5.0  # DexScreener 5-min change in percent: a move is on (wide on purpose, the brain only watches
-MOMENTUM_MIN_TX = 30  # and learns this source until its replays earn it)
+MOMENTUM_MIN_TX = 30
+MOMENTUM_EVERY_S = 60
+MOMENTUM_FRESH_S = 180  # and learns this source until its replays earn it)
 
 
 def _default_safety(conn, mint):
@@ -55,6 +57,7 @@ class Trader:
         self._organic_at = (0.0, False)
         self._market_at = (-1e18, False)
         self._challenge_at = (-1e18, False)
+        self._momentum_at = -1e18
         self._snapshots = snapshots
         self._executor = executor
         self.safety_check = safety_check or _default_safety
@@ -132,24 +135,25 @@ class Trader:
         if store.has(c, "tokens"):
             # side source: coins the signals service keeps fresh from DexScreener with a 5-min move and trading going
             # on (momentum), whether smart money is in or not; the brain learns which of them run
-            cur = self._cursor("cursor_momentum", "SELECT MAX(last_updated) FROM tokens")
-            try:
-                rows = c.execute(
-                    f"""SELECT mint, last_updated AS ts, dex, mcap_usd, price_change_m5 AS pc_m5,
-                               price_change_h1 AS pc_h1, txns_m5, volume_h1, 'momentum' AS reason,
-                               CASE WHEN pair_created_at > 0 THEN (? - pair_created_at /
-                                   (CASE WHEN pair_created_at > 1e11 THEN 1000 ELSE 1 END)) / 60.0 END AS age_min
-                        FROM tokens WHERE last_updated>? AND price_change_m5>=? AND COALESCE(txns_m5,0)>=?
-                        ORDER BY last_updated LIMIT 300""",
-                    (now, cur, MOMENTUM_MIN_M5, MOMENTUM_MIN_TX)).fetchall()
-            except Exception as e:  # an older tokens table without txns: no momentum source
-                log.debug("momentum source: %s", e)
-                rows = []
-            for r in rows:
-                if now - (r["ts"] or 0) <= self.s.max_signal_age_s:
-                    out.append(("market", f"mom{r['mint']}{int(r['ts']) // 3600}", r))
-            if rows:
-                store.put(c, "cursor_momentum", rows[-1]["ts"])
+            # no cursor on last_updated: a row stamped ahead of the clock (seen 17.10.: 52 min in the future) would
+            # have skipped everything after it. Once a minute the rows refreshed in the last 3 min; the 6 h dedup per
+            # coin keeps repeats out
+            if now - self._momentum_at >= MOMENTUM_EVERY_S:
+                self._momentum_at = now
+                try:
+                    rows = c.execute(
+                        """SELECT mint, MIN(last_updated, ?) AS ts, dex, mcap_usd, price_change_m5 AS pc_m5,
+                                  price_change_h1 AS pc_h1, txns_m5, volume_h1, 'momentum' AS reason,
+                                  CASE WHEN pair_created_at > 0 THEN (? - pair_created_at /
+                                      (CASE WHEN pair_created_at > 1e11 THEN 1000 ELSE 1 END)) / 60.0 END AS age_min
+                           FROM tokens WHERE last_updated>=? AND price_change_m5>=? AND COALESCE(txns_m5,0)>=?
+                           ORDER BY last_updated DESC LIMIT 300""",
+                        (int(now), now, int(now) - MOMENTUM_FRESH_S, MOMENTUM_MIN_M5, MOMENTUM_MIN_TX)).fetchall()
+                except Exception as e:  # an older tokens table without txns: no momentum source
+                    log.debug("momentum source: %s", e)
+                    rows = []
+                for r in rows:
+                    out.append(("market", f"mom{r['mint']}{int(now) // 3600}", r))
         if store.has(c, "sniper_launches") and store.has(c, "sniper_positions"):
             # 'enter' is written at stage 2 together with the sniper's paper position, after decided_ts (stage 1):
             # the cursor runs on the position's opened_ts, as copytrade.engine.follow_launches does
@@ -430,11 +434,12 @@ class Trader:
         now = self.clock()
         at, on = self._market_at
         if now - at >= VERDICT_EVERY_S:
-            from .learner import honest
-
             # recent results only (3 days): a pattern that stops working switches the source off again by itself
-            k = honest(self.conn, evaluated_since=now - MARKET_WINDOW_S).get("by_kind", {}).get("market") or {}
-            on = k.get("n_taken", 0) >= MARKET_MIN_N and (k.get("taken_mean") or 0) > 0
+            # what it wanted OR explored from the source: the first buys of an unknown source are explorations
+            n, mean = self.conn.execute(
+                "SELECT COUNT(*), AVG(realized_plan) FROM brain_opps WHERE kind='market' AND (wanted=1 OR explore=1) "
+                "AND realized_plan IS NOT NULL AND evaluated_at>=?", (int(now - MARKET_WINDOW_S),)).fetchone()
+            on = n >= MARKET_MIN_N and (mean or 0) > 0
             self._market_at = (now, on)
         return on
 
@@ -465,10 +470,12 @@ class Trader:
         held = (now - p["opened_at"]) / 60
         if held >= exits.MAX_HOLD_MIN:
             return "time", False
+        high = max(p["high_price_sol"] or entry, px)
+        if high / entry - 1 >= exits.RUNNER_UP and px <= high * (1 - exits.RUNNER_TRAIL):
+            return "trail", False  # a doubled coin keeps a 30 % trail from its high (winner study)
         if not self.live.due(p["id"], now):
             return None, False
         meta = _meta(p)
-        high = max(p["high_price_sol"] or entry, px)
         ago = self.live.price_ago(p["id"], now, 60)
         vpeak = self.live.vpeak.get(p["id"], 0.0)
         o = self.conn.execute("SELECT features FROM brain_opps WHERE id=?", (p["opp_id"],)).fetchone()

@@ -26,6 +26,8 @@ from .model import Brain
 FWD_MIN = 10  # the question each minute: what does the price do in the next 10 minutes
 CRASH_STOP = 0.30  # hard floor below the buy price whatever the model says (winner study 17.10.: stop -30 %, trail late)
 MAX_HOLD_MIN = 240
+RUNNER_UP = 1.0  # winner study 17.10.: once a coin doubled, a 30 % trail from the high took +123 % on the 3x coins
+RUNNER_TRAIL = 0.30
 CHECK_S = 60  # one decision a minute, like the candles it learned from
 SAMPLE_W = 0.25  # minute-samples of one coin are correlated: each counts a quarter
 MIN_N = 400  # weighted samples before the model may decide anything
@@ -190,6 +192,8 @@ def replay(xm, cs, t0, kind, liq, wallet, swaps, whale_sells, s, cost: float) ->
             return got + left * (px / entry) - 1 - cost, m, "crash"
         if m >= MAX_HOLD_MIN:
             return got + left * (c / entry) - 1 - cost, m, "time"
+        if high / entry - 1 >= RUNNER_UP and c <= high * (1 - RUNNER_TRAIL):
+            return got + left * (c / entry) - 1 - cost, m, "trail"
         act, _, _ = advise(xm, toks, s, left < 1.0, c / entry - 1)
         if act == "sell":
             return got + left * (c / entry) - 1 - cost, m, "organic"
