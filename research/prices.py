@@ -34,6 +34,25 @@ class _Sparse:
         return self.fn(self.t[k][i], self.t[k][j - (1 << k) + 1])
 
 
+SPIKE = 5.0  # a single print 5x above (or below) both neighbours is a bad print, not a price
+
+
+def _drop_spikes(pts):
+    """Drop isolated bad prints: a price SPIKE times higher or lower than both the print before and the one
+    after. A real move keeps the new level on the next print; three such prints alone turned a backtest from
+    -14 % to +1 % (10/2026). Uses the next print only to reject a value, never to create one."""
+    if len(pts) < 3:
+        return pts
+    out = [pts[0]]
+    for i in range(1, len(pts) - 1):
+        a, p, b = pts[i - 1][1], pts[i][1], pts[i + 1][1]
+        if a > 0 and b > 0 and ((p > SPIKE * a and p > SPIKE * b) or (p * SPIKE < a and p * SPIKE < b)):
+            continue
+        out.append(pts[i])
+    out.append(pts[-1])
+    return out
+
+
 class PriceIndex:
     def __init__(self):
         self.ts, self.px, self.hi_ts, self.hi, self.lo_ts, self.lo = {}, {}, {}, {}, {}, {}
@@ -85,7 +104,7 @@ class PriceIndex:
 
     def _add(self, mint, pts, highs=(), lows=(), candles=()):
         """pts: (ts, price) prints; highs/lows: extra point extremes at their ts; candles: (tf, start, high, low)."""
-        pts = sorted(pts)
+        pts = _drop_spikes(sorted(pts))
         by_tf = {}
         for tf, st, h, l in sorted(candles, key=lambda c: (c[0], c[1])):
             by_tf.setdefault(tf, ([], [], []))

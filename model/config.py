@@ -24,8 +24,10 @@ def _horizons():
 TIERS = ("ultra", "smart", "good")
 TIER_LABELS = {"ultra": "Ultra Smart", "smart": "Smart", "good": "Good"}
 
-PRIOR_WALLET_WEIGHTS = dict(win=0.15, early=0.15, roi=0.12, consistency=0.10, timing=0.08, lead=0.12,
-                            influence=0.12, rug_avoid=0.08, exit=0.08)
+# timing (low entry mcap) carried 58 % of the learned weight but does not persist; edge over other buyers of the
+# same coin does (rank correlation 0.15-0.20 between halves, data review 10/2026), so it starts with real weight
+PRIOR_WALLET_WEIGHTS = dict(win=0.13, early=0.12, roi=0.10, consistency=0.10, timing=0.05, lead=0.12,
+                            influence=0.12, rug_avoid=0.08, exit=0.06, edge=0.12)
 
 
 @dataclass

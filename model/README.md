@@ -151,7 +151,13 @@ Wallets in the `wallets` table that the model has not scored yet are backfilled 
   `i_coverage` = share known). intel's smart-money features are not used (today's tiers before the first model).
   Every candidate is also tested without the intel group, so they only stay if they help out of sample.
 - Tiers need net PnL > 0. Launch/dev bots (≥ 50 % of buys within 3 s of pool creation, or always the first buyer)
-  and second-flippers (median hold < 15 s) get no tier (`model.tiers.uncopyable`).
+  and second-flippers (median hold < 15 s) get no tier (`model.tiers.uncopyable`), nor wash wallets and one-hit
+  wallets (> 70 % of the profit from one coin and a net loss without it).
+- Wallet component `edge`: median ROI minus the median ROI of the other buyers of the same coins (persists between
+  periods, unlike raw ROI); `timing` (low entry mcap) starts with less prior weight.
+- Honest labels: outcomes start `MODEL_ENTRY_DELAY_S` (60 s) after the wallet trade; a candle's high/low only counts
+  for windows containing the whole candle; isolated bad prints (5x off both neighbours) are dropped; coins picked by
+  their later move give no events before the pick, and wallets found through such a pump are not credited for it.
 - Walk-forward checkpoints ignore today's `is_bot` flags and use only trades before the cutoff.
 
 **Two wallet measures, side by side:** `net_pnl_usd` / `net_roi` = what the wallet earned itself after costs (tier

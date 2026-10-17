@@ -418,3 +418,21 @@ def test_wallet_found_through_a_pump_is_not_credited_for_it(market):
     m = sorted(mints)[0]
     ds.hindsight, ds.early_found = {m: now + 10 ** 9}, {w}
     assert wallet_stats.compute(ds, now + 1)[0][w]["n_tokens"] == before - 1
+
+
+def test_isolated_bad_prints_are_dropped_and_real_moves_kept():
+    from research.prices import PriceIndex
+    idx = PriceIndex()
+    idx._add("S", [(0, 1.0), (60, 40.0), (120, 1.1), (180, 1.0)])  # one +3900 % print
+    assert idx.max_between("S", 0, 600) < 2 and idx.price_at("S", 90) == 1.0
+    idx._add("R", [(0, 1.0), (60, 8.0), (120, 8.5), (180, 9.0)])  # a real move stays
+    assert idx.max_between("R", 0, 600) == 9.0 and idx.price_at("R", 90) == 8.0
+
+
+def test_one_hit_wallets_get_no_tier_and_edge_component_exists():
+    from model.tiers import uncopyable
+    from research.wallet_stats import COMPONENTS
+    base = dict(n_tokens=6, n_exits=0, launch_share=0.0, median_entry_rank=0.4, influence_samples=4)
+    assert uncopyable(dict(base, top_coin_share=0.9, net_pnl_wo_best_usd=-50)) == "one_hit"
+    assert uncopyable(dict(base, top_coin_share=0.9, net_pnl_wo_best_usd=500)) is None
+    assert "edge" in COMPONENTS

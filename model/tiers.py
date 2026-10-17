@@ -9,13 +9,14 @@ from research.wallet_stats import COMPONENTS
 def wallet_score(stats, weights=None):
     w = weights or PRIOR_WALLET_WEIGHTS
     tot = sum(w.get(c, 0) for c in COMPONENTS) or 1.0
-    raw = sum(w.get(c, 0) * stats["components"][c] for c in COMPONENTS) / tot
+    raw = sum(w.get(c, 0) * stats["components"].get(c, 0.5) for c in COMPONENTS) / tot
     return round(100 * raw * math.sqrt(1 - math.exp(-stats["n_tokens"] / 4)), 1)
 
 
 def uncopyable(stats):
     """Wallets nobody can follow: launch/dev bots (buy within 3 s of the pool's creation, or first buyer every
-    time), second-flippers (median hold under 15 s) and wash wallets (most exits within 5 min at |ROI| < 3 %).
+    time), second-flippers (median hold under 15 s), wash wallets (most exits within 5 min at |ROI| < 3 %) and
+    one-hit wallets (over 70 % of the profit from one coin, at a loss after costs without it).
     They can show great PnL or volume but are not a signal."""
     n = stats.get("n_tokens", 0)
     if n >= 3 and (stats.get("launch_share") or 0) >= 0.5:
@@ -26,6 +27,8 @@ def uncopyable(stats):
         return "flipper"
     if (stats.get("n_exits") or 0) >= 4 and (stats.get("wash_share") or 0) >= 0.5:
         return "wash"  # mostly in-and-out within minutes at ~0 % (volume farming, wash trading)
+    if n >= 3 and (stats.get("top_coin_share") or 0) > 0.7 and (stats.get("net_pnl_wo_best_usd") or 0) <= 0:
+        return "one_hit"  # one lucky coin, losing without it: 61 % of Good wallets looked like this (10/2026)
     return None
 
 

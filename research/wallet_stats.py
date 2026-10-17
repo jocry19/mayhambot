@@ -12,12 +12,13 @@ from core.config import settings
 from research.config import rsettings
 from research.stats import median
 
-COMPONENTS = ("win", "early", "roi", "consistency", "timing", "lead", "influence", "rug_avoid", "exit")
+COMPONENTS = ("win", "early", "roi", "consistency", "timing", "lead", "influence", "rug_avoid", "exit", "edge")
 COMPONENT_LABELS = {
     "win": "Trefferquote", "early": "Frühe Einstiege (danach ≥2x)", "roi": "Rendite (ROI)",
     "consistency": "Konstanz", "timing": "Einstieg bei niedriger Market Cap",
     "lead": "Kauft vor der Masse", "influence": "Einfluss (Follower)",
     "rug_avoid": "Rug-Vermeidung", "exit": "Ausstiegs-Qualität (verkauft nahe am Hoch)",
+    "edge": "Besser als andere Käufer derselben Coins",
 }
 
 
@@ -130,10 +131,20 @@ def compute(ds, cutoff, min_position_usd=None, use_flags=True):
             entry_mcap=pidx.mcap(m, fpx), rug=crashed and sell_usd < 0.5 * buy_usd,
             infl=infl.get((w, m)), capture=capture, hold=hold,
             launch_s=(fts - ds.created[m]) if fts and ds.created.get(m) else None))
+    # edge over the crowd: a position's ROI minus the median ROI of the other buyers of the same coin. It
+    # carries over between periods much better than raw ROI (a coin that ran lifts every buyer alike).
+    by_mint = defaultdict(list)
+    for w, P in per.items():
+        if w not in bots:
+            for p in P:
+                by_mint[p["mint"]].append(p["roi"])
+    med = {m: median(v) for m, v in by_mint.items() if len(v) >= 4}
     out = {}
     for w, P in per.items():
         if w in bots:
             continue
+        for p in P:
+            p["excess"] = p["roi"] - med[p["mint"]] if p["mint"] in med else None
         out[w] = summarize(P)
     return out, bots
 
@@ -170,7 +181,12 @@ def summarize(P):
     exit_c = (sum(caps) + 2 * 0.4) / (len(caps) + 2)
     mc = median([p["entry_mcap"] for p in P if p["entry_mcap"]])
     timing = min(1.0, max(0.0, 1 - (math.log10(mc) - 4) / 3)) if mc else 0.5
+    exc = [max(-1.0, min(3.0, p["excess"])) for p in P if p.get("excess") is not None]
+    k_e = len(exc)
+    edge = (k_e * (0.5 + 0.5 * math.tanh(median(exc))) + 3 * 0.5) / (k_e + 3) if exc else 0.5
+    best = max((p["pnl"] for p in P), default=0.0)
     comps = dict(
+        edge=edge,
         win=(wins + 1) / (n + 2), early=(early + 0.5) / (n + 2), roi=0.5 + 0.5 * math.tanh(net_roi),
         consistency=consistency, timing=timing, lead=lead, influence=infl_c, exit=exit_c, rug_avoid=1 - (rugs + 0.5) / (n + 2))
     return dict(
@@ -186,6 +202,9 @@ def summarize(P):
         launch_share=(sum(1 for p in P if p.get("launch_s") is not None and 0 <= p["launch_s"] <= 3)
                       / max(1, sum(1 for p in P if p.get("launch_s") is not None))),
         consistency=consistency, rug_rate=rugs / n, components=comps,
+        top_coin_share=(max(pos) / sum(pos)) if pos else 0.0,
+        net_pnl_wo_best_usd=(net_pnl - best + cost * next(p["buy_usd"] for p in P if p["pnl"] == best)) if P else 0.0,
+        median_excess_roi=median(exc) if exc else None,
         last_ts=max(p["ts"] for p in P))
 
 
