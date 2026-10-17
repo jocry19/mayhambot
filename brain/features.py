@@ -27,7 +27,7 @@ LABELS = {
     "ev": "Signal-EV", "call": "Call Nr.", "lscore": "Sniper-Score", "lrisk": "Sniper-Risiko",
     "bundle": "Bundle", "insider": "Insider", "devl": "Dev-Launches", "top10": "Top-10-Anteil",
     "socials": "Socials", "lsmart": "Smart Wallets im Launch", "modelp": "Modell-Chance", "form": "eigene Form",
-    "flip": "Wal verkauft binnen 2 min",
+    "flip": "Wal verkauft binnen 2 min", "run5": "Kurs 5 min vor dem Kauf",
 }
 
 
