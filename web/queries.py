@@ -2318,10 +2318,71 @@ def market_summary(conn, now=None):
 
 
 # ====================================================================== brain (learning decider, brain/README.md)
-BRAIN_KIND = {"whale": "Wal-Kauf", "signal": "Signal", "launch": "Launch"}
-BRAIN_EXIT = {"target": "Ziel erreicht", "stop": "Stop", "trail": "Trailing-Stop", "inflow_peak": "Ansturm vorbei",
+BRAIN_KIND = {"whale": "Wal-Kauf", "signal": "Signal", "signal_v2": "Signal v2", "launch": "Launch"}
+BRAIN_EXIT = {"organic": "organisch (Zustand des Coins)", "target": "Ziel erreicht", "stop": "Stop", "trail": "Trailing-Stop", "inflow_peak": "Ansturm vorbei",
               "whale": "Wal hat verkauft", "time": "Haltezeit vorbei", "rug": "Liquidität weg", "no_market": "kein Markt mehr"}
 BRAIN_TARGET = 100  # out-of-sample trades before the result counts (README: "100 nachgeprüfte Trades")
+BRAIN_GOAL_MULT = (2, 4)  # the user's goal (brain/journal.GOAL_MULT): paper account x2 to x4 every day
+BRAIN_DAYS = 14
+
+
+def _mean(xs):
+    xs = [x for x in xs if x is not None]
+    return sum(xs) / len(xs) if xs else None
+
+
+def _brain_capture(gain, max_up):
+    """Share of the best move after the buy the exit took home, only where there was a move of 10 %+ (brain.learner)."""
+    return gain / max_up if gain is not None and max_up and max_up >= 0.1 else None
+
+
+def _brain_days(conn, now, regimes):
+    """Per UTC day (as brain's diary counts them): the account's factor (equity at the day's end / at its start)
+    against the goal, the selection lead (taken minus copy-everything, out of sample), and how much of the best move
+    the exits took home (replays: organic vs plans; own closed trades). Straight from brain's tables, so the series
+    exists before the first diary entry carries these numbers."""
+    t_end = now - now % 86400 + 86400
+    lo = t_end - BRAIN_DAYS * 86400
+    day = lambda ts: int(ts) - int(ts) % 86400  # noqa: E731
+    out = {lo + k * 86400: {"ts": lo + k * 86400} for k in range(BRAIN_DAYS)}
+    if has(conn, "brain_equity"):
+        for r in rows(conn, "SELECT ts / 86400 * 86400 d, MIN(ts) a, MAX(ts) b FROM brain_equity WHERE ts>=? GROUP BY d", (lo,)):
+            first = scalar(conn, "SELECT equity_sol FROM brain_equity WHERE ts=?", (r["a"],))
+            last = scalar(conn, "SELECT equity_sol FROM brain_equity WHERE ts=?", (r["b"],))
+            if r["d"] in out and first:
+                out[r["d"]].update(start_sol=_f(first, 4), end_sol=_f(last, 4), mult=_f(last / first, 4))
+    ev = defaultdict(list)
+    for r in rows(conn, "SELECT evaluated_at, wanted, realized_plan, realized_base FROM brain_opps "
+                        "WHERE evaluated_at>=? AND realized_plan IS NOT NULL", (lo,)):
+        ev[day(r["evaluated_at"])].append(r)
+    for d, rs in ev.items():
+        if d in out:
+            tk = _mean([r["realized_plan"] for r in rs if r["wanted"]])
+            ca = _mean([r["realized_base"] for r in rs])
+            out[d].update(n_eval=len(rs), n_taken=sum(1 for r in rs if r["wanted"]),
+                          alpha=_f(tk - ca, 4) if tk is not None and ca is not None else None)
+    if has(conn, "brain_exit_evals"):
+        xe = defaultdict(list)
+        for r in rows(conn, "SELECT evaluated_at, organic, plan_gain, max_up FROM brain_exit_evals WHERE evaluated_at>=? "
+                            "AND organic IS NOT NULL AND plan_gain IS NOT NULL", (lo,)):
+            xe[day(r["evaluated_at"])].append(r)
+        for d, rs in xe.items():
+            if d in out:
+                out[d].update(n_replay=len(rs),
+                              capture_organic=_f(_mean([_brain_capture(r["organic"], r["max_up"]) for r in rs]), 4),
+                              capture_plan=_f(_mean([_brain_capture(r["plan_gain"], r["max_up"]) for r in rs]), 4))
+    own = defaultdict(list)
+    for r in rows(conn, "SELECT closed_at, pnl_pct, entry_price_sol, high_price_sol, meta FROM brain_positions "
+                        "WHERE status='closed' AND closed_at>=?", (lo,)) if has(conn, "brain_positions") else []:
+        ref = (_j(r["meta"], {}) or {}).get("ref_price") or r["entry_price_sol"]
+        own[day(r["closed_at"])].append(_brain_capture(r["pnl_pct"], r["high_price_sol"] / ref - 1 if ref and r["high_price_sol"] else None))
+    for d, cs in own.items():
+        if d in out:
+            out[d]["capture_own"] = _f(_mean(cs), 4)
+    for x in regimes:
+        if day(x["at"]) in out:
+            out[day(x["at"])].setdefault("regimes", []).append(x)
+    return [out[k] for k in sorted(out)]
 
 
 def _brain_plans():
@@ -2359,13 +2420,21 @@ def brain_view(conn, kind=None, show="all", limit=60, now=None):
     for p in pos:
         d = {k: p.get(k) for k in ("id", "opp_id", "kind", "mint", "symbol", "wallet", "opened_at", "closed_at", "size_sol",
                                    "entry_price_sol", "last_price_sol", "plan", "take_profit", "stop_loss", "max_hold_min",
-                                   "status", "pnl_sol", "pnl_pct", "exit_reason")}
+                                   "status", "pnl_sol", "pnl_pct", "exit_reason", "tokens")}
         d["kind_label"] = BRAIN_KIND.get(p.get("kind"), p.get("kind"))
         d["plan_label"] = (plans.get(p.get("plan")) or {}).get("label", p.get("plan"))
+        meta = _j(p.get("meta"), {}) or {}
+        meta = meta if isinstance(meta, dict) else {}
+        d["exit_mode"] = "organic" if meta.get("exit_mode") == "organic" else "plan"
+        d["partial_sol"] = _f(meta.get("partial_sol"), 4) or None  # half sold earlier, booked at once
         if p.get("status") == "open":
             if p.get("entry_price_sol") and p.get("last_price_sol"):
-                d["value_sol"] = _f(p["last_price_sol"] / p["entry_price_sol"] * (p.get("size_sol") or 0), 4)
-                d["unrealized_pct"] = _f(p["last_price_sol"] / p["entry_price_sol"] - 1, 4)
+                # what the remaining tokens are worth (fewer after a partial sell), as brain's equity counts it
+                d["value_sol"] = _f(p["last_price_sol"] * p["tokens"], 4) if p.get("tokens") is not None else \
+                    _f(p["last_price_sol"] / p["entry_price_sol"] * (p.get("size_sol") or 0), 4)
+                # whole trade so far: the remaining value plus what the partial sell already brought in
+                d["unrealized_pct"] = _f(((d["value_sol"] or 0) + (d["partial_sol"] or 0)) / p["size_sol"] - 1, 4) \
+                    if p.get("size_sol") else _f(p["last_price_sol"] / p["entry_price_sol"] - 1, 4)
             if p.get("high_price_sol") and p.get("entry_price_sol"):
                 d["peak_pct"] = _f(p["high_price_sol"] / p["entry_price_sol"] - 1, 4)
             d["held_min"] = _f((now - (p.get("opened_at") or now)) / 60, 1)
@@ -2421,6 +2490,10 @@ def brain_view(conn, kind=None, show="all", limit=60, now=None):
         for r in rows(conn, "SELECT day, ts, text FROM brain_journal ORDER BY day DESC LIMIT 14"):
             diary.append({"day": r["day"], "ts": r["ts"], "text": _redact(r["text"] or "")[:6000]})
     h = _brain_honest(conn) or {}
+    regimes = [x for x in (st.get("regime_history") or []) if isinstance(x, dict) and x.get("at")]
+    days = _brain_days(conn, now, regimes)
+    xr = h.get("exit_replays") or {}
+    seg = lambda x: {k: _f(x.get(k), 4) if k.endswith("mean") else x.get(k) for k in ("n", "n_taken", "taken_mean", "n_explored", "copy_all_mean")}  # noqa: E731
     return {
         "available": True, "now": now,
         "account": {"start_sol": start, "balance_sol": bal, "open_value_sol": _f(open_val, 4),
@@ -2435,6 +2508,21 @@ def brain_view(conn, kind=None, show="all", limit=60, now=None):
         "honest": {**h, "target": BRAIN_TARGET, "progress": _f(min(1.0, (h.get("n_taken") or 0) / BRAIN_TARGET), 3),
                    "by_kind": [{"kind": k, "label": BRAIN_KIND.get(k, k), **v} for k, v in (h.get("by_kind") or {}).items()]},
         "prior_check": st.get("prior_check") if isinstance(st.get("prior_check"), dict) else None,
+        "goal": {"mult": list(BRAIN_GOAL_MULT), "today": days[-1].get("mult") if days else None},
+        "days": days,
+        "regimes": [{"at": x["at"], "n": x.get("n"), "err": _f(x.get("err"), 4), "z": x.get("z")} for x in regimes[-30:]],
+        "exits": {
+            "by_exit": [{"mode": k, "label": "organisch" if k == "organic" else "feste Pläne", "n": x.get("n"),
+                         "mean": _f(x.get("mean"), 4), "sol": _f(x.get("sol"), 4), "capture": _f(x.get("capture"), 4)}
+                        for k, x in (h.get("by_exit") or {}).items() if isinstance(x, dict)],
+            "replays": {k: _f(xr.get(k), 4) if k != "n" else xr.get("n") for k in
+                        ("n", "organic", "plan", "hold_1h", "capture_organic", "capture_plan")},
+        },
+        "segments": {
+            "by_delay": [{"key": k, "label": f"Wal erkannt nach {k}", **seg(x)} for k, x in (h.get("by_delay") or {}).items() if isinstance(x, dict)],
+            "by_liq": [{"key": k, "label": "Bonding-Curve" if k == "curve" else "Pool", **seg(x)} for k, x in (h.get("by_liq") or {}).items() if isinstance(x, dict)],
+        },
+        "alpha": _f(h.get("alpha"), 4),
         "open": open_, "closed": closed[:40], "decisions": decisions, "diary": diary, "equity": eq,
         "plans": [{"name": k, **v} for k, v in plans.items()],
     }

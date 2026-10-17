@@ -129,7 +129,10 @@ def _brain_demo(conn, r, tokens, now):
     bal, eq_pts, open_sz = 5.0, [], 0.0
     kinds = ("whale", "signal", "launch")
     for i in range(80):
-        t, kind, ts = r.choice(tok), r.choice(kinds), now - int((80 - i) * 900 * r.uniform(0.6, 1.0))
+        t, kind = r.choice(tok), r.choice(kinds)
+        ts = now - int((80 - i) * (5400 if i < 62 else 900) * r.uniform(0.8, 1.0))  # spread over the week, dense today
+        feats = {"delay": r.choice(("<5s", "5-15s", "15-30s", "30-90s", ">90s")) if kind == "whale" else None,
+                 "liq": r.choice(("curve", "pool"))}
         plan = r.choice(NAMES)
         p, mean = BY_NAME[plan], r.gauss(0.0, 0.02)
         conf = min(0.97, max(0.2, 0.5 + mean * 12 + r.uniform(-0.1, 0.1)))
@@ -150,11 +153,12 @@ def _brain_demo(conn, r, tokens, now):
         realized = mean + r.gauss(0, 0.08) if old else None
         cur = conn.execute(
             "INSERT INTO brain_opps(ts, decided_at, kind, ref, mint, symbol, wallet, src_ts, price_sol, decision, wanted, plan, "
-            "pred_mean, pred_std, pred_p, sample, explore, size_sol, note, evaluated_at, realized_plan, realized_base, realized_best) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "pred_mean, pred_std, pred_p, sample, explore, size_sol, note, evaluated_at, realized_plan, realized_base, realized_best, features) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ts, ts + 0.02, kind, f"demo:{i}", t["mint"], t["symbol"], None, ts - 5, 1e-6, "enter" if enter else "skip", int(wanted),
              plan, mean, 0.015, conf, mean, int(explore), size, note, ts + 4 * 3600 if old else None, realized,
-             (realized - r.uniform(0, 0.05)) if old else None, (realized + r.uniform(0, 0.2)) if old else None))
+             (realized - r.uniform(0, 0.05)) if old else None, (realized + r.uniform(0, 0.2)) if old else None,
+             json.dumps({k: v for k, v in feats.items() if v})))
         if enter:
             closed = ts < now - 3 * 3600
             pct = r.gauss(0.01, 0.15) if closed else None
@@ -163,16 +167,37 @@ def _brain_demo(conn, r, tokens, now):
                 "take_profit, stop_loss, trail_activate, trail_drawdown, max_hold_min, inflow_exit, whale_exit, high_price_sol, last_price_sol, "
                 "last_seen, status, closed_at, pnl_sol, pnl_pct, exit_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (cur.lastrowid, kind, t["mint"], t["symbol"], ts - 5, ts, 1e-6, size, size / 1e-6, 6, plan, p.take_profit, p.stop_loss,
-                 p.trail_activate, p.trail_drawdown, p.max_hold_min, p.inflow_exit, int(kind == "whale"), 1.2e-6, 1e-6 * (1 + r.uniform(-0.15, 0.25)),
+                 p.trail_activate, p.trail_drawdown, p.max_hold_min, p.inflow_exit, int(kind == "whale"), 1e-6 * (1 + max(pct or 0, 0) + r.uniform(0.1, 0.5)), 1e-6 * (1 + r.uniform(-0.15, 0.25)),
                  now - 30, "closed" if closed else "open", ts + r.randint(5, 120) * 60 if closed else None,
                  size * pct if closed else None, pct, r.choice(("target", "stop", "trail", "inflow_peak", "whale", "time")) if closed else None))
             if closed:
                 bal += size * pct
             else:
                 open_sz += size
-    for k in range(48 * 6):
-        ts = now - (48 * 6 - k) * 600
-        eq_pts.append((ts, 5.0 + (bal - 5.0) * k / (48 * 6), 0.0))
+    # a week of 10-minute equity points: a random walk with daily drift that ends at today's result
+    steps, walk = 7 * 144, 0.0
+    for k in range(steps):
+        walk += r.gauss(0.0004, 0.004)
+        eq_pts.append((now - (steps - k) * 600, 5.0 * math.exp(walk), 0.0))
+    shift = (5.0 + bal - 5.0) / eq_pts[-1][1]
+    eq_pts = [(ts, b * (1 + (shift - 1) * i / steps), o) for i, (ts, b, o) in enumerate(eq_pts)]
+    # replays of the exits (brain_exit_evals): organic vs plan vs 1 h hold, with the best move after the buy
+    for oid, ts in conn.execute("SELECT id, ts FROM brain_opps WHERE evaluated_at IS NOT NULL").fetchall():
+        up = max(0.0, r.gauss(0.35, 0.3))
+        conn.execute("INSERT OR REPLACE INTO brain_exit_evals(opp_id, ts, kind, plan, plan_gain, organic, organic_reason, organic_min, "
+                     "hold_1h, max_up, evaluated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                     (oid, ts, "whale", "pump", up * r.uniform(0.1, 0.5) - 0.06, up * r.uniform(0.2, 0.7) - 0.05, "flow_out",
+                      r.uniform(5, 90), r.gauss(-0.05, 0.2), up, ts + 4 * 3600))
+    # organic exits and half sells on some positions (brain_positions.meta), two regime shifts (brain_state)
+    for pid, tok in conn.execute("SELECT id, tokens FROM brain_positions").fetchall():
+        if r.random() < 0.5:
+            meta = {"exit_mode": "organic", "ref_price": 1e-6}
+            if r.random() < 0.5:
+                meta["partial_sol"] = round(r.uniform(0.04, 0.12), 4)
+                conn.execute("UPDATE brain_positions SET tokens=? WHERE id=?", (tok * 0.5, pid))
+            conn.execute("UPDATE brain_positions SET meta=? WHERE id=?", (json.dumps(meta), pid))
+    store.put(conn, "regime_history", [{"at": now - 3 * 86400 + 5000, "n": 31, "err": -0.042, "z": -3.1},
+                                       {"at": now - 20000, "n": 27, "err": 0.035, "z": 2.7}])
     conn.executemany("INSERT OR REPLACE INTO brain_equity(ts, balance_sol, open_value_sol, equity_sol) VALUES (?,?,?,?)",
                      [(ts, b, o, b + o) for ts, b, o in eq_pts])
     store.put(conn, "balance_sol", round(bal - open_sz, 4))  # cash: open stakes are out of the balance

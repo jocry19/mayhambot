@@ -761,6 +761,16 @@ def test_brain_view(demo, empty, tmp_path):
     assert all(x["decision"] != "enter" for x in c.get("/api/brain?show=skip").json()["decisions"])
     assert all(x["kind"] == "whale" for x in c.get("/api/brain?kind=whale").json()["decisions"])
     assert c.get("/api/brain?show=x").status_code == 400
+    # goal, day factors, selection lead, capture, exit comparison, segments, regime markers, partial sells
+    assert d["goal"]["mult"] == [2, 4] and len(d["days"]) == 14 and any(x.get("mult") for x in d["days"])
+    assert any(x.get("alpha") is not None for x in d["days"]) and any(x.get("capture_organic") is not None for x in d["days"])
+    assert d["exits"]["replays"]["n"] > 0 and {e["mode"] for e in d["exits"]["by_exit"]} <= {"organic", "plan"}
+    assert d["segments"]["by_liq"] and d["regimes"] and any(x.get("regimes") for x in d["days"])
+    held = d["open"] + d["closed"]
+    assert {p["exit_mode"] for p in held} <= {"organic", "plan"}
+    for p in d["open"]:
+        if p.get("value_sol") is not None and p.get("tokens"):
+            assert abs(p["value_sol"] - p["last_price_sol"] * p["tokens"]) < 1e-3  # remaining tokens, as brain counts it
     assert any(b["name"] == "brain" for b in c.get("/api/overview").json()["board"]["rows"])
     # brain created its tables but has not decided anything yet: every number may be empty
     p = str(tmp_path / "fresh.db")
@@ -772,6 +782,7 @@ def test_brain_view(demo, empty, tmp_path):
     conn.row_factory = sqlite3.Row
     v = Q.brain_view(conn)
     assert v["available"] and v["decisions"] == [] and v["account"]["equity_sol"] == 5.0 and v["honest"]["n"] == 0
+    assert v["goal"]["today"] is None and v["exits"]["by_exit"] == [] and v["segments"]["by_delay"] == [] and v["regimes"] == []
     from cli.report import brain_line
 
     assert "noch nichts nachgeprüft" in brain_line(v) and brain_line(None) == ""
