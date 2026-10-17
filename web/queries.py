@@ -1788,24 +1788,26 @@ def sniper_view(conn, hours=24, limit=300):
     start = cfg.paper_start_sol if cfg else None
     # filter value: what each skip reason would have earned with the same stake, held 60 min, after the same
     # round-trip costs the paper trades pay (pump.fun fee and adverse slippage per leg, priority + network fee),
-    # so "ohne Filter" compares net with net
+    # so "ohne Filter" compares net with net. From sniper.stats' robust mean (each launch between -100 % and
+    # +500 %, unit errors outside pump.fun not measured), never from raw returns: one broken bonk quote alone
+    # showed +1,895,667,485 % here.
     cost = _sniper_round_trip(cfg, size)
-    per = defaultdict(lambda: {"sum": 0.0, "n": 0})
-    for r in rows(conn, "SELECT skip_reason, ret_60m FROM sniper_launches WHERE decision='skip' AND decided_ts>=? "
-                        "AND ret_60m IS NOT NULL", (now - int(hours * 3600) if hours else 0,)):
-        d = per[r["skip_reason"] or "?"]
-        d["sum"] += max(-1.0, r["ret_60m"]) - cost
-        d["n"] += 1
+    without, measured = 0.0, 0
     for f in st.get("filters", []):
-        d = per.get(f["code"], {"sum": 0.0, "n": 0})
-        f["avg_ret_60m"] = _f(d["sum"] / d["n"], 4) if d["n"] else None
-        f["pnl_without_sol"] = _f(d["sum"] * size, 4) if d["n"] else None   # bought anyway: result
-        f["filter_value_sol"] = _f(-d["sum"] * size, 4) if d["n"] else None  # positive = the filter saved money
-    without = sum(d["sum"] for d in per.values()) * size
+        m, k = f.get("mean_ret_60m_capped"), f.get("n_measured") or 0
+        if m is None or not k:
+            f["avg_ret_60m"] = f["pnl_without_sol"] = f["filter_value_sol"] = None
+            continue
+        avg = m - cost
+        f["avg_ret_60m"] = _f(avg, 4)
+        f["pnl_without_sol"] = _f(avg * size * k, 4)   # bought anyway: result
+        f["filter_value_sol"] = _f(-avg * size * k, 4)  # positive = the filter saved money
+        without += avg * size * k
+        measured += k
     paper = st.get("paper") or {}
     st["filter_total"] = {"with_sol": _f(paper.get("pnl_sol"), 4), "skipped_sol": _f(without, 4),
                           "without_sol": _f((paper.get("pnl_sol") or 0) + without, 4), "size_sol": size,
-                          "measured": sum(d["n"] for d in per.values()), "cost_pct": _f(cost, 4)}
+                          "measured": measured, "cost_pct": _f(cost, 4)}
     launches = sniper.recent(conn, limit=limit)
     for x in launches:
         x["source_label"] = SNIPER_SOURCE.get(x.get("source"), x.get("source") or "–")

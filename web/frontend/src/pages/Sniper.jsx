@@ -220,14 +220,14 @@ export default function Sniper() {
       </div>
 
       <Card title="Was bringt jeder Filter?" flush
-        sub={`Übersprungene Launches nachgemessen. „Ohne Filter“ = gleicher Einsatz (${sol(ft.size_sol)}), 60 min gehalten, ohne Stop, mit denselben Kosten wie die Papier-Trades (${pct(ft.cost_pct, 1)} je Kauf und Verkauf). Positiver Filterwert = der Filter hat Geld gespart.`}>
+        sub={`Übersprungene Launches nachgemessen. „Ohne Filter“ = gleicher Einsatz (${sol(ft.size_sol)}), 60 min gehalten (jeder Launch zwischen −100 % und +500 % gezählt), ohne Stop, mit denselben Kosten wie die Papier-Trades (${pct(ft.cost_pct, 1)} je Kauf und Verkauf). Positiver Filterwert = der Filter hat Geld gespart.`}>
         <Table rows={st.filters} rowKey={(r) => r.code} initialSort={{ k: "n", d: "desc" }} empty="Noch nichts übersprungen" cols={[
           { k: "label", l: "Filter" },
           { k: "n", l: "Übersprungen", r: true, fmt: (r) => n(r.n) },
           { k: "missed_winners", l: "Verpasste Gewinner", r: true, title: "Hoch ≥ +100 % innerhalb von 60 min", fmt: (r) => <span className={r.missed_winners ? "warn-ink" : "dim"}>{n(r.missed_winners)}</span> },
           { k: "avoided_rugs", l: "Vermiedene Rugs", r: true, title: "≤ −80 % nach 60 min", fmt: (r) => <span className={r.avoided_rugs ? "up" : "dim"}>{n(r.avoided_rugs)}</span> },
           { k: "hit_rate_2x", l: "Treffer", r: true, fmt: (r) => pct(r.hit_rate_2x) },
-          { k: "avg_ret_60m", l: "Ø nach 60 min", r: true, fmt: (r) => <Delta v={r.avg_ret_60m} d={0} arrow={false} /> },
+          { k: "avg_ret_60m", l: "Ø nach 60 min", r: true, title: "netto nach Kosten, jeder Launch zwischen −100 % und +500 %; Kursfehler außerhalb pump.fun nicht gemessen", fmt: (r) => <Delta v={r.avg_ret_60m} d={0} arrow={false} /> },
           { k: "pnl_without_sol", l: "Ohne Filter", r: true, title: "Ergebnis, wenn wir diese Launches trotzdem gekauft hätten", fmt: (r) => <span className={sign(r.pnl_without_sol)}>{solSigned(r.pnl_without_sol, 2)}</span> },
           { k: "filter_value_sol", l: "Filterwert", r: true, fmt: (r) => <span className={`b ${sign(r.filter_value_sol)}`}>{solSigned(r.filter_value_sol, 2)}</span> },
         ]} />
