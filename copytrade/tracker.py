@@ -364,7 +364,8 @@ def _key_wallet(conn, wallet: str) -> bool:
 
 
 def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, tries: int = 3,
-                      received_at: float | None = None) -> chain.Swap | None:
+                      received_at: float | None = None,
+                      escalate: bool = True) -> chain.Swap | None:
     """A transaction the websocket reported for a watched wallet -> stored swap (or None). Public RPC first; a
     brand-new transaction can be missing there for a moment, so retry and ask the main RPC on the last try."""
     solusd = market.sol_usd(s)  # before the claim: an error here must not leave the signature claimed
@@ -372,7 +373,7 @@ def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, 
         return None  # duplicate notification (both sockets) or already polled
     _inflight.add(sig)
     try:
-        sw = _read_and_store(conn, rpc, wallet, sig, tries, received_at, solusd, s)
+        sw = _read_and_store(conn, rpc, wallet, sig, tries, received_at, solusd, s, escalate)
     except Exception:
         _release(sig)  # e.g. database locked: retry_locked calls again, or the polling net picks it up
         raise
@@ -404,7 +405,7 @@ def main_budget_ok(s: Settings | None, now: float | None = None) -> bool:
     return ok
 
 
-def _read_and_store(conn, rpc, wallet, sig, tries, received_at, solusd, s=None):
+def _read_and_store(conn, rpc, wallet, sig, tries, received_at, solusd, s=None, escalate=True):
     tx = None
     # main RPC credits: while the day's budget is rich, for every wallet right after one failed public try (the
     # public pool answers 429 for minutes at times, and a late whale buy is worth less than a credit); otherwise
@@ -412,7 +413,7 @@ def _read_and_store(conn, rpc, wallet, sig, tries, received_at, solusd, s=None):
     key = _key_wallet(conn, wallet)
     params = [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}]
     for i in range(tries):
-        if i == 1 and hasattr(rpc, "call") and main_budget_ok(s):
+        if i == 1 and escalate and hasattr(rpc, "call") and main_budget_ok(s):
             try:
                 tx = rpc.call("getTransaction", params, "live")
                 MAIN_READS["early"] += 1
@@ -420,7 +421,7 @@ def _read_and_store(conn, rpc, wallet, sig, tries, received_at, solusd, s=None):
                 log.debug("ws tx %s on main failed: %s", sig[:8], e)
             if tx:
                 break
-        last_try = key and i == tries - 1
+        last_try = key and escalate and i == tries - 1
         try:
             tx = rpc.read("getTransaction", params, main_if_empty=last_try, priority="live", main_on_error=last_try)
         except Exception as e:

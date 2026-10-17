@@ -233,6 +233,21 @@ DEX_PROGRAMS = {
 }
 
 
+def log_venues(logs: list | None) -> set[str] | None:
+    """Known DEX programs a notification's logs invoke (routers CPI into them, so they show up too); None when
+    the logs are missing or truncated (unknown). An empty set: no swap venue at all (transfers, account closes,
+    spam), not worth main RPC credits."""
+    if not logs or any("Log truncated" in (ln or "") for ln in logs if isinstance(ln, str)):
+        return None
+    out = set()
+    for ln in logs:
+        if isinstance(ln, str) and ln.startswith("Program ") and " invoke [" in ln:
+            name = DEX_PROGRAMS.get(ln.split()[1])
+            if name:
+                out.add(name)
+    return out
+
+
 def dex_of(tx: dict) -> str:
     """Venue of a parsed transaction from the programs it touches (account keys + inner instructions)."""
     try:

@@ -76,6 +76,7 @@ class Watcher:
         self.fetch_s: collections.deque = collections.deque(maxlen=2000)  # transaction read (s)
         self.catchups = 0
         self.skipped_catchups = 0
+        self.lean = 0  # notifications without a swap venue: read on the public pool only
         self._caught: dict[str, float] = {}
         self._kicked_at: dict[str, float] = {}
         self._last_watchdog = 0.0
@@ -151,7 +152,8 @@ class Watcher:
 
         parts.append(f"queue wait p50 {pct(self.waits, .5):.1f}s p90 {pct(self.waits, .9):.1f}s, transaction read "
                      f"p50 {pct(self.fetch_s, .5):.1f}s p90 {pct(self.fetch_s, .9):.1f}s, "
-                     f"{self.catchups} catch-ups after reconnects ({self.skipped_catchups} skipped, covered elsewhere)"
+                     f"{self.catchups} catch-ups after reconnects ({self.skipped_catchups} skipped, covered elsewhere), "
+                     f"{self.lean} without swap venue read public-only"
                      + (f", Helius stream {self.helius.bytes / 1e6:.1f} MB = {self.helius_credits:.0f} credits"
                         + (f" (paused: {self.helius_paused})" if self.helius_paused else "") if self.helius else ""))
         v = tracker.VERIFY
@@ -221,7 +223,13 @@ class Watcher:
                 if sw.side == "buy":  # buys feed ranking and entries; sells keep the curve amounts (saves RPC)
                     self._verify.append((time.time() + 3, 0, sw))
             else:
-                sw = store.retry_locked(tracker.process_signature, conn, self.s, self.rpc, wallet, sig, 3, got)
+                # Helius credits only for transactions that touch a swap venue (or whose logs we cannot see)
+                venues = chain.log_venues(logs) if logs is not None else None
+                escalate = venues is None or bool(venues)
+                if not escalate:
+                    self.lean += 1
+                sw = store.retry_locked(tracker.process_signature, conn, self.s, self.rpc, wallet, sig, 3, got,
+                                        escalate)
                 self.fetch_s.append(time.time() - start)
         except Exception as e:
             log.debug("ws swap %s failed: %s", sig[:8], e)

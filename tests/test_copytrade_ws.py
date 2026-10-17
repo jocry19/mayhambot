@@ -897,3 +897,37 @@ def test_catch_up_is_skipped_when_another_stream_watched_the_wallet_all_along():
     assert w.covered_elsewhere(W, now)
     a.connected = False
     assert not w.covered_elsewhere(W, now)
+
+
+def test_notifications_without_a_swap_venue_never_spend_main_credits(env, monkeypatch):
+    s, conn, ex, state = env
+    calls = []
+
+    class Pub:
+        counts, hosts = {}, {}
+
+        def call(self, method, params, priority="bulk"):
+            calls.append("public")
+            raise RuntimeError("429")
+
+    rpc = chain.Rpc(Settings(rpc_url="https://mainnet.helius-rpc.com/?api-key=k", poll_rpc_url=""))
+    rpc.public = Pub()
+    monkeypatch.setattr(chain.Rpc, "call", lambda self, m, p, priority="live": calls.append("main"))
+    monkeypatch.setattr(tracker.time, "sleep", lambda x: None)
+    monkeypatch.setattr(tracker, "main_budget_ok", lambda *a, **kw: True)
+    store.add_wallets(conn, [W], "manual")  # a key wallet: would get main credits on the last try
+    tracker._seen.clear()
+    plain = ["Program 11111111111111111111111111111111 invoke [1]",
+             "Program 11111111111111111111111111111111 success"]
+    assert chain.log_venues(plain) == set()
+    assert chain.log_venues(plain[:1] + ["Program pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA invoke [2]"]) == {"pumpswap"}
+    assert chain.log_venues(None) is None and chain.log_venues(["Log truncated"]) is None
+    from copytrade import watch
+
+    w = watch.Watcher(Settings(ws_urls=["ws://n0"], ws_parallel=1), rpc, {}, threading.Event())
+    w.s = s
+    w.fetch(conn, W, "sigT", time.time(), plain)
+    assert calls == ["public"] * 3 and w.lean == 1  # a transfer: public pool only, even for a manual wallet
+    calls.clear()
+    w.fetch(conn, W, "sigS", time.time(), plain + ["Program 6EF8rrDYGrSquN2vUbW2kH7JMLtQFZyD3J4bLy1F2uY3 invoke [1]"])
+    assert "main" in calls and w.lean == 1

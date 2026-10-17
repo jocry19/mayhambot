@@ -101,7 +101,8 @@ class Engine:
                 + f"; rpc calls public {pub}"
                 + (f" ({', '.join(f'{h} {n}' for h, n in sorted(self.rpc.endpoints().items(), key=lambda x: -x[1]))})"
                    if self.rpc.endpoints() else "")
-                + f", helius {hel} ({tracker.MAIN_READS['early']} early websocket reads), fallbacks "
+                + f", helius {hel} ({', '.join(f'{k[7:]} {v}' for k, v in sorted(u.items(), key=lambda x: -x[1]) if k.startswith('helius:'))}"
+                  f"; {tracker.MAIN_READS['early']} early websocket reads), fallbacks "
                   f"{self.rpc.fallbacks}, public bulk failures {self.rpc.bulk_failures}")
         tracker.DETECTED.update(wslog=0, ws=0, poll=0, gap=0)
         tracker.MAIN_READS["early"] = 0
