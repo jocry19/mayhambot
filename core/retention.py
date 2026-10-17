@@ -259,7 +259,7 @@ def cleanup(conn, now=None, delete=False, trades_days=30, prices_days=7, batch=2
                AND NOT EXISTS (SELECT 1 FROM trades t WHERE t.wallet = wallets.address)"""
     p_sel = f"SELECT rowid FROM token_prices WHERE ts < ? AND rowid NOT IN ({PRICE_KEEP_SQL.format(where='WHERE ts < ?')})"
     if not delete:
-        out["trades"] = conn.execute(t_sel.replace("rowid", "COUNT(*)", 1), (t_cut,)).fetchone()[0]
+        out["trades"] = conn.execute(t_sel.replace("rowid", "COUNT(*)", 1), (t_cut,)).fetchone()[0] if trades_days > 0 else 0
         out["prices"] = conn.execute(p_sel.replace("rowid", "COUNT(*)", 1), (p_cut, p_cut)).fetchone()[0]
         return out
     conn.execute(TRADES_HOURLY_SCHEMA)
@@ -277,8 +277,9 @@ def cleanup(conn, now=None, delete=False, trades_days=30, prices_days=7, batch=2
     def drop(table):
         return lambda ids: conn.execute(f"DELETE FROM {table} WHERE rowid IN ({','.join('?' * len(ids))})", ids)
 
-    out["trades"] = _batches(conn, t_sel, (t_cut,), drop_trades, batch, pause_s, deadline)
-    out["wallets"] = _batches(conn, w_sel, (), drop("wallets"), batch, pause_s, deadline)
+    if trades_days > 0:   # 0 = keep every trade, thin only the prices
+        out["trades"] = _batches(conn, t_sel, (t_cut,), drop_trades, batch, pause_s, deadline)
+        out["wallets"] = _batches(conn, w_sel, (), drop("wallets"), batch, pause_s, deadline)
     # prices hour by hour from the oldest one not yet thinned, so each pass reads one hour's rows
     done_until = int((conn.execute("SELECT value FROM retention_state WHERE key='prices_done_until'").fetchone()
                       or [0])[0]) if _has(conn, "retention_state") else 0

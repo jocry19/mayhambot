@@ -152,3 +152,10 @@ def test_compact_switches_to_incremental(tmp_path):
     c = sqlite3.connect(path)
     assert retention.file_stats(c)["auto_vacuum"] == "incremental"
     assert c.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 353
+
+
+def test_trades_days_zero_keeps_all_trades(tmp_path):
+    c, now, _ = _live(tmp_path)
+    n = c.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+    out = retention.cleanup(c, now=now, delete=True, trades_days=0, pause_s=0)
+    assert c.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == n and out["prices"] > 0
