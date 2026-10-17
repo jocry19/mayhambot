@@ -190,6 +190,9 @@ def write_report(conn, path=None, now=None):
     from signals import plan
     rep["plan_next"] = plan.levels(conn, now)
     rep["plan_next_v2"] = plan.levels(conn, now, kind="v2")
+    from signals import shadow  # rejected coins by reason and what they did next (calls: outcomes_* above)
+    rep.update(shadow_24h=shadow.summary(conn, 24, now), shadow_7d=shadow.summary(conn, 168, now),
+               shadow_v2_7d=shadow.summary(conn, 168, now, kind="v2"))
     rs = rep["recent_signals"]
     rep["tradable_strict_share"] = round(sum(r["tradable_strict"] for r in rs) / len(rs), 3) if rs else None
     tmp = path.with_suffix(".tmp")

@@ -13,7 +13,7 @@ import time
 from core import db, scoring, wallets
 from core.config import settings
 from core.sources import market, wallet_source
-from signals import accum, engine, funnel, notifier, plan
+from signals import accum, engine, funnel, notifier, plan, shadow
 
 log = logging.getLogger("mayhambot.run")
 
@@ -234,6 +234,10 @@ def cycle(conn, i):
     new_trades += fetch_trades(conn, [r for r in watch if r["mint"] not in hot_mints],
                                budget=max(10, settings.trades_budget_seconds - t_fetch))
     engine.update_outcomes(conn)
+    try:
+        shadow.update(conn)  # what the rejected coins did since: the funnel's gates checked on data
+    except Exception:  # noqa: BLE001
+        log.exception("signal shadow update failed")
     try:
         notifier.notify_followups(plan.check_levels(conn))  # target / stop reached: follow-up alert for manual trading
     except Exception:  # noqa: BLE001 - follow-ups must never stop signals

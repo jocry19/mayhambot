@@ -17,7 +17,7 @@ import time
 from core import scoring
 from core.config import settings
 from signals import ev as ev_mod
-from signals import plan
+from signals import plan, shadow
 from signals.backtest import DEAD_RET, confirmed, price_near, robust_max
 
 log = logging.getLogger("mayhambot.signals")
@@ -543,6 +543,15 @@ def prune_metrics(conn, now=None, days=METRICS_KEEP_DAYS):
 RECALL_MIN = int(os.getenv("SIGNAL_RECALL_MIN", 15))
 
 
+def _shadow(conn, mint, why, m, tok, now, kind="v1"):
+    """Rejected coin into the shadow book (signals.shadow), so the funnel's gates can be checked on what came next."""
+    try:
+        shadow.record(conn, mint, why, dict(m, min_score=m.get("min_score", settings.signal_min_score)),
+                      tok["price_usd"] if tok else None, now, kind)
+    except Exception as e:  # noqa: BLE001 - the shadow book must never stop signals
+        log.debug("shadow record %s failed: %s", mint[:6], e)
+
+
 def fresh_buyers(m, last):
     """Smart wallets buying now that were not in the coin's last call: a re-call inside the cooldown needs at least
     one (and RECALL_MIN minutes since that call), so a coin can be called again on new smart money without spam."""
@@ -606,10 +615,12 @@ def evaluate(conn, mints, cfg=settings, now=None):
         why = _reason(m, cfg)
         if why:
             f[why] += 1
+            _shadow(conn, mint, why, m, tok, now)
             continue
         m = check_before_signal(conn, mint, m)
         if _reason(m, cfg, strict=True):
             f["safety_drop"] += 1
+            _shadow(conn, mint, "safety_drop", m, tok, now)
             log.info("signal %s dropped by safety check: %s", mint[:6], (m.get("safety") or {}).get("reasons"))
             continue
         contrib = json.dumps(m["contributions"])

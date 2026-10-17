@@ -242,3 +242,13 @@ consumer should only take one type. Plan levels (`plan.levels(kind=)`) and outco
 per kind; the hourly report has `last_cycle_v2`, `outcomes_v2_24h/7d`, `plan_next_v2`. Env: `SIGNAL_V2` (on),
 `SIGNAL_V2_WINDOW_H`, `SIGNAL_V2_MIN_HOLDERS`, `SIGNAL_V2_HOLD_SHARE`, `SIGNAL_V2_NET_MULT`, `SIGNAL_V2_MIN_SPAN_MIN`,
 `SIGNAL_V2_FRESH_MIN`, `SIGNAL_V2_COOLDOWN_H`.
+
+## Shadow book of rejected coins (signals/shadow.py)
+
+Every cycle the first rejection per coin, reason and hour (coins with at least one smart buyer; v1, and v2 with 2+
+holders) goes into `signal_shadow` with its numbers and price; `shadow.update()` fills ret_1h / max_ret_1h /
+max_ret_4h with the same honest rules as the calls (entry 60 s later, bad prints filtered, vanished coins dead).
+The hourly report carries `shadow_24h`, `shadow_7d`, `shadow_v2_7d`: per reason hit_50 / hit_100 / median high / dead
+share, plus near misses ("few_entities: 1 owner, net >= min", "low_net: net >= half the min", safety by risk). A gate
+is loosened only when its near misses beat the calls out of sample. Read-only retro from signal_metrics (last ~3 days)
+for a DB without shadow rows: `python -m signals.shadow --retro --db data/mayhambot.db --hours 72`.

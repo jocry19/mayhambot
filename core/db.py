@@ -52,6 +52,13 @@ CREATE TABLE IF NOT EXISTS signals (
 CREATE INDEX IF NOT EXISTS idx_signals_mint ON signals(mint, ts);
 CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts);
 CREATE INDEX IF NOT EXISTS idx_signal_metrics_mint_ts ON signal_metrics(mint, ts);
+CREATE TABLE IF NOT EXISTS signal_shadow (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, mint TEXT, kind TEXT, reason TEXT, entities INTEGER,
+    net_usd REAL, score REAL, min_net REAL, min_score REAL, safety_risk REAL, liquidity_usd REAL, price_usd REAL,
+    model_exp_net REAL, ret_1h REAL, max_ret_1h REAL, max_ret_4h REAL, outcome_flag TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_signal_shadow_ts ON signal_shadow(ts);
+CREATE INDEX IF NOT EXISTS idx_signal_shadow_mint ON signal_shadow(mint, reason, ts);
 """
 
 # columns added after the first release: (table, column, type). Applied on connect, idempotent.

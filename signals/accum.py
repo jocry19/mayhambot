@@ -248,6 +248,8 @@ def evaluate(conn, cfg=settings, now=None):
                 why = _reason(m, min_net, now, tok)
         if why:
             f[why] += 1
+            if m["holders"] >= 2 and why != "stale_price":
+                engine._shadow(conn, mint, why, m, tok, now, KIND)
             continue
         last = conn.execute("SELECT ts, smart_buyers FROM signals WHERE mint=? AND kind=? ORDER BY ts DESC LIMIT 1",
                             (mint, KIND)).fetchone()
