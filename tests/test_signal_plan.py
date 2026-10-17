@@ -187,3 +187,20 @@ def test_single_bad_low_print_is_no_dip():
     from signals.backtest import confirmed
     assert confirmed([1.0, 1.1, 0.004, 1.15, 1.3]) == [1.0, 1.1, 1.1, 1.15, 1.3]   # BERT's -99.6 % print
     assert confirmed([1.0, 0.7, 0.5, 0.45]) == [1.0, 0.7, 0.5, 0.45]                # a real slide stays
+
+
+def test_wash_trading_vetoes_a_call(monkeypatch):
+    import dataclasses
+    from types import SimpleNamespace
+    from core.config import settings
+    cfg = dataclasses.replace(settings, signal_min_wallets=2, signal_min_net_usd=100, signal_min_score=10)
+    m = dict(smart_buyers=2, entities=2, net_usd=500, score=50, liquidity_usd=36000, contributions={})
+    a = SimpleNamespace(override=None, reasons=[{"check": "wash", "risk": 34, "text": "27 % Hin-und-her"}])
+    fake = SimpleNamespace(signal_penalty=lambda c, x: {"factor": 0.86, "risk": 34, "checked": True, "reasons": []},
+                           get=lambda c, x: a)
+    monkeypatch.setattr(engine, "_safety", fake)
+    out = engine.apply_safety(None, "K", m)
+    assert out["safety"]["red_flags"] and engine._reason(out, cfg) == "safety_drop"
+    assert engine._reason(dict(out, ev=0.2), cfg) == "safety_drop"          # also when the EV table decides
+    a.override = "allow"                                                     # manual release wins
+    assert engine._reason(engine.apply_safety(None, "K", m), cfg) is None

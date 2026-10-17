@@ -167,6 +167,8 @@ def _reason(m, cfg, strict=False):
     safety factor too (before that it still gets its quick check instead of an early veto)."""
     if m["smart_buyers"] <= 0:
         return "no_smart"
+    if (m.get("safety") or {}).get("red_flags"):
+        return "safety_drop"
     if m.get("ev") is not None:  # an out-of-sample-checked EV table replaces wallets / net / score minimums
         sp = m.get("safety") or {}
         if sp.get("factor", 1.0) < EV_MIN_SAFETY_FACTOR and (strict or sp.get("checked") is not False):
@@ -400,6 +402,11 @@ def _load_safety():
 _safety = _load_safety()
 
 
+# safety checks whose finding alone stops a call: wash trading means the volume (and any pump) is fake. Kavantissa
+# fired with 27 % round-trip volume (risk 34, factor 0.86 barely dented the score), peaked at +37 % and was -64 % at 1 h.
+VETO_CHECKS = {c.strip() for c in os.getenv("SIGNAL_VETO_CHECKS", "wash").split(",") if c.strip()}
+
+
 def apply_safety(conn, mint, m):
     """score x safety.signal_penalty factor (1.0 up to risk 25, 0.2 at 75, 0 when blocked, 1.0 unchecked).
     Adds a negative 'safety' contribution so the points still add up to the score."""
@@ -410,6 +417,12 @@ def apply_safety(conn, mint, m):
     except Exception as e:  # noqa: BLE001
         log.warning("safety.signal_penalty %s failed: %s", mint[:6], e)
         return m
+    try:  # findings that veto a call however low the total risk (structured, from the stored assessment)
+        a = _safety.get(conn, mint)
+        if a and a.override != "allow":
+            p = dict(p, red_flags=[r["text"] for r in a.reasons if r.get("check") in VETO_CHECKS and r.get("risk", 0) > 0])
+    except Exception as e:  # noqa: BLE001
+        log.debug("safety.get %s failed: %s", mint[:6], e)
     m = dict(m, safety=p, score_raw=m["score"])
     if p.get("factor", 1.0) < 1.0:
         m["score"] = round(m["score"] * p["factor"], 1)
