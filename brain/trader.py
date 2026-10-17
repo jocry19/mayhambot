@@ -32,6 +32,8 @@ EXIT_NAMES = {"target": "Ziel erreicht", "stop": "Stop-Loss", "trail": "Trailing
 VERDICT_EVERY_S = 600
 MARKET_MIN_N = 30
 MARKET_WINDOW_S = 3 * 86400
+MARKET_CHALLENGE_PER_H = 12  # challenge: exploration buys from the unproven side sources per hour
+CHALLENGE_PAUSE_S = 6 * 3600
 MOMENTUM_MIN_M5 = 5.0  # DexScreener 5-min change in percent: a move is on (wide on purpose, the brain only watches
 MOMENTUM_MIN_TX = 30  # and learns this source until its replays earn it)
 
@@ -52,6 +54,7 @@ class Trader:
         self.live = exits.Live()
         self._organic_at = (0.0, False)
         self._market_at = (-1e18, False)
+        self._challenge_at = (-1e18, False)
         self._snapshots = snapshots
         self._executor = executor
         self.safety_check = safety_check or _default_safety
@@ -226,7 +229,7 @@ class Trader:
                     feats["safety"] = self._safe[0]
             except Exception as e:
                 log.debug("safety %s: %s", row["mint"][:6], e)
-        d = decide.choose(self.model, kind, feats, self.s, self.rng, equity=self.equity())
+        d = decide.choose(self.model, kind, feats, self.settings(now), self.rng, equity=self.equity())
         block = None
         wanted = d.enter and not d.explore  # convinced before the hard gates: what the honest score judges
         if d.enter:
@@ -256,7 +259,12 @@ class Trader:
     def _gate(self, kind: str, mint: str, snap, d, row=None, raw=None) -> str | None:
         """Hard limits the model never overrides: a market to trade, the rug check, risk limits."""
         if kind == "market" and not self.market_live():
-            return "Nebenquelle: erst beobachten, bis sie im Nachspielen vorne liegt"
+            if not self.challenge_on(self.clock()):
+                return "Nebenquelle: erst beobachten, bis sie im Nachspielen vorne liegt"
+            n = self.conn.execute("SELECT COUNT(*) FROM brain_opps WHERE kind='market' AND decision='enter' AND ts>=?",
+                                  (int(self.clock()) - 3600,)).fetchone()[0]
+            if n >= MARKET_CHALLENGE_PER_H:
+                return f"Nebenquelle: {n} Probekäufe in dieser Stunde, mehr erst wenn sie sich bewährt"
         if snap is None or not snap.price_sol:
             return "kein Marktpreis"
         if features.on_curve(snap):
@@ -375,6 +383,43 @@ class Trader:
                 self.live.drop(p["id"])
                 n += 1
         return n
+
+    def challenge_on(self, now: float) -> bool:
+        """The hourly x2 challenge is active unless switched off or the last 3 full hours together lost more than
+        BRAIN_CHALLENGE_STOP (then it pauses 6 h and the normal sizes return)."""
+        if self.s.challenge == "off":
+            return False
+        paused = store.get(self.conn, "challenge_paused_until", 0) or 0
+        if now < paused:
+            return False
+        at, on = self._challenge_at
+        if now - at < VERDICT_EVERY_S:
+            return on
+        from .journal import hour_factors
+
+        hf = [m for _, m in hour_factors(self.conn, now, 3)]
+        prod = 1.0
+        for m in hf:
+            prod *= m
+        on = True
+        if len(hf) >= 2 and prod < self.s.challenge_stop:
+            store.put(self.conn, "challenge_paused_until", int(now + CHALLENGE_PAUSE_S))
+            hist = (store.get(self.conn, "challenge_pauses", []) or [])[-29:] + [{"at": int(now), "factor": round(prod, 4)}]
+            store.put(self.conn, "challenge_pauses", hist)
+            log.info("challenge paused 6 h: last %d hours x%.3f", len(hf), prod)
+            on = False
+        self._challenge_at = (now, on)
+        return on
+
+    def settings(self, now: float):
+        """The settings a decision runs with: the challenge's bigger stakes while it is on."""
+        if not self.challenge_on(now):
+            return self.s
+        import dataclasses
+
+        return dataclasses.replace(self.s, kelly_frac=self.s.challenge_kelly_frac,
+                                   max_stake=self.s.challenge_max_stake,
+                                   explore_share=self.s.challenge_explore_share)
 
     def market_live(self) -> bool:
         """The side source trades only once its own out-of-sample record earned it: auto = what the brain wanted from

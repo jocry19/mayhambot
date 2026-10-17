@@ -79,6 +79,8 @@ def choose(model, kind: str, feats: dict, s, rng: random.Random | None = None,
         # the edge is an estimate; never more than BRAIN_MAX_STAKE of the account, never less than the minimum
         kelly = s.kelly_frac * mean / max(model.sigma2(i), 1e-4)
         size = round(max(s.min_size_sol, min(s.max_stake * equity, kelly * equity)), 3)
+    elif explore and equity and equity > 0 and s.explore_share > 0:
+        size = round(max(s.min_size_sol, s.explore_share * equity), 3)
     contrib = sorted(model.contributions(toks, i), key=lambda c: c[1])
     pros = [c for c in reversed(contrib) if c[1] > 0.004][:3]
     cons = [c for c in contrib if c[1] < -0.004][:3]
