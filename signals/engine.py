@@ -45,8 +45,10 @@ class QualityCache:
             manual = bool(m and m["manual"])
             bot = bool(m and m["is_bot"])
             score = q["score"] if q["n"] else (MANUAL_DEFAULT_SCORE if manual else 0.0)
-            if wallet in self.model_tiers:  # scored by the active model version: its tier is the truth
-                tier = self.model_tiers[wallet][0]
+            if wallet in self.model_tiers:  # scored by the active model version: its tier and score are the truth
+                tier, mscore = self.model_tiers[wallet][:2]
+                if mscore is not None:
+                    score = mscore
                 if manual and not bot and tier not in ("ultra", "smart"):
                     tier = "smart"
             else:  # no model yet, or not scored yet: heuristic
@@ -670,16 +672,21 @@ def peak_stats(pts, t0, p0, horizon=3600, snaps=None):
     return dict(peak_min_1h=round((w[i][0] - t0) / 60, 1), dd_before_peak_1h=min(0.0, min(before) / p0 - 1))
 
 
+VANISHED_AFTER_S = 1800  # no DexScreener update for this long after a horizon while others got one: gone
+
+
 def update_outcomes(conn, now=None, cfg=settings):
     """Fill ret_5m / ret_15m / ret_1h / ret_6h / max_ret_1h / max_ret_24h for signals of the last 3 days.
 
     Unbiased on purpose: a return is the price within a tolerance around the horizon (2 min for 5m, 5 min for
     15m / 1h, 30 min for 6h), never an arbitrary later print. A coin that died (liquidity below a quarter of
-    MIN_LIQUIDITY_USD) with no price near or after the horizon counts as DEAD_RET instead of dropping out of the
-    stats, so rugs are not survivorship-filtered. outcome_flag: ok | dead | gap (no price near the horizon).
+    MIN_LIQUIDITY_USD, or vanished from DexScreener: no update since the horizon while other coins got one) with no
+    price near or after the horizon counts as DEAD_RET instead of dropping out of the stats, so rugs are not
+    survivorship-filtered. outcome_flag: ok | dead | gap (no price near the horizon).
     Prices: token_prices (DexScreener) first; pool trade prints only where no snapshot is near."""
     now = now or int(time.time())
     dead_liq = cfg.min_liquidity_usd / 4
+    newest_update = conn.execute("SELECT MAX(last_updated) FROM tokens").fetchone()[0]
     for s in conn.execute("SELECT * FROM signals WHERE ts > ? AND (ret_1h IS NULL OR max_ret_1h IS NULL "
                           "OR max_ret_24h IS NULL OR ret_6h IS NULL OR max_ret_4h IS NULL OR max_ret_15m IS NULL)",
                           (now - 72 * 3600,)).fetchall():
@@ -697,9 +704,16 @@ def update_outcomes(conn, now=None, cfg=settings):
 
         def rmax(w):  # w: [(ts, price)]; snapshots stand, single trade prints need a neighbour to confirm them
             return robust_max([v for _, v in w], [(t, v) in snapset for t, v in w])
-        tok = conn.execute("SELECT liquidity_usd FROM tokens WHERE mint=?", (s["mint"],)).fetchone()
+        tok = conn.execute("SELECT liquidity_usd, last_updated FROM tokens WHERE mint=?", (s["mint"],)).fetchone()
         dead = bool(tok and tok[0] is not None and tok[0] < dead_liq)
         flags = []
+
+        def vanished(t):
+            """A rugged coin drops out of DexScreener, so its liquidity is never updated to ~0: it counts as dead
+            when it got no update since t while the bot kept updating other coins (bot running, not asleep)."""
+            if not tok or (tok[1] or 0) >= t or t > s["ts"] + plan.FOLLOW_HOURS * 3600:  # only while still watched
+                return False
+            return now >= t + VANISHED_AFTER_S and (newest_update or 0) >= t + VANISHED_AFTER_S
 
         def ret(dt, tol):
             if now < s["ts"] + dt + tol:
@@ -709,7 +723,7 @@ def update_outcomes(conn, now=None, cfg=settings):
                 p = price_near(pts, s["ts"] + dt, tol)
             if p is not None:
                 return p / p0 - 1
-            if dead and not any(t > s["ts"] + dt for t, _ in pts):
+            if (dead or vanished(s["ts"] + dt)) and not any(t > s["ts"] + dt for t, _ in pts):
                 flags.append("dead")
                 return DEAD_RET
             flags.append("gap")

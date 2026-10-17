@@ -46,6 +46,26 @@ FUNNEL_KEYS = ("coins", "few_holders", "low_share", "low_net", "short_span", "st
 last_funnel = {}
 
 
+def quality(qc, wallet, mint):
+    """(score, tier): one source. With an active model version that is model_wallet_stats (tier and score; wallets
+    it did not score are not counted, manual wallets stay smart); the heuristic only while no model is active."""
+    if not qc.model_tiers:
+        return qc.get(wallet, mint)[:2]
+    v = qc.model_tiers.get(wallet)
+    if v and v[0] in ("ultra", "smart"):
+        return (v[1] or 0.0), v[0]
+    m = qc.meta.get(wallet)
+    if m and m["manual"] and not m["is_bot"]:
+        return (v[1] if v and v[1] is not None else engine.MANUAL_DEFAULT_SCORE), "smart"
+    return 0.0, None
+
+
+def tiered_wallets(conn, qc):
+    if qc.model_tiers:
+        return {w for w in set(qc.model_tiers) | set(qc.meta) if quality(qc, w, None)[1]}
+    return {r[0] for r in conn.execute("SELECT address FROM wallets WHERE tier IN ('ultra','smart')")}
+
+
 def receivers(conn, tiered):
     """{wallet: funder} for wallets funded by an Ultra/Smart wallet. Funders of many wallets are exchanges or hubs
     (research.funding.hubs), not one owner, and are skipped. Empty when research/ has not checked funders yet."""
@@ -87,13 +107,13 @@ def metrics(conn, mint, qc, recv, now):
     for r in conn.execute("SELECT wallet, side, usd_amount, sol_amount, ts FROM trades WHERE mint=? AND ts>? AND ts<=?",
                           (mint, since, now)):
         w = r["wallet"]
-        score, tier, _ = qc.get(w, mint)
+        score, tier = quality(qc, w, mint)
         funder = None
         if tier not in ("ultra", "smart"):
             funder = recv.get(w)
             if not funder:
                 continue
-            score, tier, _ = qc.get(funder, mint)
+            score, tier = quality(qc, funder, mint)
             if tier not in ("ultra", "smart"):
                 continue
         ent = qc.entity(funder or w)
@@ -204,8 +224,7 @@ def evaluate(conn, cfg=settings, now=None):
     if not ENABLED:
         return []
     qc = engine.QualityCache(conn, cfg)
-    tiered = {r[0] for r in conn.execute("SELECT address FROM wallets WHERE tier IN ('ultra','smart')")}
-    tiered |= {w for w, v in qc.model_tiers.items() if v[0] in ("ultra", "smart")}
+    tiered = tiered_wallets(conn, qc)
     recv = receivers(conn, tiered)
     f["receivers"] = len(recv)
     min_net = engine.min_net_usd(conn, cfg, now)

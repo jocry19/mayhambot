@@ -13,6 +13,7 @@ class FakeQC:
     def __init__(self, conn, cfg=None, tiers=None):
         self.tiers = tiers or {}
         self.model_tiers = {}
+        self.meta = {}
 
     def get(self, wallet, mint):
         t = self.tiers.get(wallet)
@@ -103,3 +104,33 @@ def test_v1_and_v2_kept_apart(c):
     assert plan.levels(c, NOW, kind="v2")["n"] == 1 and plan.levels(c, NOW)["n"] == 1
     assert funnel.outcomes(c, 24, now=NOW, kind="v2")[-1]["hit_50"] == 1.0
     assert funnel.outcomes(c, 24, now=NOW)[-1]["hit_50"] == 0.0
+
+
+def test_active_model_is_the_only_quality_source():
+    qc = FakeQC(None, tiers={"H": "smart"})                 # heuristic says smart ...
+    qc.model_tiers = {"S": ("ultra", 81.0, None, None), "H": (None, 40.0, None, None)}
+    qc.meta = {"MAN": {"manual": 1, "is_bot": 0}}
+    assert accum.quality(qc, "H", "M") == (0.0, None)      # ... but the active model scored it below smart
+    assert accum.quality(qc, "S", "M") == (81.0, "ultra")
+    assert accum.quality(qc, "U", "M") == (0.0, None)      # not scored by the model: not counted
+    assert accum.quality(qc, "MAN", "M")[1] == "smart"
+    assert accum.tiered_wallets(None, qc) == {"S", "MAN"}
+
+
+def test_vanished_coin_counts_as_dead_not_unmeasured(tmp_path):
+    c = db.connect(str(tmp_path / "d.db"))
+    now = 100_000
+    t = now - 3 * 3600
+    c.execute("INSERT INTO signals(ts, mint, score, price_usd) VALUES (?,?,?,?)", (t, "R", 40, 1.0))
+    c.execute("INSERT INTO tokens(mint, liquidity_usd, last_updated) VALUES ('R', 40000, ?)", (t + 600,))
+    c.execute("INSERT INTO tokens(mint, liquidity_usd, last_updated) VALUES ('OK', 40000, ?)", (now - 60,))
+    c.execute("INSERT INTO token_prices(mint, ts, price_usd) VALUES ('R', ?, 1.3)", (t + 300,))
+    c.commit()
+    engine.update_outcomes(c, now=now)
+    s = c.execute("SELECT * FROM signals").fetchone()
+    assert s["ret_1h"] == -0.95 and s["outcome_flag"] == "dead"
+    c.execute("UPDATE tokens SET last_updated=? WHERE mint='OK'", (t + 600,))   # bot was asleep: unknown, not dead
+    c.execute("UPDATE signals SET ret_1h=NULL, outcome_flag=NULL")
+    c.commit()
+    engine.update_outcomes(c, now=now)
+    assert c.execute("SELECT ret_1h FROM signals").fetchone()[0] is None
