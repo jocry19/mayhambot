@@ -49,7 +49,8 @@ def choose(model, kind: str, feats: dict, s, rng: random.Random | None = None) -
     Convinced: the chosen plan's expected net return is positive and the brain is at least BRAIN_MIN_CONF sure of
     that; the size grows from the minimum at that certainty to the maximum at 95 %.
     Exploring (Thompson sampling): not convinced, but one draw from the posterior says it could pay, or the best
-    plan is at least BRAIN_EXPLORE_MIN_P likely to be positive; bought with the minimum size. Everything else is passed (and still learned from)."""
+    plan is at least BRAIN_EXPLORE_MIN_P likely to be positive; bought with the minimum size, except in the segments
+    BRAIN_NO_EXPLORE names. Everything else is passed (and still learned from)."""
     rng = rng or random
     toks = F.tokens(kind, feats)
     preds = model.predict(toks)
@@ -65,6 +66,9 @@ def choose(model, kind: str, feats: dict, s, rng: random.Random | None = None) -
     p_pos = _phi(mean / sd) if sd > 0 else float(mean > 0)
     # paper learns from its own fills: also try what is merely plausible (P(best plan > 0) >= BRAIN_EXPLORE_MIN_P)
     explore = not convinced and (draws[i] > s.min_edge or p_best >= s.explore_min_p)
+    cold = next((f"{k}:{v}" for k, v in feats.items() if f"{k}:{v}" in s.no_explore_set), "")
+    if explore and cold:  # a segment that loses at entry: only a convinced buy, the replay still learns it
+        explore = False
     enter = convinced or explore
     frac = max(0.0, min(1.0, (p_pos - s.min_conf) / max(1e-6, 0.95 - s.min_conf)))
     size = round(s.min_size_sol + (s.max_size_sol - s.min_size_sol) * frac, 3) if convinced else s.min_size_sol
@@ -72,7 +76,8 @@ def choose(model, kind: str, feats: dict, s, rng: random.Random | None = None) -
     pros = [c for c in reversed(contrib) if c[1] > 0.004][:3]
     cons = [c for c in contrib if c[1] < -0.004][:3]
     why_not = "" if enter else (f"bester Plan im Schnitt {adj[best]:+.1%} netto, sicher im Plus nur zu {p_best:.0%}; "
-                                f"lohnt nicht")
+                                + (f"keine Erkundung bei {F.LABELS.get(cold.split(':')[0], cold.split(':')[0])} "
+                                   f"{cold.split(':', 1)[1]} (verliert laut Daten)" if cold else "lohnt nicht"))
     return Decision(enter, PLANS[i].name, mean, sd, p_pos, draws[i], explore, size, why_not,
                     [round(m, 4) for m in adj], pros, cons)
 

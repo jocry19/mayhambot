@@ -33,6 +33,10 @@ class Settings:
     min_edge: float = field(default_factory=lambda: _f("BRAIN_MIN_EDGE", 0.0))
     min_conf: float = field(default_factory=lambda: _f("BRAIN_MIN_CONF", 0.75))  # P(mean > 0) for a real buy
     explore_min_p: float = field(default_factory=lambda: _f("BRAIN_EXPLORE_MIN_P", 0.25))
+    # segments the data shows losing at entry (backup 17.10., 44 h, after costs): whale copies detected 30 s+ late
+    # -11.2 % (n 22) vs -4 % under 30 s (n 69); bonding-curve coins -17 % (n 418) vs pumpswap -6.5 % (n 449).
+    # No exploration buys there; a convinced buy still goes through, and the replay keeps learning every one.
+    no_explore: str = field(default_factory=lambda: _s("BRAIN_NO_EXPLORE", "delay:30-90s,delay:>90s,liq:curve"))
     # round-trip costs on top of the simulator's 3 %: copy 5.5 % in total, sniper launches 9 %
     extra_cost_copy: float = field(default_factory=lambda: _f("BRAIN_EXTRA_COST_COPY", 0.025))
     extra_cost_launch: float = field(default_factory=lambda: _f("BRAIN_EXTRA_COST_LAUNCH", 0.06))
@@ -54,6 +58,10 @@ class Settings:
     telegram: str = field(default_factory=lambda: _s("BRAIN_TELEGRAM", "trades").lower())
     diary_hour_utc: int = field(default_factory=lambda: int(_f("BRAIN_DIARY_HOUR_UTC", 19)))
     enabled: bool = field(default_factory=lambda: _s("BRAIN_ENABLED", "true").lower() not in ("0", "false", "off"))
+
+    @property
+    def no_explore_set(self) -> set:
+        return {x.strip() for x in self.no_explore.split(",") if x.strip()}
 
     @property
     def model_path(self) -> Path:

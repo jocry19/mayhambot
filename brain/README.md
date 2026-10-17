@@ -25,6 +25,10 @@ das Trailing scharf erst nach einer Minute.
 - **Erkunden** (nicht überzeugt, aber eine Ziehung aus dem Posterior sagt „könnte sich lohnen“, Thompson Sampling,
   oder der beste Plan ist zu ≥ `BRAIN_EXPLORE_MIN_P` = 25 % im Plus):
   0,1 SOL, ohne Tageskontingent (Papier hat kein Budget; `BRAIN_EXPLORE_PER_DAY` > 0 setzt eins).
+  Nicht erkundet wird in Segmenten, die laut Daten schon beim Einstieg verlieren (`BRAIN_NO_EXPLORE`, Standard
+  `delay:30-90s,delay:>90s,liq:curve`; Auswertung 17.10.: Wal-Kopie ab 30 s erkannt −11,2 % gegen −4 % darunter,
+  Curve-Coins −17 % gegen pumpswap −6,5 %). Dort kauft das Hirn nur überzeugt; gelernt wird jede Gelegenheit.
+  `honest()` zeigt diese Segmente getrennt (`by_delay`, `by_liq`), das Tagebuch ebenso.
 - Sonst **auslassen**. Auch ausgelassene Gelegenheiten werden später nachgespielt und gelernt.
 
 Harte Grenzen, die das Modell nie übergeht: Marktpreis vorhanden (ein Coin ohne DexScreener-Paar bekommt 30 s),
