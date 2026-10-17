@@ -56,8 +56,10 @@ def run_once(conn=None, now=None, write_files=True):
     bt.setdefault("metrics", {})["selection"] = selection
     for line in selection_log(selection):
         log.info(line)
-    tiered = [w for w, (t, _, _) in tiers.items() if t]
-    cl = wallet_stats.clusters(ds, tiered, now + 1)
+    # same wallet set as the backtest that trained the model (tiered, or untiered but scoring >= event_min_score),
+    # so live cluster features match what the model learned on
+    keep = [w for w, (t, sc, _) in tiers.items() if t or sc >= msettings.event_min_score]
+    cl = wallet_stats.clusters(ds, keep, now + 1)
     counts = {t: sum(1 for v in tiers.values() if v[0] == t) for t in ("ultra", "smart", "good")}
     prev = _previous(conn)
     cur = conn.execute(
