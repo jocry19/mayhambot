@@ -339,3 +339,15 @@ def test_exit_study_keeps_out_of_sample_check_when_long_holds_are_not_complete(m
     monkeypatch.setattr(exits, "replay", fake)
     o = exits.study(evs, None, top_share=1.0)["out_of_sample"]
     assert o and o["rule"]["hold"] != "6h" and o["n"] >= 10
+
+
+def test_candle_high_before_the_entry_does_not_count_as_reached_after_it():
+    from research.prices import PriceIndex
+    idx = PriceIndex()
+    # 5-min candle 0..299 spiked to 2.0 before an entry at t=100; the next candle only reaches 1.2
+    idx._add("M", [(50, 1.0), (299, 1.0), (599, 1.1)], candles=[(300, 0, 2.0, 0.9), (300, 300, 1.2, 1.0)])
+    assert idx.max_between("M", 100, 3600) == 1.2
+    assert idx.first_time_reaching("M", 100, 3600, 1.9) is None
+    assert idx.first_time_reaching("M", 100, 3600, 1.15) == 599  # counts at the candle end
+    assert idx.max_between("M", -1, 3600) == 2.0  # whole candle inside the window: its high counts
+    assert idx.max_between("M", 300, 500) is None or idx.max_between("M", 300, 500) <= 1.1  # candle not finished

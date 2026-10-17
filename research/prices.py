@@ -3,6 +3,10 @@
 price_at(mint, ts)        last known price at or before ts (never looks ahead)
 max_between(mint, a, b)   highest confirmed price in (a, b]
 min_between(mint, a, b)   lowest price in (a, b]
+
+A candle's high and low can lie anywhere inside the candle, so they only count for a window (a, b] when the
+whole candle lies inside it (start after a, end at or before b). Otherwise a high from before an entry inside
+the entry candle would count as reached after the entry. Candle closes count as prints at the candle end.
 """
 import bisect
 from collections import defaultdict
@@ -34,6 +38,8 @@ class PriceIndex:
     def __init__(self):
         self.ts, self.px, self.hi_ts, self.hi, self.lo_ts, self.lo = {}, {}, {}, {}, {}, {}
         self._max, self._min = {}, {}
+        self.cand = {}  # mint -> {tf: (starts, highs, lows)}
+        self._cmax, self._cmin = {}, {}
         self.supply = {}
         self.fetched = {}  # mint -> time the newest candles were fetched (no candle after it = no trades)
 
@@ -61,10 +67,8 @@ class PriceIndex:
         for mint, cs in cand.items():
             for tf, ts, h, l, c in cs:
                 pts[mint].append((ts + tf - 1, c))
-                highs[mint].append((ts + tf - 1, h))
-                lows[mint].append((ts + tf - 1, l))
         for mint, p in pts.items():
-            idx._add(mint, p, highs.get(mint, []), lows.get(mint, []))
+            idx._add(mint, p, candles=[(tf, ts, h, l) for tf, ts, h, l, _ in cand.get(mint, [])])
         for r in conn.execute("SELECT mint, price_usd, mcap_usd FROM tokens WHERE price_usd > 0 AND mcap_usd > 0"
                               + cond, args):
             idx.supply[r[0]] = r[2] / r[1]
@@ -79,8 +83,21 @@ class PriceIndex:
             pass
         return idx
 
-    def _add(self, mint, pts, highs=(), lows=()):
+    def _add(self, mint, pts, highs=(), lows=(), candles=()):
+        """pts: (ts, price) prints; highs/lows: extra point extremes at their ts; candles: (tf, start, high, low)."""
         pts = sorted(pts)
+        by_tf = {}
+        for tf, st, h, l in sorted(candles, key=lambda c: (c[0], c[1])):
+            by_tf.setdefault(tf, ([], [], []))
+            by_tf[tf][0].append(st)
+            by_tf[tf][1].append(h)
+            by_tf[tf][2].append(l)
+        if by_tf:
+            self.cand[mint] = by_tf
+        else:
+            self.cand.pop(mint, None)
+        self._cmax.pop(mint, None)
+        self._cmin.pop(mint, None)
         prices = [p for _, p in pts]
         # a print only counts as a high if the previous print confirms it within 3x (filters single bad prints;
         # only the earlier neighbour, so a high at t never depends on a later price)
@@ -119,11 +136,31 @@ class PriceIndex:
 
     def last_ts(self, mint):
         tss = self.ts.get(mint)
-        return max(tss[-1], self.hi_ts[mint][-1]) if tss else None
+        if not tss:
+            return None
+        ends = [st[-1] + tf - 1 for tf, (st, _, _) in self.cand.get(mint, {}).items()]
+        return max([tss[-1], self.hi_ts[mint][-1]] + ends)
 
     def first_ts(self, mint):
         tss = self.ts.get(mint)
-        return min(tss[0], self.hi_ts[mint][0]) if tss else None
+        if not tss:
+            return None
+        starts = [st[0] for st, _, _ in self.cand.get(mint, {}).values()]
+        return min([tss[0], self.hi_ts[mint][0]] + starts)
+
+    def _candle_range(self, mint, a, b):
+        """Per timeframe: (tf, i, j) index range of candles lying fully inside (a, b]."""
+        for tf, (st, _, _) in self.cand.get(mint, {}).items():
+            i, j = bisect.bisect_right(st, a), bisect.bisect_right(st, b - tf + 1) - 1
+            if i <= j:
+                yield tf, i, j
+
+    def _candle_ext(self, mint, a, b, high):
+        cache, fn, k = (self._cmax, max, 1) if high else (self._cmin, min, 2)
+        if mint not in cache:
+            cache[mint] = {tf: _Sparse(v[k], fn) for tf, v in self.cand[mint].items()}
+        vals = [cache[mint][tf].query(i, j) for tf, i, j in self._candle_range(mint, a, b)]
+        return fn(vals) if vals else None
 
     def max_between(self, mint, a, b):
         tss = self.hi_ts.get(mint)
@@ -131,7 +168,9 @@ class PriceIndex:
             return None
         if mint not in self._max:
             self._max[mint] = _Sparse(self.hi[mint], max)
-        return self._max[mint].query(bisect.bisect_right(tss, a), bisect.bisect_right(tss, b) - 1)
+        v = self._max[mint].query(bisect.bisect_right(tss, a), bisect.bisect_right(tss, b) - 1)
+        c = self._candle_ext(mint, a, b, True) if mint in self.cand else None
+        return v if c is None else c if v is None else max(v, c)
 
     def min_between(self, mint, a, b):
         tss = self.lo_ts.get(mint)
@@ -139,26 +178,37 @@ class PriceIndex:
             return None
         if mint not in self._min:
             self._min[mint] = _Sparse(self.lo[mint], min)
-        return self._min[mint].query(bisect.bisect_right(tss, a), bisect.bisect_right(tss, b) - 1)
+        v = self._min[mint].query(bisect.bisect_right(tss, a), bisect.bisect_right(tss, b) - 1)
+        c = self._candle_ext(mint, a, b, False) if mint in self.cand else None
+        return v if c is None else c if v is None else min(v, c)
+
+    def _first(self, mint, a, b, hit, k):
+        """Earliest time in (a, b] a print or a whole candle meets hit(value); a candle counts at its end."""
+        best = None
+        tss, vals = (self.hi_ts, self.hi) if k == 1 else (self.lo_ts, self.lo)
+        t_ = tss.get(mint)
+        if t_:
+            for i in range(bisect.bisect_right(t_, a), bisect.bisect_right(t_, b)):
+                if hit(vals[mint][i]):
+                    best = t_[i]
+                    break
+        for tf, i, j in self._candle_range(mint, a, b):
+            st, v = self.cand[mint][tf][0], self.cand[mint][tf][k]
+            for x in range(i, j + 1):
+                end = st[x] + tf - 1
+                if best is not None and end >= best:
+                    break
+                if hit(v[x]):
+                    best = end
+                    break
+        return best
 
     def first_time_reaching(self, mint, a, b, level):
         """First ts in (a, b] whose high >= level, else None."""
-        tss = self.hi_ts.get(mint)
-        if not tss:
-            return None
-        for i in range(bisect.bisect_right(tss, a), bisect.bisect_right(tss, b)):
-            if self.hi[mint][i] >= level:
-                return tss[i]
-        return None
+        return self._first(mint, a, b, lambda v: v >= level, 1)
 
     def first_time_below(self, mint, a, b, level):
-        tss = self.lo_ts.get(mint)
-        if not tss:
-            return None
-        for i in range(bisect.bisect_right(tss, a), bisect.bisect_right(tss, b)):
-            if self.lo[mint][i] <= level:
-                return tss[i]
-        return None
+        return self._first(mint, a, b, lambda v: v <= level, 2)
 
     def mcap(self, mint, price):
         if not price:
