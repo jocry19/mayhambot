@@ -68,7 +68,8 @@ _lock = threading.Lock()
 DAS_ENHANCED_SPACING = "helius-das-enhanced"
 SHARED_HOSTS = {DAS_ENHANCED_SPACING, "api.geckoterminal.com", "api.helius.xyz", "mainnet.helius-rpc.com", "beta.helius-rpc.com",
                 "api.mainnet-beta.solana.com"}
-_LOCK_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "ratelimit")
+_LOCK_DIR = os.getenv("MAYHAM_RATELIMIT_DIR") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "ratelimit")
 
 
 # Adaptive spacing for shared hosts: every 429 stretches the interval for all processes (x1.5, up to

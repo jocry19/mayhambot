@@ -23,6 +23,7 @@ WALLETS_FILE = Path(__file__).with_name("wallets.txt")
 # signatures already handled (websocket and polling both see the same transaction: act once)
 _seen: OrderedDict[str, None] = OrderedDict()
 _seen_lock = threading.Lock()  # websocket worker and polling run in different threads
+_inflight: set = set()  # signatures the websocket path is reading right now (the poll must not move past them)
 DETECTED = {"wslog": 0, "ws": 0, "poll": 0, "gap": 0}  # swaps per source since the last hourly line; gap = poll found a
 #                                            swap of a wallet the websocket was watching (missed notification)
 WS_LATENCY: list[float] = []  # seconds from websocket notification to recognised swap (hourly mean)
@@ -304,6 +305,9 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk",
     claimed = []
     cursor = last
     for sg in reversed(sigs):  # oldest first
+        if not sg.get("err") and sg["signature"] in _inflight:
+            break  # the websocket is still reading it; if that fails it is released and this poll's cursor must
+            #        still be before it, so the next poll reads it
         if sg.get("err") or not _claim(conn, sg["signature"], wallet):
             cursor = sg["signature"]  # failed on chain, or already handled from the websocket
             continue
@@ -363,8 +367,21 @@ def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, 
                       received_at: float | None = None) -> chain.Swap | None:
     """A transaction the websocket reported for a watched wallet -> stored swap (or None). Public RPC first; a
     brand-new transaction can be missing there for a moment, so retry and ask the main RPC on the last try."""
+    solusd = market.sol_usd(s)  # before the claim: an error here must not leave the signature claimed
     if not _claim(conn, sig, wallet):
         return None  # duplicate notification (both sockets) or already polled
+    _inflight.add(sig)
+    try:
+        sw = _read_and_store(conn, rpc, wallet, sig, tries, received_at, solusd)
+    except Exception:
+        _release(sig)  # e.g. database locked: retry_locked calls again, or the polling net picks it up
+        raise
+    finally:
+        _inflight.discard(sig)
+    return sw
+
+
+def _read_and_store(conn, rpc, wallet, sig, tries, received_at, solusd):
     tx = None
     # main RPC credits only for wallets worth them, and only on the last try; anyone else is read on the public
     # pool and, if that fails, picked up by the polling net a little later
@@ -383,7 +400,6 @@ def process_signature(conn, s: Settings, rpc: chain.Rpc, wallet: str, sig: str, 
     if not tx:
         _release(sig)
         return None  # the polling net picks it up later
-    solusd = market.sol_usd(s)
     sw = chain.extract_swap(tx, wallet, solusd)
     if sw:
         store.save_swaps(conn, [sw], solusd)
@@ -401,10 +417,16 @@ def process_logs(conn, s: Settings, wallet: str, sig: str, logs, received_at: fl
     """Fast path: a pump.fun trade read from the notification's logs (no RPC call). None when the logs are not
     a clear pump.fun trade of this wallet; then process_signature reads the transaction as before."""
     sw = chain.swap_from_logs(logs, wallet, sig)
-    if not sw or not _claim(conn, sig, wallet):
+    if not sw:
         return None
-    solusd = market.sol_usd(s)
-    store.save_swaps(conn, [sw], solusd)
+    solusd = market.sol_usd(s)  # before the claim: an error here must not leave the signature claimed
+    if not _claim(conn, sig, wallet):
+        return None
+    try:
+        store.save_swaps(conn, [sw], solusd)
+    except Exception:
+        _release(sig)  # database locked: the retry (retry_locked) must be able to claim it again
+        raise
     DETECTED["wslog"] += 1
     record_detection(conn, sw, "wslog", received_at, solusd)
     if received_at:
@@ -429,6 +451,14 @@ def verify_swap(conn, s: Settings, rpc: chain.Rpc, sw: chain.Swap) -> str:
         log.info("log-read swap %s did not hold up against the transaction", sw.signature[:8])
         store.event(conn, "verify", f"Swap aus Logs nicht bestätigt: {sw.signature[:8]}…", "warn",
                     {"sig": sw.signature, "wallet": sw.wallet, "mint": sw.mint})
+        # a swap that never happened must not feed ranking, learning, the brain or the signals
+        for sql in ("DELETE FROM ct_swaps WHERE sig=? AND wallet=? AND mint=?",
+                    "DELETE FROM trades WHERE sig=? AND wallet=? AND mint=? AND source='copytrade'"):
+            try:
+                conn.execute(sql, (sw.signature, sw.wallet, sw.mint))
+            except Exception as e:  # noqa: BLE001 - a table missing in a stripped-down setup
+                log.debug("cleanup of rejected swap failed: %s", e)
+        conn.commit()
         return "rejected"
     conn.execute("UPDATE ct_swaps SET token_amount=?, sol_amount=?, price_sol=?, ts=COALESCE(NULLIF(?, 0), ts) "
                  "WHERE sig=? AND wallet=? AND mint=?", (full.token_amount, full.sol_amount, full.price_sol,

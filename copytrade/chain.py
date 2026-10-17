@@ -27,6 +27,9 @@ try:  # Helius credit ledger shared by all mayhambot processes (core/README.md "
     from core.http import CreditsExhausted, rpc_url as _core_rpc_url  # type: ignore
 except Exception:  # copytrade without core
     _core_rpc_url = None
+
+    class CreditsExhausted(Exception):  # type: ignore[no-redef]
+        pass
 try:  # pool of keyless public endpoints with probe, failover and per-endpoint lanes (core/README.md)
     from core import http as _core_http  # type: ignore
 
@@ -41,9 +44,6 @@ def _is_pool_url(url: str) -> bool:
         return False
     host = urlparse(url).netloc
     return host in {urlparse(u).netloc for u in _core_http.public_rpc_urls()} or url.rstrip("/") == PUBLIC_RPC
-
-    class CreditsExhausted(Exception):  # type: ignore[no-redef]
-        pass
 
 
 class Rpc:
@@ -136,8 +136,21 @@ class Rpc:
         return self.read("getSignaturesForAddress", [address, opts], priority=priority) or []
 
     def poll_signatures(self, address: str, limit: int = 15, until: str | None = None,
-                        priority: str = "bulk") -> list[dict]:
-        return self.signatures(address, limit=limit, until=until, priority=priority)
+                        priority: str = "bulk", max_pages: int = 4) -> list[dict]:
+        """Newest first down to `until`. A full page means there may be more since the cursor: page further back
+        (up to max_pages), or a busy whale's older swaps, sells included, were skipped when the cursor jumped."""
+        out = self.signatures(address, limit=limit, until=until, priority=priority)
+        pages = 1
+        while until and len(out) == limit * pages and pages < max_pages:
+            more = self.signatures(address, limit=limit, until=until, before=out[-1]["signature"], priority=priority)
+            if not more:
+                break
+            out += more
+            pages += 1
+        if until and len(out) == limit * max_pages:
+            log.warning("wallet %s: more than %d new transactions since the last poll, older ones skipped",
+                        address[:6], len(out))
+        return out
 
     def transaction(self, sig: str, main: bool = False, priority: str = "bulk") -> dict | None:
         """main=True: our own live swap (straight to the main RPC, it sees fresh transactions first)."""
