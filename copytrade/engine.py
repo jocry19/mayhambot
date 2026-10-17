@@ -206,6 +206,11 @@ def follow_signals(conn, strat: Strategy) -> int:
     except Exception:  # signal engine not installed / table missing
         return 0
     for sig in rows:
+        # only v1 calls (smart buying now): presets, gates and the learned filters are fitted on them; a v2 call
+        # (accumulation over hours, signals kind='v2') has another score scale and is not mixed in
+        if (sig["kind"] if "kind" in sig.keys() else None) not in (None, "v1"):
+            store.set_state(conn, "last_signal_id", sig["id"])
+            continue
         try:
             strat.on_signal(sig)
         except Exception as e:  # e.g. database locked: retry next round, give up after SIGNAL_TRIES

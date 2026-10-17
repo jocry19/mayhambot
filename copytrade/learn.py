@@ -360,7 +360,7 @@ def evaluate_signals(conn, s: Settings, limit: int = 30) -> int:
     """Past smart-money signals of the signal engine -> exit grid (entry after our latency)."""
     try:
         rows = conn.execute(
-            """SELECT g.* FROM signals g WHERE g.ts < ?
+            """SELECT g.* FROM signals g WHERE g.ts < ? AND COALESCE(g.kind, 'v1')='v1'
                AND NOT EXISTS (SELECT 1 FROM ct_evals e WHERE e.kind='signal' AND e.ref=CAST(g.id AS TEXT))
                ORDER BY g.ts DESC LIMIT ?""", (int(time.time()) - HORIZON_S, limit)).fetchall()
     except Exception:

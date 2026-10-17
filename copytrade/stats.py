@@ -104,7 +104,8 @@ def signal_backtest(conn, preset, size_sol: float | None = None) -> pd.DataFrame
     result capped at the stop)."""
     try:
         df = pd.read_sql_query(
-            "SELECT * FROM signals WHERE max_ret_1h IS NOT NULL AND score>=? AND smart_buyers>=? ORDER BY ts",
+            "SELECT * FROM signals WHERE max_ret_1h IS NOT NULL AND COALESCE(kind, 'v1')='v1' AND score>=? "
+            "AND smart_buyers>=? ORDER BY ts",
             conn, params=(preset.min_score, preset.min_smart_buyers))
     except Exception:
         return pd.DataFrame()
