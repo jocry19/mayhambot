@@ -841,6 +841,24 @@ def test_exploration_whale_copy_from_lower_liquidity(env, monkeypatch):
     assert st.on_whale_buy(chain.Swap("sigY", W, int(time.time()) - 5, "buy", MINT, 1e6, 1.0, 3e-6)) is None
 
 
+def test_bonding_curve_coins_only_explored_and_late_copies_skipped(env, monkeypatch):
+    import dataclasses
+
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path), ex)
+    _rank(conn)
+    _evals(conn, 0.12)
+    state["snap"] = dataclasses.replace(state["snap"], dex_id="pumpfun")
+    assert st.on_whale_buy(whale_buy()) is None  # strict account: curve coins lost -17 % net in the research data
+    assert any("Bonding Curve" in r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'"))
+    monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": "smart"})
+    assert st.on_whale_buy(whale_buy(sol=1.0))
+    assert [r[0] for r in conn.execute("SELECT mode FROM ct_positions")] == ["explore"]
+    state["snap"] = dataclasses.replace(state["snap"], dex_id="pumpswap")
+    late = chain.Swap("sigLate", W, int(time.time()) - strategy.MAX_ENTRY_AGE_S - 5, "buy", MINT, 1e6, 1.0, 3e-6)
+    assert st.on_whale_buy(late) is None
+
+
 def test_paper_target_needs_a_sellable_price_and_slippage_survives_a_restart(env, monkeypatch):
     import dataclasses
     import json as _json

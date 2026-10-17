@@ -47,6 +47,12 @@ PAPER_TECH_MAX_OPEN = 100  # not a budget: open paper positions are re-priced ev
 # 106 whale coin-hours 10/16-17 (net after costs, train 2/3, test 1/3): Spearman -0.37 train (q 0.08 over 28
 # features), -0.35 test; up >5 %: -9 to -20 % net vs about 0 % for coins flat or down. The only feature that held.
 RUN5_HALF, RUN5_SIZE = 0.05, 0.5
+# never copy a whale more than this long after its buy, learned wait included: 22 strict copies 10/16 at 35-181 s
+# lost -12 % each vs -1 % at <= 15 s (the price peak after our entry was +3.7 % on average, the loss is the entry)
+MAX_ENTRY_AGE_S = 30
+# coins still on the pump.fun bonding curve: research 10/17 (44 h, 6 % costs) -17 % net and 13 % pump rate (n 418)
+# vs -6.5 % and 28 % after migration (n 449); the strict account skips them, exploration keeps measuring
+CURVE_DEX = "pumpfun"
 
 
 class ExploreExecutor:
@@ -226,7 +232,7 @@ class Strategy:
             store.event(self.conn, "wait", f"[whale] {swap.mint[:6]}…: warte {lp['delay_s'] - age:.0f}s "
                                            f"(gelernte Einstiegs-Verzögerung)", data={"wallet": swap.wallet})
             return None
-        if age > s.max_entry_delay_s + (lp or {}).get("delay_s", 0) * deferred:
+        if age > min(MAX_ENTRY_AGE_S, s.max_entry_delay_s + (lp or {}).get("delay_s", 0) * deferred):
             return self._skip("whale", swap.mint, f"zu spät erkannt ({age:.0f}s)", wallet=swap.wallet)
         p = control.preset(self.conn, "whale")
         ex = self.executor("whale")
@@ -278,6 +284,12 @@ class Strategy:
                                snap, account="explore")
             else:
                 return self._skip("whale", swap.mint, f"Liquidität zu klein (${snap.liquidity_usd:,.0f})", snap)
+        if snap.dex_id == CURVE_DEX and "paper" in accounts:
+            accounts.remove("paper")
+            if not accounts:
+                return self._skip("whale", swap.mint, "noch auf der Bonding Curve (pump.fun)", snap)
+            self._skip("whale", swap.mint, "noch auf der Bonding Curve (pump.fun); nur Erkundung", snap,
+                       account="explore")
         if snap.fdv and snap.fdv > p.max_mcap_usd:
             return self._skip("whale", swap.mint, f"Market Cap zu groß (${snap.fdv:,.0f})", snap)
         if snap.age_hours > s.max_token_age_h:
@@ -447,6 +459,8 @@ class Strategy:
             return self._skip("signal", mint, "kein Marktpreis")
         if not why and snap.liquidity_usd < p.min_liquidity_usd:
             why = f"Liquidität zu klein (${snap.liquidity_usd:,.0f})"
+        if not why and snap.dex_id == CURVE_DEX:
+            why = "noch auf der Bonding Curve (pump.fun)"
         if why and not expl:
             return self._skip("signal", mint, why, snap)
         if why and snap.liquidity_usd < self.s.explore_min_liq_usd:
