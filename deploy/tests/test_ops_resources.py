@@ -13,6 +13,7 @@ def _setup(tmp_path, monkeypatch, env=None):
     monkeypatch.setattr(ops, "ROOT", tmp_path)
     monkeypatch.setattr(ops, "ENV", dict(env or {}))
     monkeypatch.setattr(ops, "db_path", lambda: tmp_path / "data" / "mayhambot.db")
+    monkeypatch.setattr(ops, "supervised", lambda: False)   # the Mac runs under launchd: never read it in tests
     (tmp_path / "data" / "pids").mkdir(parents=True)
     (tmp_path / "logs").mkdir()
 
