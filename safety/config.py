@@ -99,6 +99,11 @@ class SafetySettings:
     wash_top3_warn: float = field(default_factory=lambda: _f("SAFETY_WASH_TOP3_WARN", 0.4))
 
     # external keyless cross-check
+    # creator-controlled launch signature (check block0)
+    block0_window_sec: float = field(default_factory=lambda: _f("SAFETY_BLOCK0_WINDOW_SEC", 5))
+    block0_max_sol: float = field(default_factory=lambda: _f("SAFETY_BLOCK0_MAX_SOL", 0.03))
+    block0_min_wallets: int = field(default_factory=lambda: _i("SAFETY_BLOCK0_MIN_WALLETS", 3))
+    block0_max_first_seen_sec: int = field(default_factory=lambda: _i("SAFETY_BLOCK0_MAX_FIRST_SEEN_SEC", 300))
     bad_wallets_file: str = field(default_factory=lambda: os.getenv("SAFETY_BAD_WALLETS_FILE", ""))  # "" = safety/bad_wallets.txt
     use_rugcheck: bool = field(default_factory=lambda: _b("SAFETY_USE_RUGCHECK", True))
 

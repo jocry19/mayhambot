@@ -928,6 +928,53 @@ def check_watchlist(ctx):
     return r.finish(cap=95)
 
 
+def _created_ts(ctx):
+    for sql in ("SELECT created_ts FROM sniper_launches WHERE mint=?", "SELECT created_ts FROM safety_launch WHERE mint=?",
+                "SELECT pair_created_at FROM safety_tokens WHERE mint=?"):
+        try:
+            r = ctx.conn.execute(sql, (ctx.mint,)).fetchone()
+        except Exception:  # noqa: BLE001 - table of another package missing
+            continue
+        if r and r[0]:
+            return int(r[0])
+    try:
+        p = ctx.pair() or {}
+        return int(float(p["pairCreatedAt"]) / 1000) if p.get("pairCreatedAt") else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def check_block0(ctx):
+    """Creator-controlled launch signature (no network, our `trades` table): several different wallets buy dust
+    amounts within SAFETY_BLOCK0_WINDOW_SEC of the first trade. Backup 2026-10-17 (52,029 sniper launches, base rug
+    rate 12 %): coins with >= 3 such wallets within 5 s at <= 0.03 SOL rugged 38 % (n=47; 31-46 % for every window
+    3-10 s, cap 0.01-0.1 SOL, 2-4 wallets, stable across both time halves), crashed >= 90 % within 4 h 36 % vs
+    15 %, but also doubled within the hour 85 % vs 49 %: a made pump that is dumped later. Warning, no block."""
+    r = CheckResult("block0", "Mini-Käufe im ersten Moment")
+    c = ctx.cfg
+    created = _created_ts(ctx)
+    try:
+        t0 = ctx.conn.execute("SELECT MIN(ts) FROM trades WHERE mint=?", (ctx.mint,)).fetchone()[0]
+    except Exception:  # noqa: BLE001
+        t0 = None
+    if not t0 or not created or t0 - created > c.block0_max_first_seen_sec:
+        r.status = "unknown"   # we did not see the first moments of this coin
+        return r.finish()
+    rows = ctx.conn.execute("SELECT DISTINCT wallet FROM trades WHERE mint=? AND side='buy' AND ts<=? "
+                            "AND sol_amount > 0 AND sol_amount <= ?",
+                            (ctx.mint, t0 + c.block0_window_sec, c.block0_max_sol)).fetchall()
+    wallets = [w for (w,) in rows]
+    r.data.update(n_wallets=len(wallets), wallets=wallets[:10], first_trade_ts=t0, created_ts=created)
+    if len(wallets) >= c.block0_min_wallets:
+        r.add(ramp(len(wallets), c.block0_min_wallets, c.block0_min_wallets + 3, 40, 55),
+              f"{len(wallets)} Wallets kauften in den ersten {c.block0_window_sec:g} s Mini-Beträge "
+              f"(≤ {c.block0_max_sol:g} SOL): Muster eines vom Ersteller gesteuerten Launches. Solche Coins ruggten in "
+              "unseren Daten 3-mal so oft (38 % statt 12 %), pumpten vorher aber meist.")
+    else:
+        r.positives.append("Kein Mini-Kauf-Muster im ersten Moment des Coins.")
+    return r.finish(cap=60)
+
+
 def check_exit(ctx):
     """Soft rug in progress, from the intel service's latest coin features (no network): insiders selling,
     liquidity leaving, smart buyers getting out. Most rugs of young coins with burned LP look like this."""
@@ -964,5 +1011,6 @@ def check_exit(ctx):
 
 
 QUICK = [check_authorities, check_sell_sim, check_liquidity, check_lp, check_socials, check_wash,
-         check_rugcheck, check_holders, check_exit, check_history, check_watchlist]
+         check_rugcheck, check_holders, check_exit, check_history, check_watchlist,
+         check_block0]
 DEEP = [check_dev, check_insiders, check_bundles]

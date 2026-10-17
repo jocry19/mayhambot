@@ -136,7 +136,7 @@ def test_clean_coin_is_low_risk():
     c = conn()
     a = safety.assess(MINT, c, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
     assert a.level == "low" and not a.blocked, a.reasons
-    assert a.coverage > 0.75  # exit and history need the intel service
+    assert a.coverage > 0.7  # exit, history and block0 need data the fixture does not have
     assert any("Mint-Authority abgegeben" in p for p in a.positives)
     assert safety.signal_penalty(c, MINT, CFG)["factor"] == 1.0
     assert not safety.is_blocked(c, MINT)
@@ -727,3 +727,21 @@ def test_known_rug_wallets_warn_or_block_and_exchanges_never_count(tmp_path):
     # the shipped list loads and never contains an exchange
     shipped = watchlist.load(None, CFG)
     assert len(shipped) >= 30 and BINANCE not in shipped
+
+
+def test_block0_dust_buy_signature_warns_only_when_we_saw_the_first_moments():
+    c = conn()
+    c.execute("CREATE TABLE sniper_launches (mint TEXT, created_ts INTEGER)")
+    c.execute("INSERT INTO sniper_launches VALUES (?, ?)", (MINT, NOW - 600))
+    t0 = NOW - 590
+    c.executemany("INSERT INTO trades(sig, wallet, mint, side, ts, sol_amount, usd_amount) VALUES (?,?,?,?,?,?,?)",
+                  [(f"d{i}", f"DUST{i}", MINT, "buy", t0 + i, 0.005, 1.0) for i in range(4)]
+                  + [("big", "WHALE", MINT, "buy", t0 + 1, 3.0, 600.0), ("late", "DUST9", MINT, "buy", t0 + 60, 0.005, 1.0)])
+    c.commit()
+    a = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
+    b0 = a.checks["block0"]
+    assert b0["status"] == "ok" and b0["data"]["n_wallets"] == 4 and 40 <= b0["risk"] <= 60 and not a.blocked
+    # a coin we only started watching long after its launch: no verdict
+    c.execute("UPDATE sniper_launches SET created_ts=?", (NOW - 86400,))
+    c.commit()
+    assert safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True).checks["block0"]["status"] == "unknown"
