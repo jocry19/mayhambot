@@ -902,3 +902,11 @@ def test_challenge_explores_side_sources_with_account_stakes_and_pauses_after_lo
     assert not t.challenge_on(time.time())
     assert t.settings(time.time()) is s
     assert "Challenge pausiert" in journal.write(conn, unsure, s)
+
+
+def test_heartbeat_reads_the_hour_factor_from_the_db(conn, s):
+    svc = Service(s, conn, snapshots=Market(), executor=Paper(), safety_check=ok_safety, notify=lambda t: None)
+    h0 = int(time.time()) // 3600 * 3600 - 3600
+    conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (h0 + 10, 5.0, 0, 5.0))
+    conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (h0 + 3500, 6.0, 0, 6.0))
+    assert "hour factor x1.200" in svc.heartbeat(h0)
