@@ -45,6 +45,15 @@ class Service:
         self.logs2 = rpcws.LogStream(cfg.ws_url2, self._on_rpc_trade, 1, name="RPC-Log-Datenstrom 2", mode="program",
                                      program=rpcws.PUMP_PROGRAM, stale_sec=cfg.stale_sec) \
             if cfg.ws_url2 and cfg.ws_url2 != cfg.ws_url else None
+        # bonk: LaunchLab events name the pool, not the mint; pools are derived from the mint (rpcws.bonk_pool)
+        self.bonk_pools, self.bonk_mints = {}, {}          # pool -> mint, mint -> pool
+        self.bonk_wallet_q = deque(maxlen=2000)            # (mint, signature, first try ts) awaiting their trader
+        self.bonk_asked = {}                               # mint -> lookups queued
+        self.bonk_stats = {"resolved": 0, "failed": 0, "migrations": 0}
+        self.logs_bonk = rpcws.LogStream(cfg.bonk_ws_url, self._on_bonk_trade, 1, parser=rpcws.parse_launchlab,
+                                         name="RPC-Bonk-Datenstrom", mode="program", program=rpcws.LAUNCHLAB_PROGRAM,
+                                         stale_sec=cfg.stale_sec) \
+            if cfg.bonk_ws_url and rpcws.bonk_pool(rpcws.WSOL_MINT) else None
         try:
             saved = json.loads(store.get_state(self.conn, "rpc_trade_mode") or "{}")
         except ValueError:
@@ -61,7 +70,7 @@ class Service:
         self.launch_log = {"pumpportal": deque(maxlen=5000), "rpc": deque(maxlen=5000)}   # times of creates seen
         self.first_log = {"pumpportal": deque(maxlen=5000), "rpc": deque(maxlen=5000)}    # creates this source delivered first
         self._warned_reject = False
-        self.engine.stream_pools = None if self.trades_via == "pumpportal" else {"pump"}
+        self.engine.stream_pools = None if self.trades_via == "pumpportal" else self._rpc_pools()
         self.connected = False
         self.pp_ws = None
         self.pp_fails = 0
@@ -82,7 +91,12 @@ class Service:
         st = self.engine.handle(m, now)
         if st is not None:
             self.first_log[src].append(now)
-            since = self.program_since() if self.trades_via == "rpc" else None
+            if self.trades_via != "rpc":
+                since = None
+            elif st.pool == "bonk":
+                since = self.logs_bonk.program_complete_since() if self.logs_bonk else None
+            else:
+                since = self.program_since()
             # the program-wide stream has run for a while: with the replay buffer, every trade since this
             # creation reaches the engine, so bundles can be read from the creation slot directly
             st.stream_complete = bool(since and now - since >= 10)
@@ -105,6 +119,87 @@ class Service:
                         "connected": connected, "per_min": round(seen / 5, 1), "first_per_min": round(first / 5, 1),
                         "last_ts": int(self.launch_log[src][-1]) if self.launch_log[src] else None}
         return out
+
+    def _rpc_pools(self):
+        return {"pump", "bonk"} if self.logs_bonk else {"pump"}
+
+    def _on_bonk_trade(self, m):
+        mint = self.bonk_pools.get(m.get("mint"))
+        if not mint:
+            return
+        m["mint"] = mint
+        status = m.pop("poolStatus", 0)
+        rx = m.get("_rx") or time.time()
+        sig = m.get("signature")
+        self._on_rpc_trade(m)
+        st = self.engine.launches.get(mint)
+        if st is None:
+            return
+        # the trader of the trades before the decision (buyers, block 0, top holders); later ones only move the price
+        if sig and st.stage == 0 and self.bonk_asked.get(mint, 0) < self.cfg.bonk_wallets_per_launch:
+            self.bonk_asked[mint] = self.bonk_asked.get(mint, 0) + 1
+            self.bonk_wallet_q.append((mint, sig, rx, 0))
+        if status and not st.migrated:
+            # pool_status leaves 0 when the curve is sold out: the coin moves to its AMM pool (DexScreener prices)
+            self.bonk_stats["migrations"] += 1
+            self.engine.handle({"txType": "migrate", "mint": mint, "pool": "raydium"}, time.time())
+
+    def _signer(self, sig):
+        j = http.post_json(self.cfg.bonk_rpc_url, {"jsonrpc": "2.0", "id": 1, "method": "getTransaction", "params": [
+            sig, {"encoding": "json", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}]}, retries=0)
+        tx = (j or {}).get("result")
+        if not tx:
+            return None
+        keys = ((tx.get("transaction") or {}).get("message") or {}).get("accountKeys") or []
+        return keys[0] if keys else None   # the fee payer signs first: the trader (also behind an aggregator)
+
+    async def bonk_wallet_loop(self):
+        """Traders of bonk trades, one getTransaction each, paced to bonk_wallets_per_min. A transaction seen at
+        'processed' may not be readable yet: one more try after a few seconds."""
+        pause = 60.0 / max(1, self.cfg.bonk_wallets_per_min)
+        while not self.stop.is_set():
+            if not self.bonk_wallet_q:
+                await asyncio.sleep(0.5)
+                continue
+            mint, sig, rx, tries = self.bonk_wallet_q.popleft()
+            if time.time() - rx < 2 + 4 * tries:
+                self.bonk_wallet_q.appendleft((mint, sig, rx, tries))
+                await asyncio.sleep(0.5)
+                continue
+            try:
+                w = await asyncio.to_thread(self._signer, sig)
+            except Exception as e:  # noqa: BLE001 - 429 or a dropped connection: wait, keep the request
+                log.debug("Bonk-Trader %s: %s", sig[:8], e)
+                w = None
+                if "429" in str(e):
+                    await asyncio.sleep(10)
+            if w:
+                self.bonk_stats["resolved"] += 1
+                self.engine.attach_wallet(mint, sig, w)
+            elif tries < 2:
+                self.bonk_wallet_q.append((mint, sig, rx, tries + 1))
+            else:
+                self.bonk_stats["failed"] += 1
+            await asyncio.sleep(pause)
+
+    def route_bonk(self, sub, unsub):
+        """Bonk launches to and from the LaunchLab stream (by their pool address)."""
+        if not self.logs_bonk:
+            return
+        with self.engine.lock:
+            new = [m for m in sub - unsub if m not in self.bonk_mints and self.engine.launches.get(m)
+                   and self.engine.launches[m].pool == "bonk"]
+        for m in new:
+            pool = rpcws.bonk_pool(m)
+            if pool:
+                self.bonk_pools[pool], self.bonk_mints[m] = m, pool
+                self.logs_bonk.subscribe({pool})   # replays the pool's buffered trades (outside the engine lock)
+        for m in unsub:
+            pool = self.bonk_mints.pop(m, None)
+            if pool:
+                self.bonk_pools.pop(pool, None)
+                self.bonk_asked.pop(m, None)
+                self.logs_bonk.unsubscribe({pool})
 
     def _on_rpc_trade(self, m):
         now = m.pop("_rx", None) or time.time()
@@ -190,7 +285,7 @@ class Service:
                                     self._warned_reject = True
                                 if self.trades_via != "rpc":
                                     self.trades_via = "rpc"
-                                    self.engine.stream_pools = {"pump"}
+                                    self.engine.stream_pools = self._rpc_pools()
                                     with self.engine.lock:
                                         mints = {k for k, s in self.engine.launches.items()
                                                  if s.subscribed and s.pool == "pump"}
@@ -241,6 +336,7 @@ class Service:
             for lg in self._streams():
                 lg.subscribe(pump - unsub)
                 lg.unsubscribe(unsub)
+            self.route_bonk(sub, unsub)
 
     def update_free_stream(self):
         self.engine.free_stream = self.trades_via == "rpc" and self.program_since() is not None
@@ -260,6 +356,8 @@ class Service:
             return []
         now = now or time.time()
         dead = [m for m in self.logs.not_live(now) if not (self.logs2 and self.logs2.is_live(m))]
+        if self.logs_bonk:
+            dead += [self.bonk_pools[p] for p in self.logs_bonk.not_live(now) if p in self.bonk_pools]
         if not dead:
             return []
         with self.engine.lock:
@@ -270,6 +368,8 @@ class Service:
             self.engine.counters["subs_lost"] = self.engine.counters.get("subs_lost", 0) + len(dead)
         for lg in self._streams():
             lg.unsubscribe(dead)
+        if self.logs_bonk:
+            self.logs_bonk.unsubscribe({self.bonk_mints[m] for m in dead if m in self.bonk_mints})
         return dead
 
     async def sub_loop(self):
@@ -395,7 +495,13 @@ class Service:
                         "second": ({"url": self.cfg.ws_url2.split("?")[0], "connected": self.logs2.connected,
                                     "program": self.logs2.program_complete_since() is not None,
                                     "server_drops": self.logs2.server_drops, "delivered": self.logs2.delivered}
-                                   if self.logs2 else None)}}
+                                   if self.logs2 else None),
+                        "bonk": ({"connected": self.logs_bonk.connected,
+                                  "program": self.logs_bonk.program_complete_since() is not None,
+                                  "pools": len(self.bonk_pools), "decoded": self.logs_bonk.decoded,
+                                  "delivered": self.logs_bonk.delivered, "replayed": self.logs_bonk.replayed,
+                                  "wallet_queue": len(self.bonk_wallet_q), **self.bonk_stats}
+                                 if self.logs_bonk else None)}}
 
     def _launch_status(self, now):
         rates = self.launch_rates(now)
@@ -477,6 +583,13 @@ class Service:
                      "Launch-Trades %d neu, %d doppelt (beide Ströme oder Dev-Kauf) | Dekoder verworfen nach Grund: %s",
                      "aus" if not l2 else ("verbunden" if l2.connected else "getrennt"), d["decoded2"] / mins,
                      d["delivered2"] / mins, d["drops2"], d["trades"], d["dupes"], why)
+        if self.logs_bonk:
+            b = self.logs_bonk
+            log.info("Bonk-Datenstrom: %s, %d Pools im Abo, %d Trades dekodiert, %d an Launches (%d nachgereicht) | "
+                     "Trader aufgelöst %d, offen %d, nicht lesbar %d | Migrationen %d",
+                     "verbunden" if b.connected else "getrennt", len(self.bonk_pools), b.decoded, b.delivered,
+                     b.replayed, self.bonk_stats["resolved"], len(self.bonk_wallet_q), self.bonk_stats["failed"],
+                     self.bonk_stats["migrations"])
         self._diag = (cur, now_m)
         log.info("Stand: %d Launches, %d Trades, %d Migrationen | Stufe 1: %d, tief geprüft: %d, Käufe: %d | "
                  "%d im Speicher, %d im Trade-Abo (%s, RPC-Logs %d Abos), Warteschlange %d | Calls gesamt RPC %d, API/Metadaten %d | offen %d, "
@@ -492,6 +605,8 @@ class Service:
                  asyncio.create_task(self.sub_loop()),
                  asyncio.create_task(self.logs.run(stop_ev)),
                  *([asyncio.create_task(self.logs2.run(stop_ev))] if self.logs2 else []),
+                 *([asyncio.create_task(self.logs_bonk.run(stop_ev)), asyncio.create_task(self.bonk_wallet_loop())]
+                   if self.logs_bonk else []),
                  *([asyncio.create_task(self.creates.run(stop_ev))] if self.creates else []),
                  asyncio.create_task(self.every(300, self.sol_round)),
                  asyncio.create_task(self.every(10, self.heartbeat, 1)),
@@ -515,6 +630,8 @@ class Service:
             self.connected = self.logs.connected = False
             if self.logs2:
                 self.logs2.connected = False
+            if self.logs_bonk:
+                self.logs_bonk.connected = False
             if self.creates:
                 self.creates.connected = False
             try:

@@ -31,6 +31,7 @@ def _group(rows):
     out["median_max_ret_60m"] = _median([r["max_ret_60m"] for r in done])
     out["hit_rate_2x"] = sum(1 for r in done if r["max_ret_60m"] >= HIT) / len(done) if done else None
     rug = [r for r in rows if r["ret_60m"] is not None]
+    out["n_ret_60m"] = len(rug)   # the n behind rug_rate and mean_ret_60m_capped (n_measured counts max_ret_60m)
     out["rug_rate"] = sum(1 for r in rug if r["ret_60m"] <= RUG) / len(rug) if rug else None
     # robust mean for "what if we had bought them all, held 60 min": each launch between -100 % and +500 %
     out["mean_ret_60m_capped"] = (sum(max(-1.0, min(MAX_NET, r["ret_60m"])) for r in rug) / len(rug)) if rug else None

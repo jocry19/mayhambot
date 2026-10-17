@@ -83,7 +83,9 @@ def load(conn, since=None, min_trades=1, limit=30000):
     since = since or 0
     fix_ts = float(store.get_state(conn, "outcome_fix_ts") or 9e18)
     cur = conn.execute(
-        "SELECT * FROM sniper_launches WHERE ret_60m IS NOT NULL AND mcap_decide_sol >= ? AND source = 'pumpportal' "
+        "SELECT * FROM sniper_launches WHERE ret_60m IS NOT NULL AND source = 'pumpportal' "
+        # pump.fun curves start at about 28 SOL (below: a broken base); bonk curves start lower (about 5 SOL)
+        "AND (mcap_decide_sol >= ? OR (COALESCE(pool, 'pump') != 'pump' AND mcap_decide_sol > 0)) "
         # decided on a finished curve (migration before the decision): the base is the curve's end value
         "AND COALESCE(curve_progress, 0) < 0.95 AND COALESCE(migrated_ts, 9e18) > COALESCE(decided_ts, 0) "
         "AND COALESCE(n_trades, 0) >= ? AND COALESCE(created_ts, 0) >= ? ORDER BY created_ts DESC LIMIT ?",
@@ -117,8 +119,12 @@ def load(conn, since=None, min_trades=1, limit=30000):
     return rows
 
 
+_FEE_BASE = [1.25]   # the curve fee inside side_cost (costs sets it); rows with their own fee_pct pay the difference
+
+
 def costs(cfg):
     """Cost model per side, the same as the paper book: curve fee + adverse slippage, priority fee per tx."""
+    _FEE_BASE[0] = cfg.curve_fee_pct
     side = cfg.curve_fee_pct / 100 + cfg.adverse_slippage
     tx = cfg.priority_fee_sol / cfg.size_sol if cfg.size_sol else 0.0
     return side, tx
@@ -180,7 +186,9 @@ def trade_returns(rows, paths, rule, side_cost, tx_cost):
     for r in rows:
         p = paths.get(r["mint"]) or pseudo_path(r)
         dt = (r.get("decided_ts") or r["created_ts"]) - r["created_ts"]
-        out.append(min(MAX_TRADE_NET, replay(p, dt, r["mcap_decide_sol"], rule, side_cost, tx_cost)[0]))
+        # bonk platforms take up to ~6 % per side (seen in the LaunchLab events), pump.fun 1.25 %
+        sc = side_cost + (r["fee_pct"] - _FEE_BASE[0]) / 100 if r.get("fee_pct") else side_cost
+        out.append(min(MAX_TRADE_NET, replay(p, dt, r["mcap_decide_sol"], rule, sc, tx_cost)[0]))
     return out
 
 

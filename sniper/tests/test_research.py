@@ -535,6 +535,7 @@ def test_stats_drop_unit_mismatch_outside_pump_and_cap_the_mean(conn):
     assert f["no_stream"]["n"] == 3 and f["no_stream"]["n_measured"] == 2
     assert abs(f["no_stream"]["mean_ret_60m_capped"]) < 1e-9          # (+0.5 - 0.5) / 2
     assert f["activity"]["mean_ret_60m_capped"] == 5.0                  # +900 % counted as +500 %
+    assert f["no_stream"]["n_ret_60m"] == 2
 
 
 def test_fixed_candidate_that_holds_becomes_the_learned_rule():

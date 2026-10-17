@@ -143,6 +143,7 @@ class LaunchState:
     learned: bool = False                             # picked by the accepted research rule (sniper.research)
     create_slot: int | None = None                    # slot of the creation (RPC create stream), bundle reference
     path: PricePath | None = None                     # bucketed mcap path for exit replays (sniper_paths)
+    fee_pct: float | None = None                      # curve fee seen in the trades (bonk: per platform, ~1-6 %)
 
     def __post_init__(self):
         if self.path is None:
@@ -192,6 +193,8 @@ class LaunchState:
         self.n_seen += 1
         if m.get("src"):
             self.trade_src = m["src"]
+        if m.get("feePct") is not None:
+            self.fee_pct = f(m["feePct"], None)
         self.seen_net_tokens += t.tokens if side == "buy" else -t.tokens
         if t.v_sol > 0 and t.v_tok > 0:
             self.v_sol, self.v_tok = t.v_sol, t.v_tok
@@ -220,6 +223,23 @@ class LaunchState:
         if not self.curve or now - self.curve[-1][0] >= 2:
             self.curve.append((int(now), self.mcap_sol, self.v_sol, self.n_seen))
         return t
+
+    def attach_wallet(self, sig, wallet):
+        """Trader of a trade that came without one (bonk's LaunchLab event names no trader; the service looks up the
+        fee payer of the transaction afterwards). Books it like apply_trade would have, at the trade's own time."""
+        if not wallet:
+            return False
+        for t in self.trades:
+            if t.sig == sig and not t.wallet:
+                t.wallet = wallet
+                if t.side == "buy":
+                    self.balances[wallet] = self.balances.get(wallet, 0.0) + t.tokens
+                    self.bought[wallet] = self.bought.get(wallet, 0.0) + t.tokens
+                    self.first_buy_ts[wallet] = min(self.first_buy_ts.get(wallet, t.ts), t.ts)
+                else:
+                    self.balances[wallet] = max(0.0, self.balances.get(wallet, 0.0) - t.tokens)
+                return True
+        return False
 
     # ---- derived values
     @property

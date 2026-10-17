@@ -53,7 +53,7 @@ Wünsche an andere Pakete (über den Coordinator):
    sie kostenlos aus dem **Solana-RPC-Websocket** (`sniper/rpcws.py`): ein `logsSubscribe` je Coin (`mentions`),
    pump.funs `TradeEvent` aus der Zeile `Program data:` dekodiert (Mint, SOL, Tokens, Seite, Trader, Curve-Reserven,
    Slot). Lehnt PumpPortal Trade-Abos ab, wechselt der Dienst automatisch auf diesen Weg und meldet es als WARNING.
-   bonk-Launches haben dort keinen Decoder: sie werden erfasst und gemessen, aber mit `no_stream` übersprungen.
+   bonk-Launches kommen über einen eigenen Programm-Datenstrom auf Raydium LaunchLab (`SNIPER_BONK_WS_URL`): Kurs, Seite, Menge und die Gebühr der Plattform (bis etwa 6 % je Seite) stehen im Event, der Pool ist aus der Mint ableitbar. Der Trader fehlt im Event; für die Trades vor der Entscheidung holt der Sniper ihn per `getTransaction` nach (höchstens `SNIPER_BONK_WALLETS_PER_LAUNCH` je Launch).
    Ebenso `no_stream`: Launches ohne einen einzigen Trade, solange der Trade-Datenstrom blind ist (Launches kommen,
    aber seit 5 min keine Trades). Dann steht im Log ein ALARM und in `service_status` `blind: true`.
    **Launches kommen aus zwei Quellen zugleich** (`SNIPER_LAUNCH_SOURCES=both`): PumpPortal und ein
@@ -181,6 +181,10 @@ oder ≤ −50 % nach Dev-/Insider-Abverkauf. Pump-Launches mit kaputtem Basispr
 | `SNIPER_LAUNCH_SOURCES` / `SNIPER_STALE_SEC` | both / 180 | Launch-Quellen (`both`, `pumpportal`, `rpc`), Neuverbindung bei Stille |
 | `SNIPER_WS_URL` / `SNIPER_WS_MAX_SUBS` | wss://api.mainnet-beta.solana.com / 150 | RPC-Log-Datenstrom |
 | `SNIPER_WS_URL2` | wss://solana-rpc.publicnode.com | zweiter Programm-Datenstrom auf einem anderen RPC (füllt die Lücken der 1002-Trennungen; doppelte Trades fallen per Signatur weg); leer = aus |
+| `SNIPER_BONK_WS_URL` | wss://solana-rpc.publicnode.com | Programm-Datenstrom von Raydium LaunchLab (bonk); leer = aus, bonk-Launches dann `no_stream` |
+| `SNIPER_BONK_RPC_URL` | https://solana-rpc.publicnode.com | RPC für die Trader der ersten bonk-Trades (`getTransaction`) |
+| `SNIPER_BONK_WALLETS_PER_LAUNCH` | 30 | so viele Trader je bonk-Launch vor der Entscheidung |
+| `SNIPER_BONK_WALLETS_PER_MIN` | 60 | Tempo dieser Abfragen |
 | `SNIPER_WS_SUBS_PER_SEC` | 4 | neue logsSubscribe-Anfragen pro Sekunde |
 | `SNIPER_USE_LEARNED_RULE` / `SNIPER_RESEARCH_HOURS` | 1 / 72 | angenommene Forschungsregel im Papiermodus nutzen / Fenster |
 | `SNIPER_RUG_P_BLOCK` | 0.59 | kein Kauf ab dieser Rug-Wahrscheinlichkeit des Rug-Modells |

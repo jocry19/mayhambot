@@ -37,6 +37,12 @@ class SniperSettings:
     # second program-wide trade stream on another public RPC: the first one drops its socket up to once a minute and
     # then misses the first seconds of launches; both feed the engine, duplicates are removed by signature. "" = off
     ws_url2: str = field(default_factory=lambda: _s("SNIPER_WS_URL2", "wss://solana-rpc.publicnode.com"))
+    # bonk (Raydium LaunchLab): one program-wide stream of its trade events (price, side, size, fee; no trader) and
+    # the trader of the first trades of each launch from getTransaction on bonk_rpc_url. "" = no bonk stream
+    bonk_ws_url: str = field(default_factory=lambda: _s("SNIPER_BONK_WS_URL", "wss://solana-rpc.publicnode.com"))
+    bonk_rpc_url: str = field(default_factory=lambda: _s("SNIPER_BONK_RPC_URL", "https://solana-rpc.publicnode.com"))
+    bonk_wallets_per_launch: int = field(default_factory=lambda: _i("SNIPER_BONK_WALLETS_PER_LAUNCH", 30))
+    bonk_wallets_per_min: int = field(default_factory=lambda: _i("SNIPER_BONK_WALLETS_PER_MIN", 60))
     # launches: PumpPortal and the RPC create stream run side by side; the first to deliver a mint wins (no gap
     # when one fails). both | pumpportal | rpc
     launch_sources: str = field(default_factory=lambda: _s("SNIPER_LAUNCH_SOURCES", "both"))

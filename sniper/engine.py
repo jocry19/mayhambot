@@ -187,6 +187,13 @@ class Engine:
                 return st
         return None
 
+    def attach_wallet(self, mint, sig, wallet):
+        with self.lock:
+            st = self.launches.get(mint)
+            ok = bool(st and st.attach_wallet(sig, wallet))
+            self.counters["wallets_attached"] = self.counters.get("wallets_attached", 0) + int(ok)
+            return ok
+
     def add_external(self, mint, created_ts, symbol="", name="", pool="", mcap_sol=0.0, now=None, info=None):
         """A new pool outside pump.fun (GeckoTerminal). Watched for outcomes; traded only if enabled."""
         now = now or time.time()
@@ -294,7 +301,8 @@ class Engine:
                    safety_risk=F.get("safety_risk"), safety_level=F.get("safety_level"), model_p=F.get("model_p"),
                    mcap_decide_sol=st.base_mcap_sol, mcap_decide_usd=(st.base_mcap_sol or 0) * sol_usd or None,
                    sol_usd=sol_usd or None, reasons_json=store.j(a.reasons[:8]), positives_json=store.j(a.positives[:6]),
-                   migrated=int(st.migrated), rug_p=F.get("rug_p"), block0_wallets=F.get("block0_wallets"))
+                   migrated=int(st.migrated), rug_p=F.get("rug_p"), block0_wallets=F.get("block0_wallets"),
+                   fee_pct=st.fee_pct)
         if stage >= 2:
             row["features_json"] = store.j(dict(F, momentum_parts=a.momentum_parts, insiders=a.insiders))
         return row

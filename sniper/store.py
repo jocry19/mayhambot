@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS sniper_paths (
 """
 
 
-ADDED_COLS = {"sniper_launches": [("rug_p", "REAL"), ("stage1_json", "TEXT"), ("block0_wallets", "INTEGER")]}   # columns added after the first release
+ADDED_COLS = {"sniper_launches": [("rug_p", "REAL"), ("stage1_json", "TEXT"), ("block0_wallets", "INTEGER"),
+                                  ("fee_pct", "REAL")]}   # columns added after the first release
 
 
 def ensure_schema(conn):

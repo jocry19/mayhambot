@@ -66,7 +66,7 @@ class PaperBook:
             if q and q.get("out", 0) > 0:
                 tokens, impact, src = q["out"], q.get("impact", 0.0), "jupiter_quote"
         if tokens <= 0 and st.v_sol > 0 and not st.migrated:
-            tokens = curve_buy(st.v_sol, st.v_tok, spend, self.cfg.curve_fee_pct)
+            tokens = curve_buy(st.v_sol, st.v_tok, spend, st.fee_pct or self.cfg.curve_fee_pct)
             p0 = st.price_sol
             impact = 1 - p0 / (spend / tokens) if tokens and p0 else 0.0
             src = "bonding_curve"
@@ -88,7 +88,7 @@ class PaperBook:
         gross, src = 0.0, ""
         on_curve = st is not None and st.subscribed and not st.migrated and st.v_sol > 0 and st.mcap_sol > 0
         if on_curve:
-            gross, src = curve_sell(st.v_sol, st.v_tok, tokens, self.cfg.curve_fee_pct), "bonding_curve"
+            gross, src = curve_sell(st.v_sol, st.v_tok, tokens, st.fee_pct or self.cfg.curve_fee_pct), "bonding_curve"
         elif quote_fn:
             q = quote_fn(st.mint, tokens, "sell")
             if q and q.get("out", 0) > 0:

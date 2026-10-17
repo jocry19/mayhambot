@@ -117,6 +117,26 @@ def decode_create(data_b64):
     return out if len(out.get("mint", "")) >= 32 else None
 
 
+def program_data(logs, program):
+    """Base64 payloads of the "Program data:" lines emitted by `program` itself. A transaction that routes through
+    both launchpads (aggregators) carries the other program's events in the same log, and pump.fun and LaunchLab
+    both call their event TradeEvent (same discriminator): following the invoke stack keeps them apart. Logs without
+    invoke lines (samples, tests) keep every data line."""
+    stack, out, framed = [], [], False
+    for line in logs or []:
+        if line.startswith("Program data: "):
+            if not framed or (stack and stack[-1] == program):
+                out.append(line[14:].strip())
+            continue
+        w = line.split(" ", 3)
+        if len(w) >= 3 and w[0] == "Program" and w[2] == "invoke":
+            stack.append(w[1])
+            framed = True
+        elif len(w) >= 3 and w[0] == "Program" and w[2] in ("success", "failed:") and stack:
+            stack.pop()
+    return out
+
+
 def parse_creates(m):
     """logsNotification of a create tx -> list of PumpPortal-shaped create messages. The dev's first buy in the
     same tx sets initialBuy and the curve state after it (it is not fed again as a trade)."""
@@ -127,16 +147,14 @@ def parse_creates(m):
     if v.get("err"):
         return []
     creates, trades = [], []
-    for line in v.get("logs") or []:
-        if line.startswith("Program data: "):
-            d = line[14:].strip()
-            c = decode_create(d)
-            if c:
-                creates.append(c)
-                continue
-            t = decode_trade(d)
-            if t:
-                trades.append(t)
+    for d in program_data(v.get("logs"), PUMP_PROGRAM):
+        c = decode_create(d)
+        if c:
+            creates.append(c)
+            continue
+        t = decode_trade(d)
+        if t:
+            trades.append(t)
     out = []
     for c in creates:
         dev = c.get("creator") or c["user"]
@@ -167,11 +185,78 @@ def parse_notification(m):
         return []
     slot = (res.get("context") or {}).get("slot")
     out = []
-    for line in v.get("logs") or []:
-        if line.startswith("Program data: "):
-            ev = decode_trade(line[14:].strip())
-            if ev:
-                out.append(to_stream_msg(ev, v.get("signature") or "", slot))
+    for d in program_data(v.get("logs"), PUMP_PROGRAM):
+        ev = decode_trade(d)
+        if ev:
+            out.append(to_stream_msg(ev, v.get("signature") or "", slot))
+    return out
+
+
+# ---------------------------------------------------------------- bonk: Raydium LaunchLab
+LAUNCHLAB_PROGRAM = "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj"
+WSOL_MINT = "So11111111111111111111111111111111111111112"
+# Anchor names it TradeEvent too, so the discriminator equals pump.fun's; the layout differs (147 bytes, checked on
+# six real transactions 10/2026, sniper/bonk_sample.json): disc 8, pool_state 32, then u64 total_base_sell,
+# virtual_base, virtual_quote, real_base_before, real_quote_before, real_base_after, real_quote_after, amount_in,
+# amount_out and four fee fields, then u8 trade_direction (0 buy, 1 sell), u8 pool_status (0 trading), bool exact_in.
+# The event has neither mint nor trader: the pool is the PDA ["pool", mint, WSOL] (bonk_pool) and the trader is the
+# fee payer of the transaction (service resolves it for the first trades of a launch).
+LL_TRADE_LEN = 147
+LL_V_SOL_RANGE, LL_V_TOK_RANGE = (1.0, 2000.0), (1.0e6, 2.0e9)
+
+
+def bonk_pool(mint, quote=WSOL_MINT):
+    """LaunchLab pool_state of a mint quoted in SOL (None without solders)."""
+    try:
+        from solders.pubkey import Pubkey
+        prog = Pubkey.from_string(LAUNCHLAB_PROGRAM)
+        return str(Pubkey.find_program_address([b"pool", bytes(Pubkey.from_string(mint)),
+                                                bytes(Pubkey.from_string(quote))], prog)[0])
+    except Exception:  # noqa: BLE001 - solders missing or a malformed mint
+        return None
+
+
+def decode_launchlab(data_b64):
+    try:
+        raw = base64.b64decode(data_b64)
+    except (ValueError, TypeError):
+        return None
+    if len(raw) < LL_TRADE_LEN or raw[:8] != TRADE_DISC:
+        return None
+    u = struct.unpack_from("<13Q", raw, 40)
+    vb, vq, rb, rq, a_in, a_out = u[1], u[2], u[5], u[6], u[7], u[8]
+    fees = sum(u[9:13])
+    is_buy = raw[144] == 0
+    v_sol, v_tok = (vq + rq) / 1e9, (vb - rb) / 1e6
+    if not (LL_V_SOL_RANGE[0] <= v_sol <= LL_V_SOL_RANGE[1] and LL_V_TOK_RANGE[0] <= v_tok <= LL_V_TOK_RANGE[1]):
+        REJECTS["bonk"] = REJECTS.get("bonk", 0) + 1
+        return None
+    sol, tok = (a_in, a_out) if is_buy else (a_out, a_in)
+    gross = a_in if is_buy else a_out + fees     # the fee comes off the SOL side: input on a buy, output on a sell
+    return {"pool": b58(raw[8:40]), "is_buy": is_buy, "sol": sol / 1e9, "tokens": tok / 1e6, "v_sol": v_sol,
+            "v_tok": v_tok, "fee_pct": 100.0 * fees / gross if gross else None, "status": raw[145]}
+
+
+def parse_launchlab(m):
+    """logsNotification of the LaunchLab program -> trade messages; 'mint' carries the pool_state until the service
+    maps it to the launch (so the stream's buffer and replay work on pools)."""
+    if m.get("method") != "logsNotification":
+        return []
+    res = (m.get("params") or {}).get("result") or {}
+    v = res.get("value") or {}
+    if v.get("err"):
+        return []
+    slot = (res.get("context") or {}).get("slot")
+    out = []
+    for d in program_data(v.get("logs"), LAUNCHLAB_PROGRAM):
+        ev = decode_launchlab(d)
+        if ev:
+            out.append({"signature": v.get("signature") or "", "mint": ev["pool"], "traderPublicKey": "",
+                        "txType": "buy" if ev["is_buy"] else "sell", "tokenAmount": ev["tokens"],
+                        "solAmount": ev["sol"], "newTokenBalance": None, "vSolInBondingCurve": ev["v_sol"],
+                        "vTokensInBondingCurve": ev["v_tok"], "marketCapSol": ev["v_sol"] / ev["v_tok"] * 1e9,
+                        "pool": "bonk", "slot": slot, "src": "rpc_logs", "feePct": ev["fee_pct"],
+                        "poolStatus": ev["status"]})
     return out
 
 
