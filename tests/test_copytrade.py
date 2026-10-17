@@ -86,6 +86,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(market, "snapshots", lambda ms, s=None: {MINT: state["snap"]})
     monkeypatch.setattr(market, "snapshots_checked", lambda ms, s=None: ({MINT: state["snap"]}, state.get("failed", set())))
     monkeypatch.setattr(market, "jupiter_quote", lambda *a, **k: None)
+    monkeypatch.setattr(market, "jupiter_quote_status", lambda *a, **k: (None, False))  # Jupiter: no route
     monkeypatch.setattr(market, "sol_usd", lambda s=None: 100.0)
     monkeypatch.setattr(chain, "token_decimals", lambda rpc, m: 6)
     ex = PaperExecutor(s, rpc=None)
@@ -858,6 +859,7 @@ def test_paper_target_needs_a_sellable_price_and_slippage_survives_a_restart(env
     state["snap"] = dataclasses.replace(state["snap"], price_sol=p["entry_price_sol"] * (1 + p["take_profit"] + 0.05))
     quote = {"outAmount": str(int(p["entry_cost_sol"] * 0.95 * 1e9))}  # mid says target, a sell would lose 5 %
     monkeypatch.setattr(market, "jupiter_quote", lambda *a, **k: quote)
+    monkeypatch.setattr(market, "jupiter_quote_status", lambda *a, **k: (quote, False))
     st.update()
     assert conn.execute("SELECT status FROM ct_positions WHERE id=?", (pid,)).fetchone()[0] == "open"
     quote["outAmount"] = str(int(p["entry_cost_sol"] * (1 + p["take_profit"]) * 1e9))
@@ -993,3 +995,19 @@ def test_commands_are_claimed_once_and_unconfirmed_live_buys_stay_opening(env):
     assert st3.open("signal", "auto", "LIVEMINT", 0.1, state["snap"], p, tp=0.5, hold=60, reason="t",
                     account="live") is None
     assert conn.execute("SELECT status FROM ct_positions WHERE mint='LIVEMINT'").fetchone()[0] == "opening"
+
+
+def test_sell_without_any_answer_stays_open_instead_of_booking_a_rug(env, monkeypatch):
+    s, conn, ex, state = env
+    monkeypatch.setattr(market, "jupiter_quote_status", lambda *a, **k: (None, True))   # network down / 429
+    f = ex.sell(MINT, 1000.0, 6, None, 3e-6)
+    assert not f.ok and "pausiert" in f.error
+    monkeypatch.setattr(market, "jupiter_quote_status", lambda *a, **k: (None, False))  # Jupiter: no route
+    f = ex.sell(MINT, 1000.0, 6, None, 3e-6)
+    assert f.ok and f.source == "no_route" and f.sol == 0
+
+
+def test_jupiter_client_error_is_final_a_429_is_not():
+    assert market._transient(RuntimeError("GET x failed: 400 Client Error: Bad Request for url")) is False
+    assert market._transient(RuntimeError("GET x failed: 429 Too Many Requests")) is True
+    assert market._transient(RuntimeError("GET x failed: HTTPSConnectionPool timed out")) is True

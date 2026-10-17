@@ -231,6 +231,20 @@ def best_pool(mint: str) -> str:
 
 def jupiter_quote(settings: Settings, input_mint: str, output_mint: str, amount_raw: int,
                   slippage_bps: int | None = None) -> dict | None:
+    return jupiter_quote_status(settings, input_mint, output_mint, amount_raw, slippage_bps)[0]
+
+
+def _transient(e: Exception) -> bool:
+    """True for a network error, timeout, 429 or 5xx (try again), False for Jupiter's own 4xx answer (no route,
+    token not tradable): only that one may count as 'the tokens sell for nothing'."""
+    txt = str(e)
+    return not ("Client Error" in txt and "429" not in txt)
+
+
+def jupiter_quote_status(settings: Settings, input_mint: str, output_mint: str, amount_raw: int,
+                         slippage_bps: int | None = None) -> tuple[dict | None, bool]:
+    """(quote or None, transient): transient=True when the quote failed for a reason that says nothing about the
+    token (network down, rate limit, Jupiter 5xx)."""
     try:
         return http.get_json(
             f"{settings.jupiter_url}/swap/v1/quote",
@@ -243,10 +257,10 @@ def jupiter_quote(settings: Settings, input_mint: str, output_mint: str, amount_
             headers=_jup_headers(settings),
             limiter_name="jupiter",
             retries=2,
-        )
+        ), False
     except Exception as e:
         log.debug("jupiter quote failed: %s", e)
-        return None
+        return None, _transient(e)
 
 
 def jupiter_swap_tx(settings: Settings, quote: dict, user_pubkey: str) -> str:

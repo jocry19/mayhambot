@@ -112,7 +112,12 @@ class PaperExecutor:
     def sell(self, mint: str, tokens: float, decimals: int, snap: market.PairSnapshot | None,
              last_price_sol: float) -> Fill:
         fees = self.s.network_fee_sol + self.s.priority_fee_sol
-        q = market.jupiter_quote(self.s, mint, SOL_MINT, int(tokens * 10 ** decimals))
+        q, transient = market.jupiter_quote_status(self.s, mint, SOL_MINT, int(tokens * 10 ** decimals))
+        if transient and snap is None:
+            # neither Jupiter nor DexScreener answered (network down, Mac just woke up, 429): that says nothing about
+            # the coin. Booking it as no_route turned every open position into a -100 % trade that the learners
+            # then took in as a real rug; the position stays open and the exit is retried next round
+            return Fill(False, error="kein Preis (Netz/Limit), Verkauf pausiert")
         if q and int(q.get("outAmount", 0)) > 0:
             gross = int(q["outAmount"]) / 1e9
             impact = float(q.get("priceImpactPct") or 0)
