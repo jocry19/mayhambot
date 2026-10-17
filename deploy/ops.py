@@ -465,6 +465,7 @@ def nightly_maintenance(st: dict, now: float | None = None) -> str | None:
     t0 = time.time()
     c = sqlite3.connect(str(db_path()), timeout=30)
     try:
+        c.execute("PRAGMA analysis_limit=1000")  # an older SQLite would ANALYZE whole tables under the write lock
         c.execute("PRAGMA optimize")
         busy, log_pages, done = c.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
     finally:

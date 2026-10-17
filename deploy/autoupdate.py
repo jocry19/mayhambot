@@ -86,7 +86,7 @@ def live_reason(env: dict) -> str | None:
     if db.exists():
         try:
             c = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=10)
-            n = c.execute("SELECT COUNT(*) FROM ct_positions WHERE mode='live' AND status='open'").fetchone()[0]
+            n = c.execute("SELECT COUNT(*) FROM ct_positions WHERE mode='live' AND status IN ('open','opening','closing')").fetchone()[0]
             c.close()
             if n:
                 return f"{n} offene Echtgeld-Position(en)"

@@ -73,6 +73,11 @@ def load_settings() -> Settings:
     rpc = _s("SOLANA_RPC_URL") or (f"https://mainnet.helius-rpc.com/?api-key={helius}" if helius
                                    else "https://api.mainnet-beta.solana.com")
     db_path = _s("MAYHAM_DB_PATH", str(ROOT / "data" / "mayhambot.db"))
+    # one reading for every module (ops, web, mayham.py do the same): ~ expanded, relative to the app folder.
+    # dotenv does not expand ~, so MAYHAM_DB_PATH=~/x.db opened a folder literally named "~" inside the app
+    db_path = os.path.expanduser(db_path)
+    if not os.path.isabs(db_path):
+        db_path = str(ROOT / db_path)
     return Settings(
         db_path=db_path,
         rpc_url=rpc,

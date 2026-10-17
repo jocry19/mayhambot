@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def db_path() -> str:
     p = os.getenv("MAYHAM_DB_PATH")
     if p:
+        p = os.path.expanduser(p)
         return p if os.path.isabs(p) else str(ROOT / p)
     try:
         from core.config import settings  # type: ignore

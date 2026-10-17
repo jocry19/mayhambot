@@ -118,7 +118,11 @@ def _migrate(conn):
         cols = known[table]
         if col not in cols:
             cols.add(col)
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+            except sqlite3.OperationalError as e:  # ten services migrate at once after a deploy: one of them wins
+                if "duplicate column" not in str(e).lower():
+                    raise
     conn.commit()
 
 

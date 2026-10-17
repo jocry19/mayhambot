@@ -346,23 +346,39 @@ def _ledger_update(fn):
     """Read-modify-write the shared credit ledger under an exclusive lock. fn(ledger) -> result."""
     import json
     os.makedirs(_LOCK_DIR, exist_ok=True)
-    with open(_ledger_path(), "a+") as f:
+    path = _ledger_path()
+    # lock on a separate file and replace the ledger atomically: truncating and rewriting it in place left an empty
+    # or half-written file when a process was killed mid-write, and the next reader started the month from zero
+    with open(path + ".lock", "a+") as lk:
         try:
             import fcntl
-            fcntl.flock(f, fcntl.LOCK_EX)
+            fcntl.flock(lk, fcntl.LOCK_EX)
         except ImportError:
             pass
-        f.seek(0)
-        try:
-            led = json.loads(f.read() or "{}")
-        except ValueError:
-            led = {}
-        led = _roll(led, write=True)
+        led = None
+        for src in (path, path + ".bak"):
+            try:
+                with open(src) as f:
+                    led = json.loads(f.read() or "{}")
+                break
+            except FileNotFoundError:
+                continue
+            except ValueError:
+                log.warning("credit ledger %s unreadable, trying the backup", src)
+        led = _roll(led or {}, write=True)
         res = fn(led)
-        f.seek(0)
-        f.truncate()
-        json.dump(led, f)
-        f.flush()
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(led, f)
+            f.flush()
+            os.fsync(f.fileno())
+        if os.path.exists(path):
+            try:  # a copy, not a rename: readers without the lock (dashboard, ops) always find the ledger
+                import shutil
+                shutil.copyfile(path, path + ".bak")
+            except OSError:
+                pass
+        os.replace(tmp, path)
         return res
 
 

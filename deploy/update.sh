@@ -11,7 +11,12 @@ PY="$ROOT/.venv/bin/python"
 
 if [ "${1:-}" != "--no-pull" ] && [ -d .git ] && git remote | grep -q .; then
   git diff --quiet && git diff --cached --quiet || { echo "Ungesicherte Änderungen im Ordner: erst committen."; exit 1; }
-  git pull --ff-only origin main
+  # mayham.py update tests the new commit in a separate worktree first and only then moves this folder onto it
+  # (a plain git pull put untested code on disk that the next service restart would have run after red tests)
+  "$PY" mayham.py update
+  sleep 20
+  "$PY" deploy/ops.py health && echo "Update ok: $(git log -1 --format='%h %s')"
+  exit 0
 fi
 "$PY" -m pip install -q -r requirements.txt
 echo "Tests ..."

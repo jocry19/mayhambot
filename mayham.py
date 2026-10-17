@@ -174,7 +174,9 @@ RESTART_S, RESTART_MAX_S, STABLE_S = 10, 300, 600
 def _compact_if_flagged(db=None):
     """The nightly retention pass (deploy/ops.py retention) asks for a one-time VACUUM into incremental auto_vacuum
     by leaving data/COMPACT_DB; it rewrites the whole file, so it runs here, before any service has it open."""
-    db = Path(db or os.getenv("MAYHAM_DB_PATH") or ROOT / "data" / "mayhambot.db")
+    db = Path(os.path.expanduser(str(db or os.getenv("MAYHAM_DB_PATH") or ROOT / "data" / "mayhambot.db")))
+    if not db.is_absolute():
+        db = ROOT / db
     flag = db.parent / "COMPACT_DB"
     if not flag.exists() or not db.exists():
         return None
