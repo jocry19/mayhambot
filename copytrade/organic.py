@@ -4,7 +4,7 @@ Each open signal position in a paper account is shown to the exit model once a m
 brain learned from (up since the buy, below the high, the last minute and five, volume against its peak, minutes held,
 the other smart wallets' flow). The model only takes over when both hold:
   - it is trained (exits.mature: enough weighted minute samples), and
-  - its out-of-sample replays beat the brain's exit plans (exits.verdict(conn)["live"], checked every 10 minutes).
+  - its out-of-sample replays of signal coins beat the plans (exits.verdict(conn, "signal")["live"], every 10 min).
 Otherwise `active()` is False and the account's own exits (target, trail, inflow, smart exit) run exactly as before.
 The account's hard guards stay either way: rug check, its stop-loss and its maximum hold (strategy.update).
 
@@ -92,7 +92,7 @@ class OrganicExit:
         self._load(now)
         mature = self._exits.mature(self.xm)
         try:
-            v = self._exits.verdict(self.conn) if mature else {}
+            v = self._exits.verdict(self.conn, "signal") if mature else {}  # only signal coins count
         except Exception as e:
             log.debug("exit verdict failed: %s", e)
             v = {}

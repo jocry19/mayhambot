@@ -18,7 +18,7 @@ def _fake_exits(live=True, act="hold"):
     ns = types.SimpleNamespace(**{k: getattr(real_exits, k) for k in ("Live", "tokens", "coin_swaps", "smart_flow",
                                                                        "FWD_MIN")})
     ns.mature = lambda xm: True
-    ns.verdict = lambda conn: {"n": 40, "organic": 0.12, "plan": 0.05, "live": live}
+    ns.verdict = lambda conn, kind=None: kind == "signal" and {"n": 40, "organic": 0.12, "plan": 0.05, "live": live}
     ns.advise = advise
     ns.calls = calls
     return ns

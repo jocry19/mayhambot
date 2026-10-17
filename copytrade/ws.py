@@ -19,6 +19,13 @@ from .config import Settings
 
 log = logging.getLogger("copytrade.ws")
 
+
+def _redact(text: str) -> str:
+    """Errors may quote the URL, and the Helius one carries the API key."""
+    import re
+
+    return re.sub(r"(api-key=)[^&\s'\"]+", r"\1***", text)
+
 try:
     import websockets  # type: ignore
 except Exception:  # optional dependency: without it the copy trader only polls
@@ -65,6 +72,7 @@ class WalletStream:
         self.sub_at: dict[str, float] = {}  # wallet -> when its subscription was confirmed (watchdog fairness)
         self._tokens, self._tok_at = 1.0, 0.0
         self.stats["limited"] = 0
+        self.bytes = 0  # received on this stream (Helius bills streamed data)
         self._wanted: list[str] = []  # best first (manual, Ultra, Smart, rank)
         self._subs: dict[str, int] = {}  # wallet -> subscription id
         self._lock = threading.Lock()
@@ -158,7 +166,7 @@ class WalletStream:
                     log.info("wallet websocket %s: subscription limit at %d wallets, cap %d, resting %d min",
                              url.split("?")[0], held, self.caps[url], self.REST_AFTER_LIMIT_S // 60)
                 else:
-                    log.info("wallet websocket %s dropped: %s", url.split("?")[0], txt[:120])
+                    log.info("wallet websocket %s dropped: %s", url.split("?")[0], _redact(txt)[:120])
             finally:
                 self.connected = False
                 with self._lock:
@@ -203,6 +211,7 @@ class WalletStream:
                 raw = await asyncio.wait_for(sock.recv(), timeout=0.25)
             except asyncio.TimeoutError:
                 continue
+            self.bytes += len(raw)
             self._handle(json.loads(raw), pending, sub_wallet)
 
     def _handle(self, msg: dict, pending: dict, sub_wallet: dict) -> None:

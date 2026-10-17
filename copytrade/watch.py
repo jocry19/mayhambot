@@ -34,6 +34,14 @@ def handle_swap(strat, sw) -> None:
         strat.on_whale_sell(sw)
 
 
+HELIUS_WS_CREDITS_PER_100KB = 2.0  # Helius billing for standard websockets (helius.dev/docs/billing/credits, 10/2026)
+
+
+def w_in(st, wallet: str) -> bool:
+    with st._lock:
+        return wallet in st._subs
+
+
 class Watcher:
     def __init__(self, s: Settings, rpc, exs, stop: threading.Event):
         self.s, self.rpc, self.exs, self._stop = s, rpc, exs, stop
@@ -44,6 +52,18 @@ class Watcher:
         self.streams = [ws.WalletStream(s, url=urls[i:] + urls[:i], events=self.events, name=f"wallet-ws-{i}",
                                      complement=i > 0)
                         for i in range(n)]
+        # Helius stream: every watched wallet on one more connection that does not drop notifications
+        self.helius = None
+        if getattr(s, "ws_helius", False) and getattr(s, "helius_api_key", "") and ws.available():
+            self.helius = ws.WalletStream(s, url=f"wss://mainnet.helius-rpc.com/?api-key={s.helius_api_key}",
+                                          events=self.events, name="wallet-ws-helius")
+            self.helius.SUBS_PER_SEC = 10.0
+            self.helius.max_wallets = s.ws_helius_max
+            self.streams.append(self.helius)
+        self.helius_paused = ""  # why the Helius stream holds no wallets right now ("" = running)
+        self.helius_credits = 0.0  # booked for streamed data since start
+        self._metered = 0
+        self._wallets: list[str] = []
         self.handled = 0
         self.fast = 0  # swaps read straight from the notification logs (no getTransaction)
         self._verify: collections.deque = collections.deque(maxlen=500)  # (due_at, tries, swap)
@@ -55,6 +75,7 @@ class Watcher:
         self.waits: collections.deque = collections.deque(maxlen=2000)  # notification -> fetch start (s)
         self.fetch_s: collections.deque = collections.deque(maxlen=2000)  # transaction read (s)
         self.catchups = 0
+        self.skipped_catchups = 0
         self._caught: dict[str, float] = {}
         self._kicked_at: dict[str, float] = {}
         self._last_watchdog = 0.0
@@ -65,8 +86,9 @@ class Watcher:
     def start(self, wallets) -> "Watcher":
         if not self.streams or not ws.available():
             return self
+        self._wallets = list(wallets)
         for st in self.streams:
-            st.set_wallets(wallets)
+            st.set_wallets([] if st is self.helius and self.helius_paused else wallets)
             st.start()
         self._thread = threading.Thread(target=self._work, name="wallet-ws-decider", daemon=True)
         self._thread.start()
@@ -79,8 +101,39 @@ class Watcher:
             st.stop()
 
     def set_wallets(self, wallets) -> None:
+        self._wallets = list(wallets)
         for st in self.streams:
-            st.set_wallets(wallets)
+            st.set_wallets([] if st is self.helius and self.helius_paused else wallets)
+
+    def meter(self, now: float | None = None) -> None:
+        """Book the Helius stream's data (2 credits per 0.1 MB) and pause it below the day's reserve (the same one
+        that guards the early transaction reads); it resumes when the budget recovers."""
+        h = self.helius
+        if h is None:
+            return
+        d, self._metered = h.bytes - self._metered, h.bytes
+        why = ""
+        if d > 0:
+            cost = d / 1e5 * HELIUS_WS_CREDITS_PER_100KB
+            self.helius_credits += cost
+            try:
+                from core import http as core_http  # type: ignore
+
+                core_http._charge(cost)
+            except ImportError:
+                pass
+            except Exception as e:  # CreditsExhausted: today's share is used up
+                why = f"credits: {e}"
+        if not why and not tracker.main_budget_ok(self.s, now):
+            why = "Helius day budget under the reserve"
+        if why and not self.helius_paused:
+            self.helius_paused = why
+            h.set_wallets([])
+            log.info("Helius wallet stream paused: %s", why)
+        elif not why and self.helius_paused:
+            self.helius_paused = ""
+            h.set_wallets(self._wallets)
+            log.info("Helius wallet stream resumed")
 
     def covered(self) -> set[str]:
         out: set[str] = set()
@@ -98,7 +151,9 @@ class Watcher:
 
         parts.append(f"queue wait p50 {pct(self.waits, .5):.1f}s p90 {pct(self.waits, .9):.1f}s, transaction read "
                      f"p50 {pct(self.fetch_s, .5):.1f}s p90 {pct(self.fetch_s, .9):.1f}s, "
-                     f"{self.catchups} catch-ups after reconnects")
+                     f"{self.catchups} catch-ups after reconnects ({self.skipped_catchups} skipped, covered elsewhere)"
+                     + (f", Helius stream {self.helius.bytes / 1e6:.1f} MB = {self.helius_credits:.0f} credits"
+                        + (f" (paused: {self.helius_paused})" if self.helius_paused else "") if self.helius else ""))
         v = tracker.VERIFY
         why = ", ".join(f"{k} {n}" for k, n in chain.LOG_STATS.most_common())
         venues = ", ".join(f"{k} {n}" for k, n in chain.LOG_VENUES.most_common(6))
@@ -117,6 +172,9 @@ class Watcher:
                 continue
             extra = rest[0] if rest else None
             if sig is None and extra == "catchup":
+                if self.covered_elsewhere(wallet, got):
+                    self.skipped_catchups += 1
+                    continue  # another stream watched it all along: nothing was missed
                 for sw in self.catch_up(conn, wallet):
                     self.decide.put(sw)
                 continue
@@ -138,6 +196,7 @@ class Watcher:
                 if time.time() - self._last_watchdog > 30:
                     self._last_watchdog = time.time()
                     self.watchdog()
+                    self.meter()
                 continue
             self._decide(strat, sw)
             self._pending(strat)
@@ -174,6 +233,11 @@ class Watcher:
         if sw:
             self._decide(strat, sw)
         return sw
+
+    def covered_elsewhere(self, wallet: str, since: float) -> bool:
+        """A connected stream had this wallet subscribed since before `since` (minus a margin)."""
+        return any(st.connected and w_in(st, wallet) and st.sub_at.get(wallet, since) < since - 5
+                   and st.connected_at < since - 5 for st in self.streams)
 
     def catch_up(self, conn, wallet: str, now: float | None = None) -> list:
         """A wallet's subscription came back after a drop: read what it did in the meantime right away instead

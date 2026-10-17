@@ -16,6 +16,7 @@ from test_copytrade import MINT, W, env, parsed_tx  # noqa: F401  (fixture)
 def _lean_helius_budget(monkeypatch):
     """The real credit ledger of the machine must not decide how a test reads: budget 'tight' unless a test says so."""
     monkeypatch.setattr(tracker, "main_budget_ok", lambda *a, **kw: False)
+    monkeypatch.delenv("HELIUS_API_KEY", raising=False)  # no extra Helius stream from the machine's environment
 
 websockets = pytest.importorskip("websockets")
 
@@ -838,3 +839,61 @@ def test_main_budget_check_keeps_a_reserve(monkeypatch):
     left["v"] = None
     assert not tracker.main_budget_ok(Settings(), now=1200.0)  # no budget known: stay lean
     tracker._budget_cache.update(at=0.0, ok=False)
+
+
+def test_helius_stream_is_metered_paused_below_the_reserve_and_never_shows_the_key(monkeypatch):
+    from copytrade import watch
+    from core import http as core_http
+
+    booked = []
+    monkeypatch.setattr(core_http, "_charge", lambda cost, force=False: booked.append(cost))
+    s = Settings(ws_urls=["ws://n0"], ws_parallel=1, helius_api_key="SECRETKEY", ws_helius=True)
+    w = watch.Watcher(s, None, {}, threading.Event())
+    h = w.helius
+    assert h is not None and h in w.streams and h.max_wallets == s.ws_helius_max and not h.complement
+    w.set_wallets([W, "B"])
+    assert h._wanted == [W, "B"]
+    h.bytes = 250_000  # 2.5 x 0.1 MB
+    monkeypatch.setattr(tracker, "main_budget_ok", lambda *a, **kw: True)
+    w.meter()
+    assert booked == [5.0] and w.helius_credits == 5.0 and not w.helius_paused
+    monkeypatch.setattr(tracker, "main_budget_ok", lambda *a, **kw: False)
+    w.meter()
+    assert w.helius_paused and h._wanted == [] and booked == [5.0]  # nothing new streamed, nothing booked
+    w.set_wallets([W])
+    assert h._wanted == []  # stays empty while paused
+    monkeypatch.setattr(tracker, "main_budget_ok", lambda *a, **kw: True)
+    w.meter()
+    assert not w.helius_paused and h._wanted == [W]
+    h.connected = True
+    txt = w.status()
+    assert "SECRETKEY" not in txt and "mainnet.helius-rpc.com" in txt and "credits" in txt
+
+    def refuse(cost, force=False):
+        raise RuntimeError("used up")
+
+    monkeypatch.setattr(core_http, "_charge", refuse)
+    h.bytes += 100_000
+    w.meter()
+    assert "credits" in w.helius_paused and h._wanted == []
+    assert ws._redact("connect wss://x/?api-key=SECRETKEY failed") == "connect wss://x/?api-key=*** failed"
+
+
+def test_no_helius_stream_without_a_key_or_when_switched_off():
+    from copytrade import watch
+
+    assert watch.Watcher(Settings(ws_urls=["ws://n0"], ws_parallel=1, helius_api_key=""), None, {},
+                         threading.Event()).helius is None
+    assert watch.Watcher(Settings(ws_urls=["ws://n0"], ws_parallel=1, helius_api_key="K", ws_helius=False), None, {},
+                         threading.Event()).helius is None
+
+
+def test_catch_up_is_skipped_when_another_stream_watched_the_wallet_all_along():
+    w = _fake_streams()
+    a, b = w.streams
+    now = time.time()
+    a.sub_at[W] = now - 300
+    b.sub_at[W] = now  # b just resubscribed and asks for a catch-up
+    assert w.covered_elsewhere(W, now)
+    a.connected = False
+    assert not w.covered_elsewhere(W, now)
