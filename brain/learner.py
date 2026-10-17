@@ -374,6 +374,8 @@ def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: i
             horizon = hz
         else:
             todo, allow, horizon = SHORT, net > 0, short_horizon_s()
+        if o["kind"] == "market" and net <= (limit or s.evals_per_round) // 2:
+            allow = False  # the side source gets at most half of the round's candle downloads (shared free limit)
         try:
             gains = replay(conn, o, candles_fn, allow, todo, horizon)
             if allow and (not final or _ct_gains(conn, o) is None):
@@ -512,7 +514,7 @@ def honest(conn, since: float = 0, evaluated_since: float = 0) -> dict:
     real = conn.execute("SELECT pnl_pct, pnl_sol, meta, entry_price_sol, high_price_sol FROM brain_positions "
                         "WHERE status='closed' AND closed_at>=?", (int(since),)).fetchall()
     by_kind = {}
-    for k in ("whale", "signal", "signal_v2", "launch"):
+    for k in ("whale", "signal", "signal_v2", "launch", "market"):
         kr = [r for r in rows if r["kind"] == k]
         if kr:
             kt = [r for r in kr if r["wanted"]]

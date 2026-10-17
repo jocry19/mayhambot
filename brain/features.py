@@ -28,6 +28,8 @@ LABELS = {
     "bundle": "Bundle", "insider": "Insider", "devl": "Dev-Launches", "top10": "Top-10-Anteil",
     "socials": "Socials", "lsmart": "Smart Wallets im Launch", "modelp": "Modell-Chance", "form": "eigene Form",
     "flip": "Wal verkauft binnen 2 min", "sig": "Signal-Art", "run5": "Kurs 5 min vor dem Kauf",
+    "dex": "Handelsplatz", "pc1h": "Kurs 1 h", "tx5": "Trades 5 min", "vol1h": "Volumen 1 h",
+    "dip15": "Kurs 15 min davor", "why": "Grund ohne Signal", "smart": "Smart-Käufer",
 }
 
 
@@ -71,7 +73,8 @@ def describe(token: str) -> str:
     if k.startswith("t_"):
         return f"Zentrale {k[2:]} {v}"
     if k == "kind":
-        return {"whale": "Wal-Kopie", "signal": "Smart-Money-Signal", "launch": "Launch"}.get(v, v)
+        return {"whale": "Wal-Kopie", "signal": "Smart-Money-Signal", "launch": "Launch",
+                "market": "Markt-Coin (Nebenquelle)"}.get(v, v)
     return f"{LABELS.get(k, k)} {v}"
 
 
@@ -295,3 +298,34 @@ def launch(conn, row, snap, now: float) -> tuple[dict, dict]:
         reasons = []
     raw = {"score": g("score"), "risk": g("risk"), "delay_s": round(delay, 1), "reasons": reasons}
     return f, raw
+
+
+def market(conn, row, snap, now: float) -> tuple[dict, dict]:
+    """A coin the signal funnel looked at but did not call (signals' shadow book, also coins without smart buyers):
+    the brain judges it from the coin's own state and momentum (winner study 17.10.: the big runners had at most one
+    smart buyer, smart-money features did not separate them)."""
+    keys = row.keys()
+
+    def g(k):
+        return row[k] if k in keys else None
+
+    dex = (g("dex") or (snap.dex_id if snap else "") or "").lower()
+    f = {"dex": "curve" if dex == "pumpfun" else dex if dex in ("pumpswap", "raydium", "meteora", "orca") else "other",
+         "pc1h": b(g("pc_h1"), (-20, 0, 20, 100), ("<-20%", "-20..0%", "0..20%", "20..100%", ">100%")),
+         "tx5": b(g("txns_m5"), (20, 100, 300), ("<20", "20-100", "100-300", "300+")),
+         "vol1h": b(g("volume_h1"), (1e4, 5e4, 2.5e5), ("<10k", "10-50k", "50-250k", ">250k")),
+         "dip15": b(g("ret_15m_before"), (-0.3, -0.1, 0.1), ("<-30%", "-30..-10%", "-10..10%", ">10%")),
+         "why": str(g("reason") or "?"),
+         "smart": b(g("entities"), (1, 2), ("0", "1", "2+"))}
+    delay = now - (g("ts") or now)
+    f["delay"] = b(delay, (15, 60, 120), ("<15s", "15-60s", "1-2min", ">2min"))
+    mc = snap.fdv if snap and snap.fdv else g("mcap_usd")
+    f["mcap"] = b(mc, (3e4, 1e5, 1e6), ("<30k", "30-100k", "100k-1M", ">1M"))
+    if snap is not None:
+        f["liq"] = liq_bucket(snap)
+    f.update(market_feats(conn, row["mint"], snap, now, "market"))
+    raw = {"reason": g("reason"), "dex": dex, "pc_m5": g("pc_m5"), "pc_h1": g("pc_h1"), "txns_m5": g("txns_m5"),
+           "volume_h1": g("volume_h1"), "dip15": g("ret_15m_before"), "smart": g("entities"),
+           "delay_s": round(delay, 1)}
+    return f, raw
+

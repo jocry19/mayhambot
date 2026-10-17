@@ -121,3 +121,13 @@ Der Markt verhält sich nicht immer wie die Lerndaten. Jede Lernrunde vergleicht
 (mehr als 3 Standardfehler und mindestens 5 Prozentpunkte je Trade), halbiert das Hirn sofort alles alte Wissen,
 im Einstiegs- und im Ausstiegsmodell; die neuen Ergebnisse zählen dann doppelt so viel. Höchstens alle 3 Stunden,
 das Tagebuch meldet „Regime gewechselt“.
+
+## Nebenquelle Markt-Coins (`kind="market"`)
+
+Coins, die der Signal-Trichter angesehen, aber nicht gemeldet hat (Schattenbuch `signal_shadow`, auch ohne
+Smart-Käufer), werden als eigene Gelegenheitsart entschieden: Handelsplatz, Kurs 5 min / 1 h, Trades 5 min,
+Volumen 1 h, Kurs 15 min davor (Rücksetzer), Market Cap, Alter, Liquidität, Grund ohne Signal. Die Gewinner-Studie
+(17.10.) fand die großen Läufer nicht über Smart Money, sondern nur über Zustand und Momentum. Gehandelt wird die
+Quelle erst, wenn das, was das Hirn aus ihr gewollt hätte, in mindestens 30 nachgespielten Fällen nach Kosten im
+Plus lag (`BRAIN_MARKET_TRADE=auto`, `on`/`off` erzwingen). Bis dahin wird nur beobachtet und gelernt, ohne
+Rug-Prüfung per RPC und mit höchstens der Hälfte der Kerzen-Downloads je Lernrunde.

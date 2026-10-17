@@ -73,13 +73,13 @@ def write(conn, model, s, now: float | None = None) -> str:
                        (t0,)).fetchall()
     n_open = c.execute("SELECT COUNT(*) FROM brain_positions WHERE status='open'").fetchone()[0]
     eq = c.execute("SELECT equity_sol FROM brain_equity ORDER BY ts DESC LIMIT 1").fetchone()
-    by_kind = {k: sum(1 for o in opps if o["kind"] == k) for k in ("whale", "signal", "launch")}
+    by_kind = {k: sum(1 for o in opps if o["kind"] == k) for k in ("whale", "signal", "launch", "market")}
     n_v2 = sum(1 for o in opps if o["kind"] == "signal" and '"sig": "v2"' in (o["features"] or ""))
     entered = [o for o in opps if o["decision"] == "enter"]
     lines = [f"🧠 Lerntagebuch {day}", ""]
     lines.append(f"Gesehen: {len(opps)} Gelegenheiten (Wale {by_kind['whale']}, Signale {by_kind['signal']}"
                  f"{f' davon v2 {n_v2}' if n_v2 else ''}, "
-                 f"Launches {by_kind['launch']}). Gekauft: {len(entered)}, davon "
+                 f"Launches {by_kind['launch']}, Markt-Coins {by_kind['market']}). Gekauft: {len(entered)}, davon "
                  f"{sum(1 for o in entered if o['explore'])} zum Erkunden. Offen: {n_open}.")
     if trades:
         sol = sum(r["pnl_sol"] or 0 for r in trades)
@@ -122,6 +122,10 @@ def write(conn, model, s, now: float | None = None) -> str:
         for k, x in h["by_exit"].items():
             lines.append(f"Eigene Trades mit {'organischem Ausstieg' if k == 'organic' else 'festen Plänen'}: "
                          f"{x['n']}× Ø {_p(x['mean'])} ({x['sol']:+.3f} SOL), vom Hoch mitgenommen {_p(x['capture'])}.")
+        mk = h["by_kind"].get("market")
+        if mk:
+            lines.append(f"Nebenquelle Markt-Coins (ohne Signal, nur beobachtet bis belegt): {mk['n']} Ergebnisse, "
+                         f"gewollt {mk['n_taken']} mit Ø {_p(mk['taken_mean'])}, alles Ø {_p(mk['copy_all_mean'])}.")
         segs = [(f"Wal erkannt nach {d}", x) for d, x in h["by_delay"].items()] + \
                [("Curve-Coins" if k == "curve" else "Pool-Coins", x) for k, x in h["by_liq"].items()]
         if segs:
@@ -149,7 +153,7 @@ def write(conn, model, s, now: float | None = None) -> str:
                                                                  for t, e, _ in good) + ".")
         if bad:
             lines.append("Spricht dagegen: " + ", ".join(f"{features.describe(t)} ({_p(e)})" for t, e, _ in bad) + ".")
-    wanted = [o["plan"] for o in opps if o["wanted"]]
+    wanted = [o["plan"] for o in opps if o["wanted"] and o["plan"] in BY_NAME]
     if wanted:
         top = max(set(wanted), key=wanted.count)
         lines.append(f"Geändert: Bevorzugter Ausstieg heute „{BY_NAME[top].label}“ ({wanted.count(top)} von "
