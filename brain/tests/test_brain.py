@@ -308,6 +308,13 @@ def test_fresh_coin_run_and_rug_verdict_reach_the_brain(conn, s):
     assert json.loads(o["features"])["safety"] == "medium"
 
 
+def test_signal_v2_learns_apart_from_v1():
+    t1 = tokens("signal", {"sig": "v1", "score": "70+", "mom": "0-10%"})
+    t2 = tokens("signal", {"sig": "v2", "score": "70+", "mom": "0-10%"})
+    assert "score=70+" in t1 and "score=70+" not in t2 and "v2:score=70+" in t2 and "sig=v2" in t2
+    assert "mom=0-10%" in t2 and "signal_v2:mom=0-10%" in t2  # market context still generalizes
+
+
 def test_honest_score_keeps_explorations_apart(conn, s):
     for i, (wanted, explore) in enumerate(((1, 0), (0, 1), (0, 0))):
         conn.execute("INSERT INTO brain_opps(ts, kind, ref, mint, features, wanted, explore, evaluated_at, "

@@ -338,16 +338,20 @@ def honest(conn, since: float = 0, evaluated_since: float = 0) -> dict:
     exploration buys (or tries a gate stopped); passed = what it let go;
     copy_all = every opportunity with the reference plan (a dumb copier). Plus the real paper trades."""
     rows = [dict(r) for r in conn.execute(
-        "SELECT kind, wanted, explore, pred_mean, realized_plan, realized_base FROM brain_opps "
+        "SELECT kind, wanted, explore, pred_mean, realized_plan, realized_base, features FROM brain_opps "
         "WHERE evaluated_at>=? AND realized_plan IS NOT NULL AND ts>=?",
         (int(evaluated_since), int(since))).fetchall()]
+    for r in rows:  # signal v1 and v2 are scored apart
+        if r["kind"] == "signal" and '"sig": "v2"' in (r.pop("features") or ""):
+            r["kind"] = "signal_v2"
+        r.pop("features", None)
     taken = [r for r in rows if r["wanted"]]
     explored = [r for r in rows if not r["wanted"] and r["explore"]]
     passed = [r for r in rows if not r["wanted"] and not r["explore"]]
     real = conn.execute("SELECT pnl_pct, pnl_sol FROM brain_positions WHERE status='closed' AND closed_at>=?",
                         (int(since),)).fetchall()
     by_kind = {}
-    for k in ("whale", "signal", "launch"):
+    for k in ("whale", "signal", "signal_v2", "launch"):
         kr = [r for r in rows if r["kind"] == k]
         if kr:
             kt = [r for r in kr if r["wanted"]]

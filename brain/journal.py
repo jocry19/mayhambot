@@ -50,15 +50,17 @@ def write(conn, model, s, now: float | None = None) -> str:
     t0 = store.day_start(now)
     day = time.strftime("%Y-%m-%d", time.gmtime(now))
     c = conn
-    opps = c.execute("SELECT kind, decision, wanted, explore, plan FROM brain_opps WHERE ts>=?", (t0,)).fetchall()
+    opps = c.execute("SELECT kind, decision, wanted, explore, plan, features FROM brain_opps WHERE ts>=?", (t0,)).fetchall()
     trades = c.execute("SELECT pnl_sol, pnl_pct FROM brain_positions WHERE status='closed' AND closed_at>=?",
                        (t0,)).fetchall()
     n_open = c.execute("SELECT COUNT(*) FROM brain_positions WHERE status='open'").fetchone()[0]
     eq = c.execute("SELECT equity_sol FROM brain_equity ORDER BY ts DESC LIMIT 1").fetchone()
     by_kind = {k: sum(1 for o in opps if o["kind"] == k) for k in ("whale", "signal", "launch")}
+    n_v2 = sum(1 for o in opps if o["kind"] == "signal" and '"sig": "v2"' in (o["features"] or ""))
     entered = [o for o in opps if o["decision"] == "enter"]
     lines = [f"🧠 Lerntagebuch {day}", ""]
-    lines.append(f"Gesehen: {len(opps)} Gelegenheiten (Wale {by_kind['whale']}, Signale {by_kind['signal']}, "
+    lines.append(f"Gesehen: {len(opps)} Gelegenheiten (Wale {by_kind['whale']}, Signale {by_kind['signal']}"
+                 f"{f' davon v2 {n_v2}' if n_v2 else ''}, "
                  f"Launches {by_kind['launch']}). Gekauft: {len(entered)}, davon "
                  f"{sum(1 for o in entered if o['explore'])} zum Erkunden. Offen: {n_open}.")
     if trades:
@@ -77,6 +79,10 @@ def write(conn, model, s, now: float | None = None) -> str:
                      f"erkundet {h['n_explored']} mit Ø {_p(h['explored_mean'])}, "
                      f"ausgelassen {h['n_passed']} mit Ø {_p(h['passed_mean'])}; alles stumpf kopiert wäre "
                      f"Ø {_p(h['copy_all_mean'])} gewesen.")
+        v2 = h["by_kind"].get("signal_v2")
+        if v2:
+            lines.append(f"Signal v2 getrennt: {v2['n']} Ergebnisse, genommen {v2['n_taken']} mit Ø "
+                         f"{_p(v2['taken_mean'])}, alles kopiert Ø {_p(v2['copy_all_mean'])}.")
     else:
         lines.append("Heute kam noch kein Ergebnis zurück (kurze Pläne nach etwa 1 Stunde, lange nach gut 4 Stunden).")
 
