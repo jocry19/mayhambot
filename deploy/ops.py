@@ -15,6 +15,7 @@ Run from anywhere; paths are relative to the mayhambot folder (parent of deploy/
                                              # (chat id set: test only, no getUpdates; --neu searches again)
   python deploy/ops.py test-alert             # sends a Telegram test message
   python deploy/ops.py summary [--send]       # hourly status report (watchdog sends it every SUMMARY_EVERY_HOURS)
+  python deploy/ops.py db-sizes               # MB and rows per table (also logged by every backup: logs/dbsize.log)
 
 Settings (optional, in .env):
   BACKUP_DIR            where backups go (default: ~/mayhambot-backups); use a 2nd disk or cloud folder
@@ -506,6 +507,12 @@ def ops_report() -> str:
         lines.append(f"Datenbank: {size:.0f} MB · frei: {shutil.disk_usage(ROOT).free / 1e9:.0f} GB")
     except OSError:
         pass
+    try:
+        last = json.loads((ROOT / "data" / "db_sizes.json").read_text())[-1]["tables"]
+        big = sorted(last.items(), key=lambda kv: -kv[1][1])[:3]
+        lines.append("Größte Tabellen: " + ", ".join(f"{t} {v[1] / 1e6:.0f} MB" for t, v in big))
+    except (OSError, ValueError, LookupError):
+        pass
     return "🛠 <b>Betrieb</b>\n" + "\n".join(lines)
 
 
@@ -658,6 +665,40 @@ def _snapshot_db(src: Path, dst: Path):
     d.close()
 
 
+def log_db_sizes(path: Path) -> str | None:
+    """Size per table (dbstat on the backup's own copy, so the live file is not read twice) into
+    data/db_sizes.json and one block per run in logs/dbsize.log. Never fails the backup."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from core import retention  # noqa: PLC0415 - stdlib only
+        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+        try:
+            sizes, fstats, grow = retention.log_sizes(c, ROOT / "data" / "db_sizes.json")
+        finally:
+            c.close()
+        text = retention.size_report(sizes, fstats, grow, top=40)
+        (ROOT / "logs").mkdir(exist_ok=True)
+        with open(ROOT / "logs" / "dbsize.log", "a") as fh:
+            fh.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')}\n{text}\n")
+        return text
+    except Exception as e:  # noqa: BLE001
+        print(f"db sizes: {type(e).__name__}: {e}")
+        return None
+
+
+def db_sizes(args) -> int:
+    """`ops.py db-sizes`: the table sizes, measured on a fresh snapshot (same as the hourly backup does)."""
+    if not db_path().exists():
+        print("keine Datenbank")
+        return 1
+    with tempfile.TemporaryDirectory() as td:
+        snap = Path(td) / "mayhambot.db"
+        _snapshot_db(db_path(), snap)
+        text = log_db_sizes(snap)
+    print(text or "Größen nicht lesbar (SQLite ohne dbstat?)")
+    return 0 if text else 1
+
+
 def _redacted_env() -> str:
     lines = []
     for line in (ROOT / ".env").read_text().splitlines():
@@ -694,6 +735,7 @@ def backup(args) -> int:
             if src.exists():
                 snap = td / "mayhambot.db"
                 _snapshot_db(src, snap)
+                log_db_sizes(snap)
                 tar.add(snap, "data/mayhambot.db")
             if (ROOT / ".env").exists():
                 e = td / "env"
@@ -1171,11 +1213,12 @@ def main(argv=None) -> int:
     sub.add_parser("test-alert")
     sub.add_parser("setup-telegram").add_argument("--neu", action="store_true", help="Chat-ID neu suchen")
     sub.add_parser("report")
+    sub.add_parser("db-sizes")
     sm = sub.add_parser("summary")
     sm.add_argument("--send", action="store_true", help="per Telegram senden")
     a = ap.parse_args(argv)
     fn = {"status": status, "health": health, "watchdog": watchdog, "backup": backup,
-          "list-backups": list_backups, "summary": summary, "report": lambda a: print(ops_report()) or 0, "setup-telegram": setup_telegram, "restore": restore, "rotate-logs": rotate_logs,
+          "list-backups": list_backups, "summary": summary, "report": lambda a: print(ops_report()) or 0, "db-sizes": db_sizes, "setup-telegram": setup_telegram, "restore": restore, "rotate-logs": rotate_logs,
           "test-alert": lambda _: 0 if send_alert("Test: Watchdog-Alarme kommen an ✅") else 1}[a.cmd]
     return fn(a)
 
