@@ -853,3 +853,22 @@ def test_momentum_coins_from_the_tokens_table_are_a_side_source(conn, s):
     f = json.loads(rows[0]["features"])
     assert f["why"] == "momentum" and f["tx5"] == "100-300" and f["pc1h"] == "20..100%"
     assert rows[0]["decision"] == "skip"  # watched until its replays earn it
+
+
+def test_convinced_buys_stake_a_kelly_share_of_the_account(s):
+    m = trained()
+    rng = random.Random(3)
+    small = choose(m, "whale", {"tier": "ultra"}, s, rng, equity=1.0)
+    big = choose(m, "whale", {"tier": "ultra"}, s, rng, equity=10.0)
+    assert small.enter and big.enter and not big.explore
+    assert big.size_sol == pytest.approx(s.max_stake * 10.0) and big.size_sol > small.size_sol  # grows with the account
+    s.kelly_frac = 0
+    assert choose(m, "whale", {"tier": "ultra"}, s, rng, equity=10.0).size_sol <= s.max_size_sol
+
+
+def test_diary_shows_the_hour_factor(conn, s):
+    h0 = int(time.time()) // 3600 * 3600 - 7200
+    for ts, eq in ((h0 + 60, 5.0), (h0 + 3500, 10.0), (h0 + 3660, 10.0), (h0 + 7100, 11.0)):
+        conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (ts, eq, 0, eq))
+    assert [x for _, x in journal.hour_factors(conn, h0 + 7300)] == [2.0, 1.1]
+    assert "×2 erreicht in 1 von 2 Stunden" in journal.write(conn, Brain(len(PLANS)), s, h0 + 7300)

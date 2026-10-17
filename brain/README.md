@@ -134,3 +134,11 @@ Quelle erst, wenn das, was das Hirn aus ihr gewollt hätte, in mindestens 30 nac
 Plus lag, gezählt über die letzten 3 Tage: lässt das Muster nach, schaltet sich die Quelle von selbst wieder ab
 (`BRAIN_MARKET_TRADE=auto`, `on`/`off` erzwingen). Bis dahin wird nur beobachtet und gelernt, ohne
 Rug-Prüfung per RPC und mit höchstens der Hälfte der Kerzen-Downloads je Lernrunde.
+
+## Einsatz nach Kelly und Stundenfaktor
+
+Überzeugte Käufe setzen einen Anteil des aktuellen Kontos: ein Viertel des Kelly-Einsatzes (erwarteter Vorsprung /
+Streuung eines Trades, `BRAIN_KELLY_FRAC` 0,25), höchstens `BRAIN_MAX_STAKE` (20 %) des Kontos, mindestens
+`BRAIN_MIN_SIZE_SOL`. Der Einsatz wächst also mit dem Konto (Zinseszins); Erkundungen bleiben beim Minimum.
+`BRAIN_KELLY_FRAC=0` stellt auf die festen Größen zurück. Das Lernen ist davon unberührt (es lernt Renditen in %).
+Die Stundenzeile im Log und das Tagebuch zeigen den Stundenfaktor des Kontos (Challenge des Nutzers: ×2 je Stunde).

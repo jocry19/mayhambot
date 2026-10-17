@@ -62,6 +62,22 @@ def multipliers(conn, now: float, days: int = 14) -> list:
     return out
 
 
+def hour_factors(conn, now: float, hours: int = 24) -> list:
+    """[(hour start, equity at its end / equity at its start)] for the last full hours (the user's challenge,
+    10/2026: double every hour)."""
+    out = []
+    end = int(now) // 3600 * 3600
+    for k in range(hours, 0, -1):
+        lo, hi = end - k * 3600, end - (k - 1) * 3600
+        a = conn.execute("SELECT equity_sol FROM brain_equity WHERE ts>=? AND ts<? ORDER BY ts LIMIT 1",
+                         (lo, hi)).fetchone()
+        b = conn.execute("SELECT equity_sol FROM brain_equity WHERE ts>=? AND ts<? ORDER BY ts DESC LIMIT 1",
+                         (lo, hi)).fetchone()
+        if a and b and a[0]:
+            out.append((lo, round(b[0] / a[0], 4)))
+    return out
+
+
 def write(conn, model, s, now: float | None = None) -> str:
     """Today's diary entry (UTC day), stored in brain_journal. Returns the text."""
     now = now or time.time()
@@ -87,6 +103,12 @@ def write(conn, model, s, now: float | None = None) -> str:
         lines.append(f"Heute geschlossen: {len(trades)} Trades, {wins} im Plus, {sol:+.3f} SOL.")
     if eq:
         lines.append(f"Papierkonto: {eq[0]:.3f} SOL (Start {s.start_balance_sol:.1f}).")
+    hf = hour_factors(conn, now)
+    if hf:
+        xs = sorted(m for _, m in hf)
+        lines.append(f"Stundenfaktor (Challenge ×2 je Stunde): letzte 24 h Median ×{xs[len(xs) // 2]:.3f}, beste "
+                     f"×{xs[-1]:.3f}, schlechteste ×{xs[0]:.3f}; ×2 erreicht in {sum(1 for x in xs if x >= 2)} "
+                     f"von {len(xs)} Stunden.")
     shifts = [x for x in (store.get(conn, "regime_history", []) or []) if x.get("at", 0) >= now - 86400]
     for x in shifts:
         lines.append(f"Regime gewechselt um {time.strftime('%H:%M', time.gmtime(x['at']))} UTC: die letzten {x['n']} "
@@ -181,7 +203,7 @@ def write(conn, model, s, now: float | None = None) -> str:
     store.put(conn, "diary_effects", {t: e for t, (e, _) in eff.items()})
     conn.execute("INSERT OR REPLACE INTO brain_journal(day, ts, text, data, sent) VALUES (?,?,?,?,"
                  "COALESCE((SELECT sent FROM brain_journal WHERE day=?),0))",
-                 (day, int(now), text, json.dumps({"honest_today": h, "honest_all": tot, "multipliers": mult}), day))
+                 (day, int(now), text, json.dumps({"honest_today": h, "honest_all": tot, "multipliers": mult, "hour_factors": hf}), day))
     return text
 
 
