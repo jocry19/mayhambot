@@ -377,7 +377,7 @@ def apply_model(conn, mint, now, m):
     m.update(score=round(r.get("score") or 0, 1), model_version=f"model-v{r.get('version')}",
              n_ultra=(tiers.get("ultra") or {}).get("wallets", 0), n_smart=(tiers.get("smart") or {}).get("wallets", 0),
              n_good=(tiers.get("good") or {}).get("wallets", 0),
-             net_sol=sum((t or {}).get("net_sol", 0) or 0 for t in tiers.values()),
+             net_sol=sum((tiers.get(k) or {}).get("net_sol", 0) or 0 for k in ("ultra", "smart")),  # same wallets as net_usd
              prediction=h1.get("p_pump"), prediction_label=f"P(+{(h1.get('threshold') or 0.5)*100:.0f}% in 1h), Note {r.get('grade', '')}",
              contributions=contrib or m["contributions"])
     m["model_p_net"], m["model_exp_net"] = h1.get("p_win_net"), h1.get("exp_net_ret")  # profit after costs
@@ -386,7 +386,7 @@ def apply_model(conn, mint, now, m):
     if r.get("wallets"):
         m["wallets"] = [dict(wallet=w["address"], tier=w.get("tier"), score=w.get("score", 0), n_tokens=None,
                              buy_usd=0.0, buy_sol=w.get("net_sol", 0), sell_usd=0.0, first_ts=w.get("first_ts"))
-                        for w in r["wallets"]]
+                        for w in r["wallets"] if (w.get("net_sol") or 0) > 0]  # net sellers are no smart buyers
     return m
 
 
@@ -612,10 +612,12 @@ def evaluate(conn, mints, cfg=settings, now=None):
             continue
         contrib = json.dumps(m["contributions"])
         sp = m.get("safety") or {}
-        last = conn.execute("SELECT ts, score, price_usd, wallets_json FROM signals WHERE mint=? ORDER BY ts DESC LIMIT 1",
-                            (mint,)).fetchone()
+        last = conn.execute("SELECT ts, score, price_usd, wallets_json, model_version FROM signals WHERE mint=? "
+                            "ORDER BY ts DESC LIMIT 1", (mint,)).fetchone()
         fresh = fresh_buyers(m, last)
-        if last and now - last["ts"] < cfg.signal_cooldown_min * 60 and m["score"] < last["score"] + 15 and not (
+        # +15 points only means "much stronger" on the same scale: a model score (P x 100) and a heuristic score are not
+        same_scale = bool(last) and (last["model_version"] or "").startswith("model-") == (m.get("model_version") or "").startswith("model-")
+        if last and now - last["ts"] < cfg.signal_cooldown_min * 60 and not (same_scale and m["score"] >= last["score"] + 15) and not (
                 fresh and now - last["ts"] >= RECALL_MIN * 60):
             f["cooldown"] += 1
             continue
@@ -722,7 +724,7 @@ def update_outcomes(conn, now=None, cfg=settings):
             if h1:
                 upd["max_ret_1h"] = rmax(h1) / pe - 1
                 if s["mcap_usd"]:
-                    upd["max_mcap_1h"] = s["mcap_usd"] * (1 + upd["max_ret_1h"])
+                    upd["max_mcap_1h"] = s["mcap_usd"] * rmax(h1) / p0  # mcap_usd was taken at the call price p0, not pe
             elif upd["ret_1h"] == DEAD_RET:
                 upd["max_ret_1h"] = DEAD_RET
             upd.update(peak_stats(after, s["ts"], pe, snaps=snapset))

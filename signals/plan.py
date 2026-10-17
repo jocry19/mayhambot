@@ -55,11 +55,19 @@ def levels(conn, now=None, days=DAYS, min_n=MIN_N):
 
 
 def _prices(conn, mint, since, until):
+    """[(ts, price)] in time order with single bad trade prints replaced (signals.backtest.confirmed, as the outcome
+    measurement does), so one stray print is never a target or stop alert. DexScreener snapshots always stand; a
+    trade print that is the newest point has no later neighbour to confirm it yet and waits for the next cycle."""
+    from signals.backtest import confirmed
     snap = conn.execute("SELECT ts, price_usd FROM token_prices WHERE mint=? AND ts>? AND ts<=? AND price_usd>0",
                         (mint, since, until)).fetchall()
     prints = conn.execute("SELECT ts, price_usd FROM trades WHERE mint=? AND ts>? AND ts<=? AND price_usd>0",
                           (mint, since, until)).fetchall()
-    return sorted((r[0], r[1]) for r in list(snap) + list(prints))
+    pts = sorted([(r[0], r[1], True) for r in snap] + [(r[0], r[1], False) for r in prints])
+    if pts and not pts[-1][2]:
+        pts = pts[:-1]
+    clean = confirmed([p for _, p, _ in pts], [tr for _, _, tr in pts])
+    return [(t, p) for (t, _, _), p in zip(pts, clean)]
 
 
 def first_cross(pts, p0, target, stop):
