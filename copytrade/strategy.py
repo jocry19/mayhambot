@@ -878,7 +878,7 @@ class Strategy:
                 continue
             bal = ex.balance(self.conn)
             open_val = sum((p["last_price_sol"] or 0) * p["tokens"] for p in self.open_positions(mode=mode))
-            self.conn.execute("INSERT OR REPLACE INTO ct_equity VALUES (?,?,?,?,?)",
+            self.conn.execute("INSERT OR REPLACE INTO ct_equity(ts, mode, balance_sol, open_value_sol, equity_sol) VALUES (?,?,?,?,?)",
                               (now, mode, bal, open_val, bal + open_val))
         self.conn.commit()
 

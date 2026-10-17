@@ -95,7 +95,7 @@ def candles(conn, s: Settings, mint: str, lo: int, hi: int, pool: str | None = N
         log.debug("candles %s failed: %s", mint[:6], e)
         return []
     if got:
-        conn.executemany("INSERT OR REPLACE INTO ct_candles VALUES (?,?,?,?,?,?,?)", [(mint, *c) for c in got])
+        conn.executemany("INSERT OR REPLACE INTO ct_candles(mint, ts, o, h, l, c, v) VALUES (?,?,?,?,?,?,?)", [(mint, *c) for c in got])
     return got
 
 
@@ -265,7 +265,8 @@ def _sell_unknown(gaps, ts: int, sells: list[int]) -> bool:
 
 
 def _store_eval(conn, kind, ref, strategy, wallet, mint, ts, gains, features, actual=None, sim_actual=None) -> None:
-    conn.execute("INSERT OR REPLACE INTO ct_evals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT OR REPLACE INTO ct_evals(kind, ref, strategy, wallet, mint, ts, grid_version, gains, actual_gain, "
+                 "sim_actual, features, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                  (kind, str(ref), strategy, wallet or "", mint, int(ts), sim.GRID_VERSION, json.dumps(gains),
                   actual, sim_actual, json.dumps(features), int(time.time())))
 

@@ -98,9 +98,9 @@ def init(conn) -> None:
     conn.executescript(SCHEMA)
     now = int(time.time())
     for name, p in BUILTIN.items():
-        conn.execute("INSERT OR IGNORE INTO ct_presets VALUES (?,?,1,?)", (name, json.dumps(asdict(p)), now))
+        conn.execute("INSERT OR IGNORE INTO ct_presets(name, data, builtin, updated_at) VALUES (?,?,1,?)", (name, json.dumps(asdict(p)), now))
     for k, v in DEFAULTS.items():
-        conn.execute("INSERT OR IGNORE INTO ct_control VALUES (?,?,?)", (k, v, now))
+        conn.execute("INSERT OR IGNORE INTO ct_control(key, value, updated_at) VALUES (?,?,?)", (k, v, now))
     conn.commit()
 
 
@@ -110,7 +110,7 @@ def get(conn, key: str) -> str:
 
 
 def set_value(conn, key: str, value) -> None:
-    conn.execute("INSERT OR REPLACE INTO ct_control VALUES (?,?,?)", (key, str(value), int(time.time())))
+    conn.execute("INSERT OR REPLACE INTO ct_control(key, value, updated_at) VALUES (?,?,?)", (key, str(value), int(time.time())))
     conn.commit()
 
 
@@ -154,7 +154,7 @@ def preset(conn, strategy: str) -> Preset:
 
 
 def save_preset(conn, name: str, p: Preset) -> None:
-    conn.execute("INSERT OR REPLACE INTO ct_presets VALUES (?,?,0,?)", (name, json.dumps(asdict(p)), int(time.time())))
+    conn.execute("INSERT OR REPLACE INTO ct_presets(name, data, builtin, updated_at) VALUES (?,?,0,?)", (name, json.dumps(asdict(p)), int(time.time())))
     conn.commit()
 
 

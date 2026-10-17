@@ -154,7 +154,9 @@ def evaluate_pending(conn, s: Settings, max_mints: int = 25, min_sol: float | No
             res = evaluate_buy(candles, b["ts"], s) if candles else None
             res = res or {"pumped": None, "candles": 0}
             conn.execute(
-                """INSERT OR REPLACE INTO ct_buy_outcomes VALUES
+                """INSERT OR REPLACE INTO ct_buy_outcomes(sig, wallet, mint, ts, sol_amount, pool, entry_price_usd,
+                   our_entry_price_usd, first_pump_gain, first_pump_min, max_gain, max_gain_min, min_before_peak,
+                   inflow_lead_min, achievable_gain, pumped, candles, evaluated_at) VALUES
                    (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (b["sig"], b["wallet"], mint, b["ts"], b["sol_amount"], pool,
                  res.get("entry_price_usd"), res.get("our_entry_price_usd"), res.get("first_pump_gain"),
@@ -198,7 +200,9 @@ def rank_wallets(conn, s: Settings) -> int:
         if med_pump_min is not None:
             hold = min(s.max_hold_min, max(5.0, 1.5 * med_pump_min + 2))
         conn.execute(
-            "INSERT OR REPLACE INTO ct_wallet_rank VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO ct_wallet_rank(address, samples, hit_rate, median_first_pump, median_pump_min, "
+            "median_lead_min, median_achievable, avg_loss, expected_value, score, take_profit, max_hold_min, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (w, n, hit_rate, med_first, med_pump_min, _median([r["inflow_lead_min"] for r in rs]),
              _median(ach), (sum(losses) / len(losses)) if losses else 0.0, ev,
              ev * confidence * (1 if n >= s.min_wallet_samples else 0.5), tp, hold, now),

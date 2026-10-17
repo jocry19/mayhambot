@@ -547,5 +547,6 @@ def test_hot_inserts_name_their_columns():
     import re as _re
     root = Path(__file__).resolve().parents[2]
     bare = _re.compile(r"INSERT(?: OR \w+)? INTO \w+ VALUES")
-    for rel in ("core/db.py", "copytrade/store.py", "safety/store.py"):
+    for rel in ("core/db.py", "copytrade/store.py", "safety/store.py", "copytrade/strategy.py", "copytrade/ranking.py",
+                "copytrade/control.py", "copytrade/learn.py"):
         assert not bare.findall((root / rel).read_text()), rel
