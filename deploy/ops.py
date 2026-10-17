@@ -392,6 +392,22 @@ def _rss_mb(pid: int) -> float | None:
         return None
 
 
+def _proc_age_s(pid: int) -> float | None:
+    """Seconds since the process started (ps etime: [[dd-]hh:]mm:ss, same on macOS and Linux)."""
+    try:
+        out = subprocess.run(["ps", "-o", "etime=", "-p", str(pid)], capture_output=True, text=True,
+                             timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not out:
+        return None
+    days, _, rest = out.rpartition("-")
+    secs = 0
+    for part in rest.split(":"):
+        secs = secs * 60 + int(part)
+    return secs + int(days or 0) * 86400
+
+
 def check_resources(procs: dict, now: float | None = None) -> dict:
     """Memory per service, a growing SQLite WAL, and services that are alive but stopped logging."""
     now = now or time.time()
@@ -707,24 +723,38 @@ def backup(args) -> int:
 
 
 def prune_backups(out: Path) -> int:
-    keep_h, keep_d = cfg("BACKUP_KEEP_HOURS", 24), cfg("BACKUP_KEEP_DAYS", 14)
-    max_bytes = cfg("BACKUP_MAX_GB", 5.0) * 1e9
+    """Everything of the last BACKUP_KEEP_HOURS (6), then one per BACKUP_KEEP_EVERY_HOURS (4) up to a day, then one
+    per day for BACKUP_KEEP_DAYS (14); the total stays under BACKUP_MAX_GB (8) and leaves BACKUP_MIN_FREE_GB (20)
+    free on the disk. Thinning the hours first keeps the daily history when the database (and every backup) grows."""
+    keep_h, every_h = cfg("BACKUP_KEEP_HOURS", 6), cfg("BACKUP_KEEP_EVERY_HOURS", 4)
+    keep_d = cfg("BACKUP_KEEP_DAYS", 14)
     now = time.time()
-    days_kept = set()
+    slots = set()
     removed = 0
     kept = []
     for f in sorted(out.glob("mayhambot-*.tar.gz"), reverse=True):   # newest first
         age = now - f.stat().st_mtime
-        day = f.name[10:18]
-        if age < keep_h * 3600 or (age < keep_d * 86400 and day not in days_kept):
-            if age >= keep_h * 3600:
-                days_kept.add(day)
+        if age < keep_h * 3600:
+            slot = None
+        elif age < 86400:
+            slot = ("h", int(age // (every_h * 3600)))
+        elif age < keep_d * 86400:
+            slot = ("d", f.name[10:18])
+        else:
+            slot = "drop"
+        if slot != "drop" and (slot is None or slot not in slots):
+            slots.add(slot)
             kept.append(f)
             continue
         f.unlink()
         removed += 1
     # the database grows: cap the total, dropping the oldest first but never the newest 3
     total = sum(f.stat().st_size for f in kept)
+    try:
+        room = shutil.disk_usage(out).free + total - cfg("BACKUP_MIN_FREE_GB", 20.0) * 1e9
+    except OSError:
+        room = float("inf")
+    max_bytes = min(cfg("BACKUP_MAX_GB", 8.0) * 1e9, room)
     for f in reversed(kept[3:]):
         if total <= max_bytes:
             break
@@ -1018,8 +1048,15 @@ def build_summary() -> str:
     lines = []
     pids = ROOT / "data" / "pids"
     if r["processes"]:
-        up = [f for f in (pids / f"{n}.pid" for n in r["processes"]) if f.exists()]
-        since = min((f.stat().st_mtime for f in up), default=None)
+        ages = []
+        for n, alive in r["processes"].items():
+            try:
+                age = _proc_age_s(int((pids / f"{n}.pid").read_text())) if alive else None
+            except (OSError, ValueError):
+                age = None
+            if age is not None:
+                ages.append(age)
+        since = now - min(ages) if ages else None   # all running since the youngest one started (a deploy resets it)
         run = sum(r["processes"].values())
         lines.append(f"{'🟢' if run == len(r['processes']) else '🟠'} Dienste {run}/{len(r['processes'])} laufen"
                      + (f", seit {(now - since) / 3600:.1f} h" if since else ""))

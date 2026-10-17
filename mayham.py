@@ -208,18 +208,23 @@ def run():
                 procs[n], due[n] = None, now + delay
     except KeyboardInterrupt:
         pass
-    for n, p in procs.items():
-        if p is None:
-            continue
+    _shutdown(procs)
+
+
+def _shutdown(procs, grace_s=10):
+    """Stop all services within one shared deadline: launchd kills the supervisor itself ~20 s after SIGTERM, and
+    waiting 15 s per service in turn left slow ones (brain mid-training) running next to the new copies."""
+    live = {n: p for n, p in procs.items() if p is not None}
+    for p in live.values():
         p.terminate()
-        (PIDS / f"{n}.pid").unlink(missing_ok=True)
-    for p in procs.values():
-        if p is None:
-            continue
+    deadline = time.time() + grace_s
+    for n, p in live.items():
         try:
-            p.wait(15)
+            p.wait(max(0.0, deadline - time.time()))
         except subprocess.TimeoutExpired:
             p.kill()
+            p.wait()
+        (PIDS / f"{n}.pid").unlink(missing_ok=True)
 
 
 def logs(name=None):

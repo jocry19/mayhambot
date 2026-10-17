@@ -160,7 +160,7 @@ Neustart höchstens alle 15 min und höchstens `MAX_RESTARTS_PER_HOUR` (3) pro S
   `copytrade/wallets.txt`.
 - `SOLANA_PRIVATE_KEY` wird **nie** mitgesichert (steht als `<entfernt>` im Backup), Keypair-Dateien auch nicht.
   Deinen Wallet-Schlüssel sicherst du selbst (Seed-Phrase).
-- Aufbewahrung: alles der letzten `BACKUP_KEEP_HOURS` (24 h), danach eins pro Tag für `BACKUP_KEEP_DAYS` (14), insgesamt höchstens `BACKUP_MAX_GB` (5 GB, die ältesten gehen zuerst, die neuesten 3 bleiben immer).
+- Aufbewahrung: alles der letzten `BACKUP_KEEP_HOURS` (6 h), dann eins pro `BACKUP_KEEP_EVERY_HOURS` (4 h) bis 24 h, danach eins pro Tag für `BACKUP_KEEP_DAYS` (14). Insgesamt höchstens `BACKUP_MAX_GB` (8 GB) und nie so viel, dass weniger als `BACKUP_MIN_FREE_GB` (20 GB) frei bleiben; dann gehen die ältesten zuerst, die neuesten 3 bleiben immer.
 - Achtung: liegt `~/Documents` in iCloud ("Schreibtisch & Dokumente"), sollte die Live-DB dort nicht synchronisiert
   werden: dann `MAYHAM_DB_PATH=~/mayhambot-data/mayhambot.db` in `.env` setzen.
 

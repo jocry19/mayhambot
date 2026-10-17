@@ -2,6 +2,7 @@
 import os
 import json
 import time
+import types
 import sqlite3
 import subprocess
 import sys
@@ -460,3 +461,33 @@ def test_run_group_kills_leftovers_after_a_normal_exit(repo, tmp_path):
     import time as _t
     _t.sleep(1.5)
     assert not marker.exists()
+
+
+def test_prune_backups_thins_hours_before_days(tmp_path, monkeypatch):
+    """A growing database must not cost the daily history: hours beyond 6 h are thinned to one per 4 h first."""
+    monkeypatch.setattr(ops, "ENV", {})
+    monkeypatch.setattr(ops.shutil, "disk_usage", lambda p: types.SimpleNamespace(free=10**12))
+    now = time.time()
+    for h in range(0, 24 * 5, 1):                                     # 5 days of hourly backups
+        t = now - h * 3600 - 60
+        f = tmp_path / ("mayhambot-" + time.strftime("%Y%m%d-%H%M%S", time.localtime(t)) + ".tar.gz")
+        f.write_bytes(b"x")
+        os.utime(f, (t, t))
+    ops.prune_backups(tmp_path)
+    ages = sorted((now - p.stat().st_mtime) / 3600 for p in tmp_path.iterdir())
+    assert sum(a < 6 for a in ages) == 6
+    assert 4 <= sum(6 <= a < 24 for a in ages) <= 5
+    days = {p.name[10:18] for p in tmp_path.iterdir() if now - p.stat().st_mtime >= 86400}
+    assert len(days) >= 4                                               # one per older day survives
+
+
+def test_prune_backups_leaves_free_disk(tmp_path, monkeypatch):
+    monkeypatch.setattr(ops, "ENV", {"BACKUP_MIN_FREE_GB": "0.000002"})   # keep 2 kB free
+    monkeypatch.setattr(ops.shutil, "disk_usage", lambda p: types.SimpleNamespace(free=0))
+    now = time.time()
+    for h in range(5):
+        f = tmp_path / f"mayhambot-20261016-{20 - h:02d}0000.tar.gz"
+        f.write_bytes(b"x" * 1000)
+        os.utime(f, (now - h * 3600, now - h * 3600))
+    ops.prune_backups(tmp_path)
+    assert len(list(tmp_path.iterdir())) == 3                           # 5 kB kept - 2 kB reserve, newest 3 stay

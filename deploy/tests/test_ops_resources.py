@@ -1,3 +1,4 @@
+import types
 import sqlite3
 import sys
 import time
@@ -121,3 +122,9 @@ def test_watchdog_leaves_restarts_to_a_running_update(tmp_path, monkeypatch):
     f.write_text(_json.dumps({}))           # round over: a service still down is the watchdog's again
     ops.watchdog(args)
     assert len(restarts) == 1
+
+
+def test_proc_age_parses_ps_etime(monkeypatch):
+    for etime, secs in (("05:02", 302), ("01:02:03", 3723), ("2-00:00:10", 172810)):
+        monkeypatch.setattr(ops.subprocess, "run", lambda *a, _e=etime, **k: types.SimpleNamespace(stdout=_e + "\n"))
+        assert ops._proc_age_s(1) == secs

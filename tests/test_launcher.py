@@ -1,3 +1,4 @@
+import subprocess
 """install-autostart against a fake launchctl that unloads the agent with a delay (the exit 5 race)."""
 import pytest
 
@@ -174,3 +175,24 @@ def test_crash_loop_backs_off_without_holding_up_others(monkeypatch, tmp_path):
     gaps = [b - a for a, b in zip(web, web[1:])]
     assert gaps[:4] == [15, 25, 45, 85]  # 10, 20, 40, 80 s back-off plus the 5 s poll
     assert len([n for n, _ in spawned if n != "web"]) == len(mayham.SERVICES) - 1  # the others never restarted
+
+
+def test_shutdown_shares_one_deadline(monkeypatch, tmp_path):
+    """launchd kills the supervisor ~20 s after SIGTERM: slow services must not each get their own 15 s."""
+    monkeypatch.setattr(mayham, "PIDS", tmp_path)
+    waits = []
+
+    class Slow:
+        def terminate(self): pass
+        def kill(self): self.killed = True
+        def wait(self, t=None):
+            if t is None:
+                return 0
+            waits.append(t)
+            clock[0] += t
+            raise subprocess.TimeoutExpired("x", t)
+    procs = {f"s{i}": Slow() for i in range(5)}
+    clock = [0.0]
+    monkeypatch.setattr(mayham.time, "time", lambda: clock[0])
+    mayham._shutdown(procs, grace_s=10)
+    assert sum(waits) <= 10 and all(p.killed for p in procs.values())
