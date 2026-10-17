@@ -105,6 +105,7 @@ MIGRATIONS = [
     ("signals", "stop_hit_ts", "INTEGER"),          # first time the price fell to the stop before the target
     ("signals", "lag_first_s", "INTEGER"),          # seconds from the first smart buy in the window to the call
     ("signals", "lag_last_s", "INTEGER"),           # seconds from the newest smart buy to the call (data + cycle lag)
+    ("signals", "kind", "TEXT"),                    # NULL/'v1' = smart buying now, 'v2' = smart money accumulating (signals.accum)
     ("signal_metrics", "ev", "REAL"),
     ("signal_metrics", "model_exp_net", "REAL"),   # model's expected 1h return after costs (for later replays)
 ]

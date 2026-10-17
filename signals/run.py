@@ -13,7 +13,7 @@ import time
 from core import db, scoring, wallets
 from core.config import settings
 from core.sources import market, wallet_source
-from signals import engine, funnel, notifier, plan
+from signals import accum, engine, funnel, notifier, plan
 
 log = logging.getLogger("mayhambot.run")
 
@@ -224,6 +224,12 @@ def cycle(conn, i):
     sigs = engine.evaluate(conn, mints)
     notifier.notify(conn, sigs)
     engine.last_funnel.update(alert_s=round(time.time() - t0, 1), fetch_s=round(t_fetch, 1))
+    try:  # v2: smart money accumulating over hours (own type, own cooldown; same alerts and outcome rating)
+        sigs2 = accum.evaluate(conn)
+        notifier.notify(conn, sigs2)
+        sigs = sigs + sigs2
+    except Exception:  # noqa: BLE001 - v2 must never stop v1
+        log.exception("signal v2 (accumulation) failed")
     hot_mints = {r["mint"] for r in hot}
     new_trades += fetch_trades(conn, [r for r in watch if r["mint"] not in hot_mints],
                                budget=max(10, settings.trades_budget_seconds - t_fetch))
@@ -260,6 +266,13 @@ def cycle(conn, i):
         if mg.get("fallbacks"):
             log.warning("model fallbacks this cycle: %d of %d coins used the heuristic (%s)", mg["fallbacks"],
                         mg["calls"], "; ".join(f"{k} x{n}" for k, n in mg["top_errors"]))
+    f2 = accum.last_funnel
+    if f2:
+        log.info("signal v2 funnel: %d coins (%d receiver wallets known) -> <%d holders %d, share %d, net <$%.0f %d, "
+                 "span %d, stale %d, price %d, thin %d, safety %d, cooldown %d, fired %d (max holders %d)",
+                 f2["coins"], f2["receivers"], accum.MIN_HOLDERS, f2["few_holders"], f2["low_share"],
+                 f2.get("min_net", 0), f2["low_net"], f2["short_span"], f2["stale"], f2["stale_price"], f2["thin_liq"],
+                 f2["safety_drop"], f2["cooldown"], f2["fired"], f2["max_holders"])
     log.info("cycle %d: %d tokens (+%d smart-active evaluated), +%d trades, +%d backfill trades, %d smart wallets, %d signals (%.0fs)",
              i, len(watch), len(mints) - len(watch), new_trades, bf, smart, len(sigs), time.time() - t0)
     return sigs

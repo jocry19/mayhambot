@@ -48,10 +48,14 @@ def _usd(x):
 def format_signal(s) -> str:
     wallets = json.loads(s["wallets_json"] or "[]")
     keys = s.keys()
+    v2 = "kind" in keys and s["kind"] == "v2"
+    head = "🟣 <b>Smart-Money-Akkumulation (v2)" if v2 else "🟢 <b>Smart Money"
     lines = [
-        f"🟢 <b>Smart Money: {html.escape(s['symbol'] or s['mint'][:6])}</b>  Score <b>{s['score']:.0f}</b>",
+        f"{head}: {html.escape(s['symbol'] or s['mint'][:6])}</b>  Score <b>{s['score']:.0f}</b>",
         f"MCap beim Signal {_usd(s['mcap_usd'])} · Preis {s['price_usd'] or 0:.8g} $",
-        f"Netto-Inflow {_usd(s['net_usd'])} ({(s['net_sol'] if 'net_sol' in keys and s['net_sol'] else 0):.1f} SOL)",
+        f"{'Gehaltene Netto-Position' if v2 else 'Netto-Inflow'} {_usd(s['net_usd'])} "
+        f"({(s['net_sol'] if 'net_sol' in keys and s['net_sol'] else 0):.1f} SOL)",
+        f"Besitzer: {s['n_ultra'] or 0} Ultra · {s['n_smart'] or 0} Smart · Qualität {s['avg_quality']:.0f}" if v2 else
         f"Wallets: {s['n_ultra'] or 0} Ultra · {s['n_smart'] or 0} Smart · {s['n_good'] or 0} Good · Qualität {s['avg_quality']:.0f}"
         if "n_ultra" in keys else f"{s['smart_buyers']} Smart Wallets · Qualität {s['avg_quality']:.0f}",
     ]
@@ -61,7 +65,8 @@ def format_signal(s) -> str:
     if "lag_last_s" in keys and s["lag_last_s"] is not None:
         lag = s["lag_last_s"]
         lines.append(f"⏱ letzter Smart-Kauf vor {lag // 60} min {lag % 60} s"
-                     + (" · Preis vor dem Kauf prüfen" if lag > 600 else ""))
+                     + (f" · erster vor {s['lag_first_s'] // 60} min" if v2 and s["lag_first_s"] else "")
+                     + (" · Preis vor dem Kauf prüfen" if lag > 600 and not v2 else ""))
     if "target_ret" in keys and s["target_ret"] is not None and s["price_usd"]:
         p0 = s["price_usd"]
         stop = s["stop_ret"] if s["stop_ret"] is not None else None
@@ -78,7 +83,9 @@ def format_signal(s) -> str:
         lines.append("Gewichtung: " + " · ".join(f"{k} {v['points']:.0f}" for k, v in c.items()))
     lines.append(f"<code>{s['mint']}</code>")
     for w in wallets[:5]:
-        lines.append(f"• {w['wallet'][:4]}…{w['wallet'][-4:]} {w.get('tier', '')} Score {w['score']:.0f} kauft {_usd(w['buy_usd'])}")
+        role = " Empfänger" if w.get("role") == "Empfänger" else ""
+        lines.append(f"• {w['wallet'][:4]}…{w['wallet'][-4:]} {w.get('tier', '')}{role} Score {w['score']:.0f} "
+                     f"{'hat gekauft' if v2 else 'kauft'} {_usd(w['buy_usd'])}")
     lines.append(f'<a href="https://dexscreener.com/solana/{s["mint"]}">DexScreener</a>')
     return "\n".join(lines)
 
@@ -93,7 +100,7 @@ def notify(conn, signals):
 
 
 def format_followup(e) -> str:
-    name = html.escape(e["symbol"] or e["mint"][:6])
+    name = html.escape(e["symbol"] or e["mint"][:6]) + (" (v2)" if e.get("signal_kind") == "v2" else "")
     call = f" (Call Nr. {e['call_no']})" if (e.get("call_no") or 1) > 1 else ""
     if e["kind"] == "target":
         head = f"🎯 <b>{name}{call}: Ziel {e['ret'] * 100:+.0f} % erreicht</b> nach {e['minutes']} min"

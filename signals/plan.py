@@ -26,15 +26,17 @@ def _q(vals, q):
     return vals[min(len(vals) - 1, max(0, int(q * len(vals))))]
 
 
-def levels(conn, now=None, days=DAYS, min_n=MIN_N):
-    """dict(target, stop, n, n_unmeasured, hit_rate (in sample), hit_rate_oos, peak_min, source) for the next alert."""
+def levels(conn, now=None, days=DAYS, min_n=MIN_N, kind="v1"):
+    """dict(target, stop, n, n_unmeasured, hit_rate (in sample), hit_rate_oos, peak_min, source) for the next alert,
+    from the past calls of the same kind (v1 burst / v2 accumulation move differently)."""
     now = now or int(time.time())
     rows = conn.execute("SELECT max_ret_1h, dd_before_peak_1h, peak_min_1h FROM signals "
-                        "WHERE ts>=? AND max_ret_1h IS NOT NULL ORDER BY ts", (now - days * 86400,)).fetchall()
-    missing = conn.execute("SELECT COUNT(*) FROM signals WHERE ts>=? AND ts<=? AND max_ret_1h IS NULL",
-                           (now - days * 86400, now - 7200)).fetchone()[0]
+                        "WHERE ts>=? AND max_ret_1h IS NOT NULL AND COALESCE(kind,'v1')=? ORDER BY ts",
+                        (now - days * 86400, kind)).fetchall()
+    missing = conn.execute("SELECT COUNT(*) FROM signals WHERE ts>=? AND ts<=? AND max_ret_1h IS NULL "
+                           "AND COALESCE(kind,'v1')=?", (now - days * 86400, now - 7200, kind)).fetchone()[0]
     mx = [r[0] for r in rows]
-    out = dict(target=DEFAULT_TARGET, stop=DEFAULT_STOP, n=len(rows), n_unmeasured=missing, hit_rate=None,
+    out = dict(kind=kind, target=DEFAULT_TARGET, stop=DEFAULT_STOP, n=len(rows), n_unmeasured=missing, hit_rate=None,
                hit_rate_oos=None, peak_min=None, source="default")
     if len(rows) >= min_n:
         out.update(target=round(min(1.5, max(0.15, _q(mx, 1 - TARGET_SHARE))), 2), source="history")
@@ -86,7 +88,7 @@ def check_levels(conn, now=None):
     dicts for the follow-up alert."""
     now = now or int(time.time())
     out = []
-    for s in conn.execute("SELECT id, ts, mint, symbol, price_usd, target_ret, stop_ret, call_no FROM signals "
+    for s in conn.execute("SELECT id, ts, mint, symbol, price_usd, target_ret, stop_ret, call_no, kind FROM signals "
                           "WHERE ts>? AND target_ret IS NOT NULL AND target_hit_ts IS NULL AND stop_hit_ts IS NULL "
                           "AND price_usd>0", (now - FOLLOW_HOURS * 3600,)).fetchall():
         hit = first_cross(_prices(conn, s["mint"], s["ts"], min(now, s["ts"] + FOLLOW_HOURS * 3600)),
@@ -98,6 +100,6 @@ def check_levels(conn, now=None):
         if now - t <= FOLLOW_FRESH_S:
             out.append(dict(kind=kind, ts=t, ret=r, minutes=round((t - s["ts"]) / 60), symbol=s["symbol"],
                             mint=s["mint"], price=s["price_usd"] * (1 + r), target=s["target_ret"],
-                            stop=s["stop_ret"], call_no=s["call_no"]))
+                            stop=s["stop_ret"], call_no=s["call_no"], signal_kind=s["kind"] or "v1"))
     conn.commit()
     return out

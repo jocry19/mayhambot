@@ -228,3 +228,17 @@ ROI, consistency (profit not from one lucky hit), scaled by confidence (number o
   - Without an active table the fixed minimums count distinct entities (clusters with at most `SIGNAL_MAX_CLUSTER_TIERED` = 3 Ultra/Smart members; bigger clusters are co-buying chains from union-find, their wallets count on their own), not wallets, and the model's own `exp_net_ret` (TP exit, after costs) must be at least `SIGNAL_MODEL_MIN_EXP_NET` (default 0), else the funnel counts `low_ev`.
   - Every run is a row in `signal_calibration`.
 - Each signal stores `ev`, `ev_n` and `reason`, a German "Dafür … Dagegen …" text. The Telegram alert shows both.
+
+## Signal v2: smart money accumulating (signals/accum.py)
+
+A second signal type next to v1. v1 = smart wallets buying a coin right now (30 min window). v2 = several distinct
+Ultra/Smart owners built a position over the last 6 h and still hold it (sold < 50 % of their buys), first buys
+spread over 20+ min, newest holder buy within 60 min, holding share >= 70 %, net position >= 3 x the v1 net minimum.
+Receiver wallets (funded by an Ultra/Smart wallet per `research_funding`, hubs/exchanges excluded) count for their
+funder's entity. Same vetoes as v1 (thin pool, wash/red flags, rug risk, unchecked coin, not a memecoin) plus a
+stale-price check. Own cooldown (6 h; re-call with 2+ more holders after 1 h). Rows go into `signals` with
+`kind='v2'` (v1 rows: `kind` NULL or 'v1'), so consumers of `signals` see both; filter `COALESCE(kind,'v1')` if a
+consumer should only take one type. Plan levels (`plan.levels(kind=)`) and outcomes (`funnel.outcomes(kind=)`) are
+per kind; the hourly report has `last_cycle_v2`, `outcomes_v2_24h/7d`, `plan_next_v2`. Env: `SIGNAL_V2` (on),
+`SIGNAL_V2_WINDOW_H`, `SIGNAL_V2_MIN_HOLDERS`, `SIGNAL_V2_HOLD_SHARE`, `SIGNAL_V2_NET_MULT`, `SIGNAL_V2_MIN_SPAN_MIN`,
+`SIGNAL_V2_FRESH_MIN`, `SIGNAL_V2_COOLDOWN_H`.

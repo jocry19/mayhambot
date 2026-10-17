@@ -613,7 +613,7 @@ def evaluate(conn, mints, cfg=settings, now=None):
         contrib = json.dumps(m["contributions"])
         sp = m.get("safety") or {}
         last = conn.execute("SELECT ts, score, price_usd, wallets_json, model_version FROM signals WHERE mint=? "
-                            "ORDER BY ts DESC LIMIT 1", (mint,)).fetchone()
+                            "AND COALESCE(kind,'v1')='v1' ORDER BY ts DESC LIMIT 1", (mint,)).fetchone()
         fresh = fresh_buyers(m, last)
         # +15 points only means "much stronger" on the same scale: a model score (P x 100) and a heuristic score are not
         same_scale = bool(last) and (last["model_version"] or "").startswith("model-") == (m.get("model_version") or "").startswith("model-")
@@ -622,7 +622,8 @@ def evaluate(conn, mints, cfg=settings, now=None):
             f["cooldown"] += 1
             continue
         f["fired"] += 1
-        call_no = 1 + conn.execute("SELECT COUNT(*) FROM signals WHERE mint=? AND ts>?", (mint, now - 86400)).fetchone()[0]
+        call_no = 1 + conn.execute("SELECT COUNT(*) FROM signals WHERE mint=? AND COALESCE(kind,'v1')='v1' AND ts>?",
+                                   (mint, now - 86400)).fetchone()[0]
         reason = explain(m, cfg)
         if last and call_no > 1:
             p_now, p_last = (tok["price_usd"] if tok else None), last["price_usd"]

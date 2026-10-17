@@ -80,7 +80,8 @@ def funnel(conn, hours=10, cfg=settings, now=None):
            FROM trades t LEFT JOIN wallets w ON w.address=t.wallet WHERE t.ts>=?""", (since,)).fetchone()
     out.update(trades=tr["n"], trade_coins=tr["coins"], trade_wallets=tr["wallets"], smart_trades=tr["smart_trades"] or 0,
                smart_trade_wallets=tr["smart_wallets"] or 0, smart_trade_coins=tr["smart_coins"] or 0)
-    out["signals"] = conn.execute("SELECT COUNT(*) FROM signals WHERE ts>=?", (since,)).fetchone()[0]
+    out["signals"] = conn.execute("SELECT COUNT(*) FROM signals WHERE ts>=? AND COALESCE(kind,'v1')='v1'", (since,)).fetchone()[0]
+    out["signals_v2"] = conn.execute("SELECT COUNT(*) FROM signals WHERE ts>=? AND kind='v2'", (since,)).fetchone()[0]
     out["tiers"] = {t: n for t, n in conn.execute("SELECT tier, COUNT(*) FROM wallets WHERE tier IS NOT NULL GROUP BY tier")}
     return out
 
@@ -114,15 +115,15 @@ def peak_after_call(rows):
     return out
 
 
-def outcomes(conn, hours=168, cost=COST, now=None, bands=(0, 20, 30, 40, 50, 60, 101)):
+def outcomes(conn, hours=168, cost=COST, now=None, bands=(0, 20, 30, 40, 50, 60, 101), kind="v1"):
     """Signal results by score band after costs: hit rate (+50% max within 1h), median max_ret_1h, mean ret_1h
-    minus costs. This is what the score bands get calibrated on."""
+    minus costs. This is what the score bands get calibrated on. One kind at a time (v1 burst, v2 accumulation)."""
     now = now or int(time.time())
     rows = conn.execute("SELECT score, ret_1h, max_ret_1h, max_ret_15m, max_ret_4h, peak_min_1h, dd_before_peak_1h, "
-                        "target_hit_ts, stop_hit_ts, lag_first_s, lag_last_s FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NOT NULL",
-                        (now - int(hours * 3600), now - 3900)).fetchall()
-    missing = conn.execute("SELECT COUNT(*) FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NULL",
-                           (now - int(hours * 3600), now - 3900)).fetchone()[0]
+                        "target_hit_ts, stop_hit_ts, lag_first_s, lag_last_s FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NOT NULL "
+                        "AND COALESCE(kind,'v1')=?", (now - int(hours * 3600), now - 3900, kind)).fetchall()
+    missing = conn.execute("SELECT COUNT(*) FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NULL AND COALESCE(kind,'v1')=?",
+                           (now - int(hours * 3600), now - 3900, kind)).fetchone()[0]
     out = []
     groups = [(f"{lo}-{hi - 1 if hi > 100 else hi}", [r for r in rows if lo <= (r["score"] or 0) < hi])
               for lo, hi in zip(bands, bands[1:])]
@@ -177,16 +178,18 @@ def write_report(conn, path=None, now=None):
             cal = dict(ts=r[0], active=bool(r[1]), n_all=r[2], oos=json.loads(r[3] or "{}"), notes=r[4])
     except Exception:  # noqa: BLE001 - no calibration yet
         pass
-    from signals import engine
-    rep = dict(ts=now, last_cycle=dict(engine.last_funnel), funnel_4h=funnel(conn, 4, now=now), funnel_24h=funnel(conn, 24, now=now),
+    from signals import accum, engine
+    rep = dict(ts=now, last_cycle=dict(engine.last_funnel), last_cycle_v2=dict(accum.last_funnel),
+               outcomes_v2_24h=outcomes(conn, 24, now=now, kind="v2"), outcomes_v2_7d=outcomes(conn, 168, now=now, kind="v2"), funnel_4h=funnel(conn, 4, now=now), funnel_24h=funnel(conn, 24, now=now),
                outcomes_24h=outcomes(conn, 24, now=now), outcomes_7d=outcomes(conn, 168, now=now), calibration=cal,
                recent_signals=[dict(r, tradable_strict=(r["liquidity_usd"] or 0) >= TRADABLE_LIQ_USD)
                                for r in conn.execute(
                    "SELECT ts, symbol, score, ev, ev_n, smart_buyers, net_usd, liquidity_usd, mcap_usd, ret_1h, "
                    "max_ret_15m, max_ret_1h, max_ret_4h, peak_min_1h, dd_before_peak_1h, call_no, target_ret, stop_ret, lag_last_s, "
-                   "target_hit_ts, stop_hit_ts, outcome_flag, reason FROM signals ORDER BY ts DESC LIMIT 20")])
+                   "target_hit_ts, stop_hit_ts, outcome_flag, reason, COALESCE(kind,'v1') AS kind FROM signals ORDER BY ts DESC LIMIT 20")])
     from signals import plan
     rep["plan_next"] = plan.levels(conn, now)
+    rep["plan_next_v2"] = plan.levels(conn, now, kind="v2")
     rs = rep["recent_signals"]
     rep["tradable_strict_share"] = round(sum(r["tradable_strict"] for r in rs) / len(rs), 3) if rs else None
     tmp = path.with_suffix(".tmp")
