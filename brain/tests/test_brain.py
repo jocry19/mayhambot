@@ -37,8 +37,8 @@ def conn(s):
     return c
 
 
-def snap(price=1e-6, liq=50_000, buys=20, sells=10, mint=MINT, symbol="TST"):
-    return PairSnapshot(mint, symbol, "pair", "raydium", price * 150, price, liq, 200_000, 1000, 5000, buys, sells,
+def snap(price=1e-6, liq=50_000, buys=20, sells=10, mint=MINT, symbol="TST", dex="raydium", fdv=200_000):
+    return PairSnapshot(mint, symbol, "pair", dex, price * 150, price, liq, fdv, 1000, 5000, buys, sells,
                         100, 2.0, 5.0, int((time.time() - 3 * 3600) * 1000), time.time())
 
 
@@ -269,6 +269,67 @@ def test_no_rebuy_of_a_coin_just_traded(conn, s):
     o = conn.execute("SELECT decision, note FROM brain_opps WHERE ref='b'").fetchone()
     assert o["decision"] == "skip" and "6 h schon gehandelt" in o["note"]
     assert conn.execute("SELECT COUNT(*) FROM brain_positions").fetchone()[0] == 1
+
+
+def test_bonding_curve_coins_and_late_pairs_are_tradable(conn, s):
+    set_tier(conn, WHALE, "ultra")
+    mk = Market()
+    clock = [time.time()]
+    t = make_trader(conn, s, trained(), mk, clock=lambda: clock[0])
+    t.scan()
+    add_whale_buy(conn, "n", ts=clock[0])
+    t.scan()  # no DexScreener pair yet: the opportunity waits instead of being passed as "kein Marktpreis"
+    assert conn.execute("SELECT COUNT(*) FROM brain_opps").fetchone()[0] == 0
+    mk.snaps[MINT] = snap(liq=0, dex="pumpfun", fdv=20_000)  # still on the pump.fun curve: no pool liquidity
+    clock[0] += 5
+    assert t.scan() == 1
+    o = conn.execute("SELECT features FROM brain_opps").fetchone()
+    assert json.loads(o["features"])["liq"] == "curve"
+    # a curve that is still tiny is passed; a coin that never gets a pair is decided after the retry window
+    m2 = "Mint2222222222222222222222222222222222222222"
+    m3 = "Mint3333333333333333333333333333333333333333"
+    w2, w3 = "W2" + "2" * 41, "W3" + "3" * 41
+    set_tier(conn, w2, "ultra")
+    set_tier(conn, w3, "ultra")
+    mk.snaps[m2] = snap(liq=0, dex="pumpfun", fdv=5_000, mint=m2)
+    add_whale_buy(conn, "small", wallet=w2, mint=m2, ts=clock[0])
+    add_whale_buy(conn, "nopair", wallet=w3, mint=m3, ts=clock[0])
+    t.scan()
+    assert "Bonding Curve noch zu klein" in conn.execute("SELECT note FROM brain_opps WHERE ref='small'").fetchone()[0]
+    assert conn.execute("SELECT 1 FROM brain_opps WHERE ref='nopair'").fetchone() is None
+    clock[0] += 31
+    t.scan()
+    assert "kein Marktpreis" in conn.execute("SELECT note FROM brain_opps WHERE ref='nopair'").fetchone()[0]
+
+
+def test_trail_waits_a_minute_and_compares_market_prices(conn, s):
+    set_tier(conn, WHALE, "ultra")
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    clock = [time.time()]
+    t = make_trader(conn, s, trained(), mk, clock=lambda: clock[0])
+    t.scan()
+    add_whale_buy(conn, "n", ts=clock[0])
+    assert t.scan() == 1
+    p = conn.execute("SELECT * FROM brain_positions").fetchone()
+    conn.execute("UPDATE brain_positions SET plan='pump', take_profit=0.4, stop_loss=0.2, trail_activate=0.15, "
+                 "trail_drawdown=0.08")
+    mk.snaps[MINT] = snap(price=1.2e-6)  # +20 % on the market two seconds in: a spike, not a run to trail yet
+    clock[0] += 2
+    t.manage()
+    mk.snaps[MINT] = snap(price=1.08e-6)
+    clock[0] += 2
+    t.manage()
+    assert conn.execute("SELECT status FROM brain_positions").fetchone()[0] == "open"
+    # after a minute the trail arms on the market price at the buy (1e-6), not on the fill with slippage
+    mk.snaps[MINT] = snap(price=1.2e-6)
+    clock[0] += 70
+    t.manage()
+    mk.snaps[MINT] = snap(price=1.09e-6)
+    clock[0] += 5
+    t.manage()
+    p = conn.execute("SELECT * FROM brain_positions").fetchone()
+    assert p["status"] == "closed" and p["exit_reason"] == "trail"
 
 
 def test_signal_and_launch_are_opportunities(conn, s):

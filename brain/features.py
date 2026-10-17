@@ -165,6 +165,17 @@ def _crowd(conn, mint: str, wallet: str, now: float) -> tuple[int, bool]:
 
 
 # ---------------------------------------------------------------------- per kind
+def on_curve(snap) -> bool:
+    """Still on the pump.fun bonding curve: DexScreener shows no pool liquidity, the curve is the market."""
+    return snap is not None and snap.dex_id == "pumpfun" and not snap.liquidity_usd
+
+
+def liq_bucket(snap) -> str:
+    from copytrade import learn
+
+    return "curve" if on_curve(snap) else learn.bucket_liq(snap.liquidity_usd)
+
+
 FLIP_S = 120
 FLIP_LOOKBACK_S = 7 * 86400
 
@@ -218,7 +229,7 @@ def whale(conn, sw, snap, now: float) -> tuple[dict, dict]:
         f["launchbot"] = "ja" if kb / nb >= 0.6 else "nein"
     if snap is not None:
         f["mcap"] = learn.bucket_mcap(snap.fdv)
-        f["liq"] = learn.bucket_liq(snap.liquidity_usd)
+        f["liq"] = liq_bucket(snap)
     f.update(market_feats(conn, mint, snap, now, "whale"))
     ent = ct_store.entity(conn, w)
     raw = {"wallet": w, "tier": info.get("tier") or "none", "cluster": ent if ent != w else None,
@@ -241,7 +252,7 @@ def signal(conn, sig, snap, now: float) -> tuple[dict, dict]:
     run = (snap.price_usd / sig["price_usd"] - 1) if snap and snap.price_usd and sig["price_usd"] else None
     f["run"] = b(run, (0, 0.05, 0.15), ("<0%", "0-5%", "5-15%", ">15%"))
     if snap is not None:
-        f["liq"] = learn.bucket_liq(snap.liquidity_usd)
+        f["liq"] = liq_bucket(snap)
     f.update(market_feats(conn, sig["mint"], snap, now, "signal"))
     raw = {"score": sig["score"], "buyers": sig["smart_buyers"], "net_usd": sig["net_usd"], "ev": ev, "call": call,
            "delay_s": round(delay, 1), "run": run,

@@ -19,6 +19,8 @@ log = logging.getLogger("brain.trader")
 
 DEDUP_S = 6 * 3600  # one opportunity per (whale entity or kind, coin) in this window: repeat buys are no new idea
 REENTRY_S = 6 * 3600  # no second brain position in a coin within this window: a coin we just lost on is no new idea
+TRAIL_MIN_HOLD_S = 60  # the trail arms after a minute: the first quotes after a buy are noise, not a run
+PRICE_RETRY_S = 30  # a coin without a DexScreener pair yet gets this long to show one before it is decided
 FLIP_MAX = 0.6  # wallets that sell this share of their buys within FLIP_S are gone before a copy can follow
 NO_MARKET_S = 15 * 60  # an open position without any price this long is closed as "kein Markt"
 RUG_LIQ_DROP = 0.8
@@ -47,6 +49,7 @@ class Trader:
         self.on_close = on_close or (lambda pos: None)
         self.rng = rng or random.Random()
         self.clock = clock
+        self.pending: dict[tuple[str, str], tuple] = {}  # (kind, ref) -> (row, entity, first seen): waiting for a pair
 
     # ------------------------------------------------------------------ wiring
     def snapshots(self, mints) -> dict:
@@ -125,18 +128,19 @@ class Trader:
     def scan(self) -> int:
         """Decide every new opportunity. Returns the number of positions opened."""
         cands = self.candidates()
-        if not cands:
+        if not cands and not self.pending:
             return 0
         now = self.clock()
-        fresh = []
+        fresh = [(kind, ref, row, ent) for (kind, ref), (row, ent, _) in self.pending.items()]
         for kind, ref, row in cands:
             ent = kind
             if kind == "whale":
                 from copytrade import store as ct_store
 
                 ent = ct_store.entity(self.conn, row["wallet"])
-            if not self._seen(kind, ref, row["mint"], ent, now):
+            if (kind, ref) not in self.pending and not self._seen(kind, ref, row["mint"], ent, now):
                 fresh.append((kind, ref, row, ent))
+                self.pending[(kind, ref)] = (row, ent, now)
         if not fresh:
             return 0
         try:
@@ -146,6 +150,10 @@ class Trader:
             snaps = {}
         opened = 0
         for kind, ref, row, ent in fresh:
+            snap = snaps.get(row["mint"])
+            if (snap is None or not snap.price_sol) and now - self.pending[(kind, ref)][2] < PRICE_RETRY_S:
+                continue  # brand-new coins often show up at DexScreener a few seconds after the first buys
+            self.pending.pop((kind, ref), None)
             try:
                 opened += bool(self.decide(kind, ref, row, ent, snaps.get(row["mint"])))
             except Exception as e:  # one bad row must not stop the others
@@ -187,7 +195,10 @@ class Trader:
         """Hard limits the model never overrides: a market to trade, the rug check, risk limits."""
         if snap is None or not snap.price_sol:
             return "kein Marktpreis"
-        if snap.liquidity_usd < self.s.min_liquidity_usd:
+        if features.on_curve(snap):
+            if snap.fdv < self.s.min_curve_mcap_usd:
+                return f"Bonding Curve noch zu klein (Market Cap ${snap.fdv:,.0f})"
+        elif snap.liquidity_usd < self.s.min_liquidity_usd:
             return f"Liquidität zu klein (${snap.liquidity_usd:,.0f})"
         c = self.conn
         if c.execute("SELECT 1 FROM brain_positions WHERE mint=? AND status='open'", (mint,)).fetchone():
@@ -254,7 +265,7 @@ class Trader:
              fill.price_sol, fill.sol, fill.tokens, fill.decimals, p.name, p.take_profit, p.stop_loss,
              p.trail_activate, p.trail_drawdown, p.max_hold_min, p.inflow_exit, int(kind == "whale"),
              snap.liquidity_usd, snap.price_sol, snap.price_sol, now, snap.buys_m5, note,
-             json.dumps({"fill_source": fill.source, "impact": fill.price_impact})))
+             json.dumps({"fill_source": fill.source, "impact": fill.price_impact, "ref_price": snap.price_sol})))
         pid = cur.lastrowid
         store.adjust_balance(c, -fill.sol, self.s.start_balance_sol)
         c.execute("UPDATE brain_opps SET position_id=? WHERE id=?", (pid, opp_id))
@@ -290,12 +301,15 @@ class Trader:
         held_min = (now - p["opened_at"]) / 60
         if not snap or not snap.price_sol:
             return "no_market" if now - (p["last_seen"] or p["opened_at"]) > NO_MARKET_S else None
-        entry = p["entry_price_sol"]
+        # targets, stops and the trail compare like with like: the market price now against the market price at the
+        # buy; the fill price carries slippage and comes from another source, so mixing them fires exits on noise
+        entry = _ref_price(p)
         px = snap.price_sol
         high = max(p["high_price_sol"] or entry, px)
         if p["entry_liq_usd"] and snap.liquidity_usd < (1 - RUG_LIQ_DROP) * p["entry_liq_usd"]:
             return "rug"
-        trail_on = p["trail_activate"] and high / entry - 1 >= p["trail_activate"]
+        trail_on = (p["trail_activate"] and now - p["opened_at"] >= TRAIL_MIN_HOLD_S
+                    and high / entry - 1 >= p["trail_activate"])
         stop_px = max(entry * (1 - p["stop_loss"]), high * (1 - p["trail_drawdown"]) if trail_on else 0)
         if px <= stop_px:
             return "trail" if trail_on and stop_px > entry * (1 - p["stop_loss"]) else "stop"
@@ -323,6 +337,8 @@ class Trader:
             return False
         if not fill or not fill.ok:
             return False
+        if getattr(fill, "source", "") == "no_route" and features.on_curve(snap):
+            return False  # a coin on the bonding curve has a market; a missing quote is a hiccup, retry next round
         now = int(self.clock())
         proceeds = fill.sol
         pnl = proceeds - p["size_sol"]
@@ -352,3 +368,11 @@ class Trader:
         ts = int(self.clock()) // 60 * 60
         c.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (ts, bal, val, bal + val))
         return {"balance_sol": bal, "open_value_sol": val, "equity_sol": bal + val}
+
+
+def _ref_price(p) -> float:
+    try:
+        ref = json.loads(p["meta"] or "{}").get("ref_price")
+    except (TypeError, ValueError):
+        ref = None
+    return float(ref) if ref else p["entry_price_sol"]

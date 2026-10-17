@@ -17,14 +17,18 @@ Jede Gelegenheit wird einzeln entschieden, mit allem, was der Bot in dem Moment 
 Für sechs Ausstiegspläne (`plans.py`: Schnell rein und raus, Erster Pump, Pump mitnehmen, Mittlerer Lauf, Laufen
 lassen, Mondschuss) schätzt das Modell den **Netto-Gewinn nach Kosten** und wie sicher es sich ist. Der Ausstieg ist
 Teil der Entscheidung: Ziel, Stop, Trailing, Haltezeit, „Ansturm vorbei“, und bei Wal-Kopien „Wal hat verkauft“.
+Ziel, Stop und Trailing messen den Marktpreis gegen den Marktpreis beim Kauf (nicht gegen den Fill mit Slippage),
+das Trailing scharf erst nach einer Minute.
 
 - **Überzeugt** (Erwartung > 0 und zu ≥ `BRAIN_MIN_CONF` = 75 % sicher): Kauf, Größe 0,1 SOL bei 75 % bis 0,5 SOL
   bei 95 % Sicherheit.
 - **Erkunden** (nicht überzeugt, aber eine Ziehung aus dem Posterior sagt „könnte sich lohnen“, Thompson Sampling):
-  0,1 SOL, höchstens `BRAIN_EXPLORE_PER_DAY` (6) am Tag.
+  0,1 SOL, höchstens `BRAIN_EXPLORE_PER_DAY` (30) am Tag.
 - Sonst **auslassen**. Auch ausgelassene Gelegenheiten werden später nachgespielt und gelernt.
 
-Harte Grenzen, die das Modell nie übergeht: Marktpreis vorhanden, Liquidität ≥ `BRAIN_MIN_LIQ_USD`, Rug-Prüfung
+Harte Grenzen, die das Modell nie übergeht: Marktpreis vorhanden (ein Coin ohne DexScreener-Paar bekommt 30 s),
+Liquidität ≥ `BRAIN_MIN_LIQ_USD` bzw. auf der pump.fun-Bonding-Curve (dort meldet DexScreener $0 Liquidität)
+Market Cap ≥ `BRAIN_MIN_CURVE_MCAP_USD` (8000), Rug-Prüfung
 (`safety.assess` quick, ohne Ergebnis kein Kauf), eine Position je Coin, `BRAIN_MAX_OPEN`, Tagesverlust
 `BRAIN_MAX_DAILY_LOSS_SOL`, Guthaben. Dazu bei Wal-Käufen: kein Kopieren, wenn der Wal schon wieder verkauft hat
 oder meist binnen 2 min wieder raus ist (≥ 60 % seiner letzten Käufe, mindestens 5), und kein zweiter Kauf in einem

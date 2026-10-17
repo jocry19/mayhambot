@@ -29,7 +29,7 @@ class Settings:
     max_open: int = field(default_factory=lambda: int(_f("BRAIN_MAX_OPEN", 5)))
     max_daily_loss_sol: float = field(default_factory=lambda: _f("BRAIN_MAX_DAILY_LOSS_SOL", 1.0))
     # trades whose expected value is still negative but uncertain enough to be worth a look (smallest size)
-    explore_per_day: int = field(default_factory=lambda: int(_f("BRAIN_EXPLORE_PER_DAY", 6)))
+    explore_per_day: int = field(default_factory=lambda: int(_f("BRAIN_EXPLORE_PER_DAY", 30)))
     min_edge: float = field(default_factory=lambda: _f("BRAIN_MIN_EDGE", 0.0))
     min_conf: float = field(default_factory=lambda: _f("BRAIN_MIN_CONF", 0.75))  # P(mean > 0) for a real buy
     # round-trip costs on top of the simulator's 3 %: copy 5.5 % in total, sniper launches 9 %
@@ -42,6 +42,8 @@ class Settings:
     max_signal_age_s: float = field(default_factory=lambda: _f("BRAIN_MAX_SIGNAL_AGE_S", 180))
     max_launch_age_s: float = field(default_factory=lambda: _f("BRAIN_MAX_LAUNCH_AGE_S", 60))
     min_liquidity_usd: float = field(default_factory=lambda: _f("BRAIN_MIN_LIQ_USD", 3000))
+    # pump.fun bonding curve: DexScreener reports no pool liquidity there, the curve itself is the market
+    min_curve_mcap_usd: float = field(default_factory=lambda: _f("BRAIN_MIN_CURVE_MCAP_USD", 8000))
     # loop timing
     scan_every_s: float = field(default_factory=lambda: _f("BRAIN_SCAN_SECONDS", 2))
     price_every_s: float = field(default_factory=lambda: _f("BRAIN_PRICE_SECONDS", 5))
