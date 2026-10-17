@@ -31,10 +31,28 @@ def test_frozen_price_of_a_dead_coin_is_not_held_at_entry(tmp_path):
     db.insert_trades(conn, [
         Trade("a", "W", "DEAD", "buy", 1000, 100.0, 1.0, 100.0, 1.0, "t"),
         Trade("b", "W", "LIVE", "buy", 1000, 100.0, 1.0, 100.0, 1.0, "t"),
-        Trade("c", "X", "LIVE", "buy", 1000 + 2 * day, 100.0, 1.0, 150.0, 1.5, "t"),
+        Trade("c", "X", "LIVE", "buy", 1000 + 2 * day, 100.0, 1.5, 150.0, 1.5, "t"),
     ])
     conn.execute("INSERT INTO tokens(mint, price_usd, liquidity_usd, last_updated) VALUES ('DEAD', 1.0, 50000, 1000)")
     conn.commit()
     pos = {(p["wallet"], p["mint"]): p for p in scoring.compute_positions(conn)}
     assert pos[("W", "DEAD")]["unrealized_pnl_usd"] == -100.0  # frozen at entry for two days: worth 0
     assert pos[("W", "LIVE")]["unrealized_pnl_usd"] == 50.0  # still traded: last print 1.5
+
+
+def test_history_trades_valued_at_one_sol_rate(tmp_path):
+    """A wallet-history trade stored with USD at another day's SOL price is revalued at the common rate, so its
+    entry price, peak multiple and PnL are in the same money as the pool trades."""
+    from core import db, scoring
+    from core.models import Trade
+    conn = db.connect(str(tmp_path / "d.db"))
+    db.insert_trades(conn, [
+        Trade("h", "W", "M", "buy", 1000, 100.0, 1.0, 200.0, 2.0, "helius"),   # fetched when SOL was quoted at $200
+        Trade("p1", "X", "M", "buy", 1100, 100.0, 1.0, 150.0, 1.5, "geckoterminal"),
+        Trade("p2", "Y", "M", "buy", 1200, 100.0, 2.0, 300.0, 3.0, "geckoterminal"),
+        Trade("p3", "Z", "N", "buy", 1200, 100.0, 1.0, 150.0, 1.5, "geckoterminal"),
+    ])
+    assert scoring.sol_rate(conn) == 150.0
+    pos = {(p["wallet"], p["mint"]): p for p in scoring.compute_positions(conn)}
+    assert pos[("W", "M")]["first_buy_price"] == 1.5 and pos[("W", "M")]["buy_usd"] == 150.0
+    assert pos[("W", "M")]["peak_multiple"] == 2.0   # 3.0 / 1.5, not 3.0 / 2.0

@@ -56,7 +56,7 @@ def add(conn, address, role, note=""):
     if role not in ROLES:
         raise ValueError(f"role must be one of {', '.join(ROLES)}")
     store.ensure_schema(conn)
-    conn.execute("INSERT OR REPLACE INTO safety_bad_wallets VALUES (?,?,?,?)", (address, role, note, int(time.time())))
+    conn.execute("INSERT OR REPLACE INTO safety_bad_wallets(address, role, note, added_at) VALUES (?,?,?,?)", (address, role, note, int(time.time())))
     conn.commit()
 
 

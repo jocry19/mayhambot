@@ -52,11 +52,29 @@ def tier_for(score, n_tokens, is_bot=False, manual=False, cfg=settings):
     return None
 
 
-def _price_index(conn):
+def sol_rate(conn) -> float:
+    """One SOL/USD rate for every trade with a SOL amount, as research/data.load uses: wallet-history trades carry USD
+    at the SOL price of the day they were fetched, pool-feed trades USD of their own day, and mixing both shifted
+    entry prices, peak multiples (the 2x 'early' line) and PnL by the SOL move in between."""
+    ratios = [r[0] / r[1] for r in conn.execute(
+        "SELECT usd_amount, sol_amount FROM trades WHERE sol_amount > 0 AND usd_amount > 0 ORDER BY ts DESC LIMIT 5000")]
+    return median(ratios) if ratios else 0.0
+
+
+def _usd(sol, tokens, usd, price, rate):
+    """(usd_amount, price_usd) of one trade on the common SOL rate (unchanged without a SOL amount)."""
+    if rate and sol and sol > 0:
+        usd = sol * rate
+        price = usd / tokens if tokens else price
+    return usd, price
+
+
+def _price_index(conn, rate=None):
     """mint -> (sorted ts list, suffix max of price) built from trades + DexScreener snapshots."""
+    rate = sol_rate(conn) if rate is None else rate
     series = defaultdict(list)
-    for r in conn.execute("SELECT mint, ts, price_usd FROM trades WHERE price_usd > 0"):
-        series[r[0]].append((r[1], r[2]))
+    for r in conn.execute("SELECT mint, ts, price_usd, sol_amount, token_amount FROM trades WHERE price_usd > 0"):
+        series[r[0]].append((r[1], _usd(r[3], r[4], None, r[2], rate)[1]))
     for r in conn.execute("SELECT mint, ts, price_usd FROM token_prices WHERE price_usd > 0"):
         series[r[0]].append((r[1], r[2]))
     idx = {}
@@ -92,31 +110,34 @@ def compute_positions(conn, now=None):
     now = now or conn.execute("SELECT MAX(ts) FROM trades").fetchone()[0] or time.time()
     cur = {r["mint"]: (r["price_usd"] or 0, r["liquidity_usd"] or 0, r["last_updated"] or 0)
            for r in conn.execute("SELECT mint, price_usd, liquidity_usd, last_updated FROM tokens")}
-    pidx = _price_index(conn)
+    rate = sol_rate(conn)
+    pidx = _price_index(conn, rate)
     agg = {}
     last_price = {}
     # buy and sell of the same token by the same wallet in one transaction: an atomic round trip
     # (MEV / volume bot), not a position anybody held
     atomic = {(r[0], r[1], r[2]) for r in conn.execute(
         "SELECT sig, wallet, mint FROM trades GROUP BY sig, wallet, mint HAVING COUNT(DISTINCT side) > 1")}
-    for r in conn.execute("SELECT sig, wallet, mint, side, ts, token_amount, usd_amount, price_usd FROM trades ORDER BY ts"):
+    for r in conn.execute("SELECT sig, wallet, mint, side, ts, token_amount, sol_amount, usd_amount, price_usd FROM trades "
+                          "ORDER BY ts"):
         if atomic and (r["sig"], r["wallet"], r["mint"]) in atomic:
             continue
+        usd, px = _usd(r["sol_amount"], r["token_amount"], r["usd_amount"], r["price_usd"], rate)
         k = (r["wallet"], r["mint"])
         a = agg.setdefault(k, dict(buy_usd=0.0, sell_usd=0.0, buy_tokens=0.0, sell_tokens=0.0,
                                    first_buy_ts=None, first_buy_price=None, trades=0, last_ts=0))
         a["trades"] += 1
         a["last_ts"] = r["ts"]
         if r["side"] == "buy":
-            a["buy_usd"] += r["usd_amount"] or 0
+            a["buy_usd"] += usd or 0
             a["buy_tokens"] += r["token_amount"] or 0
             if a["first_buy_ts"] is None:
-                a["first_buy_ts"], a["first_buy_price"] = r["ts"], r["price_usd"]
+                a["first_buy_ts"], a["first_buy_price"] = r["ts"], px
         else:
-            a["sell_usd"] += r["usd_amount"] or 0
+            a["sell_usd"] += usd or 0
             a["sell_tokens"] += r["token_amount"] or 0
-        if r["price_usd"]:
-            last_price[r["mint"]] = (r["price_usd"], r["ts"])
+        if px:
+            last_price[r["mint"]] = (px, r["ts"])
     out = []
     for (wallet, mint), a in agg.items():
         if a["buy_tokens"] <= 0:
@@ -228,7 +249,8 @@ def _rescore(conn, cfg) -> int:
     positions = compute_positions(conn)
     conn.execute("DELETE FROM wallet_positions")
     conn.executemany(
-        "INSERT INTO wallet_positions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO wallet_positions(wallet, mint, buy_usd, sell_usd, buy_tokens, sell_tokens, realized_pnl_usd, "
+        "unrealized_pnl_usd, roi, first_buy_ts, first_buy_price, peak_multiple, trades) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [(p["wallet"], p["mint"], p["buy_usd"], p["sell_usd"], p["buy_tokens"], p["sell_tokens"],
           p["realized_pnl_usd"], p["unrealized_pnl_usd"], p["roi"], p["first_buy_ts"], p["first_buy_price"],
           p["peak_multiple"], p["trades"]) for p in positions])
