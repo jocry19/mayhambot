@@ -414,8 +414,9 @@ def _rows(conn, strategy: str, wallet: str | list[str] | None = None,
 
 
 def _means(rows: Sequence[dict], n_var: int, extra_cost: float = 0.0) -> list[float]:
-    tot = [0.0] * n_var
-    wsum = sum(r["w"] for r in rows) or 1
+    # per variant over the rows it could simulate: a missing simulation (no candles after a long delay) counted as a
+    # 0 % trade, so when the average was negative the variants with the most gaps looked best
+    tot, wsum = [0.0] * n_var, [0.0] * n_var
     for r in rows:
         g = r["gains"]
         if len(g) != n_var:
@@ -423,7 +424,8 @@ def _means(rows: Sequence[dict], n_var: int, extra_cost: float = 0.0) -> list[fl
         for i, x in enumerate(g):
             if x is not None:
                 tot[i] += r["w"] * max(GAIN_CLIP[0], min(GAIN_CLIP[1], x))
-    return [t / wsum - extra_cost for t in tot]
+                wsum[i] += r["w"]
+    return [t / (ws or 1) - extra_cost for t, ws in zip(tot, wsum)]
 
 
 def extra_cost(conn, strategy: str) -> float:
@@ -541,11 +543,13 @@ def robustness(test: Sequence[dict], best: int, base: int, variants: Sequence[si
     of its grid neighbours (one step away in one parameter) must be in the black too (no lone spike)."""
     import random
 
-    rows = [r for r in test if len(r["gains"]) == len(variants)]
+    # only entries both variants could simulate: a missing one is no 0 % trade
+    rows = [r for r in test if len(r["gains"]) == len(variants)
+            and r["gains"][best] is not None and r["gains"][base] is not None]
     if not rows:
         return {"p_win": 0.0, "neighbours": None, "runs": 0}
-    gb = [max(GAIN_CLIP[0], min(GAIN_CLIP[1], r["gains"][best] if r["gains"][best] is not None else 0)) for r in rows]
-    g0 = [max(GAIN_CLIP[0], min(GAIN_CLIP[1], r["gains"][base] if r["gains"][base] is not None else 0)) for r in rows]
+    gb = [max(GAIN_CLIP[0], min(GAIN_CLIP[1], r["gains"][best])) for r in rows]
+    g0 = [max(GAIN_CLIP[0], min(GAIN_CLIP[1], r["gains"][base])) for r in rows]
     w = [r["w"] for r in rows]
     rng = random.Random(len(rows) * 7919 + best)  # deterministic: the same data gives the same verdict
     n, wins = len(rows), 0
@@ -687,6 +691,13 @@ def landing_drift(conn, land_s: int = LAND_S) -> dict:
                          "LIMIT 1", (mint, int(t))).fetchone()
         return (r[0], t - r[1]) if r else (None, None)
 
+    def px_after(mint, t, land):
+        # the first real print inside the landing window: without one there is nothing to measure (the last print
+        # before t + land was the same print as at t, a 0 that pulled the mean down to the 0.75 % floor)
+        r = conn.execute("SELECT price_usd FROM trades WHERE mint=? AND ts>? AND ts<=? AND price_usd>0 ORDER BY ts "
+                         "DESC LIMIT 1", (mint, int(t), int(t + land))).fetchone()
+        return r[0] if r else None
+
     buys, sells = [], []
     try:
         rows = conn.execute("SELECT mint, opened_at, closed_at FROM ct_positions WHERE mode IN ('paper','explore') "
@@ -696,7 +707,7 @@ def landing_drift(conn, land_s: int = LAND_S) -> dict:
                 if not t:
                     continue
                 a, age = px(mint, t)
-                b, _ = px(mint, t + land_s)
+                b = px_after(mint, t, land_s)
                 if a and b and age < 60:
                     out.append(sign * (b / a - 1))  # >0 = moved against us
     except Exception as e:  # no trade tape (signals/ not running)
