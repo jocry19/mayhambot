@@ -99,6 +99,34 @@ function DayFactor({ days, goal, regimes }) {
   );
 }
 
+/** Hour factor of the last 24 h (the challenge: double every hour), log scale, line at the goal. */
+function HourFactor({ hours, goal }) {
+  const hs = hours || [];
+  if (!hs.length) return <Empty>Noch keine Stunde mit Equity-Punkten</Empty>;
+  const hit = hs.filter((x) => !x.partial && x.mult >= goal).length, full = hs.filter((x) => !x.partial).length;
+  const hh = (ts) => { const d = new Date(ts * 1000); return `${String(d.getHours()).padStart(2, "0")}:00`; };
+  return (
+    <>
+      <EChart height={220} deps={[hours]} ariaLabel="Stundenfaktor der letzten 24 Stunden"
+        build={(c) => baseOption(c, {
+          tooltip: { ...baseOption(c).tooltip, axisPointer: { type: "shadow" },
+            formatter: (ps) => { const x = hs[ps[0].dataIndex]; return `<b>${hh(x.ts)}${x.partial ? " (läuft noch)" : ""}</b>${tipRow(x.mult >= 1 ? c.good : c.bad, "Stundenfaktor", fx(x.mult, 3))}${tipRow("transparent", "Konto", `${sol(x.start_sol, 3)} → ${sol(x.end_sol, 3)}`)}`; } },
+          xAxis: catAxis(c, hs.map((x) => hh(x.ts))),
+          yAxis: valueAxis(c, (v) => `×${n(v, v < 1 ? 2 : 1)}`, { type: "log", logBase: 2, min: (v) => Math.min(0.5, v.min), max: (v) => Math.max(goal * 1.2, v.max) }),
+          series: [{
+            type: "bar", barMaxWidth: 14,
+            data: hs.map((x) => ({ value: x.mult, itemStyle: { color: x.mult >= 1 ? c.good : c.bad, opacity: x.partial ? 0.45 : 1, borderRadius: x.mult >= 1 ? [3, 3, 0, 0] : [0, 0, 3, 3] } })),
+            markLine: { silent: true, symbol: "none", data: [
+              { yAxis: goal, lineStyle: { color: c.good, type: "solid", width: 1 }, label: { color: c.good, formatter: `Ziel ×${goal}`, position: "insideEndTop" } },
+              { yAxis: 1, lineStyle: { color: c.muted, type: "dashed", width: 1 }, label: { color: c.muted, formatter: "×1", position: "insideEndTop" } },
+            ] },
+          }],
+        })} />
+      <div className="help" style={{ margin: "6px 0 0" }}>×{goal} erreicht in {n(hit)} von {n(full)} vollen Stunden; die laufende Stunde ist blass.</div>
+    </>
+  );
+}
+
 /** Selection lead per day: taken minus copy-everything, average net per trade, out of sample. */
 function AlphaChart({ days }) {
   const ds = (days || []).filter((x) => x.alpha != null);
@@ -259,6 +287,14 @@ export default function Brain() {
         <Card title="Equity über Zeit" sub="Guthaben plus offene Positionen zum letzten Preis, jede Minute">
           <EquityChart eq={d.equity} start={a.start_sol} regimes={d.regimes} />
         </Card>
+        <Card title="Stundenfaktor, letzte 24 h" sub={`Konto am Ende jeder Stunde geteilt durch den Anfang; Challenge: ×${d.goal.hour ?? 2} je Stunde`}>
+          <HourFactor hours={d.hours} goal={d.goal.hour ?? 2} />
+        </Card>
+      </div>
+      <div className="grid g-wide-left">
+        <Card title="Tagesfaktor gegen das Ziel" sub={`Konto am Ende jedes UTC-Tags geteilt durch den Anfang; grünes Band = Ziel ×${d.goal.mult[0]} bis ×${d.goal.mult[1]}; ⚑ = Regime-Wechsel`}>
+          <DayFactor days={d.days} goal={d.goal} regimes={d.regimes} />
+        </Card>
         <Card title="Ehrliche Kennzahl" sub="Ø netto je Gelegenheit: genommen, ausgelassen, alles kopiert">
           <Honest h={h} />
           {h.by_kind?.length > 0 && (
@@ -273,9 +309,6 @@ export default function Brain() {
         </Card>
       </div>
 
-      <Card title="Tagesfaktor gegen das Ziel" sub={`Konto am Ende jedes UTC-Tags geteilt durch den Anfang; grünes Band = Ziel ×${d.goal.mult[0]} bis ×${d.goal.mult[1]}; ⚑ = Regime-Wechsel`}>
-        <DayFactor days={d.days} goal={d.goal} regimes={d.regimes} />
-      </Card>
       <div className="grid g2">
         <Card title="Auswahl-Vorsprung je Tag" sub="Ø netto des Genommenen minus Ø netto von allem, nachgeprüft am Tag des Ergebnisses">
           <AlphaChart days={d.days} />

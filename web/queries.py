@@ -2338,6 +2338,27 @@ def _brain_capture(gain, max_up):
     return gain / max_up if gain is not None and max_up and max_up >= 0.1 else None
 
 
+BRAIN_HOUR_GOAL = 2  # the user's challenge (10/2026): double the paper account every hour
+
+
+def _brain_hours(conn, now):
+    """Hour factor of the last 24 hours as brain.journal.hour_factors counts it (equity at the hour's last minute /
+    at its first), plus the running hour marked partial. From brain_equity, so it exists before the diary carries
+    hour_factors."""
+    if not has(conn, "brain_equity"):
+        return []
+    end = now - now % 3600 + 3600
+    out = []
+    for r in rows(conn, "SELECT ts / 3600 * 3600 h, MIN(ts) a, MAX(ts) b FROM brain_equity WHERE ts>=? AND ts<? GROUP BY h ORDER BY h",
+                  (end - 25 * 3600, end)):
+        first = scalar(conn, "SELECT equity_sol FROM brain_equity WHERE ts=?", (r["a"],))
+        last = scalar(conn, "SELECT equity_sol FROM brain_equity WHERE ts=?", (r["b"],))
+        if first:
+            out.append({"ts": r["h"], "mult": _f(last / first, 4), "start_sol": _f(first, 4), "end_sol": _f(last, 4),
+                        "partial": r["h"] + 3600 > now})
+    return out
+
+
 def _brain_days(conn, now, regimes):
     """Per UTC day (as brain's diary counts them): the account's factor (equity at the day's end / at its start)
     against the goal, the selection lead (taken minus copy-everything, out of sample), and how much of the best move
@@ -2494,6 +2515,7 @@ def brain_view(conn, kind=None, show="all", limit=60, now=None):
     h = _brain_honest(conn) or {}
     regimes = [x for x in (st.get("regime_history") or []) if isinstance(x, dict) and x.get("at")]
     days = _brain_days(conn, now, regimes)
+    hours = _brain_hours(conn, now)
     xr = h.get("exit_replays") or {}
     seg = lambda x: {k: _f(x.get(k), 4) if k.endswith("mean") else x.get(k) for k in ("n", "n_taken", "taken_mean", "n_explored", "copy_all_mean")}  # noqa: E731
     return {
@@ -2510,7 +2532,8 @@ def brain_view(conn, kind=None, show="all", limit=60, now=None):
         "honest": {**h, "target": BRAIN_TARGET, "progress": _f(min(1.0, (h.get("n_taken") or 0) / BRAIN_TARGET), 3),
                    "by_kind": [{"kind": k, "label": BRAIN_KIND.get(k, k), **v} for k, v in (h.get("by_kind") or {}).items()]},
         "prior_check": st.get("prior_check") if isinstance(st.get("prior_check"), dict) else None,
-        "goal": {"mult": list(BRAIN_GOAL_MULT), "today": days[-1].get("mult") if days else None},
+        "goal": {"mult": list(BRAIN_GOAL_MULT), "today": days[-1].get("mult") if days else None, "hour": BRAIN_HOUR_GOAL},
+        "hours": hours,
         "days": days,
         "regimes": [{"at": x["at"], "n": x.get("n"), "err": _f(x.get("err"), 4), "z": x.get("z")} for x in regimes[-30:]],
         "exits": {

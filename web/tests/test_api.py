@@ -763,6 +763,8 @@ def test_brain_view(demo, empty, tmp_path):
     assert c.get("/api/brain?show=x").status_code == 400
     # goal, day factors, selection lead, capture, exit comparison, segments, regime markers, partial sells
     assert d["goal"]["mult"] == [2, 4] and len(d["days"]) == 14 and any(x.get("mult") for x in d["days"])
+    assert d["goal"]["hour"] == 2 and 1 <= len(d["hours"]) <= 25 and all(x["mult"] > 0 for x in d["hours"])
+    assert [x["partial"] for x in d["hours"]].count(True) <= 1 and d["hours"] == sorted(d["hours"], key=lambda x: x["ts"])
     assert any(x.get("alpha") is not None for x in d["days"]) and any(x.get("capture_organic") is not None for x in d["days"])
     assert d["exits"]["replays"]["n"] > 0 and {e["mode"] for e in d["exits"]["by_exit"]} <= {"organic", "plan"}
     assert d["segments"]["by_liq"] and d["regimes"] and any(x.get("regimes") for x in d["days"])
@@ -782,7 +784,7 @@ def test_brain_view(demo, empty, tmp_path):
     conn.row_factory = sqlite3.Row
     v = Q.brain_view(conn)
     assert v["available"] and v["decisions"] == [] and v["account"]["equity_sol"] == 5.0 and v["honest"]["n"] == 0
-    assert v["goal"]["today"] is None and v["exits"]["by_exit"] == [] and v["segments"]["by_delay"] == [] and v["regimes"] == []
+    assert v["goal"]["today"] is None and v["hours"] == [] and v["exits"]["by_exit"] == [] and v["segments"]["by_delay"] == [] and v["regimes"] == []
     from cli.report import brain_line
 
     assert "noch nichts nachgeprüft" in brain_line(v) and brain_line(None) == ""
