@@ -284,7 +284,7 @@ class Engine:
                    safety_risk=F.get("safety_risk"), safety_level=F.get("safety_level"), model_p=F.get("model_p"),
                    mcap_decide_sol=st.base_mcap_sol, mcap_decide_usd=(st.base_mcap_sol or 0) * sol_usd or None,
                    sol_usd=sol_usd or None, reasons_json=store.j(a.reasons[:8]), positives_json=store.j(a.positives[:6]),
-                   migrated=int(st.migrated), rug_p=F.get("rug_p"))
+                   migrated=int(st.migrated), rug_p=F.get("rug_p"), block0_wallets=F.get("block0_wallets"))
         if stage >= 2:
             row["features_json"] = store.j(dict(F, momentum_parts=a.momentum_parts, insiders=a.insiders))
         return row

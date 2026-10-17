@@ -23,7 +23,7 @@ from . import store
 BASE_FEATURES = ["n_trades", "n_buyers", "n_sellers", "buy_sol", "sell_sol", "net_sol", "momentum", "prescore",
                  "unseen_pct", "bundle_pct", "bundle_wallets", "dev_buy_pct", "dev_sold_pct", "top10_pct",
                  "fast_buyers", "dev_launches", "dev_launches_24h", "n_smart", "n_good", "curve_progress",
-                 "mcap_decide_sol", "risk"]
+                 "mcap_decide_sol", "risk", "block0_wallets"]
 # rug_p (safety's launch model) is left out on purpose: that model is trained on these same launches, so it
 # would leak the later outcomes into the earlier half of the time split
 DERIVED = {
@@ -457,6 +457,36 @@ def rule_search(rows, paths, cfg, train_share=0.7, min_n=30, top_singles=10):
             "split_ts": train[-1]["created_ts"], "candidates": results, "walk_forward": folds, "accepted": acc}
 
 
+def signature_test(rows, paths, cfg, feat="block0_wallets", thr=3, blocks=5, min_test=5):
+    """A fixed entry condition (feat >= thr) instead of a searched one: the best exit is picked on older launches
+    and traded on the next block (walk-forward), so the exit choice cannot see its own test data."""
+    side_cost, tx_cost = costs(cfg)
+    sig = [r for r in rows if (r.get(feat) or 0) >= thr]
+    out = {"feature": feat, "min": thr, "n": len(sig), "measured": sum(1 for r in rows if r.get(feat) is not None)}
+    if not sig:
+        return out
+    out.update(rug=round(mean([r["rug"] for r in sig]), 3), x2=round(mean([r["x2"] for r in sig]), 3))
+    size = len(rows) // blocks
+    folds = []
+    for k in range(2, blocks):
+        lo, hi = rows[k * size]["created_ts"], (rows[(k + 1) * size]["created_ts"] if k < blocks - 1 else 9e18)
+        train = [r for r in sig if r["created_ts"] < lo]
+        test = [r for r in sig if lo <= r["created_ts"] < hi]
+        if len(train) < min_test or len(test) < min_test:
+            folds.append({"fold": k, "n": len(test), "ok": False})
+            continue
+        best = exit_grid(train, paths, side_cost, tx_cost, top=1)[0]
+        rule = tuple(best["rule"][k2] for k2 in ("tp1_pct", "tp1_frac", "trail_pct", "stop_pct", "time_stop_min",
+                                                 "max_hold_min"))
+        rs = trade_returns(test, paths, rule, side_cost, tx_cost)
+        folds.append({"fold": k, "n": len(rs), "exit": best["rule"], "train_net": best["net"],
+                      "test_net": round(mean(rs), 4), "test_median": round(sorted(rs)[len(rs) // 2], 4),
+                      "ok": mean(rs) > 0})
+    out["folds"] = folds
+    out["holds"] = sum(f["ok"] for f in folds) >= 2 and all(f.get("test_median", -1) > 0 for f in folds if f["ok"])
+    return out
+
+
 def run(conn, cfg=None, hours=0, save=False, now=None):
     from .config import SniperSettings
     cfg = cfg or SniperSettings()
@@ -476,6 +506,7 @@ def run(conn, cfg=None, hours=0, save=False, now=None):
         rep["exits"] = exit_grid(rows, paths, side_cost, tx_cost)
         rep["risk"] = calibrate_risk(rows)
         rep["rules"] = rule_search(rows, paths, cfg)
+        rep["block0"] = signature_test(rows, paths, cfg)
     if save:
         store.set_state(conn, "research_report", json.dumps(rep))
         acc = (rep.get("rules") or {}).get("accepted")
@@ -551,4 +582,13 @@ def summary(rep, top=8):
                      "festen Regeln.")
     elif rs:
         L.append(f"\nRegelsuche: {rs.get('status')}.")
+    b0 = rep.get("block0")
+    if b0:
+        L.append(f"\nBlock-0-Signatur (>= {b0['min']} Mini-Käufe in 5 s): {b0['n']} von {b0['measured']} gemessenen "
+                 f"Launches" + (f", Rug {100 * b0['rug']:.0f} %, Verdopplung {100 * b0['x2']:.0f} %" if b0["n"] else ""))
+        for f in b0.get("folds") or []:
+            L.append(f"  Block {f['fold']}: " + (f"Test {100 * f['test_net']:+.1f} % (Median {100 * f['test_median']:+.1f} %, "
+                     f"n {f['n']}), Ausstieg aus älteren Daten" if "test_net" in f else f"zu wenig Daten (n {f['n']})"))
+        if b0.get("folds"):
+            L.append("  -> trägt" if b0["holds"] else "  -> trägt nicht (oder noch zu wenig Daten): keine eigene Regel")
     return "\n".join(L)

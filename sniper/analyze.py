@@ -166,6 +166,14 @@ def analyze(st, cfg, enr=None, tiers=None, now=None):
         return {w: ts - st.created_ts for w, ts in st.first_buy_ts.items()}
     fast = {w for w, dt in first_ts().items() if dt <= 2 and w != creator and w not in bundle}
     F["fast_buyers"] = len(fast)
+    # block-0 signature (rug protection, safety.block0): >= 3 wallets buying <= 0.03 SOL within 5 s of the first
+    # trade, a made pump that is dumped later. Only from a complete stream (otherwise the first seconds are missing)
+    buys = [t for t in st.trades if t.side == "buy" and t.wallet and t.wallet != creator]
+    if getattr(st, "stream_complete", False) and st.trades:
+        t0 = min(t.ts for t in st.trades)
+        F["block0_wallets"] = len({t.wallet for t in buys if t.ts - t0 <= 5 and 0 < t.sol <= 0.03})
+    else:
+        F["block0_wallets"] = None
     if len(fast) >= cfg.sniper_bots_warn:
         a.add("bots", ramp(len(fast), cfg.sniper_bots_warn, cfg.sniper_bots_warn * 3, 10, 40),
               f"{len(fast)} Sniper-Bots kauften in den ersten 2 Sekunden (verkaufen meist beim ersten Anstieg).")

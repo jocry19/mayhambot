@@ -418,3 +418,26 @@ def test_stats_ignore_outcomes_of_broken_bases(conn):
                                  "skip_reason": "bundle", "mcap_decide_sol": base, "max_ret_60m": mx, "ret_60m": 0.0})
     b = next(f for f in analytics.stats(conn, hours=0, now=T0 + 10)["filters"] if f["code"] == "bundle")
     assert b["n"] == 3 and b["n_measured"] == 2 and b["missed_winners"] == 1
+
+
+def test_block0_signature_is_measured_and_tested_walk_forward(conn):
+    """Rug protection's block-0 signature (>= 3 wallets with <= 0.03 SOL in the first 5 s) as a stage-1 feature."""
+    c = cfg()
+    eng = Engine(c, conn, enricher=FakeEnricher())
+    cv = Curve("BLOCK0")
+    st = eng.handle(cv.create(), T0)
+    st.stream_complete = True
+    for i in range(4):
+        eng.handle(cv.buy(f"tiny{i}", 0.02), T0 + 1 + i)
+    organic(eng, cv, T0 + 6, n=20)
+    eng.tick(T0 + c.decide_sec + 1)
+    r = conn.execute("SELECT block0_wallets, stage1_json FROM sniper_launches WHERE mint='BLOCK0'").fetchone()
+    assert r["block0_wallets"] == 4 and json.loads(r["stage1_json"])["block0_wallets"] == 4
+    rows = [{"mint": f"S{i}", "created_ts": i, "decided_ts": i + 20, "mcap_decide_sol": 30.0, "block0_wallets": 3 * (i % 4 == 0),
+             "ret_1m": 0.5 if i % 4 == 0 else -0.2, "ret_5m": -0.3, "ret_15m": -0.6, "ret_60m": -0.9,
+             "rug": int(i % 4 == 0), "x2": 0} for i in range(400)]
+    out = research.signature_test(rows, {}, c)
+    assert out["n"] == 100 and out["rug"] == 1.0 and len(out["folds"]) == 3
+    assert all("test_net" in f for f in out["folds"])
+    assert "Block-0-Signatur" in research.summary({"n": 400, "with_path": 0, "cost_round_trip": 0.1, "base": {},
+                                                   "block0": out})
