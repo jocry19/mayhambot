@@ -78,9 +78,9 @@ def save_assessment(conn, a):
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (a.mint, a.ts, a.score, a.level, int(a.blocked), a.coverage, _j(a.hard_flags), _j(a.reasons),
              _j(a.positives), _j(a.checks), a.creator, a.pair_created_at, a.version, a.calls, a.error, a.deep_ts))
-        conn.execute("INSERT OR REPLACE INTO safety_history VALUES (?,?,?,?)", (a.mint, a.ts, a.score, a.level))
+        conn.execute("INSERT OR REPLACE INTO safety_history (mint, ts, score, level) VALUES (?,?,?,?)", (a.mint, a.ts, a.score, a.level))
         # per-check risks at that time, for learning (own table: others insert into safety_history positionally)
-        conn.execute("INSERT OR REPLACE INTO safety_risks VALUES (?,?,?)", (a.mint, a.ts, _j(
+        conn.execute("INSERT OR REPLACE INTO safety_risks (mint, ts, risks_json) VALUES (?,?,?)", (a.mint, a.ts, _j(
             {n: c.get("risk") for n, c in a.checks.items() if c.get("status") == "ok"})))
         conn.commit()
     db.retry_locked(conn, write)
@@ -95,7 +95,7 @@ def set_override(conn, mint, action, reason=""):
         if action is None:
             conn.execute("DELETE FROM safety_overrides WHERE mint=?", (mint,))
         else:
-            conn.execute("INSERT OR REPLACE INTO safety_overrides VALUES (?,?,?,?)",
+            conn.execute("INSERT OR REPLACE INTO safety_overrides (mint, action, reason, ts) VALUES (?,?,?,?)",
                          (mint, action, reason, int(time.time())))
         conn.commit()
     db.retry_locked(conn, write)
@@ -115,7 +115,8 @@ def wallet_profile(conn, address, max_age):
 
 def save_wallet_profile(conn, p):
     def write():
-        conn.execute("INSERT OR REPLACE INTO safety_wallets VALUES (?,?,?,?,?,?,?,?)",
+        conn.execute("INSERT OR REPLACE INTO safety_wallets (address, n_txs, complete, first_ts, last_ts, funder, funded_sol, checked_at) "
+                     "VALUES (?,?,?,?,?,?,?,?)",
                      (p["address"], p["n_txs"], int(p["complete"]), p["first_ts"], p["last_ts"], p["funder"],
                       p["funded_sol"], int(time.time())))
         conn.commit()
@@ -136,7 +137,8 @@ def save_launch(conn, mint, d):
     rest = {k: v for k, v in d.items() if k not in ("creator", "created_slot", "created_ts", "reachable")}
 
     def write():
-        conn.execute("INSERT OR REPLACE INTO safety_launch VALUES (?,?,?,?,?,?,?)",
+        conn.execute("INSERT OR REPLACE INTO safety_launch (mint, creator, created_slot, created_ts, reachable, launch_json, checked_at) "
+                     "VALUES (?,?,?,?,?,?,?)",
                      (mint, d.get("creator"), d.get("created_slot"), d.get("created_ts"),
                       int(bool(d.get("reachable"))), _j(rest), int(time.time())))
         conn.commit()
@@ -152,7 +154,7 @@ def cache_get(conn, key, max_age):
 
 def cache_put(conn, key, value):
     def write():
-        conn.execute("INSERT OR REPLACE INTO safety_cache VALUES (?,?,?)", (key, int(time.time()), _j(value)))
+        conn.execute("INSERT OR REPLACE INTO safety_cache (key, ts, json) VALUES (?,?,?)", (key, int(time.time()), _j(value)))
         conn.execute("DELETE FROM safety_cache WHERE ts < ?", (int(time.time()) - 86400,))
         conn.commit()
     db.retry_locked(conn, write)

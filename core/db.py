@@ -213,7 +213,7 @@ def insert_trades(conn, trades) -> int:
     trades = clean_trades(conn, list(trades))
     before = conn.total_changes
     conn.executemany(
-        "INSERT OR IGNORE INTO trades VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "INSERT OR IGNORE INTO trades (sig, wallet, mint, side, ts, token_amount, sol_amount, usd_amount, price_usd, source) VALUES (?,?,?,?,?,?,?,?,?,?)",
         [(t.sig, t.wallet, t.mint, t.side, int(t.ts), t.token_amount, t.sol_amount,
           t.usd_amount, t.price_usd, t.source) for t in trades],
     )
@@ -254,7 +254,7 @@ def upsert_tokens(conn, tokens, tracked=None):
              t.txns_m5, t.txns_h1, now, now, 1 if tracked is None else int(tracked), 1 if tracked is None else int(tracked)),
         )
         if t.price_usd:
-            conn.execute("INSERT OR REPLACE INTO token_prices VALUES (?,?,?,?,?)",
+            conn.execute("INSERT OR REPLACE INTO token_prices (mint, ts, price_usd, mcap_usd, liquidity_usd) VALUES (?,?,?,?,?)",
                          (t.mint, now, t.price_usd, t.mcap_usd, t.liquidity_usd))
     conn.commit()
 

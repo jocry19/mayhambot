@@ -154,7 +154,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
 def event(conn: sqlite3.Connection, kind: str, message: str, level: str = "info", data: Any = None) -> None:
     from .http import redact
 
-    conn.execute("INSERT INTO ct_events VALUES (?,?,?,?,?)",
+    conn.execute("INSERT INTO ct_events (ts, level, kind, message, data) VALUES (?,?,?,?,?)",
                  (int(time.time()), level, kind, redact(message),
                   redact(json.dumps(data)) if data is not None else None))
     conn.commit()
@@ -166,7 +166,7 @@ def get_state(conn: sqlite3.Connection, key: str, default: str | None = None) ->
 
 
 def set_state(conn: sqlite3.Connection, key: str, value: Any) -> None:
-    conn.execute("INSERT OR REPLACE INTO ct_state VALUES (?,?)", (key, str(value)))
+    conn.execute("INSERT OR REPLACE INTO ct_state (key, value) VALUES (?,?)", (key, str(value)))
     conn.commit()
 
 
@@ -226,7 +226,7 @@ def save_swaps(conn: sqlite3.Connection, swaps: list, sol_usd: float = 0.0) -> i
     now = int(time.time())
     before = conn.total_changes
     conn.executemany(
-        "INSERT OR IGNORE INTO ct_swaps VALUES (?,?,?,?,?,?,?,?,?)",
+        "INSERT OR IGNORE INTO ct_swaps (sig, wallet, mint, side, ts, token_amount, sol_amount, price_sol, seen_at) VALUES (?,?,?,?,?,?,?,?,?)",
         [(s.signature, s.wallet, s.mint, s.side, s.block_time, s.token_amount, s.sol_amount, s.price_sol, now)
          for s in swaps],
     )

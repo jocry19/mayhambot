@@ -539,3 +539,13 @@ def test_health_check_starts_after_the_startup_vacuum(repo, monkeypatch):
     monkeypatch.setattr(ops, "compacting", lambda now=None: clock.t < done_at)
     monkeypatch.setattr(autoupdate, "_pids", lambda names: {"a": 1 if clock.t >= done_at else None})
     assert autoupdate.health_check(window=180, interval=15)[0]
+
+
+def test_hot_inserts_name_their_columns():
+    """A rollback after a migration that added a column must not break inserts: 'INSERT INTO t VALUES (...)'
+    counts columns, 'INSERT INTO t (a, b) VALUES' does not."""
+    import re as _re
+    root = Path(__file__).resolve().parents[2]
+    bare = _re.compile(r"INSERT(?: OR \w+)? INTO \w+ VALUES")
+    for rel in ("core/db.py", "copytrade/store.py", "safety/store.py"):
+        assert not bare.findall((root / rel).read_text()), rel
