@@ -1794,7 +1794,8 @@ def sniper_view(conn, hours=24, limit=300):
     cost = _sniper_round_trip(cfg, size)
     without, measured = 0.0, 0
     for f in st.get("filters", []):
-        m, k = f.get("mean_ret_60m_capped"), f.get("n_measured") or 0
+        # n behind the capped mean (launches with ret_60m); older sniper.stats only had n_measured (max_ret_60m)
+        m, k = f.get("mean_ret_60m_capped"), f.get("n_ret_60m", f.get("n_measured")) or 0
         if m is None or not k:
             f["avg_ret_60m"] = f["pnl_without_sol"] = f["filter_value_sol"] = None
             continue

@@ -817,5 +817,10 @@ def test_sniper_filter_value_ignores_unit_errors(demo, tmp_path):
     assert f.get("pnl_without_sol") is None or abs(f["pnl_without_sol"]) < 100
     ft = v["stats"]["filter_total"]
     assert abs(ft["without_sol"] - ((ft["with_sol"] or 0) + ft["skipped_sol"])) < 1e-3 and abs(ft["skipped_sol"]) < 1000
-    assert ft["measured"] == sum(x.get("n_measured") or 0 for x in v["stats"]["filters"] if x.get("mean_ret_60m_capped") is not None)
+    assert ft["measured"] == sum(x.get("n_ret_60m", x.get("n_measured")) or 0 for x in v["stats"]["filters"]
+                                 if x.get("mean_ret_60m_capped") is not None)
+    for f in v["stats"]["filters"]:
+        if f.get("pnl_without_sol") is not None:
+            k = f.get("n_ret_60m", f.get("n_measured"))
+            assert abs(f["pnl_without_sol"] - f["avg_ret_60m"] * ft["size_sol"] * k) <= 1e-4 * ft["size_sol"] * k + 1e-3  # avg rounded to 4 places
     assert before.keys() <= {x["code"] for x in v["stats"]["filters"]}
