@@ -145,7 +145,9 @@ def test_backup_logs_table_sizes(tmp_path, monkeypatch):
     monkeypatch.setattr(ops, "backup_dir", lambda: tmp_path / "bk")
     assert ops.backup(None) == 0
     log = (tmp_path / "logs" / "dbsize.log").read_text()
-    assert "trades:" in log and "100 Zeilen" in log and "Einmal-Wallets" in log
+    assert "trades:" in log and "100 Zeilen" in log
+    assert ops.log_db_sizes(tmp_path / "data" / "mayhambot.db") is None     # next one only after 6 h
+    assert "Einmal-Wallets" in ops.log_db_sizes(tmp_path / "data" / "mayhambot.db", profile=True, every_h=0)
     assert (tmp_path / "data" / "db_sizes.json").exists()
 
 
@@ -155,7 +157,7 @@ def test_retention_counts_only_until_switched_on(tmp_path, monkeypatch):
     from core import db
     p = tmp_path / "data" / "mayhambot.db"
     c = db.connect(str(p))
-    old = int(time.time()) - 30 * 86400
+    old = int(time.time()) - 40 * 86400
     c.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?)",
                   [(f"s{i}", f"one{i}", "JUNK", "buy", old + i, 1, 1, 1, 1, "geckoterminal") for i in range(10)])
     c.commit()

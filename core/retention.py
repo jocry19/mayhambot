@@ -120,7 +120,9 @@ def growth(log: list, window_days: float = 7) -> dict:
     if len(log) < 2:
         return {}
     new = log[-1]
-    base = next((e for e in log if new["ts"] - e["ts"] <= window_days * 86400 + 3600 and e is not new), None)
+    # an entry without byte sizes (before the estimate existed) is no base: the whole table would count as growth
+    base = next((e for e in log if new["ts"] - e["ts"] <= window_days * 86400 + 3600 and e is not new
+                 and sum(v[1] for v in e["tables"].values()) > 0), None)
     if base is None:
         return {}
     days = max((new["ts"] - base["ts"]) / 86400, 1e-9)
@@ -210,15 +212,11 @@ POOL_FEEDS = "('geckoterminal', 'rpc_early', 'test_pool')"
 
 
 def _mark_oneoff(conn):
-    """Temp tables: one-off wallets (one coin ever, only seen in a pool feed) and the coins only they traded."""
+    """Temp table _ret_oneoff: one-off wallets (one coin ever, only seen in a pool feed)."""
     conn.execute("CREATE TEMP TABLE IF NOT EXISTS _ret_oneoff(wallet TEXT PRIMARY KEY)")
-    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _ret_coins(mint TEXT PRIMARY KEY)")
     conn.execute("DELETE FROM _ret_oneoff")
-    conn.execute("DELETE FROM _ret_coins")
     conn.execute(f"""INSERT INTO _ret_oneoff SELECT wallet FROM trades GROUP BY wallet
                      HAVING COUNT(DISTINCT mint) = 1 AND SUM(COALESCE(source, '') NOT IN {POOL_FEEDS}) = 0""")
-    conn.execute("""INSERT INTO _ret_coins SELECT DISTINCT mint FROM trades EXCEPT
-                    SELECT DISTINCT mint FROM trades WHERE wallet NOT IN (SELECT wallet FROM _ret_oneoff)""")
 
 
 def _batches(conn, select_sql, args, apply, batch, pause_s, deadline):
@@ -241,20 +239,21 @@ def _batches(conn, select_sql, args, apply, batch, pause_s, deadline):
     return done
 
 
-def cleanup(conn, now=None, delete=False, trades_days=14, prices_days=7, batch=2000, pause_s=0.2,
+def cleanup(conn, now=None, delete=False, trades_days=30, prices_days=7, batch=2000, pause_s=0.2,
             budget_s=900, vacuum_pages=2000) -> dict:
     """Nightly retention. conn: autocommit (isolation_level=None) on the live file.
 
-    trades older than trades_days of coins that only one-off wallets ever traded (no scored wallet, so no
-    training event, tier or influence reads them) are summed into trades_hourly first, then deleted, together
-    with those wallets' rows in `wallets`. token_prices older than prices_days keep the hour's highest and lowest
+    trades older than trades_days of one-off wallets (one coin ever, only seen in the pool feed: never scored,
+    no tier, no training event of their own) are summed into trades_hourly per coin, hour and side first, then
+    deleted, together with those wallets' rows in `wallets`. Every trade of a wallet with 2+ coins or a
+    backfilled history stays. token_prices older than prices_days keep the hour's highest and lowest
     price, lowest liquidity and newest row. With delete=False only the counts are returned."""
     now = int(now or time.time())
     deadline = time.time() + budget_s
     out = {"delete": bool(delete)}
     _mark_oneoff(conn)
     t_cut, p_cut = now - trades_days * 86400, now - prices_days * 86400
-    t_sel = "SELECT rowid FROM trades WHERE ts < ? AND mint IN (SELECT mint FROM _ret_coins)"
+    t_sel = "SELECT rowid FROM trades WHERE ts < ? AND wallet IN (SELECT wallet FROM _ret_oneoff)"
     w_sel = """SELECT rowid FROM wallets WHERE address IN (SELECT wallet FROM _ret_oneoff)
                AND COALESCE(manual, 0) = 0 AND tier IS NULL AND COALESCE(is_smart, 0) = 0
                AND NOT EXISTS (SELECT 1 FROM trades t WHERE t.wallet = wallets.address)"""

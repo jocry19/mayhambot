@@ -83,9 +83,9 @@ def _live(tmp_path, auto_vacuum=None):
         c0.close()
     c = db.connect(str(path))
     now = 1_760_000_000
-    old = now - 20 * DAY
+    old = now - 40 * DAY
     rows = []
-    for i in range(300):   # coin JUNK: only one-off wallets, 20 days old
+    for i in range(300):   # coin JUNK: only one-off wallets, 40 days old
         rows.append((f"j{i}", f"one{i}", "JUNK", "buy" if i % 3 else "sell", old + i, 10.0, 0.1, 15.0, 1e-6 * (1 + i % 5),
                      "geckoterminal"))
     for i in range(50):    # coin GOOD: a two-coin wallet bought it, plus one-off followers
@@ -108,21 +108,22 @@ def test_cleanup_dry_run_counts_and_deletes_nothing(tmp_path):
     c, now, _ = _live(tmp_path)
     n = c.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
     out = retention.cleanup(c, now=now)
-    assert out["trades"] == 300 and 100 <= out["prices"] < 120
+    assert out["trades"] == 350 and 100 <= out["prices"] < 120
     assert c.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == n
 
 
 def test_cleanup_keeps_what_scoring_and_training_read(tmp_path):
     c, now, _ = _live(tmp_path)
     out = retention.cleanup(c, now=now, delete=True, batch=64, pause_s=0)
-    assert out["trades"] == 300
+    assert out["trades"] == 350                                  # old trades of one-coin pool-feed wallets
     left = {r[0] for r in c.execute("SELECT DISTINCT mint FROM trades")}
-    assert left == {"GOOD", "OTHER", "NEW"}                      # coins a scored wallet touched + recent stay whole
-    assert c.execute("SELECT COUNT(*) FROM trades WHERE mint='GOOD'").fetchone()[0] == 51
+    assert left == {"GOOD", "OTHER", "NEW"}                      # the two-coin wallet's trades and recent ones stay
+    assert [r[0] for r in c.execute("SELECT wallet FROM trades WHERE mint='GOOD'")] == ["smart"]
+    assert c.execute("SELECT SUM(n) FROM trades_hourly WHERE mint='GOOD'").fetchone()[0] == 50
     agg = c.execute("SELECT SUM(n), SUM(usd), MIN(price_lo), MAX(price_hi) FROM trades_hourly WHERE mint='JUNK'").fetchone()
     assert agg[0] == 300 and abs(agg[1] - 4500) < 1e-6 and agg[2] == 1e-6 and abs(agg[3] - 5e-6) < 1e-12
     w = {r[0] for r in c.execute("SELECT address FROM wallets")}
-    assert "one3" not in w and "one7" in w and "smart" in w and "fol3" in w
+    assert "one3" not in w and "fol3" not in w and "one7" in w and "smart" in w and "fresh" in w
     # prices: the 10x spike survives, old hours keep at most 4 rows each, recent rows untouched
     assert c.execute("SELECT MAX(price_usd) FROM token_prices WHERE mint='GOOD'").fetchone()[0] == 10.0
     assert c.execute("SELECT COUNT(*) FROM token_prices WHERE ts < ?", (now - 7 * DAY,)).fetchone()[0] <= 3 * 4

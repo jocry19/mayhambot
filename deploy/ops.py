@@ -498,7 +498,7 @@ def retention_run(args) -> int:
     t0 = time.time()
     try:
         c.execute("PRAGMA busy_timeout=30000")
-        r = retention.cleanup(c, delete=delete, trades_days=cfg("RETENTION_TRADES_DAYS", 14),
+        r = retention.cleanup(c, delete=delete, trades_days=cfg("RETENTION_TRADES_DAYS", 30),
                               prices_days=cfg("RETENTION_PRICES_DAYS", 7), budget_s=cfg("RETENTION_BUDGET_MIN", 15) * 60)
         fs = retention.file_stats(c)
     finally:
@@ -706,9 +706,14 @@ def _snapshot_db(src: Path, dst: Path):
     d.close()
 
 
-def log_db_sizes(path: Path) -> str | None:
-    """Size per table (dbstat on the backup's own copy, so the live file is not read twice) into
-    data/db_sizes.json and one block per run in logs/dbsize.log. Never fails the backup."""
+def log_db_sizes(path: Path, profile=False, every_h: float | None = None) -> str | None:
+    """Size per table (on the backup's own copy, so the live file is not read twice) into data/db_sizes.json and
+    one block in logs/dbsize.log, at most every DB_SIZES_EVERY_HOURS (6) from the backup. Never fails the backup.
+    profile: also the trades breakdown (minutes on the Mac's 640k rows, so only on demand)."""
+    log = ROOT / "logs" / "dbsize.log"
+    every_h = cfg("DB_SIZES_EVERY_HOURS", 6.0) if every_h is None else every_h
+    if every_h and log.exists() and time.time() - log.stat().st_mtime < every_h * 3600:
+        return None
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
         from core import retention  # noqa: PLC0415 - stdlib only
@@ -716,12 +721,12 @@ def log_db_sizes(path: Path) -> str | None:
         try:
             sizes, fstats, grow = retention.log_sizes(c, ROOT / "data" / "db_sizes.json")
             text = retention.size_report(sizes, fstats, grow)
-            if "trades" in sizes:
+            if profile and "trades" in sizes:
                 text += "\n" + retention.profile_report(retention.trades_profile(c))
         finally:
             c.close()
         (ROOT / "logs").mkdir(exist_ok=True)
-        with open(ROOT / "logs" / "dbsize.log", "a") as fh:
+        with open(log, "a") as fh:
             fh.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')}\n{text}\n")
         return text
     except Exception as e:  # noqa: BLE001
@@ -737,8 +742,8 @@ def db_sizes(args) -> int:
     with tempfile.TemporaryDirectory() as td:
         snap = Path(td) / "mayhambot.db"
         _snapshot_db(db_path(), snap)
-        text = log_db_sizes(snap)
-    print(text or "Größen nicht lesbar (SQLite ohne dbstat?)")
+        text = log_db_sizes(snap, profile=args.profile, every_h=0)
+    print(text or "Größen nicht lesbar")
     return 0 if text else 1
 
 
@@ -1256,7 +1261,7 @@ def main(argv=None) -> int:
     sub.add_parser("test-alert")
     sub.add_parser("setup-telegram").add_argument("--neu", action="store_true", help="Chat-ID neu suchen")
     sub.add_parser("report")
-    sub.add_parser("db-sizes")
+    sub.add_parser("db-sizes").add_argument("--profile", action="store_true", help="auch trades aufschlüsseln (langsam)")
     sub.add_parser("retention").add_argument("--db", help="Datenbankdatei (Standard: MAYHAM_DB_PATH)")
     sm = sub.add_parser("summary")
     sm.add_argument("--send", action="store_true", help="per Telegram senden")
