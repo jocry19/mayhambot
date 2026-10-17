@@ -126,6 +126,10 @@ def groups(rows):
     sd = [r for r in by.get("safety_drop", []) if r["safety_risk"] is not None]
     out["safety_drop: risk < 45"] = _stats([r for r in sd if r["safety_risk"] < 45])
     out["safety_drop: risk >= 45"] = _stats([r for r in sd if r["safety_risk"] >= 45])
+    # confidence hypotheses (see funnel.CONFIDENCE_GROUPS): the same features among the rejected coins
+    ent = lambda r: (r["entities"] or 0) if "entities" in r.keys() else 0  # noqa: E731 - retro rows have none
+    out["any reason: entities>=3"] = _stats([r for r in rows if ent(r) >= 3])
+    out["any reason: net 500-2000, entities>=2"] = _stats([r for r in rows if ent(r) >= 2 and 500 <= (r["net_usd"] or 0) <= 2000])
     return out
 
 

@@ -72,6 +72,8 @@ def format_signal(s) -> str:
         stop = s["stop_ret"] if s["stop_ret"] is not None else None
         lines.append(f"📋 Plan: Einstieg ~{p0:.8g} $ · Ziel <b>{s['target_ret'] * 100:+.0f} %</b> ({p0 * (1 + s['target_ret']):.8g} $)"
                      + (f" · Stopp {stop * 100:.0f} % ({p0 * (1 + stop):.8g} $)" if stop is not None else ""))
+    if not v2 and (s["smart_buyers"] or 0) >= 3:  # hypothesis under test (funnel.CONFIDENCE_GROUPS), not a size rule
+        lines.append("⭐ Konfidenz hoch: 3+ unabhängige Smart-Gruppen (bisher 33 % davon mit +50 % in 1 h)")
     if "prediction" in keys and s["prediction"] is not None:
         lines.append(f"Vorhersage {s['prediction']*100:.0f}% · {html.escape(s['prediction_label'] or '')}")
     if "ev" in keys and s["ev"] is not None:

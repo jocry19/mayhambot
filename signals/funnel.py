@@ -147,6 +147,30 @@ def outcomes(conn, hours=168, cost=COST, now=None, bands=(0, 20, 30, 40, 50, 60,
     return out
 
 
+def _group_stats(rows):
+    mx = [r["max_ret_1h"] or 0 for r in rows]
+    return dict(n=len(rows), hit_50=round(sum(x >= 0.5 for x in mx) / len(rows), 3) if rows else None,
+                median_max_ret_1h=_med(mx), median_ret_1h=_med(r["ret_1h"] for r in rows))
+
+
+# hypotheses from the data thread (17.10., 44 h): 3+ independent smart groups 33 % to +50 % (n 55), net $500-2000
+# with 2+ groups 6 of 9, mcap > $1M slightly positive (n 28). Tracked on the calls so a confidence tier can be decided
+CONFIDENCE_GROUPS = {
+    "entities>=3": lambda r: (r["smart_buyers"] or 0) >= 3,
+    "entities=2": lambda r: (r["smart_buyers"] or 0) == 2,
+    "net 500-2000, entities>=2": lambda r: (r["smart_buyers"] or 0) >= 2 and 500 <= (r["net_usd"] or 0) <= 2000,
+    "mcap>=1M": lambda r: (r["mcap_usd"] or 0) >= 1e6,
+}
+
+
+def by_confidence(conn, hours=168, now=None, kind="v1"):
+    now = now or int(time.time())
+    rows = conn.execute("SELECT smart_buyers, net_usd, mcap_usd, ret_1h, max_ret_1h FROM signals WHERE ts>=? AND ts<=? "
+                        "AND ret_1h IS NOT NULL AND COALESCE(kind,'v1')=?",
+                        (now - int(hours * 3600), now - 3900, kind)).fetchall()
+    return {k: _group_stats([r for r in rows if f(r)]) for k, f in CONFIDENCE_GROUPS.items()}
+
+
 REPORT_EVERY = 3600
 TRADABLE_LIQ_USD = float(os.getenv("CT_MIN_LIQUIDITY_USD", 15000))  # the strict copytrade account's liquidity floor
 
@@ -191,6 +215,7 @@ def write_report(conn, path=None, now=None):
     from signals import plan
     rep["plan_next"] = plan.levels(conn, now)
     rep["plan_next_v2"] = plan.levels(conn, now, kind="v2")
+    rep["confidence_7d"] = by_confidence(conn, 168, now)
     from signals import shadow  # rejected coins by reason and what they did next (calls: outcomes_* above)
     rep.update(shadow_24h=shadow.summary(conn, 24, now), shadow_7d=shadow.summary(conn, 168, now),
                shadow_v2_7d=shadow.summary(conn, 168, now, kind="v2"))
