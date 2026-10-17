@@ -109,6 +109,9 @@ def write(conn, model, s, now: float | None = None) -> str:
         lines.append(f"Stundenfaktor (Challenge ×2 je Stunde): letzte 24 h Median ×{xs[len(xs) // 2]:.3f}, beste "
                      f"×{xs[-1]:.3f}, schlechteste ×{xs[0]:.3f}; ×2 erreicht in {sum(1 for x in xs if x >= 2)} "
                      f"von {len(xs)} Stunden.")
+    for x in [x for x in (store.get(conn, "challenge_pauses", []) or []) if x.get("at", 0) >= now - 86400]:
+        lines.append(f"Challenge pausiert um {time.strftime('%H:%M', time.gmtime(x['at']))} UTC für 6 h: die letzten "
+                     f"Stunden zusammen ×{x['factor']:.3f}, normale Einsätze bis dahin.")
     shifts = [x for x in (store.get(conn, "regime_history", []) or []) if x.get("at", 0) >= now - 86400]
     for x in shifts:
         lines.append(f"Regime gewechselt um {time.strftime('%H:%M', time.gmtime(x['at']))} UTC: die letzten {x['n']} "

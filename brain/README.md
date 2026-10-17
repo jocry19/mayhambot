@@ -142,3 +142,10 @@ Streuung eines Trades, `BRAIN_KELLY_FRAC` 0,25), höchstens `BRAIN_MAX_STAKE` (2
 `BRAIN_MIN_SIZE_SOL`. Der Einsatz wächst also mit dem Konto (Zinseszins); Erkundungen bleiben beim Minimum.
 `BRAIN_KELLY_FRAC=0` stellt auf die festen Größen zurück. Das Lernen ist davon unberührt (es lernt Renditen in %).
 Die Stundenzeile im Log und das Tagebuch zeigen den Stundenfaktor des Kontos (Challenge des Nutzers: ×2 je Stunde).
+
+## Challenge-Modus (×2 je Stunde, `BRAIN_CHALLENGE=on`)
+
+Auf Wunsch des Nutzers (10/2026, „komme was wolle“): überzeugte Käufe mit halbem Kelly-Einsatz, bis 35 % des
+Kontos; Erkundungen mit 2 % des Kontos; die noch unbelegten Nebenquellen werden sofort auf Papier erkundet (bis 12
+Probekäufe je Stunde, Rug-Prüfung nur beim Kauf). Haben die letzten 3 vollen Stunden zusammen mehr als 15 % verloren
+(`BRAIN_CHALLENGE_STOP` 0,85), pausiert der Modus 6 Stunden mit den normalen Einsätzen; das Tagebuch meldet es.

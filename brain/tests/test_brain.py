@@ -803,6 +803,7 @@ def add_shadow(conn, i, mint=MINT, ts=None, reason="no_smart"):
 
 
 def test_market_coins_are_watched_not_traded_until_their_replays_earn_it(conn, s):
+    s.challenge = "off"
     mk = Market()
     mk.snaps[MINT] = snap(dex="pumpswap")
     good = trained(kind="market", good=("dex=pumpswap",))
@@ -832,6 +833,7 @@ def test_market_coins_are_watched_not_traded_until_their_replays_earn_it(conn, s
 
 
 def test_momentum_coins_from_the_tokens_table_are_a_side_source(conn, s):
+    s.challenge = "off"
     conn.execute("""CREATE TABLE IF NOT EXISTS tokens (mint TEXT PRIMARY KEY, symbol TEXT, dex TEXT, mcap_usd REAL,
                     liquidity_usd REAL, pair_created_at INTEGER, price_change_m5 REAL, price_change_h1 REAL,
                     volume_h1 REAL, txns_m5 INTEGER, last_updated INTEGER)""")
@@ -872,3 +874,31 @@ def test_diary_shows_the_hour_factor(conn, s):
         conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (ts, eq, 0, eq))
     assert [x for _, x in journal.hour_factors(conn, h0 + 7300)] == [2.0, 1.1]
     assert "×2 erreicht in 1 von 2 Stunden" in journal.write(conn, Brain(len(PLANS)), s, h0 + 7300)
+
+
+def test_challenge_explores_side_sources_with_account_stakes_and_pauses_after_losses(conn, s):
+    mk = Market()
+    mk.snaps[MINT] = snap(dex="pumpswap")
+    unsure = Brain(len(PLANS))  # knows nothing: exploration, not conviction
+    t = Trader(conn, s, unsure, snapshots=mk, executor=Paper(), rng=random.Random(11), safety_check=ok_safety)
+    add_shadow(conn, 1)
+    t.scan()
+    bought = 0
+    for i in range(2, 12):
+        m = f"Mint{i:040d}"[:44]
+        mk.snaps[m] = snap(dex="pumpswap", mint=m)
+        add_shadow(conn, i, mint=m)
+        bought += t.scan()
+    assert bought >= 1
+    o = conn.execute("SELECT * FROM brain_opps WHERE decision='enter'").fetchone()
+    assert o["kind"] == "market" and o["explore"] == 1
+    assert o["size_sol"] == pytest.approx(max(s.min_size_sol, s.challenge_explore_share * 5.0), abs=0.02)
+    # three losing hours: the challenge pauses and the side source is only watched again
+    h0 = int(time.time()) // 3600 * 3600
+    for k, eq in ((3, 5.0), (2, 4.5), (1, 4.0)):
+        conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (h0 - k * 3600 + 10, eq, 0, eq))
+        conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (h0 - k * 3600 + 3500, eq * 0.9, 0, eq * 0.9))
+    t._challenge_at = (-1e18, False)
+    assert not t.challenge_on(time.time())
+    assert t.settings(time.time()) is s
+    assert "Challenge pausiert" in journal.write(conn, unsure, s)
