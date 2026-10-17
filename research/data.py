@@ -127,7 +127,13 @@ def load(conn, since_ts=0, mints=None, shared=None):
     for r in conn.execute("SELECT mint, created_at FROM research_tokens WHERE created_at > 0" + mcond, margs):
         created[r[0]] = min(created.get(r[0], r[1]), r[1])
     bots, manual = (shared.bots, shared.manual) if shared is not None else _flags(conn)
-    ds = Dataset(trades, pidx, created, bots, manual, median(ratios) or 150.0)
+    sol_usd = median(ratios) or 150.0
+    # one money scale: wallet-history trades carry USD at today's SOL price, pool-feed trades USD of their day.
+    # Mixing both distorts PnL and tiers, so every trade with a SOL amount is valued in SOL at one rate.
+    for t in trades:
+        if t.sol > 0:
+            t.usd = t.sol * sol_usd
+    ds = Dataset(trades, pidx, created, bots, manual, sol_usd)
     if shared is not None:
         ds.intel = shared.intel
     else:

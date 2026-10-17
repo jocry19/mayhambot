@@ -383,3 +383,15 @@ def test_intel_source_survives_a_locked_read(monkeypatch):
     assert src("M", 0)["i_coverage"] == 0  # neutral after 3 locked tries
     assert src.ok  # still on
     assert "i_coverage" in src("M", 120) and calls["n"] == 4
+
+
+def test_trades_are_valued_on_one_sol_scale():
+    from research import data
+    from research.store import ensure_schema
+    conn = ensure_schema(db.connect(os.path.join(tempfile.mkdtemp(), "s.db")))
+    db.insert_trades(conn, [Trade("a", "W1", "M", "buy", 100, 10, 1.0, 120.0, 12.0, "geckoterminal"),
+                            Trade("b", "W2", "M", "buy", 200, 10, 1.0, 250.0, 25.0, "rpc"),  # SOL price of today
+                            Trade("c", "W3", "M", "buy", 300, 10, 2.0, 400.0, 20.0, "geckoterminal")])
+    ds = data.load(conn)
+    usd = {t.wallet: t.usd for t in ds.trades}
+    assert usd["W1"] == usd["W2"] and abs(usd["W3"] - 2 * usd["W1"]) < 1e-9
