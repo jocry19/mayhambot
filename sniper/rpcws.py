@@ -187,6 +187,7 @@ class LogStream:
         self.rate_limit_log = deque(maxlen=50)
         self.reconnects = 0
         self.server_drops = 0                  # closes by the RPC with an invalid close code (1002)
+        self.silent_reconnects = 0             # reconnects because nothing arrived for silence_limit() seconds
         self.recent, self._buffered, self.replayed = {}, 0, 0   # program mode: recent trades of unwanted coins
         self._program_since = None
         self.ws = None
@@ -297,6 +298,16 @@ class LogStream:
         """Since when the program-wide subscription delivers every pump.fun trade (None if it does not)."""
         return self._program_since if self.mode == "program" and self.program in self.subs else None
 
+    def silence_limit(self):
+        """Seconds without any message after which the connection counts as dead (a half-open socket keeps
+        answering pings but delivers nothing). The program subscription carries every pump.fun trade, so a minute
+        of silence is dead; per-mint subscriptions only once there are enough coins that silence is implausible."""
+        if not self.stale_sec or not self.subs:
+            return None
+        if self.mode == "program":
+            return min(60, self.stale_sec)
+        return self.stale_sec if len(self.subs) >= 10 or self.max_subs <= 1 else None
+
     async def run(self, stop):
         import time as _t
         import websockets
@@ -321,10 +332,11 @@ class LogStream:
                     try:
                         while True:
                             try:
-                                raw = await asyncio.wait_for(ws.recv(), timeout=self.stale_sec or 3600)
+                                raw = await asyncio.wait_for(ws.recv(), timeout=self.silence_limit() or 60)
                             except asyncio.TimeoutError:
-                                if self.stale_sec and self.subs:
-                                    log.warning("%s: %d s keine Daten, verbinde neu", self.name, self.stale_sec)
+                                if self.silence_limit():
+                                    self.silent_reconnects += 1
+                                    log.warning("%s: %d s keine Daten, verbinde neu", self.name, self.silence_limit())
                                     break
                                 continue
                             self.msgs += 1

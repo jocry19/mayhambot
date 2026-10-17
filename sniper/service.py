@@ -37,7 +37,8 @@ class Service:
             log.warning("SNIPER_TRADE_SOURCE=pumpportal ohne SNIPER_PUMPPORTAL_API_KEY: PumpPortal liefert Trades "
                         "nur mit aufgeladenem Key, nehme den RPC-Log-Datenstrom")
         self.logs = rpcws.LogStream(cfg.ws_url, self._on_rpc_trade, cfg.ws_max_subs, subs_per_sec=cfg.ws_subs_per_sec,
-                                    mode=cfg.trade_sub_mode, program=rpcws.PUMP_PROGRAM)
+                                    mode=cfg.trade_sub_mode, program=rpcws.PUMP_PROGRAM,
+                                    stale_sec=cfg.stale_sec)
         self.logs.on_mode = self._save_mode
         try:
             saved = json.loads(store.get_state(self.conn, "rpc_trade_mode") or "{}")
@@ -370,7 +371,8 @@ class Service:
                 "rpc": {"active": self.trades_via == "rpc", "connected": self.logs.connected, "mode": self.logs.mode,
                         "subs": self.logs.active_subs(), "wanted": len(self.logs.want), "attempts": self.logs.attempts,
                         "rejects": self.logs.rejects, "reconnects": self.logs.reconnects,
-                        "server_drops": self.logs.server_drops, "decode_rejects": dict(rpcws.REJECTS),
+                        "server_drops": self.logs.server_drops, "silent_reconnects": self.logs.silent_reconnects,
+                        "decode_rejects": dict(rpcws.REJECTS),
                         "replayed": self.logs.replayed, "trades_per_min": rpc}}
 
     def _launch_status(self, now):

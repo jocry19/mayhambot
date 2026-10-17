@@ -327,6 +327,8 @@ class Engine:
         st.queued_ts = None if reason else now
         row = self._row(st, a, now, st.decision, reason, 1)
         row["prescore"] = st.prescore
+        # what the learned rule saw (stage 2 overwrites these columns): research trains on exactly this
+        row["stage1_json"] = store.j({k: row.get(k) for k in research.BASE_FEATURES})
         store.save_launch(self.conn, row)
 
     def _outcomes(self, st, now):
@@ -334,19 +336,24 @@ class Engine:
             return
         base = st.base_mcap_sol
         upd, new = {}, False
+        last = max(self.cfg.horizons_min)
         for h in self.cfg.horizons_min:
             if h in st.outcomes or now < st.decided_ts + h * 60:
                 continue
-            v = st.current_mcap_sol()
-            if not v:      # no price yet (restarted stub): wait for one instead of recording a total loss
+            v = self._outcome_mcap(st, now)
+            if not v:      # no current price (restarted stub, stale or vanished pair): wait for one
                 continue
             st.outcomes[h] = v
             new = True
             if base:
                 upd[f"ret_{h}m"] = round(v / base - 1, 4)
         if not new:        # without a base there are no returns, but the launch must still finish (and leave memory)
+            if now > st.decided_ts + (last + 15) * 60:
+                # never a fresh price for the last horizon: give up without a label instead of keeping it forever
+                # (or writing the last stale quote as the 60 min result)
+                st.done = True
+                store.update_launch(self.conn, st.mint, done=1, outcome_src="no_fresh_price")
             return
-        last = max(self.cfg.horizons_min)
         if base:
             upd["max_ret_60m"] = round(max(st.max_mcap_sol, *st.outcomes.values()) / base - 1, 4)
             upd["min_ret_60m"] = round(min(st.min_mcap_sol or base, *st.outcomes.values()) / base - 1, 4)
@@ -369,6 +376,16 @@ class Engine:
             if st.n_seen or st.external_ts:   # a path with movement: replays of exit rules need it
                 store.save_path(self.conn, st.mint, st.created_ts, st.decided_ts, base, st.path.points())
         store.update_launch(self.conn, st.mint, **upd)
+
+    def _outcome_mcap(self, st, now):
+        """Market cap for an outcome at `now`: the live curve, else a DexScreener price at most 3 DexScreener rounds
+        (>= 90 s) old. The last quote of a pair that stopped updating is no outcome (it was written as the result)."""
+        if st.subscribed and not st.migrated and st.mcap_sol > 0:
+            return st.mcap_sol
+        fresh = max(90, 3 * self.cfg.dex_every_sec)
+        if st.external_mcap_sol and now - (st.external_ts or 0) <= fresh:
+            return st.external_mcap_sol
+        return 0.0
 
     def due_external(self, now=None, ahead=None):
         """Mints that need a DexScreener price soon: horizon due and no live curve, or open after migration."""
@@ -423,6 +440,24 @@ class Engine:
             store.update_launch(self.conn, st.mint, decision="skip",
                                 skip_reason=getattr(st, "stage1_reason", None) or "budget")
 
+    def _gates(self, st, a, enr, p_rug, conn, now):
+        """Skip reason after stage 2: the analysis, the rug model, the learned rule (replaces the score), the
+        market gate (moves the score bar), then the hard duties. The duties come last so that nothing that lowers
+        the bar (learned rule, hot narrative) can let an unchecked or rug-prone launch through."""
+        reason = a.skip_reason(self.cfg)
+        a.features["rug_p"] = p_rug
+        if reason == "score" and st.learned:
+            reason = None   # the accepted rule replaces the momentum score; bundles, insiders, risk still block
+        reason = market_gate(conn, st, a, reason, self.cfg, now)
+        if p_rug is not None and p_rug >= self.cfg.rug_p_block and reason in (None, "score", "risk", "market"):
+            reason = "rug_p"
+            a.reasons.append({"check": "rug_p", "risk": round(100 * p_rug, 1),
+                              "text": f"Rug-Modell: {100 * p_rug:.0f} % Rug-Wahrscheinlichkeit in 60 min"})
+        if reason is None and self.cfg.require_launch_data and st.source == "pumpportal" \
+                and not enr.get("early") and not enr.get("replay"):
+            reason = "unverified"
+        return reason
+
     def finalize(self, st, enr, now=None, conn=None):
         """Stage 2: full analysis with the enrichment, safety gate, paper entry. Runs in the worker thread
         with its own DB connection `conn`."""
@@ -435,19 +470,8 @@ class Engine:
             for w in a.wallets:   # insiders' bags we never saw bought, so their sells can trigger the insider exit
                 if w.get("role") in ("bundle", "insider") and (w.get("tokens") or 0) > 0:
                     st.insider_base.setdefault(w["wallet"], float(w["tokens"]))
-            reason = a.skip_reason(self.cfg)
             p_rug = self.rug_p(a.features, now)
-            a.features["rug_p"] = p_rug
-            if p_rug is not None and p_rug >= self.cfg.rug_p_block and reason in (None, "score", "risk"):
-                reason = "rug_p"
-                a.reasons.append({"check": "rug_p", "risk": round(100 * p_rug, 1),
-                                  "text": f"Rug-Modell: {100 * p_rug:.0f} % Rug-Wahrscheinlichkeit in 60 min"})
-            if reason == "score" and st.learned:
-                reason = None   # the accepted rule replaces the momentum score; bundles, insiders, risk still block
-            if reason is None and self.cfg.require_launch_data and st.source == "pumpportal" \
-                    and not enr.get("early") and not enr.get("replay"):
-                reason = "unverified"
-        reason = market_gate(conn, st, a, reason, self.cfg, now)
+        reason = self._gates(st, a, enr, p_rug, conn, now)
         self.counters["stage2"] += 1
         safety_res = None
         if reason is None and self.cfg.safety_gate and self.enricher:
@@ -455,10 +479,9 @@ class Engine:
             enr["safety"] = safety_res
             with self.lock:
                 a = analyze(st, self.cfg, enr, self.tiers, now)
-                r2 = a.skip_reason(self.cfg)
-                reason = market_gate(conn, st, a, None if (r2 == "score" and st.learned) else r2, self.cfg, now)
-                if reason is None and safety_res.get("blocked"):
-                    reason = "safety"
+            reason = self._gates(st, a, enr, p_rug, conn, now)
+            if reason is None and safety_res.get("blocked"):
+                reason = "safety"
         if reason is None and st.pool == "pump" and st.current_mcap_sol() < research.MIN_BASE_MCAP:
             reason = "no_price"   # a buy at "MCAP 0.0" happened on a broken curve state
         qf = None

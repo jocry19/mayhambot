@@ -92,6 +92,16 @@ def load(conn, since=None, min_trades=1, limit=30000):
     rows = []
     for t in cur.fetchall():
         r = dict(zip(cols, t))
+        # the rule is matched live on the stage-1 features; stage 2 overwrites those columns later (more trades,
+        # the enrichment), so research reads the stage-1 snapshot, and skips deep-checked rows from before it
+        try:
+            s1 = json.loads(r.get("stage1_json") or "null")
+        except ValueError:
+            s1 = None
+        if s1:
+            r.update({k: v for k, v in s1.items() if k in BASE_FEATURES})
+        elif (r.get("stage") or 1) >= 2:
+            continue
         for k, fn in DERIVED.items():
             try:
                 r[k] = fn(r)

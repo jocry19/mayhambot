@@ -341,3 +341,70 @@ def test_dev_history_counts_each_bad_launch_once_and_not_the_current_one(conn):
     store.save_launch(conn, {"mint": "NEW", "creator": "DEV", "created_ts": T0})
     h = store.creator_history(conn, "DEV", T0, exclude_mint="NEW")
     assert h["n"] == 1 and h["bad"] == 1
+
+
+def test_market_gate_cannot_waive_the_launch_data_duty(monkeypatch, conn):
+    """Review: a too-low score skipped the 'unverified' check, then a hot market lowered the bar: bought unchecked."""
+    from sniper import engine as engine_mod
+
+    class HotMarket:
+        @staticmethod
+        def sniper_adjust(*_a):
+            return {"delta": -99, "why": "heißes Narrativ"}
+    monkeypatch.setattr(engine_mod, "_market", HotMarket)
+    c = cfg(min_score=99)
+    eng = Engine(c, conn, enricher=FakeEnricher())
+    cv = Curve("HOTNODATA")
+    eng.handle(cv.create(), T0)
+    organic(eng, cv, T0 + 1, n=30)
+    st = eng.tick(T0 + c.decide_sec + 1)[0]
+    _, reason, pos = eng.finalize(st, {"errors": ["pump.fun down"]}, now=T0 + 22)
+    assert reason == "unverified" and pos is None
+
+
+def test_stale_dexscreener_price_is_no_outcome(conn):
+    """Review: the last quote of a pair that stopped updating was written as the final 60 min result."""
+    c = cfg()
+    eng = Engine(c, conn, enricher=FakeEnricher())
+    cv = Curve("STALE")
+    eng.handle(cv.create(), T0)
+    organic(eng, cv, T0 + 1, n=30)
+    st = eng.tick(T0 + c.decide_sec + 1)[0]
+    eng._unsub(st)
+    d = st.decided_ts
+    eng.apply_external({"STALE": st.base_mcap_sol * 2}, now=d + 50)
+    eng.tick(d + 61)                                   # 1 min: fresh quote -> recorded
+    eng.tick(d + 3601)                                 # 60 min: the quote is an hour old -> nothing
+    r = conn.execute("SELECT ret_1m, ret_60m, done FROM sniper_launches WHERE mint='STALE'").fetchone()
+    assert r["ret_1m"] is not None and r["ret_60m"] is None and r["done"] == 0
+    eng.tick(d + 75 * 60 + 1)                          # no fresh price ever: finished without a label
+    r = conn.execute("SELECT ret_60m, done, rugged, outcome_src FROM sniper_launches WHERE mint='STALE'").fetchone()
+    assert r["done"] == 1 and r["ret_60m"] is None and r["rugged"] is None and r["outcome_src"] == "no_fresh_price"
+    assert "STALE" not in eng.launches
+
+
+def test_research_reads_the_stage1_features_the_rule_is_matched_on(conn):
+    """Review: finalize overwrote the stage-1 columns, research trained on later values than the live match sees."""
+    c = cfg()
+    _enter(conn, c)
+    s1 = json.loads(conn.execute("SELECT stage1_json FROM sniper_launches WHERE mint='RESTART'").fetchone()[0])
+    conn.execute("UPDATE sniper_launches SET n_trades = 999, ret_60m = 0.1 WHERE mint='RESTART'")
+    conn.execute("INSERT INTO sniper_launches(mint, source, pool, stage, decided_ts, created_ts, mcap_decide_sol, "
+                 "n_trades, ret_60m) VALUES ('OLD2', 'pumpportal', 'pump', 2, 1, 1, 30, 5, 0.1)")
+    conn.commit()
+    rows = {r["mint"]: r for r in research.load(conn)}
+    assert rows["RESTART"]["n_trades"] == s1["n_trades"] != 999
+    assert "OLD2" not in rows                         # deep-checked before the snapshot existed: not comparable
+
+
+def test_silent_trade_stream_counts_as_dead():
+    from sniper import rpcws
+    s = rpcws.LogStream("wss://x", lambda m: None, 150, stale_sec=180, mode="program", program=rpcws.PUMP_PROGRAM)
+    assert s.silence_limit() is None                   # nothing subscribed yet
+    s.subs = {rpcws.PUMP_PROGRAM: 1}
+    assert s.silence_limit() == 60                     # the whole program is never quiet for a minute
+    m = rpcws.LogStream("wss://x", lambda m: None, 150, stale_sec=180, mode="mints")
+    m.subs = {f"m{i}": i for i in range(3)}
+    assert m.silence_limit() is None                   # three quiet coins can be silent
+    m.subs = {f"m{i}": i for i in range(12)}
+    assert m.silence_limit() == 180
