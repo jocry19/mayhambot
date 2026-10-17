@@ -5,7 +5,6 @@
 
 # 2026-10-17 Ketten-Suche über 30 trendende Coins (wallets/2026-10-17-grossforschung, bericht.md)
 4kTXMs5fJhomtKtum5PZuq5SBAjSKtGdeZHzAWkDMrdx  insider  Geldgeber 6tckHFBp… finanziert auch Bundle-Wallets (apeonduo, PLAY); kauft immer vor dem DexScreener
-4HY3naHRCMb9bQb76f7Rnh93WawUTZuVpo5Q8gB3vLDQ  insider  Geldgeber 5tzFkiKs… finanziert 10 Bundle-/Dev-Wallets (MHDG, Deer, PLAY)
 F91RwE999KbvvKBgofBgv64bQ6PZpw36KBRLtFRi5mgn  insider  kauft zu 100 % in der ersten Minute, Block-0-Käufer
 KgoxFngLwkC4NzUQJWQGZrqJwWDjhKnAmCspPqJjvpP  insider  Geldgeber iGdFcQoy… finanziert auch Bundle-Wallets
 2JxPmU9UU5KhSQ7h5v8PfhgbxPQhHNyBqNrhPAjPiWCu  launcher  Serien-Launcher
