@@ -171,11 +171,29 @@ def _note_planned(name):
 RESTART_S, RESTART_MAX_S, STABLE_S = 10, 300, 600
 
 
+def _compact_if_flagged(db=None):
+    """The nightly retention pass (deploy/ops.py retention) asks for a one-time VACUUM into incremental auto_vacuum
+    by leaving data/COMPACT_DB; it rewrites the whole file, so it runs here, before any service has it open."""
+    db = Path(db or os.getenv("MAYHAM_DB_PATH") or ROOT / "data" / "mayhambot.db")
+    flag = db.parent / "COMPACT_DB"
+    if not flag.exists() or not db.exists():
+        return None
+    try:
+        from core import retention
+        msg = retention.compact(db)
+    except Exception as e:  # noqa: BLE001 - a failed VACUUM leaves the file as it was; services start anyway
+        msg = f"Verdichtung fehlgeschlagen: {type(e).__name__}: {e}"
+    flag.unlink(missing_ok=True)
+    print(msg, flush=True)
+    return msg
+
+
 def run():
     """Foreground supervisor: restarts a crashed service after 10 s, doubling up to 5 min while it keeps crashing
     (reset after 10 min up or a planned restart), without holding up the other services; stops all on
     Ctrl+C / SIGTERM."""
     _stop_detached(quiet=True)  # never run next to copies started with `start`
+    _compact_if_flagged()
     procs = {n: _spawn(n, detach=False) for n in SERVICES}
     started = {n: time.time() for n in SERVICES}
     crashes = {n: 0 for n in SERVICES}

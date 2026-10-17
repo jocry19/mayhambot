@@ -196,3 +196,18 @@ def test_shutdown_shares_one_deadline(monkeypatch, tmp_path):
     monkeypatch.setattr(mayham.time, "time", lambda: clock[0])
     mayham._shutdown(procs, grace_s=10)
     assert sum(waits) <= 10 and all(p.killed for p in procs.values())
+
+
+def test_compact_runs_once_when_flagged(tmp_path):
+    import sqlite3
+    db = tmp_path / "mayhambot.db"
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE t(x)")
+    c.executemany("INSERT INTO t VALUES (?)", [("x" * 1000,) for _ in range(500)])
+    c.commit()
+    c.close()
+    assert mayham._compact_if_flagged(db) is None                 # no flag: nothing happens
+    (tmp_path / "COMPACT_DB").write_text("x")
+    assert "verdichtet" in mayham._compact_if_flagged(db)
+    assert not (tmp_path / "COMPACT_DB").exists()
+    assert sqlite3.connect(db).execute("PRAGMA auto_vacuum").fetchone()[0] == 2

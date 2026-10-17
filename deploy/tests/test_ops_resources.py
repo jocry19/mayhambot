@@ -43,6 +43,8 @@ def test_hung_service_and_big_wal(tmp_path, monkeypatch):
 
 def test_nightly_maintenance_once_per_day(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch, {"MAINT_HOUR": "4"})
+    spawned = []
+    monkeypatch.setattr(ops, "_spawn_retention", lambda: spawned.append(1))
     c = sqlite3.connect(tmp_path / "data" / "mayhambot.db")
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("CREATE TABLE t(x)")
@@ -54,6 +56,7 @@ def test_nightly_maintenance_once_per_day(tmp_path, monkeypatch):
     assert ops.nightly_maintenance(st, now=four - 3600) is None          # 03:05: not the hour
     assert "Wartung 2026-10-17" in ops.nightly_maintenance(st, now=four)
     assert ops.nightly_maintenance(st, now=four + 600) is None           # once per day
+    assert spawned == [1]
 
 
 def test_ops_report_shows_update_state(tmp_path, monkeypatch):
@@ -144,3 +147,25 @@ def test_backup_logs_table_sizes(tmp_path, monkeypatch):
     log = (tmp_path / "logs" / "dbsize.log").read_text()
     assert "trades:" in log and "100 Zeilen" in log and "Einmal-Wallets" in log
     assert (tmp_path / "data" / "db_sizes.json").exists()
+
+
+def test_retention_counts_only_until_switched_on(tmp_path, monkeypatch):
+    import argparse
+    _setup(tmp_path, monkeypatch)
+    from core import db
+    p = tmp_path / "data" / "mayhambot.db"
+    c = db.connect(str(p))
+    old = int(time.time()) - 30 * 86400
+    c.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?)",
+                  [(f"s{i}", f"one{i}", "JUNK", "buy", old + i, 1, 1, 1, 1, "geckoterminal") for i in range(10)])
+    c.commit()
+    c.close()
+    assert ops.retention_run(argparse.Namespace(db=str(p))) == 0
+    c = sqlite3.connect(p)
+    assert c.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 10
+    c.close()
+    monkeypatch.setattr(ops, "ENV", {"RETENTION_DELETE": "1"})
+    assert ops.retention_run(argparse.Namespace(db=str(p))) == 0
+    c = sqlite3.connect(p)
+    assert c.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
+    assert c.execute("SELECT SUM(n) FROM trades_hourly").fetchone()[0] == 10

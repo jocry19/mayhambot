@@ -16,6 +16,7 @@ Run from anywhere; paths are relative to the mayhambot folder (parent of deploy/
   python deploy/ops.py test-alert             # sends a Telegram test message
   python deploy/ops.py summary [--send]       # hourly status report (watchdog sends it every SUMMARY_EVERY_HOURS)
   python deploy/ops.py db-sizes               # MB and rows per table (also logged by every backup: logs/dbsize.log)
+  python deploy/ops.py retention              # nightly cleanup (core/retention.py), counts only unless RETENTION_DELETE=1
 
 Settings (optional, in .env):
   BACKUP_DIR            where backups go (default: ~/mayhambot-backups); use a 2nd disk or cloud folder
@@ -471,7 +472,47 @@ def nightly_maintenance(st: dict, now: float | None = None) -> str | None:
     msg = (f"Wartung {day}: optimize, Checkpoint {done}/{log_pages} Seiten"
            f"{' (Leser aktiv)' if busy else ''}, {time.time() - t0:.1f} s")
     print(msg)
+    _spawn_retention()
     return msg
+
+
+def _spawn_retention():
+    """The retention pass runs detached (it may take minutes), so the watchdog's next rounds are not held up."""
+    (ROOT / "logs").mkdir(exist_ok=True)
+    with open(ROOT / "logs" / "maintenance.log", "a") as fh:
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "retention", "--db", str(db_path())],
+                         cwd=str(ROOT), stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                         start_new_session=True)
+
+
+def retention_run(args) -> int:
+    """`ops.py retention`: the nightly cleanup (core/retention.py). Counts only unless RETENTION_DELETE=1 in .env.
+    Small batches with pauses, so the services keep writing; at most RETENTION_BUDGET_MIN minutes per night."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from core import retention  # noqa: PLC0415 - stdlib only
+    path = Path(args.db) if getattr(args, "db", None) else db_path()
+    if not path.exists():
+        return 1
+    delete = str(cfg("RETENTION_DELETE", "0")).lower() in ("1", "true", "on", "yes")
+    c = sqlite3.connect(str(path), timeout=30, isolation_level=None)
+    t0 = time.time()
+    try:
+        c.execute("PRAGMA busy_timeout=30000")
+        r = retention.cleanup(c, delete=delete, trades_days=cfg("RETENTION_TRADES_DAYS", 14),
+                              prices_days=cfg("RETENTION_PRICES_DAYS", 7), budget_s=cfg("RETENTION_BUDGET_MIN", 15) * 60)
+        fs = retention.file_stats(c)
+    finally:
+        c.close()
+    verb = "gelöscht" if delete else "würde löschen (RETENTION_DELETE aus)"
+    msg = (f"{time.strftime('%Y-%m-%d %H:%M:%S')} Aufräumen {verb}: trades {r.get('trades', 0)}, "
+           f"Kurse {r.get('prices', 0)}, Wallets {r.get('wallets', 0)}; Datei {fs['bytes'] / 1e6:.0f} MB, "
+           f"frei {fs['free_bytes'] / 1e6:.0f} MB, freigegeben {r.get('freed_mb', 0)} MB, {time.time() - t0:.0f} s")
+    # the file only shrinks with incremental auto_vacuum; switching needs one VACUUM while no service runs
+    if delete and fs["auto_vacuum"] != "incremental" and fs["free_bytes"] > max(200e6, 0.15 * fs["bytes"]):
+        (path.parent / retention.COMPACT_FLAG).write_text(msg)
+        msg += "; Verdichtung beim nächsten Neustart vorgemerkt"
+    print(msg, flush=True)
+    return 0
 
 
 def ops_report() -> str:
@@ -1216,11 +1257,12 @@ def main(argv=None) -> int:
     sub.add_parser("setup-telegram").add_argument("--neu", action="store_true", help="Chat-ID neu suchen")
     sub.add_parser("report")
     sub.add_parser("db-sizes")
+    sub.add_parser("retention").add_argument("--db", help="Datenbankdatei (Standard: MAYHAM_DB_PATH)")
     sm = sub.add_parser("summary")
     sm.add_argument("--send", action="store_true", help="per Telegram senden")
     a = ap.parse_args(argv)
     fn = {"status": status, "health": health, "watchdog": watchdog, "backup": backup,
-          "list-backups": list_backups, "summary": summary, "report": lambda a: print(ops_report()) or 0, "db-sizes": db_sizes, "setup-telegram": setup_telegram, "restore": restore, "rotate-logs": rotate_logs,
+          "list-backups": list_backups, "summary": summary, "report": lambda a: print(ops_report()) or 0, "db-sizes": db_sizes, "retention": retention_run, "setup-telegram": setup_telegram, "restore": restore, "rotate-logs": rotate_logs,
           "test-alert": lambda _: 0 if send_alert("Test: Watchdog-Alarme kommen an ✅") else 1}[a.cmd]
     return fn(a)
 

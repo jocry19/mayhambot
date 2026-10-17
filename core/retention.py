@@ -199,3 +199,140 @@ def profile_report(p: dict) -> str:
             f"Coins nur mit Einmal-Wallets: {pct(p['oneoff_coin_rows'])} der Zeilen"
             + (f"\ntoken_prices: {_n(p['prices_rows'])} Zeilen, nach Ausdünnen auf Stundenextreme "
                f"{_n(p['prices_thin_rows'])}" if "prices_rows" in p else ""))
+
+
+# ---------------------------------------------------------------- cleanup (deleting needs RETENTION_DELETE=1)
+TRADES_HOURLY_SCHEMA = """CREATE TABLE IF NOT EXISTS trades_hourly (
+    mint TEXT, hour INTEGER, side TEXT, n INTEGER, usd REAL, sol REAL, price_lo REAL, price_hi REAL,
+    PRIMARY KEY (mint, hour, side))"""
+COMPACT_FLAG = "COMPACT_DB"   # in data/: the launcher converts the file to incremental auto_vacuum on its next start
+POOL_FEEDS = "('geckoterminal', 'rpc_early', 'test_pool')"
+
+
+def _mark_oneoff(conn):
+    """Temp tables: one-off wallets (one coin ever, only seen in a pool feed) and the coins only they traded."""
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _ret_oneoff(wallet TEXT PRIMARY KEY)")
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _ret_coins(mint TEXT PRIMARY KEY)")
+    conn.execute("DELETE FROM _ret_oneoff")
+    conn.execute("DELETE FROM _ret_coins")
+    conn.execute(f"""INSERT INTO _ret_oneoff SELECT wallet FROM trades GROUP BY wallet
+                     HAVING COUNT(DISTINCT mint) = 1 AND SUM(COALESCE(source, '') NOT IN {POOL_FEEDS}) = 0""")
+    conn.execute("""INSERT INTO _ret_coins SELECT DISTINCT mint FROM trades EXCEPT
+                    SELECT DISTINCT mint FROM trades WHERE wallet NOT IN (SELECT wallet FROM _ret_oneoff)""")
+
+
+def _batches(conn, select_sql, args, apply, batch, pause_s, deadline):
+    """Run `apply(rowids)` in its own short write transaction per batch until select_sql finds nothing or the
+    deadline passes. Every batch commits, so the bot's writers wait at most one batch."""
+    done = 0
+    while time.time() < deadline:
+        ids = [r[0] for r in conn.execute(select_sql + f" LIMIT {int(batch)}", args)]
+        if not ids:
+            break
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            apply(ids)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        done += len(ids)
+        time.sleep(pause_s)
+    return done
+
+
+def cleanup(conn, now=None, delete=False, trades_days=14, prices_days=7, batch=2000, pause_s=0.2,
+            budget_s=900, vacuum_pages=2000) -> dict:
+    """Nightly retention. conn: autocommit (isolation_level=None) on the live file.
+
+    trades older than trades_days of coins that only one-off wallets ever traded (no scored wallet, so no
+    training event, tier or influence reads them) are summed into trades_hourly first, then deleted, together
+    with those wallets' rows in `wallets`. token_prices older than prices_days keep the hour's highest and lowest
+    price, lowest liquidity and newest row. With delete=False only the counts are returned."""
+    now = int(now or time.time())
+    deadline = time.time() + budget_s
+    out = {"delete": bool(delete)}
+    _mark_oneoff(conn)
+    t_cut, p_cut = now - trades_days * 86400, now - prices_days * 86400
+    t_sel = "SELECT rowid FROM trades WHERE ts < ? AND mint IN (SELECT mint FROM _ret_coins)"
+    w_sel = """SELECT rowid FROM wallets WHERE address IN (SELECT wallet FROM _ret_oneoff)
+               AND COALESCE(manual, 0) = 0 AND tier IS NULL AND COALESCE(is_smart, 0) = 0
+               AND NOT EXISTS (SELECT 1 FROM trades t WHERE t.wallet = wallets.address)"""
+    p_sel = f"SELECT rowid FROM token_prices WHERE ts < ? AND rowid NOT IN ({PRICE_KEEP_SQL.format(where='WHERE ts < ?')})"
+    if not delete:
+        out["trades"] = conn.execute(t_sel.replace("rowid", "COUNT(*)", 1), (t_cut,)).fetchone()[0]
+        out["prices"] = conn.execute(p_sel.replace("rowid", "COUNT(*)", 1), (p_cut, p_cut)).fetchone()[0]
+        return out
+    conn.execute(TRADES_HOURLY_SCHEMA)
+
+    def drop_trades(ids):
+        q = ",".join("?" * len(ids))
+        conn.execute(f"""INSERT INTO trades_hourly
+            SELECT mint, ts / 3600 * 3600, side, COUNT(*), SUM(usd_amount), SUM(sol_amount),
+                   MIN(NULLIF(price_usd, 0)), MAX(price_usd) FROM trades WHERE rowid IN ({q}) GROUP BY 1, 2, 3
+            ON CONFLICT(mint, hour, side) DO UPDATE SET n = n + excluded.n, usd = usd + excluded.usd,
+                sol = sol + excluded.sol, price_lo = MIN(COALESCE(price_lo, excluded.price_lo), COALESCE(excluded.price_lo, price_lo)),
+                price_hi = MAX(COALESCE(price_hi, excluded.price_hi), COALESCE(excluded.price_hi, price_hi))""", ids)
+        conn.execute(f"DELETE FROM trades WHERE rowid IN ({q})", ids)
+
+    def drop(table):
+        return lambda ids: conn.execute(f"DELETE FROM {table} WHERE rowid IN ({','.join('?' * len(ids))})", ids)
+
+    out["trades"] = _batches(conn, t_sel, (t_cut,), drop_trades, batch, pause_s, deadline)
+    out["wallets"] = _batches(conn, w_sel, (), drop("wallets"), batch, pause_s, deadline)
+    # prices hour by hour from the oldest one not yet thinned, so each pass reads one hour's rows
+    done_until = int((conn.execute("SELECT value FROM retention_state WHERE key='prices_done_until'").fetchone()
+                      or [0])[0]) if _has(conn, "retention_state") else 0
+    first = conn.execute("SELECT MIN(ts) FROM token_prices WHERE ts >= ?", (done_until,)).fetchone()[0]
+    n_p, hour = 0, (first // 3600 * 3600) if first else p_cut
+    while hour + 3600 <= p_cut and time.time() < deadline:
+        sel = (f"SELECT rowid FROM token_prices WHERE ts >= ? AND ts < ? AND rowid NOT IN "
+               f"({PRICE_KEEP_SQL.format(where='WHERE ts >= ? AND ts < ?')})")
+        n_p += _batches(conn, sel, (hour, hour + 3600) * 2, drop("token_prices"), 10 ** 6, 0, deadline)
+        hour += 3600
+        conn.execute("CREATE TABLE IF NOT EXISTS retention_state (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT OR REPLACE INTO retention_state VALUES ('prices_done_until', ?)", (str(hour),))
+    out["prices"] = n_p
+    out.update(reclaim(conn, deadline, vacuum_pages, pause_s))
+    return out
+
+
+def _has(conn, table) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone() is not None
+
+
+def reclaim(conn, deadline, pages=2000, pause_s=0.2) -> dict:
+    """Give free pages back to the file system in small steps (incremental auto_vacuum only; the launcher converts
+    the file once, see COMPACT_FLAG). Each step is one short write; the bot keeps running."""
+    fs = file_stats(conn)
+    freed = 0
+    if fs["auto_vacuum"] == "incremental":
+        while time.time() < deadline:
+            left = conn.execute("PRAGMA freelist_count").fetchone()[0]
+            if not left:
+                break
+            conn.execute(f"PRAGMA incremental_vacuum({min(pages, left)})")
+            freed += min(pages, left)
+            time.sleep(pause_s)
+    return {"freed_mb": round(freed * conn.execute("PRAGMA page_size").fetchone()[0] / 1e6, 1),
+            "auto_vacuum": fs["auto_vacuum"], "free_mb_before": round(fs["free_bytes"] / 1e6, 1)}
+
+
+def compact(path, min_free_factor=2.2, timeout_s=15) -> str:
+    """One-time switch to incremental auto_vacuum: PRAGMA + VACUUM rewrites the whole file, so it runs only while
+    no service is up (the launcher calls it before starting them) and with room for the copy."""
+    import shutil
+    p = Path(path)
+    size = p.stat().st_size
+    if shutil.disk_usage(p.parent).free < size * min_free_factor:
+        return f"übersprungen: zu wenig freier Platz für {size / 1e6:.0f} MB"
+    c = sqlite3.connect(str(p), timeout=timeout_s, isolation_level=None)
+    try:
+        t0 = time.time()
+        c.execute("PRAGMA auto_vacuum=INCREMENTAL")
+        c.execute("VACUUM")
+        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return (f"verdichtet: {size / 1e6:.0f} -> {p.stat().st_size / 1e6:.0f} MB in {time.time() - t0:.0f} s, "
+                f"auto_vacuum {file_stats(c)['auto_vacuum']}")
+    finally:
+        c.close()
