@@ -109,8 +109,8 @@ def cobuys(conn, wallet, buys, ts):
 def latency(conn, wallet, ts):
     if not has(conn, "ct_swaps"):
         return {}
-    d = sorted(r[0] for r in conn.execute("SELECT seen_at-ts FROM ct_swaps WHERE wallet=? AND ts>? AND ts<=? AND seen_at>=ts "
-                                          "AND seen_at-ts<3600", (wallet, ts - 7 * 86400, ts)))
+    d = sorted(r[0] for r in conn.execute("SELECT seen_at-ts FROM ct_swaps WHERE wallet=? AND ts>? AND ts<=? AND seen_at>=ts AND seen_at<=? "
+                                          "AND seen_at-ts<3600", (wallet, ts - 7 * 86400, ts, ts)))  # point in time: only latencies known by ts
     if not d:
         return {}
     return {"w_latency_median_s": statistics.median(d), "w_latency_p90_s": d[min(len(d) - 1, int(0.9 * len(d)))]}

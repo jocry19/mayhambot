@@ -133,13 +133,19 @@ class Trader:
             return 0
         now = self.clock()
         fresh = [(kind, ref, row, ent) for (kind, ref), (row, ent, _) in self.pending.items()]
+        # the 6 h dedup (_seen) only knows recorded decisions: two buys of one whale in one coin in the same scan, or
+        # while the first waits for a price, were both decided and learned as two samples
+        batch = {(kind, row["mint"], ent) for kind, _, row, ent in fresh}
         for kind, ref, row in cands:
             ent = kind
             if kind == "whale":
                 from copytrade import store as ct_store
 
                 ent = ct_store.entity(self.conn, row["wallet"])
-            if (kind, ref) not in self.pending and not self._seen(kind, ref, row["mint"], ent, now):
+            if (kind, ref) in self.pending or (kind, row["mint"], ent) in batch:
+                continue
+            if not self._seen(kind, ref, row["mint"], ent, now):
+                batch.add((kind, row["mint"], ent))
                 fresh.append((kind, ref, row, ent))
                 self.pending[(kind, ref)] = (row, ent, now)
         if not fresh:

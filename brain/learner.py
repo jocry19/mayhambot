@@ -194,6 +194,9 @@ def replay(conn, o, candles_fn, allow_net: bool = True, plans=None, horizon: int
     return out if any(x is not None for x in out) else None
 
 
+_retry: dict = {}  # opp id -> (failed network replays, next try): a dead coin without candles is retried with backoff
+
+
 def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: int | None = None) -> int:
     """Replay opportunities in two steps and learn each step at once: the short plans (up to 45 min) about an hour
     after the decision, the long ones when the longest plan is over (~4.2 h). Then score the decision made back then.
@@ -217,7 +220,9 @@ def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: i
             continue
         if final:
             todo = [i for i in range(len(PLANS)) if prev is None or i not in SHORT]
-            allow = net > 0 and o["ts"] < now - hz - CACHE_GRACE_S
+            # oldest first: without a backoff the coins that never get candles took the whole network budget every
+            # round for two days (RETRY_S) and fresh outcomes were never fetched
+            allow = net > 0 and o["ts"] < now - hz - CACHE_GRACE_S and now >= _retry.get(o["id"], (0, 0))[1]
             horizon = hz
         else:
             todo, allow, horizon = SHORT, net > 0, short_horizon_s()
@@ -231,7 +236,11 @@ def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: i
         if gains is None and not final:
             continue  # no candles yet: the final step tries again with the full window
         if gains is None and o["ts"] >= now - RETRY_S:
+            if allow:
+                k = _retry.get(o["id"], (0, 0))[0] + 1
+                _retry[o["id"]] = (k, now + min(6 * 3600, 300 * 2 ** k))
             continue
+        _retry.pop(o["id"], None)
         merged = (list(prev or []) + [None] * len(PLANS))[:len(PLANS)]
         for i in todo:
             if gains and gains[i] is not None:
