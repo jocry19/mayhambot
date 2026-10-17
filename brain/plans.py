@@ -46,14 +46,20 @@ NAMES = tuple(p.name for p in PLANS)
 BY_NAME = {p.name: p for p in PLANS}
 
 
-def grid_index(plan: Plan, grid=None) -> int:
-    """Index of the plan in copytrade's grid (whale buys: GRID with 15 s delay; signals/trades: EXIT_GRID)."""
+def nearest_delay(delay_s: float) -> int:
+    """copytrade's grid delay closest to the brain's own entry delay after the whale's buy."""
+    return min(sim.DELAYS_S, key=lambda d: abs(d - delay_s))
+
+
+def grid_index(plan: Plan, grid=None, delay_s: int | None = None) -> int:
+    """Index of the plan in copytrade's grid (whale buys: GRID at the given delay, default 15 s; signals/trades:
+    EXIT_GRID)."""
     grid = sim.GRID if grid is None else grid
-    return grid.index(plan.variant(sim.DELAYS_S[0]))
+    return grid.index(plan.variant(sim.DELAYS_S[0] if delay_s is None else delay_s))
 
 
-def gains_from_grid(gains: list, grid) -> list:
+def gains_from_grid(gains: list, grid, delay_s: int | None = None) -> list:
     """The plans' gains out of a stored full-grid replay (None where the grid row has none)."""
     if len(gains) != len(grid):
         return [None] * len(PLANS)
-    return [gains[grid_index(p, grid)] for p in PLANS]
+    return [gains[grid_index(p, grid, delay_s)] for p in PLANS]

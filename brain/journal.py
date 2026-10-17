@@ -74,10 +74,11 @@ def write(conn, model, s, now: float | None = None) -> str:
     if h["n"]:
         lines.append(f"Ehrlich nachgeprüft (Entscheidung vor dem Ergebnis, nach Kosten), {h['n']} Ergebnisse heute: "
                      f"genommen {h['n_taken']} mit Ø {_p(h['taken_mean'])} (erwartet {_p(h['taken_pred'])}), "
+                     f"erkundet {h['n_explored']} mit Ø {_p(h['explored_mean'])}, "
                      f"ausgelassen {h['n_passed']} mit Ø {_p(h['passed_mean'])}; alles stumpf kopiert wäre "
                      f"Ø {_p(h['copy_all_mean'])} gewesen.")
     else:
-        lines.append("Heute kam noch kein Ergebnis zurück (ein Ergebnis braucht gut 4 Stunden).")
+        lines.append("Heute kam noch kein Ergebnis zurück (kurze Pläne nach etwa 1 Stunde, lange nach gut 4 Stunden).")
 
     # what changed in the beliefs since the last entry
     eff = effects(model, min_evidence=5)
