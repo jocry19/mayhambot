@@ -32,13 +32,24 @@ def _group(rows):
     out["hit_rate_2x"] = sum(1 for r in done if r["max_ret_60m"] >= HIT) / len(done) if done else None
     rug = [r for r in rows if r["ret_60m"] is not None]
     out["rug_rate"] = sum(1 for r in rug if r["ret_60m"] <= RUG) / len(rug) if rug else None
+    # robust mean for "what if we had bought them all, held 60 min": each launch between -100 % and +500 %
+    out["mean_ret_60m_capped"] = (sum(max(-1.0, min(MAX_NET, r["ret_60m"])) for r in rug) / len(rug)) if rug else None
     return out
+
+
+MAX_EXTERNAL_RET = 100.0   # +10,000 % in an hour from a pool outside pump.fun: base and outcome in different units
+MAX_NET = 5.0              # one launch counts at most +500 % in a mean (as in sniper.research)
 
 
 def _clean(r):
     """A pump launch decided below the curve's start price had a broken quote: its returns (+4,800,000 % on
-    average) are no outcome. It still counts as a launch, just not as measured."""
-    if r.get("pool") == "pump" and r.get("mcap_decide_sol") is not None and r["mcap_decide_sol"] < MIN_BASE_MCAP:
+    average) are no outcome. Outside pump.fun (bonk) the decision price comes from the create message and the
+    outcome from DexScreener: a jump beyond +10,000 % is a unit mismatch (+1,895,667,485 % on the dashboard).
+    Such a launch still counts, just not as measured."""
+    ext_broken = r.get("pool") not in (None, "pump") and max(r.get("max_ret_60m") or 0, r.get("ret_60m") or 0) \
+        > MAX_EXTERNAL_RET
+    if ext_broken or r.get("pool") == "pump" and r.get("mcap_decide_sol") is not None \
+            and r["mcap_decide_sol"] < MIN_BASE_MCAP:
         for k in ("ret_1m", "ret_5m", "ret_15m", "ret_60m", "max_ret_60m", "rugged"):
             r[k] = None
     return r

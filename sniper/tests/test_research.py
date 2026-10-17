@@ -522,3 +522,16 @@ def test_decoder_rejects_are_counted_by_reason():
         struct.pack("<qQQ", 0, int(30e9), int(2.1e9 * 1e6))
     assert rpcws.decode_trade(base64.b64encode(raw).decode()) is None
     assert rpcws.REJECT_WHY.get("tok_high", 0) == before.get("tok_high", 0) + 1
+
+
+def test_stats_drop_unit_mismatch_outside_pump_and_cap_the_mean(conn):
+    """Dashboard: 'kein Trade-Datenstrom (bonk)' showed +1,895,667,485 % on average after 60 min."""
+    from sniper import analytics
+    for i, r60 in enumerate([18956674.0, 0.5, -0.5, 9.0]):
+        store.save_launch(conn, {"mint": f"K{i}", "pool": "bonk" if i < 3 else "pump", "decided_ts": int(T0),
+                                 "stage": 1, "decision": "skip", "skip_reason": "no_stream" if i < 3 else "activity",
+                                 "mcap_decide_sol": 40.0, "max_ret_60m": max(r60, 0), "ret_60m": r60})
+    f = {x["code"]: x for x in analytics.stats(conn, hours=0, now=T0 + 10)["filters"]}
+    assert f["no_stream"]["n"] == 3 and f["no_stream"]["n_measured"] == 2
+    assert abs(f["no_stream"]["mean_ret_60m_capped"]) < 1e-9          # (+0.5 - 0.5) / 2
+    assert f["activity"]["mean_ret_60m_capped"] == 5.0                  # +900 % counted as +500 %
