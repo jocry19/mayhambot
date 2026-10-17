@@ -212,11 +212,16 @@ POOL_FEEDS = "('geckoterminal', 'rpc_early', 'test_pool')"
 
 
 def _mark_oneoff(conn):
-    """Temp table _ret_oneoff: one-off wallets (one coin ever, only seen in a pool feed)."""
+    """Temp tables: _ret_oneoff = one-off wallets (one coin ever, only seen in a pool feed), _ret_keep = coins
+    any other wallet traded."""
     conn.execute("CREATE TEMP TABLE IF NOT EXISTS _ret_oneoff(wallet TEXT PRIMARY KEY)")
     conn.execute("DELETE FROM _ret_oneoff")
     conn.execute(f"""INSERT INTO _ret_oneoff SELECT wallet FROM trades GROUP BY wallet
                      HAVING COUNT(DISTINCT mint) = 1 AND SUM(COALESCE(source, '') NOT IN {POOL_FEEDS}) = 0""")
+    # coins any other wallet traded: their whole tape stays (training's crowd, structure and influence features)
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _ret_keep(mint TEXT PRIMARY KEY)")
+    conn.execute("DELETE FROM _ret_keep")
+    conn.execute("INSERT INTO _ret_keep SELECT DISTINCT mint FROM trades WHERE wallet NOT IN (SELECT wallet FROM _ret_oneoff)")
 
 
 def _batches(conn, select_sql, args, apply, batch, pause_s, deadline):
@@ -243,21 +248,24 @@ def cleanup(conn, now=None, delete=False, trades_days=30, prices_days=7, batch=2
             budget_s=900, vacuum_pages=2000) -> dict:
     """Nightly retention. conn: autocommit (isolation_level=None) on the live file.
 
-    trades older than trades_days of one-off wallets (one coin ever, only seen in the pool feed: never scored,
-    no tier, no training event of their own) are summed into trades_hourly per coin, hour and side first, then
-    deleted, together with those wallets' rows in `wallets`. Every trade of a wallet with 2+ coins or a
-    backfilled history stays. token_prices older than prices_days keep the hour's highest and lowest
+    trades older than trades_days of coins that only one-off wallets ever traded (one coin ever, only seen in
+    the pool feed) are summed into trades_hourly per coin, hour and side first, then deleted, together with
+    those wallets' rows in `wallets`. research/data.load trains on the whole tape of every coin a scored or
+    multi-coin wallet touched (crowd, top10/bundle/early_sell, influence), so those coins keep every trade. token_prices older than prices_days keep the hour's highest and lowest
     price, lowest liquidity and newest row. With delete=False only the counts are returned."""
     now = int(now or time.time())
     deadline = time.time() + budget_s
     out = {"delete": bool(delete)}
     _mark_oneoff(conn)
     t_cut, p_cut = now - trades_days * 86400, now - prices_days * 86400
-    t_sel = "SELECT rowid FROM trades WHERE ts < ? AND wallet IN (SELECT wallet FROM _ret_oneoff)"
+    t_sel = ("SELECT rowid FROM trades WHERE ts < ? AND wallet IN (SELECT wallet FROM _ret_oneoff) "
+             "AND mint NOT IN (SELECT mint FROM _ret_keep)")
     w_sel = """SELECT rowid FROM wallets WHERE address IN (SELECT wallet FROM _ret_oneoff)
                AND COALESCE(manual, 0) = 0 AND tier IS NULL AND COALESCE(is_smart, 0) = 0
                AND NOT EXISTS (SELECT 1 FROM trades t WHERE t.wallet = wallets.address)"""
-    p_sel = f"SELECT rowid FROM token_prices WHERE ts < ? AND rowid NOT IN ({PRICE_KEEP_SQL.format(where='WHERE ts < ?')})"
+    # prices of coins a scored wallet traded stay whole too: they are the outcome labels (PriceIndex.max_between)
+    p_sel = (f"SELECT rowid FROM token_prices WHERE ts < ? AND mint NOT IN (SELECT mint FROM _ret_keep) "
+             f"AND rowid NOT IN ({PRICE_KEEP_SQL.format(where='WHERE ts < ?')})")
     if not delete:
         out["trades"] = conn.execute(t_sel.replace("rowid", "COUNT(*)", 1), (t_cut,)).fetchone()[0] if trades_days > 0 else 0
         out["prices"] = conn.execute(p_sel.replace("rowid", "COUNT(*)", 1), (p_cut, p_cut)).fetchone()[0]
@@ -286,7 +294,8 @@ def cleanup(conn, now=None, delete=False, trades_days=30, prices_days=7, batch=2
     first = conn.execute("SELECT MIN(ts) FROM token_prices WHERE ts >= ?", (done_until,)).fetchone()[0]
     n_p, hour = 0, (first // 3600 * 3600) if first else p_cut
     while hour + 3600 <= p_cut and time.time() < deadline:
-        sel = (f"SELECT rowid FROM token_prices WHERE ts >= ? AND ts < ? AND rowid NOT IN "
+        sel = (f"SELECT rowid FROM token_prices WHERE ts >= ? AND ts < ? AND mint NOT IN (SELECT mint FROM _ret_keep) "
+               f"AND rowid NOT IN "
                f"({PRICE_KEEP_SQL.format(where='WHERE ts >= ? AND ts < ?')})")
         n_p += _batches(conn, sel, (hour, hour + 3600) * 2, drop("token_prices"), 10 ** 6, 0, deadline)
         hour += 3600

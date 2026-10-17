@@ -97,8 +97,9 @@ def _live(tmp_path, auto_vacuum=None):
     c.executemany("INSERT OR IGNORE INTO wallets(address) VALUES (?)", [(r[1],) for r in rows])
     c.execute("UPDATE wallets SET manual=1 WHERE address='one7'")     # a manual wallet row is never dropped
     c.executemany("INSERT INTO token_prices VALUES (?,?,?,?,?)",
-                  [("GOOD", old + 60 * i, 1.0 + (i == 17) * 9, 0, 1000 - i) for i in range(120)]
-                  + [("GOOD", now - 60 * i, 1.0, 0, 1000) for i in range(30)])
+                  [("JUNK", old + 60 * i, 1.0 + (i == 17) * 9, 0, 1000 - i) for i in range(120)]
+                  + [("JUNK", now - 60 * i, 1.0, 0, 1000) for i in range(30)]
+                  + [("GOOD", old + 60 * i, 2.0, 0, 1000) for i in range(120)])
     c.commit()
     c.isolation_level = None
     return c, now, path
@@ -108,26 +109,27 @@ def test_cleanup_dry_run_counts_and_deletes_nothing(tmp_path):
     c, now, _ = _live(tmp_path)
     n = c.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
     out = retention.cleanup(c, now=now)
-    assert out["trades"] == 350 and 100 <= out["prices"] < 120
+    assert out["trades"] == 300 and 100 <= out["prices"] < 120
     assert c.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == n
 
 
 def test_cleanup_keeps_what_scoring_and_training_read(tmp_path):
     c, now, _ = _live(tmp_path)
     out = retention.cleanup(c, now=now, delete=True, batch=64, pause_s=0)
-    assert out["trades"] == 350                                  # old trades of one-coin pool-feed wallets
+    assert out["trades"] == 300                                  # coin JUNK: only one-off wallets ever traded it
     left = {r[0] for r in c.execute("SELECT DISTINCT mint FROM trades")}
-    assert left == {"GOOD", "OTHER", "NEW"}                      # the two-coin wallet's trades and recent ones stay
-    assert [r[0] for r in c.execute("SELECT wallet FROM trades WHERE mint='GOOD'")] == ["smart"]
-    assert c.execute("SELECT SUM(n) FROM trades_hourly WHERE mint='GOOD'").fetchone()[0] == 50
+    assert left == {"GOOD", "OTHER", "NEW"}
+    assert c.execute("SELECT COUNT(*) FROM trades WHERE mint='GOOD'").fetchone()[0] == 51   # whole tape: training
+    assert c.execute("SELECT COUNT(*) FROM trades_hourly WHERE mint='GOOD'").fetchone()[0] == 0
     agg = c.execute("SELECT SUM(n), SUM(usd), MIN(price_lo), MAX(price_hi) FROM trades_hourly WHERE mint='JUNK'").fetchone()
     assert agg[0] == 300 and abs(agg[1] - 4500) < 1e-6 and agg[2] == 1e-6 and abs(agg[3] - 5e-6) < 1e-12
     w = {r[0] for r in c.execute("SELECT address FROM wallets")}
-    assert "one3" not in w and "fol3" not in w and "one7" in w and "smart" in w and "fresh" in w
+    assert "one3" not in w and "fol3" in w and "one7" in w and "smart" in w and "fresh" in w
     # prices: the 10x spike survives, old hours keep at most 4 rows each, recent rows untouched
-    assert c.execute("SELECT MAX(price_usd) FROM token_prices WHERE mint='GOOD'").fetchone()[0] == 10.0
-    assert c.execute("SELECT COUNT(*) FROM token_prices WHERE ts < ?", (now - 7 * DAY,)).fetchone()[0] <= 3 * 4
+    assert c.execute("SELECT MAX(price_usd) FROM token_prices WHERE mint='JUNK'").fetchone()[0] == 10.0
+    assert c.execute("SELECT COUNT(*) FROM token_prices WHERE mint='JUNK' AND ts < ?", (now - 7 * DAY,)).fetchone()[0] <= 3 * 4
     assert c.execute("SELECT COUNT(*) FROM token_prices WHERE ts > ?", (now - 2 * DAY,)).fetchone()[0] == 30
+    assert c.execute("SELECT COUNT(*) FROM token_prices WHERE mint='GOOD'").fetchone()[0] == 120   # labels stay
     again = retention.cleanup(c, now=now, delete=True, pause_s=0)    # idempotent
     assert again["trades"] == 0 and again["prices"] == 0
 
