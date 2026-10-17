@@ -16,7 +16,7 @@ Run from anywhere; paths are relative to the mayhambot folder (parent of deploy/
   python deploy/ops.py test-alert             # sends a Telegram test message
   python deploy/ops.py summary [--send]       # hourly status report (watchdog sends it every SUMMARY_EVERY_HOURS)
   python deploy/ops.py db-sizes               # MB and rows per table (also logged by every backup: logs/dbsize.log)
-  python deploy/ops.py retention              # nightly cleanup (core/retention.py), counts only unless RETENTION_DELETE=1
+  python deploy/ops.py retention              # nightly cleanup (core/retention.py), RETENTION_DELETE=0 counts only
 
 Settings (optional, in .env):
   BACKUP_DIR            where backups go (default: ~/mayhambot-backups); use a 2nd disk or cloud folder
@@ -486,14 +486,14 @@ def _spawn_retention():
 
 
 def retention_run(args) -> int:
-    """`ops.py retention`: the nightly cleanup (core/retention.py). Counts only unless RETENTION_DELETE=1 in .env.
+    """`ops.py retention`: the nightly cleanup (core/retention.py). Deletes by default (user approved 2026-10-17); RETENTION_DELETE=0 in .env counts only.
     Small batches with pauses, so the services keep writing; at most RETENTION_BUDGET_MIN minutes per night."""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from core import retention  # noqa: PLC0415 - stdlib only
     path = Path(args.db) if getattr(args, "db", None) else db_path()
     if not path.exists():
         return 1
-    delete = str(cfg("RETENTION_DELETE", "0")).lower() in ("1", "true", "on", "yes")
+    delete = str(cfg("RETENTION_DELETE", "1")).lower() in ("1", "true", "on", "yes")
     c = sqlite3.connect(str(path), timeout=30, isolation_level=None)
     t0 = time.time()
     try:
