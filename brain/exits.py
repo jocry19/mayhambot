@@ -202,11 +202,14 @@ def replay(xm, cs, t0, kind, liq, wallet, swaps, whale_sells, s, cost: float) ->
 
 
 # ---------------------------------------------------------------------------------------------- live verdict
-def verdict(conn) -> dict:
-    """Out-of-sample: the organic exit's replays against the chosen plans' replays of the same opportunities."""
+def verdict(conn, kind: str | None = None) -> dict:
+    """Out-of-sample: the organic exit's replays against the chosen plans' replays of the same opportunities; with
+    `kind` ("whale", "signal", "launch", "market") only that kind's coins (another account holding such coins asks
+    for its own kind)."""
     try:
         rows = conn.execute("SELECT organic, plan_gain FROM brain_exit_evals WHERE organic IS NOT NULL AND "
-                            "plan_gain IS NOT NULL ORDER BY opp_id DESC LIMIT ?", (VERDICT_WINDOW,)).fetchall()
+                            "plan_gain IS NOT NULL AND (? IS NULL OR kind=?) ORDER BY opp_id DESC LIMIT ?",
+                            (kind, kind, VERDICT_WINDOW)).fetchall()
     except Exception:
         rows = []
     n = len(rows)
