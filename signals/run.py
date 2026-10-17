@@ -212,6 +212,14 @@ def refresh_tokens(conn, now=None):
     mints = list(dict.fromkeys(mints))[:TOKEN_REFRESH_MAX]
     infos = market.token_info(mints)
     db.retry_locked(conn, lambda: db.upsert_tokens(conn, infos, tracked=False))
+    # a row stamped ahead of the clock (17.10.: one 52 min in the future, writer unknown) would pass every freshness
+    # filter as "just updated" until then: pulled back to now, logged so the writer can be found
+    ahead = conn.execute("SELECT mint, last_updated FROM tokens WHERE last_updated > ?", (now + 120,)).fetchall()
+    if ahead:
+        log.warning("tokens.last_updated ahead of the clock, reset to now: %s",
+                    ", ".join(f"{r[0][:6]} +{(r[1] - now) // 60} min" for r in ahead[:5]))
+        db.retry_locked(conn, lambda: (conn.execute("UPDATE tokens SET last_updated=? WHERE last_updated > ?",
+                                                    (now, now + 120)), conn.commit()))
     return len(infos)
 
 

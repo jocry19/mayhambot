@@ -212,6 +212,7 @@ def test_token_refresh_keeps_watch_flags(tmp_path, monkeypatch):
     c = conn(tmp_path)
     c.execute("INSERT INTO tokens(mint, tracked, last_updated) VALUES ('W', 1, 0)")
     c.execute("INSERT INTO tokens(mint, tracked, last_updated) VALUES ('S', 0, 0)")
+    c.execute("INSERT INTO tokens(mint, tracked, last_updated) VALUES ('F', 0, ?)", (int(__import__('time').time()) + 3120,))
     c.execute("INSERT INTO signals(ts, mint, score, price_usd) VALUES (?, 'S', 40, 1.0)", (int(__import__('time').time()) - 600,))
     c.commit()
     asked = []
@@ -223,3 +224,4 @@ def test_token_refresh_keeps_watch_flags(tmp_path, monkeypatch):
     assert run.refresh_tokens(c) == 2 and sorted(asked) == ["S", "W"]
     r = {x["mint"]: x for x in c.execute("SELECT * FROM tokens")}
     assert r["S"]["tracked"] == 0 and r["W"]["tracked"] == 1 and r["W"]["txns_m5"] == 40 and r["S"]["last_updated"] > 0
+    assert r["F"]["last_updated"] <= int(__import__('time').time())    # stamped 52 min ahead: pulled back
