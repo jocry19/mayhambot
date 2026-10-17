@@ -739,6 +739,7 @@ def test_replays_compare_organic_with_the_plan_out_of_sample(conn, s):
     xr = learner.honest(conn)["exit_replays"]
     assert xr["n"] == 1 and xr["capture_organic"] > xr["capture_plan"]
     assert exits.verdict(conn)["n"] == 1 and not exits.verdict(conn)["live"]  # one coin proves nothing yet
+    assert exits.verdict(conn, "signal")["n"] == 1 and exits.verdict(conn, "whale")["n"] == 0
     text = journal.write(conn, model, s)
     assert "Ausstieg im Vergleich" in text
 
