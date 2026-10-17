@@ -42,6 +42,10 @@ EXIT_NAMES = {"target": "Ziel erreicht", "inflow_peak": "Copy-Ansturm vorbei", "
 UNCONFIRMED = "unbestätigt:"  # live.executor.UNCONFIRMED: a buy that may still land keeps its 'opening' row
 RUG_LIQ_DROP = 0.8  # liquidity this far under its value at entry: the pool was pulled, exit at once
 PAPER_MODES = ("paper", "explore")  # simulated accounts: strict paper (the live rules) and exploration
+# coin already up this much in the 5 min before the copy (intel px_ret_5m): strict size x RUN5_SIZE. Walk-forward on
+# 106 whale coin-hours 10/16-17 (net after costs, train 2/3, test 1/3): Spearman -0.37 train (q 0.08 over 28
+# features), -0.35 test; up >5 %: -9 to -20 % net vs about 0 % for coins flat or down. The only feature that held.
+RUN5_HALF, RUN5_SIZE = 0.05, 0.5
 
 
 class ExploreExecutor:
@@ -313,8 +317,12 @@ class Strategy:
             if not accounts:
                 return self._skip("whale", swap.mint, f"gelernter Filter: {blocked} verliert", snap,
                                   wallet=swap.wallet)
+        run5 = iraw.get("px_ret_5m")
+        chased = run5 is not None and run5 >= RUN5_HALF
+        if chased:  # strict only: exploration keeps full size so the rule can be proven wrong
+            size *= RUN5_SIZE
         exits = self._learned_exits(lp, p, tp, hold, inflow=1)
-        info = {"explore": explore, "whale_sol": swap.sol_amount, "delay_s": round(age, 1),
+        info = {"explore": explore, "run5_size": RUN5_SIZE if chased else None, "whale_sol": swap.sol_amount, "delay_s": round(age, 1),
                 "wallet_score": round(rank["score"] * 100, 2) if rank else None,
                 "wallet_hit_rate": rank["hit_rate"] if rank else None, "model_tier": tier,
                 "model_score": winfo.get("model_score"), "cluster": ent if ent != swap.wallet else None,
@@ -325,7 +333,8 @@ class Strategy:
                   + (f", Wal-Score {info['wallet_score']}" if rank else ", unbewertet")
                   + (f", Vorteil Ø {edge['mean']:+.1%} aus {edge['n']} Käufen, Größe ×{edge['size_factor']:.2f}"
                      if edge else "")
-                  + (f"; {info['thesis']}" if info["thesis"] else ""))
+                  + (f"; {info['thesis']}" if info["thesis"] else "")
+                  + (f"; Kurs 5 min schon {run5:+.0%}, Größe ×{RUN5_SIZE:g}" if chased else ""))
         if m == "manual":
             control.alert(self.conn, "whale", swap.mint, snap.symbol, "signal", reason, wallet=swap.wallet,
                           price_sol=snap.price_sol, price_usd=snap.price_usd, mcap_usd=snap.fdv,

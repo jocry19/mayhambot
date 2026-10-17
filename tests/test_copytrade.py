@@ -483,6 +483,19 @@ def test_ranked_whale_needs_edge_after_costs(env):
     assert "Vorteil" in conn.execute("SELECT reason FROM ct_alerts WHERE action='bought'").fetchone()[0]
 
 
+def test_strict_copy_halves_size_after_a_5min_run(env, monkeypatch):
+    from copytrade import learn
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path), ex)
+    _rank(conn)
+    _evals(conn, 0.12)
+    monkeypatch.setattr(learn, "intel_context", lambda *a: ({"run5": ">5%"}, {"px_ret_5m": 0.12}))
+    assert st.on_whale_buy(whale_buy())
+    p = conn.execute("SELECT * FROM ct_positions").fetchone()
+    assert p["size_sol"] == pytest.approx(s.position_size_sol * 1.5 * strategy.RUN5_SIZE)
+    assert "Kurs 5 min schon +12%" in conn.execute("SELECT reason FROM ct_alerts WHERE action='bought'").fetchone()[0]
+
+
 def test_extra_cost_from_own_trades_lowers_the_edge(env):
     from copytrade import learn
     s, conn, ex, state = env

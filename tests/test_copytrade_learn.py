@@ -316,7 +316,7 @@ def test_intel_context_buckets_and_thesis(monkeypatch):
         if kind == "coin" else {"w_scalp_share": 0.8, "w_hold_median_min": 12.0})})
     monkeypatch.setitem(sys.modules, "intel", fake)
     b, raw = learn.intel_context(None, "MINTxyz", "WAL1", 1000)
-    assert b == {"wash": "<10%", "persons": ">80", "liq60": "<-20%", "scalper": ">70%", "focus": "?"}
+    assert b == {"wash": "<10%", "persons": ">80", "liq60": "<-20%", "scalper": ">70%", "focus": "?", "run5": "?"}
     t = learn.thesis(raw)
     assert "120 Personen/h" in t and "Wash 5%" in t and "Liquidität 1 h -30%" in t and "Scalps 80%" in t
 

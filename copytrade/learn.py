@@ -176,10 +176,11 @@ def wallet_features(conn, wallet: str, ts: float | None = None) -> dict:
 
 
 # intel/ (Zentrale): point-in-time features; the buckets below become learnable filters, the raw values go to
-# the journal. Walk-forward on the first 410 whale buys (10/2026) no single intel feature helped after costs,
-# so nothing here gates by itself: only a filter the tuner learns in train AND test does.
+# the journal. Walk-forward on the first 410 whale buys (10/2026) no single intel feature helped after costs; on
+# 106 coin-hours with intel snapshots (10/16-17) only px_ret_5m held in train and test (strategy.RUN5_HALF sizes on
+# it). Nothing else here gates by itself: only a filter the tuner learns in train AND test does.
 INTEL_KEYS = {"coin": ("vol_roundtrip_60m", "vol_entities_60m", "flow_smart_exit_share", "liq_chg_60m",
-                       "exec_rt_0_25", "hold_top10", "px_ret_15m", "mkt_phase"),
+                       "exec_rt_0_25", "hold_top10", "px_ret_5m", "px_ret_15m", "mkt_phase"),
               "wallet": ("w_hold_median_min", "w_scalp_share", "w_concentration", "w_latency_median_s")}
 
 
@@ -210,6 +211,7 @@ def intel_context(conn, mint: str, wallet: str, ts) -> tuple[dict, dict]:
         "liq60": _b(raw["liq_chg_60m"], (-0.2, 0), ("<-20%", "-20-0%", ">0%")),
         "scalper": _b(raw["w_scalp_share"], (0.3, 0.7), ("<30%", "30-70%", ">70%")),
         "focus": _b(raw["w_concentration"], (0.3, 0.6), ("<30%", "30-60%", ">60%")),
+        "run5": _b(raw["px_ret_5m"], (0, 0.05), ("<0%", "0-5%", ">5%")),
     }
     return buckets, {k: (round(v, 4) if isinstance(v, float) else v) for k, v in raw.items()}
 
@@ -226,6 +228,8 @@ def thesis(raw: dict) -> str:
         parts.append(f"Wash {pct('vol_roundtrip_60m')}")
     if pct("liq_chg_60m"):
         parts.append(f"Liquidität 1 h {raw['liq_chg_60m']:+.0%}")
+    if raw.get("px_ret_5m") is not None:
+        parts.append(f"Kurs 5 min {raw['px_ret_5m']:+.0%}")
     if pct("exec_rt_0_25"):
         parts.append(f"Kosten {pct('exec_rt_0_25')}")
     if raw.get("w_hold_median_min") is not None:
