@@ -131,5 +131,6 @@ aus der `tokens`-Tabelle, die der Signal-Dienst von DexScreener frisch hält (Ku
 Grund „momentum“); je Coin höchstens eine Gelegenheit in 6 h. Die Gewinner-Studie
 (17.10.) fand die großen Läufer nicht über Smart Money, sondern nur über Zustand und Momentum. Gehandelt wird die
 Quelle erst, wenn das, was das Hirn aus ihr gewollt hätte, in mindestens 30 nachgespielten Fällen nach Kosten im
-Plus lag (`BRAIN_MARKET_TRADE=auto`, `on`/`off` erzwingen). Bis dahin wird nur beobachtet und gelernt, ohne
+Plus lag, gezählt über die letzten 3 Tage: lässt das Muster nach, schaltet sich die Quelle von selbst wieder ab
+(`BRAIN_MARKET_TRADE=auto`, `on`/`off` erzwingen). Bis dahin wird nur beobachtet und gelernt, ohne
 Rug-Prüfung per RPC und mit höchstens der Hälfte der Kerzen-Downloads je Lernrunde.
