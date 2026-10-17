@@ -38,7 +38,8 @@ LAUNCH_MAX_RUN = 0.3  # mode 3: market cap up more than this since the sniper de
 LAUNCH_MAX_AGE_S = 60  # mode 3: a sniper decision older than this is not bought (launch prices move in seconds)
 EXIT_NAMES = {"target": "Ziel erreicht", "inflow_peak": "Copy-Ansturm vorbei", "trail": "Trailing-Stop",
               "stop": "Stop-Loss", "time": "Zeit abgelaufen", "whale": "Wal verkauft", "no_market": "kein Markt",
-              "smart_exit": "Smart Money steigt aus", "manual": "von dir verkauft", "rug": "Liquidität abgezogen"}
+              "smart_exit": "Smart Money steigt aus", "manual": "von dir verkauft", "rug": "Liquidität abgezogen",
+              "organic": "Zustand des Coins gekippt (Hirn)"}
 UNCONFIRMED = "unbestätigt:"  # live.executor.UNCONFIRMED: a buy that may still land keeps its 'opening' row
 RUG_LIQ_DROP = 0.8  # liquidity this far under its value at entry: the pool was pulled, exit at once
 PAPER_MODES = ("paper", "explore")  # simulated accounts: strict paper (the live rules) and exploration
@@ -764,12 +765,23 @@ class Strategy:
         bought, sold = (r[0] or 0), (r[1] or 0)
         return bought > 0 and sold >= 0.5 * bought
 
+    def organic_exit(self):
+        """The brain's organic exit for the signal paper account (copytrade/organic.py); built on first use."""
+        org = getattr(self, "_organic", None)
+        if org is None:
+            from .organic import OrganicExit
+
+            org = self._organic = OrganicExit(self.conn, self.s)
+        return org
+
     def update(self) -> None:
         pos = self.open_positions()
         if not pos:
             return
         snaps, failed = market.snapshots_checked([p["mint"] for p in pos], self.s)
         now = time.time()
+        org = self.organic_exit() if any(p["strategy"] == "signal" and p["mode"] in PAPER_MODES for p in pos) else None
+        org_on = bool(org and org.active(now))
         for p in pos:
             snap = snaps.get(p["mint"])
             if p["mint"] in failed:
@@ -803,6 +815,9 @@ class Strategy:
             trail_dd = p["trail_drawdown"] if p["trail_drawdown"] is not None else self.s.trail_drawdown
             inflow = p["use_inflow_exit"] if p["use_inflow_exit"] is not None else p["strategy"] == "whale"
             reason = None
+            organic = org_on and p["strategy"] == "signal" and p["mode"] in PAPER_MODES
+            if organic:
+                org.observe(p, snap, now)
             try:
                 liq0 = float(json.loads(p["meta"] or "{}").get("liq_usd") or 0)
             except (ValueError, TypeError):
@@ -811,6 +826,16 @@ class Strategy:
                 reason = "rug"  # LP pulled: the screener price often stays at the pre-rug level, so no stop fires
             elif gain <= -p["stop_loss"]:
                 reason = "stop"
+            elif organic:
+                # the brain decides instead of target / inflow / trail / smart exit; stop, rug and max hold stay
+                if (now - p["opened_at"]) / 60 >= p["max_hold_min"]:
+                    reason = "time"
+                else:
+                    d = org.decide(p, snap, now, price, high)
+                    if d and d[0] == "sell":
+                        reason = "organic"
+                        store.event(self.conn, "organic", f"Hirn verkauft {p['symbol'] or p['mint'][:6]}: {d[1]}",
+                                    data={"position": p["id"], "why": d[1]})
             elif gain >= p["take_profit"]:
                 reason = "target"
             elif (inflow and gain > self.s.tp_min / 2 and peak_buys >= 20
@@ -826,6 +851,8 @@ class Strategy:
                 reason = None  # trailing stop, stop and time limit still apply
             if reason:
                 self._exit(p, snap, reason)
+                if org:
+                    org.drop(p["id"])
         self.conn.commit()
 
     def _target_confirmed(self, p) -> bool:
