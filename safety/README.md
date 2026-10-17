@@ -82,6 +82,7 @@ count for `SAFETY_CARRY_MAX_AGE_SEC`=2 h. Findings that were made keep their lev
 | `socials` | DexScreener info, RugCheck metadata | – | no website/socials, mutable metadata |
 | `exit` | intel features (`intel.latest`, no network) | – | liquidity leaving in the last 60 min, insider sells relative to liquidity, share of smart money exiting, liquidity that appeared and vanished (flash) |
 | `history` | intel network features (`net_dev_*`, `net_funder_*`, `net_early_bad/good`, `net_bot_share_60m`; no network): `intel.latest` when younger than `SAFETY_HISTORY_FRESH_SEC`=5 min, else `intel.network_features` straight from the DB (fresh launches outside the intel universe) | – | dev's earlier rugs (shrunk while he has few launches), rug rate of the funder network (≥ `SAFETY_HISTORY_MIN_FUNDER_LAUNCHES`=3), launch wallets from earlier rugs, bot volume share ≥ `SAFETY_HISTORY_BOT_SHARE_WARN`=0.4 |
+| `watchlist` | `safety/bad_wallets.txt` + table `safety_bad_wallets` (no network: holders already loaded, launch wallets from `safety_launch`/`sniper_launch_wallets`, funders from `safety_wallets`) | creator on the list, or ≥ 2 listed wallets (launch buyers, top holders, funders of either) | one listed wallet 45 (block-0 sniper 25), a holder funded by a listed funder 40 |
 | `rugcheck` | api.rugcheck.xyz report (keyless, optional) | RugCheck says rugged | its other danger/warn items (max 45; items our own checks measure are skipped) |
 
 Funding from an exchange hot wallet never links wallets (one exchange funds thousands of strangers).
@@ -159,6 +160,7 @@ Enhanced API. Jupiter, DexScreener and RugCheck are keyless and not Helius.
 | `safety_risks` | mint, ts, per-check risks of each assessment (learning input) |
 | `safety_outcomes` | labelled outcome per coin: price/liquidity at the check, min/max return, rugged, minutes to rug |
 | `safety_weights` | learned weight per check with its rug rates and lift |
+| `safety_bad_wallets` | runtime additions to the rug list: address, role, note, added_at |
 | `safety_cache` | holder snapshots, `learn_report`, `launch_backtest`, `launch_model` |
 
 ## CLI
@@ -169,6 +171,7 @@ Enhanced API. Jupiter, DexScreener and RugCheck are keyless and not Helius.
 .venv/bin/python -m safety learn                   # label outcomes, re-weight checks, report
 .venv/bin/python -m safety backtest                # walk-forward on the sniper's launches
 .venv/bin/python -m safety audit                   # blocked coins bought anyway? result per level
+.venv/bin/python -m safety watch list               # rug list; watch add <ADDR> <launcher|bundle|insider|funder|sniper0> "note" / watch remove <ADDR>
 .venv/bin/python -m safety run                     # endless loop (own process)
 .venv/bin/python -m safety list
 .venv/bin/python -m safety block <MINT> "grund"    # allow <MINT> / clear <MINT>

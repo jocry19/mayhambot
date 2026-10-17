@@ -842,6 +842,90 @@ def check_history(ctx):
     return r.finish(cap=85)
 
 
+def _launch_wallets(ctx):
+    """Wallets around the launch from what is already stored (no network): our launch analysis, the sniper's
+    launch roles (dev, bundle, insider, early) and the creator known to safety or the sniper."""
+    out = {}
+    la = store.launch(ctx.conn, ctx.mint) or {}
+    for b in la.get("buyers") or []:
+        out.setdefault(b.get("wallet"), "Launch-Käufer")
+    creator = la.get("creator")
+    for sql in ("SELECT wallet, role FROM sniper_launch_wallets WHERE mint=?",):
+        try:
+            for w, role in ctx.conn.execute(sql, (ctx.mint,)):
+                out.setdefault(w, {"dev": "Ersteller", "bundle": "Bundle-Käufer", "insider": "Insider",
+                                   "early": "Frühkäufer"}.get(role, "Launch-Käufer"))
+                if role == "dev":
+                    creator = creator or w
+        except Exception:  # noqa: BLE001 - sniper not installed
+            break
+    for sql in ("SELECT creator FROM safety_tokens WHERE mint=?", "SELECT creator FROM sniper_launches WHERE mint=?"):
+        if creator:
+            break
+        try:
+            r = ctx.conn.execute(sql, (ctx.mint,)).fetchone()
+            creator = r[0] if r else None
+        except Exception:  # noqa: BLE001
+            pass
+    if not creator:
+        try:
+            creator = ctx.creator()  # deep: launch analysis; quick: RugCheck report already loaded
+        except Exception:  # noqa: BLE001
+            creator = None
+    out.pop(None, None)
+    return creator, out
+
+
+def check_watchlist(ctx):
+    """Known rug wallets (safety/bad_wallets.txt + table safety_bad_wallets) as creator, launch buyer, top holder
+    or as funder of the creator or a top holder. Creator on the list, or two listed wallets around the launch,
+    blocks; one listed wallet warns."""
+    from safety import watchlist
+    r = CheckResult("watchlist", "Bekannte Rug-Wallets")
+    bad = watchlist.load(ctx.conn, ctx.cfg)
+    if not bad:
+        r.status = "unknown"
+        return r.finish()
+    creator, around = _launch_wallets(ctx)
+    try:
+        for h in ctx.holders():
+            if h.get("kind") == "wallet":
+                around.setdefault(h["owner"], f"Top-Holder ({h['pct']:.1f} %)")
+    except BudgetExceeded:
+        raise
+    except Exception:  # noqa: BLE001 - holders unreadable: judge on what is stored
+        pass
+    hits = []
+    if creator and creator in bad:
+        hits.append((creator, "Ersteller", bad[creator]))
+    for w, where in around.items():
+        if w in bad and w != creator:
+            hits.append((w, where, bad[w]))
+    funded = []
+    for w in ([creator] if creator else []) + list(around):
+        p = store.wallet_profile(ctx.conn, w, 30 * 86400) or {}
+        f = p.get("funder")
+        if f and f in bad and f not in {h[0] for h in hits}:
+            funded.append((w, f, bad[f]))
+    r.data.update(creator=creator, n_checked=len(around) + (1 if creator else 0),
+                  hits=[{"wallet": w, "where": where, "role": b["role"]} for w, where, b in hits],
+                  funded_by_listed=[{"wallet": w, "funder": f, "role": b["role"]} for w, f, b in funded])
+    for w, where, b in hits:
+        role = watchlist.ROLES[b["role"]]
+        r.add(85 if where == "Ersteller" else 45 if b["role"] != "sniper0" else 25,
+              f"{where} {short(w)} steht auf der Rug-Liste ({role}{': ' + b['note'] if b['note'] else ''}).")
+    for w, f, b in funded:
+        r.add(40, f"{short(w)} wurde von {short(f)} finanziert, der auf der Rug-Liste steht ({watchlist.ROLES[b['role']]}).")
+    serious = [h for h in hits if h[2]["role"] != "sniper0"]
+    if (creator and creator in bad) or len(serious) + len(funded) >= 2:
+        r.hard = True
+        if not (creator and creator in bad):
+            r.add(80, f"{len(serious) + len(funded)} Wallets der Rug-Liste rund um diesen Launch: gesperrt.")
+    if not hits and not funded:
+        r.positives.append(f"Keine bekannte Rug-Wallet unter {r.data['n_checked']} geprüften Launch-Wallets und Holdern.")
+    return r.finish(cap=95)
+
+
 def check_exit(ctx):
     """Soft rug in progress, from the intel service's latest coin features (no network): insiders selling,
     liquidity leaving, smart buyers getting out. Most rugs of young coins with burned LP look like this."""
@@ -878,5 +962,5 @@ def check_exit(ctx):
 
 
 QUICK = [check_authorities, check_sell_sim, check_liquidity, check_lp, check_socials, check_wash,
-         check_rugcheck, check_holders, check_exit, check_history]
+         check_rugcheck, check_holders, check_exit, check_history, check_watchlist]
 DEEP = [check_dev, check_insiders, check_bundles]

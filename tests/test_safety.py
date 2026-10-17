@@ -695,3 +695,35 @@ def test_backtest_treats_blind_launches_as_unseen_and_calibration_stays_bounded(
     # perfectly separable hold-out: Newton must not run away
     a, b = backtest._platt([0.0] * 50 + [1.0] * 50, [0] * 50 + [1] * 50, -2.0)
     assert -6 <= a <= 6 and 0 <= b <= 3
+
+
+def test_known_rug_wallets_warn_or_block_and_exchanges_never_count(tmp_path):
+    from safety import store, watchlist
+    cfg = SafetySettings()
+    cfg.exchanges_file = CFG.exchanges_file
+    cfg.bad_wallets_file = str(tmp_path / "bad.txt")
+    (tmp_path / "bad.txt").write_text(f"H3  bundle  test\nH4  insider\nDEVw  launcher\nFUNDx  funder\n{BINANCE}  funder  falsch\n")
+    assert BINANCE not in watchlist.load(None, cfg) and watchlist.load(None, cfg)["H3"]["role"] == "bundle"
+    c = conn()
+    # one listed holder: warning, no block
+    s = clean()
+    s["holders"] = [(POOL, 300_000_000), ("H3", 10_000_000)] + [(f"Z{i}", 10_000_000) for i in range(10)]
+    a = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(s), cfg=cfg, force=True)
+    w = a.checks["watchlist"]
+    assert w["status"] == "ok" and not w["hard"] and 40 <= w["risk"] < 75 and not a.blocked
+    # second listed wallet (funds a holder): block
+    store.save_wallet_profile(c, {"address": "Z1", "n_txs": 5, "complete": 1, "first_ts": NOW, "last_ts": NOW,
+                                  "funder": "FUNDx", "funded_sol": 1.0})
+    a = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(s), cfg=cfg, force=True)
+    assert a.checks["watchlist"]["hard"] and a.blocked
+    # listed creator alone blocks; a runtime addition counts too
+    c2 = conn()
+    c2.execute("CREATE TABLE sniper_launch_wallets (mint TEXT, wallet TEXT, role TEXT)")
+    c2.execute("INSERT INTO sniper_launch_wallets VALUES (?, 'NEWDEV', 'dev')", (MINT,))
+    c2.commit()
+    watchlist.add(c2, "NEWDEV", "launcher", "Serien-Launcher")
+    a = safety.assess(MINT, c2, deep=False, fetcher=FakeFetcher(clean()), cfg=cfg, force=True)
+    assert a.blocked and "Ersteller" in a.reasons[0]["text"] + " ".join(r["text"] for r in a.reasons)
+    # the shipped list loads and never contains an exchange
+    shipped = watchlist.load(None, CFG)
+    assert len(shipped) >= 30 and BINANCE not in shipped

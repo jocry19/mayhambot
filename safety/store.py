@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS safety_weights (
 CREATE TABLE IF NOT EXISTS safety_cache (
     key TEXT PRIMARY KEY, ts INTEGER, json TEXT
 );
+CREATE TABLE IF NOT EXISTS safety_bad_wallets (
+    address TEXT PRIMARY KEY, role TEXT, note TEXT, added_at INTEGER
+);
 CREATE TABLE IF NOT EXISTS safety_launch (
     mint TEXT PRIMARY KEY, creator TEXT, created_slot INTEGER, created_ts INTEGER,
     reachable INTEGER, launch_json TEXT, checked_at INTEGER
@@ -47,7 +50,7 @@ MIGRATIONS = [("safety_tokens", "deep_ts", "INTEGER")]
 
 
 def ensure_schema(conn):
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='safety_weights'").fetchone() is None:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='safety_bad_wallets'").fetchone() is None:
         db.retry_locked(conn, lambda: conn.executescript(SCHEMA))
     for table, col, typ in MIGRATIONS:
         if col not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:

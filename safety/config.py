@@ -99,6 +99,7 @@ class SafetySettings:
     wash_top3_warn: float = field(default_factory=lambda: _f("SAFETY_WASH_TOP3_WARN", 0.4))
 
     # external keyless cross-check
+    bad_wallets_file: str = field(default_factory=lambda: os.getenv("SAFETY_BAD_WALLETS_FILE", ""))  # "" = safety/bad_wallets.txt
     use_rugcheck: bool = field(default_factory=lambda: _b("SAFETY_USE_RUGCHECK", True))
 
     # cost control

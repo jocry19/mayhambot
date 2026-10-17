@@ -1,4 +1,4 @@
-"""python -m safety assess <MINT> [--quick] | refresh | learn | backtest | audit | run | list | block <MINT> [grund] | allow <MINT> | clear <MINT>"""
+"""python -m safety assess <MINT> [--quick] | refresh | learn | backtest | audit | watch | run | list | block <MINT> [grund] | allow <MINT> | clear <MINT>"""
 import argparse
 import logging
 import time
@@ -30,6 +30,11 @@ def main(argv=None):
     sub.add_parser("learn", help="Ausgänge auswerten und Gewichte der Checks neu lernen (ohne Netz)")
     sub.add_parser("backtest", help="Schwellen an den Sniper-Launches nachrechnen (ältere Hälfte lernen, neuere prüfen)")
     sub.add_parser("audit", help="Wurden gesperrte Coins trotzdem gekauft? Ergebnis je Rug-Stufe beim Kauf")
+    w = sub.add_parser("watch", help="Rug-Liste: list | add <ADRESSE> <rolle> [notiz] | remove <ADRESSE>")
+    w.add_argument("action", choices=["list", "add", "remove"])
+    w.add_argument("address", nargs="?")
+    w.add_argument("role", nargs="?")
+    w.add_argument("note", nargs="*")
     sub.add_parser("run", help="Dauerschleife: alle SAFETY_REFRESH_EVERY_SEC Sekunden ein Refresh")
     p = sub.add_parser("list")
     p.add_argument("-n", type=int, default=30)
@@ -52,6 +57,15 @@ def main(argv=None):
     elif a.cmd == "audit":
         from safety import audit
         print(audit.report_text(audit.audit(conn)))
+    elif a.cmd == "watch":
+        from safety import watchlist
+        from safety.config import settings as cfg
+        if a.action == "add":
+            watchlist.add(conn, a.address, a.role, " ".join(a.note))
+        elif a.action == "remove":
+            watchlist.remove(conn, a.address)
+        for addr, v in sorted(watchlist.load(conn, cfg).items(), key=lambda kv: kv[1]["role"]):
+            print(f"{v['role']:<9} {addr}  {v['note']}")
     elif a.cmd == "refresh":
         for x in engine.refresh(conn):
             _print(x)
