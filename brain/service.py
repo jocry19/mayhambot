@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 
-from . import config, journal, learner, store
+from . import config, exits, journal, learner, store
 from .model import Brain
 from .plans import PLANS
 from .trader import Trader
@@ -21,15 +21,21 @@ def load_model(s) -> Brain:
     return Brain.load(s.model_path, len(PLANS), s.half_life_h)
 
 
+def load_exit_model(s) -> Brain:
+    return Brain.load(s.exit_model_path, 1, s.half_life_h)
+
+
 class Service:
     def __init__(self, s=None, conn=None, **trader_kw):
         self.s = s or config.load()
         self.conn = conn or store.connect(self.s.db_path)
         self.model = load_model(self.s)
+        self.xm = load_exit_model(self.s)
         notify = trader_kw.pop("notify", None)
         if notify is None:
             notify = journal.send if self.s.telegram == "trades" else (lambda text: False)
-        self.trader = Trader(self.conn, self.s, self.model, notify=notify, on_close=self._learn_trade, **trader_kw)
+        self.trader = Trader(self.conn, self.s, self.model, notify=notify, on_close=self._learn_trade,
+                             exit_model=self.xm, **trader_kw)
         self.dirty = False
 
     def _learn_trade(self, pos) -> None:
@@ -38,10 +44,11 @@ class Service:
 
     def learn(self, candles_fn=None) -> dict:
         n_prior = learner.warm_start(self.conn, self.model, self.s)
-        n_eval = learner.evaluate(self.conn, self.model, self.s, candles_fn)
-        if n_prior or n_eval:
+        n_eval = learner.evaluate(self.conn, self.model, self.s, candles_fn, xm=self.xm)
+        n_back = learner.backfill_exits(self.conn, self.xm, self.s, candles_fn)
+        if n_prior or n_eval or n_back:
             self.dirty = True
-        return {"prior": n_prior, "evaluated": n_eval}
+        return {"prior": n_prior, "evaluated": n_eval, "exit_backfill": n_back}
 
     def heartbeat(self, since: float) -> str:
         c = self.conn
@@ -52,11 +59,14 @@ class Service:
         eq = self.trader.equity_snapshot()["equity_sol"]
         late, self.trader.too_late = self.trader.too_late, 0
         return (f"{n} opportunities ({late} whale buys arrived too late), {ent} bought, {held} wanted but blocked by a gate, {n_open} open, equity {eq:.3f} SOL, "
-                f"model {self.model.d - 1} tokens / {self.model.n:.0f} outcomes")
+                f"model {self.model.d - 1} tokens / {self.model.n:.0f} outcomes, exit model {self.xm.n:.0f} minutes "
+                f"(organic exits {'on' if self.trader.organic_on(time.time()) else 'off'}, "
+                f"replays {exits.verdict(c)['n']})")
 
     def save(self) -> None:
         if self.dirty:
             self.model.save(self.s.model_path)
+            self.xm.save(self.s.exit_model_path)
             store.put(self.conn, "model_saved_at", int(time.time()))
             self.dirty = False
 

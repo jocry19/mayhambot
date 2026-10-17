@@ -98,3 +98,18 @@ python -m brain status | decisions 20 | journal [--write] | beliefs
 ```
 
 `BRAIN_ENABLED=false` hält den Dienst an. Ein LLM steckt nicht drin; die Entscheidung ist Rechnung in Millisekunden.
+
+## Organischer Ausstieg (`exits.py`)
+
+Statt fester Prozentmarken entscheidet ein zweites Modell einmal pro Minute aus dem Zustand des Coins: Plus/Minus seit
+dem Kauf, Abstand zum Hoch, letzte Minute und letzte 5 Minuten, ob das Volumen trägt oder austrocknet, Haltedauer, ob
+der kopierte Wal verkauft hat, ob die übrigen Smart Wallets zu- oder abfließen. Gefragt wird: was macht der Kurs in
+den nächsten 10 Minuten? Halten, die Hälfte verkaufen (im Plus ≥ `BRAIN_EXIT_HALF_MIN_UP`, P(steigt) < `BRAIN_EXIT_HALF_P`)
+oder den Rest verkaufen (P < `BRAIN_EXIT_SELL_P`). Harte Grenzen bleiben: Crash-Stop −30 %, Rug-Prüfung, max. 4 h.
+
+Gelernt wird aus jeder nachgespielten Gelegenheit (jede Minute ein Beispiel, dieselben Minutenkerzen wie die
+Plan-Replays) und einmalig aus den schon fertigen (`backfill_exits`). Jede fertige Gelegenheit wird zusätzlich mit
+dem organischen Ausstieg nachgespielt, mit dem Modell von vor diesem Coin (`brain_exit_evals`). Live übernimmt er
+(`BRAIN_ORGANIC_EXIT=auto`) erst, wenn diese Replays (mind. 30) im Schnitt die gewählten Pläne schlagen; `on`/`off`
+erzwingen. Das Tagebuch zeigt organisch gegen Pläne gegen 1 h halten, den Anteil am besten Kursanstieg
+(Einfangquote), den Auswahl-Vorsprung und den Tagesfaktor des Kontos (Ziel ×2–4).

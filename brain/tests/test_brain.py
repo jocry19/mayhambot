@@ -9,7 +9,7 @@ from brain import config, journal, learner, store
 from brain.decide import choose
 from brain.features import tokens
 from brain.model import Brain
-from brain.plans import BASE, NAMES, PLANS, grid_index
+from brain.plans import BASE, BY_NAME, NAMES, PLANS, grid_index
 from brain.service import Service
 from brain.trader import Trader
 from copytrade import learn as ct_learn, sim, store as ct_store
@@ -631,3 +631,133 @@ def test_service_starts_without_model_and_keeps_running(s, caplog):
     assert not th.is_alive()
     text = caplog.text
     assert "brain started" in text and "no saved model yet" in text and "keeps running" in text
+
+
+# ---------------------------------------------------------------------- organic exits
+from brain import exits  # noqa: E402
+
+
+def candles_pump_dump(conn, mint, lo, hi, allow_net=True):
+    """Flat 20 min, +4 %/min with rising volume for 15 min, then the volume dries out and it bleeds -3 %/min."""
+    out, px = [], 1.0
+    for i, ts in enumerate(range(lo - lo % 60, hi, 60)):
+        vol = 1000.0
+        if 22 < i <= 37:
+            px *= 1.04
+            vol = 1000.0 + 400 * (i - 22)
+        elif i > 37:
+            px *= 0.97
+            vol = 300.0
+        out.append((ts, px, px * 1.005, px * 0.995, px, vol))
+    return out
+
+
+def test_exit_model_learns_when_a_run_is_over_and_beats_the_fixed_plan(s):
+    xm = exits.new_model(120)
+    t0 = 1_700_000_000
+    for k in range(12):  # twelve coins with the same shape teach it: rising volume carries, dried volume ends it
+        lo = t0 + k * 86400
+        cs = candles_pump_dump(None, MINT, lo - 20 * 60, lo + 300 * 60)
+        assert exits.learn_path(xm, cs, lo, "whale", "10-50k", None, [], [], 0, exits.MAX_HOLD_MIN) > 100
+    assert exits.mature(xm)
+    lo = t0 + 99 * 86400
+    cs = candles_pump_dump(None, MINT, lo - 20 * 60, lo + 300 * 60)
+    gain, held, why = exits.replay(xm, cs, lo, "whale", "10-50k", None, [], [], s, 0.03)
+    plan = sim.simulate(cs, lo, BY_NAME["pump"].variant(0))[0]  # fixed +40 % target
+    assert why == "organic" and gain > plan and gain > 0.3  # rode the run past +40 % and left when it turned
+
+
+def test_trader_sells_half_then_the_rest_when_the_state_turns(conn, s):
+    class Outlook:  # stands in for a trained exit model: P(next 10 min up) set by the test
+        n = 10_000
+        p = 0.45
+
+        def predict(self, toks):
+            from statistics import NormalDist
+            return [(NormalDist().inv_cdf(self.p) * 0.1, 0.1)]
+    s.organic_exit = "on"
+    set_tier(conn, WHALE, "ultra")
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    clock = [time.time()]
+    xm = Outlook()
+    t = make_trader(conn, s, trained(), mk, clock=lambda: clock[0], exit_model=xm)
+    t.scan()
+    add_whale_buy(conn, "n", ts=clock[0])
+    assert t.scan() == 1
+    p0 = conn.execute("SELECT * FROM brain_positions").fetchone()
+    bal0 = store.balance(conn, s.start_balance_sol)
+    mk.snaps[MINT] = snap(price=p0["entry_price_sol"] * 1.5)  # +50 %, the outlook doubtful: half off the table
+    clock[0] += 120
+    assert t.manage() == 0
+    p1 = conn.execute("SELECT * FROM brain_positions").fetchone()
+    assert p1["tokens"] == pytest.approx(p0["tokens"] / 2) and json.loads(p1["meta"])["partial_sol"] > 0
+    assert store.balance(conn, s.start_balance_sol) > bal0
+    xm.p = 0.2  # the run is over
+    clock[0] += 61
+    assert t.manage() == 1
+    p2 = conn.execute("SELECT * FROM brain_positions").fetchone()
+    assert p2["exit_reason"] == "organic" and p2["pnl_pct"] > 0.3
+    assert p2["proceeds_sol"] == pytest.approx(json.loads(p2["meta"])["partial_sol"] + p1["tokens"] * mk.snaps[MINT].price_sol * 0.98)
+    h = learner.honest(conn)
+    assert h["by_exit"]["organic"]["n"] == 1 and h["by_exit"]["organic"]["capture"] > 0.5
+
+
+def test_trader_keeps_the_crash_stop_and_plans_while_organic_is_unproven(conn, s):
+    set_tier(conn, WHALE, "ultra")
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    xm = exits.new_model(120)
+    t = make_trader(conn, s, trained(), mk, exit_model=xm)  # auto mode, untrained: the plans decide
+    assert not t.organic_on(time.time())
+    t.scan()
+    add_whale_buy(conn, "n")
+    t.scan()
+    p = conn.execute("SELECT * FROM brain_positions").fetchone()
+    mk.snaps[MINT] = snap(price=p["entry_price_sol"] * (1 + p["take_profit"] + 0.05))
+    assert t.manage() == 1
+    assert conn.execute("SELECT exit_reason FROM brain_positions").fetchone()[0] == "target"
+
+
+def test_replays_compare_organic_with_the_plan_out_of_sample(conn, s):
+    model = Brain(len(PLANS))
+    xm = exits.new_model(120)
+    for k in range(12):
+        lo = 1_700_000_000 + k * 86400
+        exits.learn_path(xm, candles_pump_dump(None, MINT, lo - 1200, lo + 18000), lo, "signal", None, None, [], [],
+                         0, exits.MAX_HOLD_MIN)
+    old = time.time() - learner.horizon_s() - learner.CACHE_GRACE_S - 600
+    conn.execute("INSERT INTO brain_opps(ts, decided_at, kind, ref, mint, wallet, entity, src_ts, features, decision,"
+                 " wanted, plan) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (int(old), old, "signal", "s1", MINT, "", "signal", int(old), json.dumps({"score": "70+"}), "skip", 1,
+                  "pump"))
+    n0 = xm.n
+    assert learner.evaluate(conn, model, s, candles_pump_dump, limit=5, xm=xm) == 1
+    e = conn.execute("SELECT * FROM brain_exit_evals").fetchone()
+    assert e["organic"] is not None and e["plan_gain"] is not None and e["max_up"] > 0.5 and e["hold_1h"] is not None
+    assert e["organic"] > e["plan_gain"] and xm.n > n0
+    xr = learner.honest(conn)["exit_replays"]
+    assert xr["n"] == 1 and xr["capture_organic"] > xr["capture_plan"]
+    assert exits.verdict(conn)["n"] == 1 and not exits.verdict(conn)["live"]  # one coin proves nothing yet
+    text = journal.write(conn, model, s)
+    assert "Ausstieg im Vergleich" in text
+
+
+def test_exit_backfill_learns_finished_opportunities_once(conn, s):
+    old = time.time() - 2 * 86400
+    conn.execute("INSERT INTO brain_opps(ts, decided_at, kind, ref, mint, features, plan, evaluated_at, gains) "
+                 "VALUES (?,?,?,?,?,?,?,?,?)", (int(old), old, "signal", "s1", MINT, "{}", "pump", int(old) + 20000,
+                                                 json.dumps([0.1] * len(PLANS))))
+    xm = exits.new_model(120)
+    assert learner.backfill_exits(conn, xm, s, candles_pump_dump) == 1 and xm.n > 0
+    assert learner.backfill_exits(conn, xm, s, candles_pump_dump) == 0
+
+
+def test_diary_shows_the_daily_multiplier(conn, s):
+    d0 = store.day_start(time.time())
+    now = d0 + 7200
+    for ts, eq in ((d0 - 86400 + 60, 5.0), (d0 - 120, 4.5), (d0 + 60, 4.5), (d0 + 3600, 9.0)):
+        conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (int(ts), eq, 0, eq))
+    m = journal.multipliers(conn, now)
+    assert [x for _, x in m] == [0.9, 2.0]
+    assert "Tagesfaktor" in journal.write(conn, Brain(len(PLANS)), s, now) and "×2.00" in journal.write(conn, Brain(len(PLANS)), s, now)
