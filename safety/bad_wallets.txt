@@ -51,3 +51,5 @@ Bent1LWi2QfNmGmvtttxiDDHa5o6w4joF1h1c9wBzuBQ  setup  Launch-Block-Käufer in 5 M
 7dL5UMwdE5ncphgN5XQc2L2bZ9Nbszm51HM8WKWnVVuX  setup  Launch-Block Meta ALV222 18.10. 07:54 (149,9 SOL, einziger Käufer), 299,8 SOL in 2 Coins
 JAw63BKsupFM7CLkqnkP9XtWwfP5P6fbyg4E4Kqf5vZU  setup  Launch-Block PEPETO BcXeFM 18.10. (879,9 SOL)
 CDvBjgJLimQFWgeobydxVTZks2qivLY5woujau1qg9sF  sniper0  Staub-Käufer in 17 Masche-Coins (von 20 gehandelten, Rest unbekannt), Launch-Block Gemini AI und FOMO
+2NXTFee6GFKgYzqyh6XRhcTzzD5xMzyna2FurSqtM9gJ  setup  Launch-Block USDF thKNTw 18.10. 09:01 (einziger Käufer, 79,31 %, sofort migriert; Betrag 4.999 SOL noch vom Sniper zu bestätigen)
+B1VDUBg5AABiP5BXHku6XWca6UnJMT3m1BXtSNhxwmeu  setup  Launch-Block Glow 18.10. (987,9 SOL laut Sniper, 79,31 %, sofort migriert; Betrag noch zu bestätigen)
