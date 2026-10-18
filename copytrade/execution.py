@@ -72,7 +72,7 @@ def implausible(price_sol: float, snap) -> str | None:
 
 def _cp_impact(size_sol: float, snap: market.PairSnapshot, sol_usd: float) -> float:
     """Price impact of a constant-product pool for a trade of size_sol."""
-    pool_sol = (snap.liquidity_usd / 2) / sol_usd if sol_usd else 0
+    pool_sol = (snap.depth_usd / 2) / sol_usd if sol_usd else 0  # a bonding curve's depth when it has no pool
     if pool_sol <= 0:
         return 0.5
     return size_sol / (pool_sol + size_sol)
@@ -122,7 +122,7 @@ class PaperExecutor:
             gross = int(q["outAmount"]) / 1e9
             impact = float(q.get("priceImpactPct") or 0)
             src = "jupiter_quote"
-        elif snap and snap.price_sol and snap.liquidity_usd >= NO_ROUTE_MIN_LIQ_USD:
+        elif snap and snap.price_sol and snap.depth_usd >= NO_ROUTE_MIN_LIQ_USD:
             value = tokens * snap.price_sol
             impact = _cp_impact(value, snap, market.sol_usd(self.s))
             gross = value * (1 - impact) * (1 - DEX_FEE_FALLBACK)

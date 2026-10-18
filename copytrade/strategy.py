@@ -45,6 +45,7 @@ STAGED_TRAIL = 0.10  # staged pump (safety check 'staged', data.pattern): exit 1
 STAGED_AFTER_HIGH_S = 15 * 60  # ... or 15 min after the last high: 74 % drained within 60 min, mostly 15-60 min after it
 STAGED_REFRESH_S = 300  # the pattern can only form within 45 min of the launch: re-read young coins every 5 min
 STAGED_YOUNG_H = 1.0
+CURVE_SNAP_MAX_AGE_S = 30  # the sniper's live curve state (sniper.store.curve_now) when DexScreener has no pair yet
 RUG_LIQ_DROP = 0.5  # liquidity half its value at entry: the pool is being pulled, exit before the price stop (18.10.: two
 # stops booked at -100 %, the price fell through them between polls). A pool only halves by trading when the price
 # falls 75 %, far past every stop, so this fires on LP pulls only
@@ -109,6 +110,7 @@ class Strategy:
         self.exs = executors
         self._missing: dict[int, int] = {}
         self._noroute: dict[int, float] = {}  # last 'no sell route' alarm per live position
+        self._sconn = None  # own connection for the sniper's curve state (sniper.store.connect)
         self._opp: dict | None = None  # the whale decision in progress, reported to brain.opportunities
         self._staged: dict[str, tuple[float, bool]] = {}  # mint -> (checked at, staged pump pattern)
         self._high_ts: dict[int, float] = {}  # position -> when its high was last raised (this process)
@@ -359,7 +361,7 @@ class Strategy:
             return self._skip("whale", swap.mint, f"schon {s.max_copies_per_coin}× in diesem Coin kopiert (6 h)",
                               wallet=swap.wallet)
 
-        snap = market.snapshot(swap.mint, s)
+        snap = market.snapshot(swap.mint, s) or self._curve_snapshot(swap.mint)
         self._opp["snap"] = snap
         if not snap or snap.price_sol <= 0:
             return self._skip("whale", swap.mint, "kein Marktpreis")
@@ -886,6 +888,7 @@ class Strategy:
             snap = snaps.get(p["mint"])
             if p["mint"] in failed:
                 continue  # DexScreener down: no news about this coin, so no 'no market' count either
+            snap = snap or self._curve_snapshot(p["mint"])
             if not snap or snap.price_sol <= 0:
                 self._missing[p["id"]] = self._missing.get(p["id"], 0) + 1
                 if self._missing[p["id"]] >= 12:
@@ -975,6 +978,29 @@ class Strategy:
             source_result(self.conn, "strategy", sig, pct, (time.time() - p["opened_at"]) / 60)
         except Exception as e:
             log.debug("opportunity result %s failed: %s", p["id"], e)
+
+    def _curve_snapshot(self, mint: str):
+        """A market snapshot from the sniper's live bonding-curve state for a coin DexScreener does not list yet
+        (18.10.: 10 whale buys in 3 h skipped with 'kein Marktpreis', all in a coin's first minutes). Depth =
+        2 x virtual SOL; None when the sniper has no fresh state or the curve already migrated."""
+        try:
+            from sniper import store as sstore
+
+            if self._sconn is None:
+                self._sconn = sstore.connect(self.s.db_path)
+            c = sstore.curve_now(self._sconn, mint, CURVE_SNAP_MAX_AGE_S)
+            if not c or c["complete"]:
+                return None
+            r = self._sconn.execute("SELECT created_ts, symbol FROM sniper_launches WHERE mint=?", (mint,)).fetchone()
+            solusd = market.sol_usd(self.s)
+            created = (r[0] if r and r[0] else c["ts"]) * 1000
+            return market.PairSnapshot(
+                mint, (r[1] if r else "") or "?", "", "pumpfun" if c["pool"] in (None, "pump") else c["pool"],
+                c["price_sol"] * solusd, c["price_sol"], 0.0, (c["mcap_sol"] or 0) * solusd, 0, 0, 0, 0, 0, 0, 0,
+                int(created), time.time(), curve_liq_usd=2 * (c["v_sol"] or 0) * solusd)
+        except Exception as e:
+            log.debug("curve snapshot %s failed: %s", mint[:6], e)
+            return None
 
     def _staged_pump(self, mint: str, snap, now: float) -> bool:
         """Safety's 'staged' check confirmed a staged pump (>= 250 k$ within 30 min of the launch on a pool of

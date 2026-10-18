@@ -1192,3 +1192,21 @@ def test_half_the_pool_gone_exits_before_the_price_stop(env):
     st.update()  # more than half pulled, price not moved yet: out
     assert tuple(conn.execute("SELECT status, exit_reason FROM ct_positions WHERE id=?", (pid,)).fetchone()) == \
         ("closed", "rug")
+
+
+def test_first_minute_curve_coin_priced_from_the_sniper_curve(env, monkeypatch):
+    from sniper import store as sstore
+
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, thompson=False), ex)
+    monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": "smart"})
+    monkeypatch.setattr(market, "snapshot", lambda m, s=None: None)  # DexScreener: no pair yet
+    assert st.on_whale_buy(whale_buy(sol=1.0)) is None  # and no curve state either: no price
+    sc = sstore.connect(s.db_path)
+    sstore.save_curve_live(sc, [{"mint": MINT, "ts": time.time(), "pool": "pump", "price_sol": 3e-6, "v_sol": 40.0,
+                                 "mcap_sol": 3000.0, "n_trades": 25, "complete": False}])
+    pid = st.on_whale_buy(chain.Swap("sigCurve", W, int(time.time()) - 5, "buy", MINT, 1.0 / 3e-6, 1.0, 3e-6))
+    import json as _json
+
+    p = conn.execute("SELECT mode, meta FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    assert p["mode"] == "explore" and _json.loads(p["meta"])["dex"] == "pumpfun"
