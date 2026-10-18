@@ -130,6 +130,7 @@ class SafetySettings:
     # hour through this bucket; at 15/min they spilled to the public nodes (getTokenLargestAccounts 429 runs)
     helius_per_min: float = field(default_factory=lambda: _f("SAFETY_HELIUS_PER_MIN", 60))
     helius_spacing_sec: float = field(default_factory=lambda: _f("SAFETY_HELIUS_SPACING_SEC", 0.5))
+    helius_overflow_wait_sec: float = field(default_factory=lambda: _f("SAFETY_HELIUS_OVERFLOW_WAIT_SEC", 2.0))
     helius_reserve: float = field(default_factory=lambda: _f("SAFETY_HELIUS_RESERVE", 4))   # kept for live buys/signals
     public_rpc_url: str = field(default_factory=lambda: os.getenv("SAFETY_PUBLIC_RPC_URL") or "https://api.mainnet-beta.solana.com")
     public_per_min: float = field(default_factory=lambda: _f("SAFETY_PUBLIC_PER_MIN", 20))  # 0 = no fallback

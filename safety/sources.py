@@ -114,10 +114,13 @@ class Fetcher:
                 f"{host}_{method}", c.largest_per_min, spacing=c.largest_spacing_sec,
                 wait=c.priority_wait_sec if self.priority else 0):
             return False
+        # Helius: wait out the shared spacing (all processes use one bucket) instead of spilling the call to a
+        # public node at once; with wait=0 every call within 0.5 s of another process's call went public and
+        # mainnet-beta struck getTokenLargestAccounts ~50 times an hour on 18.10. while Helius ran at ~10/min of 60
+        wait = c.priority_wait_sec if self.priority else (c.helius_overflow_wait_sec if helius else 0)
         return budget.take(host, c.helius_per_min if helius else c.public_per_min,
                            spacing=c.helius_spacing_sec if helius else c.public_spacing_sec,
-                           reserve=c.helius_reserve if helius and not self.priority else 0,
-                           wait=c.priority_wait_sec if self.priority else 0)
+                           reserve=c.helius_reserve if helius and not self.priority else 0, wait=wait)
 
     # ---- Solana JSON-RPC ----
     def rpc(self, method, params):

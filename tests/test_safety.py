@@ -853,3 +853,19 @@ def test_setup_wallet_of_the_brand_scam_blocks_alone(tmp_path):
     shipped = watchlist.load(None, CFG)
     assert shipped["4G9JAzftaydKjB2558MLnkYw175KMN6NGGgyxkeRuwwA"]["role"] == "setup"
     assert "7FPqg7MpJwvGneBPvkBrCDjAvZhFnAvoiUw9LF91nsN" not in shipped   # the copycat is a victim, not a scammer
+
+
+def test_helius_call_waits_out_the_spacing_instead_of_spilling_to_public(monkeypatch):
+    from safety import sources
+    hel, pub = _uniq("helius"), _uniq("public")
+    cfg = SafetySettings()
+    cfg.helius_spacing_sec, cfg.helius_overflow_wait_sec, cfg.helius_reserve = 0.3, 2.0, 0
+    cfg.public_spacing_sec, cfg.public_rpc_url = 0, f"https://{pub}"
+    monkeypatch.setattr(sources.http, "post_json", lambda url, payload, **kw: {"result": 1})
+    f = sources.Fetcher(cfg, rpc_url=f"https://{hel}/?api-key=x", priority=False)
+    try:
+        for _ in range(3):
+            f.rpc("getAccountInfo", [MINT])
+        assert f.rpc_calls[hel] == 3 and not f.rpc_calls.get(pub)
+    finally:
+        _cleanup(hel, pub)
