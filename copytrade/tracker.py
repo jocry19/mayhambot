@@ -346,6 +346,8 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk",
     sigs = rpc.poll_signatures(wallet, limit=15, until=last, priority=priority) if last \
         else rpc.poll_signatures(wallet, limit=1, priority=priority)
     now = int(time.time())
+    if _burst_bot(conn, wallet_row, sigs):
+        return []
     if not sigs:
         conn.execute("UPDATE ct_wallets SET last_polled=? WHERE address=?", (now, wallet))
         conn.commit()  # no-op in autocommit, but never leave a write lock open across what follows
@@ -405,6 +407,34 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk",
     except Exception as e:
         log.debug("cursor %s not moved: %s", wallet[:6], e)
     return out
+
+
+BURST_TX, BURST_SPAN_S = 60, 11 * 60  # the backfill's bot rate (80 tx in 15 min) seen by one poll
+BOTS_OFF: list[str] = []
+
+
+def _burst_bot(conn, wallet_row, sigs) -> bool:
+    """A poll that finds 60+ new transactions within 11 minutes is a bot's pace, not a whale's: such a wallet
+    cost up to 60 transaction reads per poll (most of the public 429s, 18.10.). It is switched off as 'bot' like
+    the backfill does; manual and block-0 wallets are kept."""
+    src = wallet_row["source"] if "source" in wallet_row.keys() else None
+    if len(sigs) < BURST_TX or src in ("manual", "block0") or wallet_row["address"] in BLOCK0:
+        return False
+    times = [sg.get("blockTime") for sg in sigs if sg.get("blockTime")]
+    if len(times) < BURST_TX or max(times) - min(times) > BURST_SPAN_S:
+        return False
+    wallet = wallet_row["address"]
+    conn.execute("UPDATE ct_wallets SET active=0, label='bot', last_sig=?, last_polled=? WHERE address=?",
+                 (sigs[0]["signature"], int(time.time()), wallet))
+    conn.commit()
+    BOTS_OFF.append(wallet)
+    log.info("wallet %s off as bot: %d transactions in %d s", wallet[:6], len(times), max(times) - min(times))
+    try:
+        store.event(conn, "bot", f"Wallet {wallet[:6]}… abgeschaltet: {len(times)} Transaktionen in "
+                    f"{(max(times) - min(times)) / 60:.0f} min (Bot-Tempo)", data={"wallet": wallet})
+    except Exception as e:
+        log.debug("bot event failed: %s", e)
+    return True
 
 
 def _key_wallet(conn, wallet: str) -> bool:

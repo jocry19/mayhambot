@@ -42,9 +42,9 @@ class EventLanes:
 
     lane 0: notifications of tracked whales that touch a swap venue (or whose logs are unknown)
     lane 1: catch-ups after a resubscribe
-    lane 2: whale notifications without any swap venue (transfers, closes, spam) and block-0 launch bots
-    Block-0 wallets fire masses of non-swap transactions: those are dropped before they are queued (no read at
-    all), so are their catch-ups (polling covers them). Lane 2 is bounded: when full, the oldest entry goes.
+    lane 2: block-0 launch bots (bounded: when full, the oldest entry goes)
+    Notifications without any swap venue in their logs (transfers, closes, spam; block-0 bots fire masses of
+    them) are dropped before they are queued and never read; so are block-0 catch-ups (polling covers them).
     """
 
     LOW_MAX = 300
@@ -64,10 +64,13 @@ class EventLanes:
                 return None
             return 1
         venues = chain.log_venues(extra) if isinstance(extra, list) else None
-        if b0 and venues is not None and not venues:
-            self.dropped["block0_noswap"] += 1
+        if venues == set():
+            # no swap venue in the logs (transfers, closes, spam): not read at all, and marked as handled so the
+            # polling net does not read it either (those reads were most of the public 429s, 18.10.)
+            tracker._mark(sig)
+            self.dropped["block0_noswap" if b0 else "noswap"] += 1
             return None
-        return 2 if b0 or venues == set() else 0
+        return 2 if b0 else 0
 
     def put(self, item) -> None:
         n = self.lane(item)

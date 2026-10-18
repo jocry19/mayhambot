@@ -1033,13 +1033,14 @@ def _venue_logs(prog: str | None) -> list[str]:
     return [f"Program {pid} invoke [1]", f"Program {pid} success"]
 
 
-def test_whale_notifications_jump_ahead_of_bulk_and_block0_floods_are_dropped(monkeypatch):
+def test_whale_notifications_jump_ahead_and_venueless_traffic_is_never_read(monkeypatch):
     from copytrade import watch
 
     B0 = "B0bot1111111111111111111111111111111111111"
     monkeypatch.setattr(tracker, "BLOCK0", {B0})
     q = watch.EventLanes()
     now = time.time()
+    tracker._seen.clear()
     q.put((B0, "b0-transfer", now, _venue_logs(None)))  # launch bot, no swap venue: never read
     q.put((B0, None, now, "catchup"))  # polling covers the launch bots
     q.put((B0, "b0-swap", now, _venue_logs("dex")))
@@ -1047,9 +1048,11 @@ def test_whale_notifications_jump_ahead_of_bulk_and_block0_floods_are_dropped(mo
     q.put((W, None, now, "catchup"))
     q.put((W, "w-swap", now, _venue_logs("dex")))
     q.put((W, "w-nologs", now, None))
-    order = [q.get(timeout=1)[1] for _ in range(5)]
-    assert order == ["w-swap", "w-nologs", None, "b0-swap", "w-transfer"] and q.empty()
-    assert q.dropped == {"block0_noswap": 1, "block0_catchup": 1}
+    order = [q.get(timeout=1)[1] for _ in range(4)]
+    assert order == ["w-swap", "w-nologs", None, "b0-swap"] and q.empty()
+    assert q.dropped == {"block0_noswap": 1, "block0_catchup": 1, "noswap": 1}
+    # dropped ones count as handled: the polling net does not read them either
+    assert not tracker._mark("b0-transfer") and not tracker._mark("w-transfer") and tracker._mark("w-swap")
     for i in range(watch.EventLanes.LOW_MAX + 5):  # the bulk lane is bounded, the whale lane never waits on it
         q.put((B0, f"b{i}", now, _venue_logs("dex")))
     q.put((W, "w2", now, None))
@@ -1072,3 +1075,28 @@ def test_block0_wallets_never_ride_the_paid_helius_stream(tmp_path, monkeypatch)
     w.helius_paused = "x"
     w.set_wallets([W, B0])
     assert w.helius._wanted == []
+
+
+def test_a_wallet_at_bot_pace_is_switched_off_instead_of_read_sixty_times(env, monkeypatch):
+    s, conn, ex, state = env
+    store.add_wallets(conn, [W], "auto")
+    conn.execute("UPDATE ct_wallets SET last_sig='old' WHERE address=?", (W,))
+    now = int(time.time())
+    sigs = [{"signature": f"b{i}", "blockTime": now - i * 5, "err": None} for i in range(60)]  # 60 in 5 min
+    reads = []
+
+    class R:
+        def poll_signatures(self, *a, **kw):
+            return sigs
+
+        def transaction(self, sig, **kw):
+            reads.append(sig)
+
+    row = conn.execute("SELECT * FROM ct_wallets WHERE address=?", (W,)).fetchone()
+    assert tracker.poll(conn, s, R(), row) == [] and reads == []
+    r = conn.execute("SELECT active, label, last_sig FROM ct_wallets WHERE address=?", (W,)).fetchone()
+    assert (r["active"], r["label"], r["last_sig"]) == (0, "bot", "b0")
+    # a busy whale spread over an hour stays, and so does a manual wallet at bot pace
+    assert not tracker._burst_bot(conn, {"address": "X", "source": "auto"},
+                                  [{"signature": f"c{i}", "blockTime": now - i * 60} for i in range(60)])
+    assert not tracker._burst_bot(conn, {"address": "Y", "source": "manual"}, sigs)
