@@ -223,6 +223,11 @@ const halfCell = (m, lo, k) => (m == null ? <span className="dim">–</span>
   : <span title={`${n(k)} Fälle, Untergrenze ${pctSigned(lo, 1)}`}><span className={sign(m)}>{pctSigned(m, 1)}</span> <span className={`dim ${lo > 0 ? "up" : ""}`}>({pctSigned(lo, 0)})</span></span>);
 
 /** Patterns (plan 18.10., "Richtung neu"): estimate and uncertainty per pattern; the release badge only while brain still sends one. */
+const pauseSince = (g) => {
+  if (g.decided_at) return <>Hauptkonto pausiert seit {dt(g.decided_at)} (Entscheidung des Nutzers){g.live_since && g.live_since > g.decided_at + 60 ? `, wirksam seit ${dt(g.live_since)}` : ""}</>;
+  if (g.live_since) return <>Hauptkonto pausiert seit {dt(g.live_since)} (vom Prüfstand ausgelöst)</>;
+  return "Hauptkonto pausiert seit 18.10. 17:06 (Entscheidung des Nutzers)";
+};
 const VERDICT = { traegt: ["good", "trägt"], kandidat: ["warn", "Kandidat"], "traegt nicht": ["", "trägt nicht"] };
 const thirdsCell = (x) => (
   <span className="row mono" style={{ gap: 6, justifyContent: "flex-end" }} title="Ø netto je Zeitdrittel des Fensters, alt nach neu">
@@ -534,7 +539,7 @@ export default function Brain() {
           sub={lastOf(d.days, "capture_own") != null ? "Anteil am besten Anstieg, eigene Trades (letzter Tag)" : "Anteil am besten Anstieg, organisch nachgespielt"} />
       </div>
       {d.main_gate && d.main_gate.mode !== "on" && (d.main_gate.paused
-        ? <Callout kind="warn" icon="alert">Hauptkonto pausiert seit 18.10. 17:06 (Entscheidung des Nutzers): es kauft erst wieder, wenn im Prüfstand eine Tasche das Urteil „trägt“ hat, und dann nur deren Art. {d.main_gate.report ? `Letzter Bericht ${ago(d.main_gate.report_at)}: keine tragende Tasche.` : "Der Prüfstand hat noch keinen Bericht."} Das Lernkonto handelt weiter{d.main_gate.stopped_24h ? `; ${n(d.main_gate.stopped_24h)} Hauptkonto-Käufe in 24 h deshalb gestoppt` : ""}.</Callout>
+        ? <Callout kind="warn" icon="alert">{pauseSince(d.main_gate)}: es kauft erst wieder, wenn im Prüfstand eine Tasche das Urteil „trägt“ hat, und dann nur deren Art. {d.main_gate.report ? `Letzter Bericht ${ago(d.main_gate.report_at)}: keine tragende Tasche.` : "Der Prüfstand hat noch keinen Bericht."} Das Lernkonto handelt weiter{d.main_gate.stopped_24h ? `; ${n(d.main_gate.stopped_24h)} Hauptkonto-Käufe in 24 h deshalb gestoppt` : ""}.</Callout>
         : <Callout kind="good" icon="info">Hauptkonto kauft nur, wo der Prüfstand eine tragende Tasche sieht: {d.main_gate.open_labels.join(", ")} ({d.main_gate.carrying.join(", ")}).</Callout>)}
       {d.challenge?.paused_until && (
         <Callout kind="warn" icon="alert">Stunden-Challenge (×2 je Stunde) pausiert bis {dt(d.challenge.paused_until)}: die letzten 3 vollen Stunden zusammen lagen bei {fx(d.challenge.pauses_24h?.[d.challenge.pauses_24h.length - 1]?.factor, 3)}. Bis dahin gelten die normalen Einsatzgrößen{d.challenge.pauses_24h?.length > 1 ? ` (${n(d.challenge.pauses_24h.length)} Pausen in 24 h)` : ""}.</Callout>

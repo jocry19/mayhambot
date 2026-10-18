@@ -2931,4 +2931,8 @@ def _brain_main_gate(conn, now, state=None):
     paused = bool(state.get("paused")) if isinstance(state, dict) and "paused" in state else not open_kinds
     return {"mode": mode, "paused": paused, "open_kinds": open_kinds, "from_brain": isinstance(state, dict) and "paused" in state,
             "open_labels": [BRAIN_KIND.get(k, k) for k in open_kinds], "carrying": carrying,
-            "report_at": lab.get("at"), "report": bool(lab.get("available")), "stopped_24h": int(stopped or 0)}
+            "report_at": lab.get("at"), "report": bool(lab.get("available")), "stopped_24h": int(stopped or 0),
+            # brain writes these with the pause: decided_at = the user's decision (18.10. 17:06), null for a pause the
+            # lab set off later; live_since = when the gate first held on the Mac
+            "decided_at": (state or {}).get("decided_at") if paused and isinstance(state, dict) else None,
+            "live_since": (state or {}).get("live_since") if paused and isinstance(state, dict) else None}

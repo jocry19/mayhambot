@@ -954,7 +954,9 @@ def test_brain_main_gate_mirrors_lab(demo, monkeypatch):
     g = Q._brain_main_gate(conn, now)
     assert not g["paused"] and g["open_kinds"] == ["whale"] and g["open_labels"] == ["Wal-Kauf"]
     g = Q._brain_main_gate(conn, now, {"paused": True, "since": now - 60, "released": []})
-    assert g["paused"] and g["from_brain"] and g["open_kinds"] == []
+    assert g["paused"] and g["from_brain"] and g["open_kinds"] == [] and g["decided_at"] is None
+    g = Q._brain_main_gate(conn, now, {"paused": True, "decided_at": 1792335960, "live_since": 1792338698, "released": []})
+    assert g["decided_at"] == 1792335960 and g["live_since"] == 1792338698
     g = Q._brain_main_gate(conn, now, {"paused": False, "released": ["market", "pool"]})
     assert not g["paused"] and g["open_kinds"] == ["market"]
     monkeypatch.setenv("BRAIN_MAIN_TRADE", "on")
