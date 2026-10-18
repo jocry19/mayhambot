@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 
-from . import config, exits, journal, learner, store
+from . import config, exits, journal, labels, learner, store
 from .model import Brain
 from .pool import Pool
 from .plans import PLANS
@@ -52,10 +52,13 @@ class Service:
         n_prior = learner.warm_start(self.conn, self.model, self.s)
         n_eval = learner.evaluate(self.conn, self.model, self.s, candles_fn, xm=self.xm, pool=self.pm)
         n_back = learner.backfill_exits(self.conn, self.xm, self.s, candles_fn)
+        n_lab = learner.learn_labels(self.conn, self.pm, self.s)
+        if n_lab:
+            self.dirty = True
         shift = learner.regime_check(self.conn, self.model, self.xm)
         if n_prior or n_eval or n_back or shift:
             self.dirty = True
-        return {"prior": n_prior, "evaluated": n_eval, "exit_backfill": n_back}
+        return {"prior": n_prior, "evaluated": n_eval, "exit_backfill": n_back, "labels": n_lab}
 
     def heartbeat(self, since: float) -> str:
         c = self.conn
@@ -80,7 +83,17 @@ class Service:
                 f"model {self.model.d - 1} tokens / {self.model.n:.0f} outcomes, exit model {self.xm.n:.0f} minutes "
                 f"(organic exits {'on' if self.trader.organic_on(time.time()) else 'off'}, "
                 f"replays {exits.verdict(c)['n']}), pool model {self.pm.d - 1} tokens / {self.pm.n:.0f} outcomes, "
-                f"{self._pooled(since)}")
+                f"{self._pooled(since)}, {self._labelled(since)}")
+
+    def _labelled(self, since: float) -> str:
+        try:
+            n, rug, m60 = self.conn.execute("SELECT COUNT(*), COALESCE(SUM(label_rug),0), AVG(label_max60) FROM "
+                                            "opportunities WHERE label_at>=?", (int(since),)).fetchone()
+            follow = len((store.get(self.conn, "label_track") or {}).get("rows") or {})
+        except Exception:
+            return "labels none"
+        return (f"labels {n} written ({rug} rugs, mean best-in-60-min {m60:+.1%} after costs), {follow} followed"
+                if n else f"labels 0 written, {follow} followed")
 
     def _pooled(self, since: float) -> str:
         try:
@@ -92,6 +105,24 @@ class Service:
         # reported / decided / bought: reported but undecided = too old when read (BRAIN_MAX_POOL_AGE_S), the brain's
         # own sources, or the same coin from the same source within 6 h
         return "pooled reported/decided/bought " + (", ".join(f"{r[0]} {r[1]}/{r[2]}/{r[3]}" for r in rows) or "none")
+
+    def _label_loop(self, stop: threading.Event) -> None:
+        """labels.py in its own thread and connection: its DexScreener batches must not hold up the 2-s loop."""
+        try:
+            lb = labels.Labeler(store.connect(self.s.db_path), self.s)
+        except Exception as e:
+            log.exception("labels: %s", e)
+            return
+        while not stop.is_set():
+            try:
+                lb.step()
+            except Exception as e:
+                log.exception("labels: %s", e)
+            stop.wait(60)
+        try:
+            lb.save()
+        except Exception:
+            pass
 
     def hour_line(self, now: float) -> bool:
         """The "brain hour:" line, first thing in the loop and on its own: on the clock hour, kept in the DB (deploys
@@ -134,6 +165,8 @@ class Service:
         except Exception as e:
             log.exception("warm start failed: %s", e)
         self.save()
+        if self.s.labels != "off":
+            threading.Thread(target=self._label_loop, args=(stop,), name="brain-labels", daemon=True).start()
         last = {"price": 0.0, "learn": time.time(), "save": time.time(), "eq": 0.0, "diary": 0.0}
         while not stop.is_set():
             now = time.time()

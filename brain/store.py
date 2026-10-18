@@ -68,9 +68,14 @@ def connect(db_path: str | None = None) -> sqlite3.Connection:
 def init(conn) -> None:
     conn.executescript(SCHEMA)
     _add_columns(conn, "brain_equity", EQUITY_COLS)
-    from . import opportunities
+    from . import labels, opportunities
 
     opportunities.ensure(conn)
+    _add_columns(conn, "opportunities", labels.COLS)
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_opportunities_label ON opportunities(label_at, id)")
+    except sqlite3.OperationalError:
+        pass
 
 
 def has(conn, table: str) -> bool:

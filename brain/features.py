@@ -376,6 +376,18 @@ def pool(conn, row, snap, now: float) -> tuple[dict, dict]:
                "reason": row["source_reason"], "score": row["source_score"]}
 
 
+def pool_reported(row) -> dict:
+    """Only what the source reported (for rows the brain never decided: too old when read, or its own sources)."""
+    try:
+        raw = json.loads(row["features"] or "{}")
+    except (TypeError, ValueError):
+        raw = {}
+    f = {"src": row["source"]}
+    for k in sorted(raw)[:POOL_MAX_FEATS]:
+        f[k] = gb(raw[k])
+    return f
+
+
 def pool_tokens(feats: dict) -> list[str]:
     """Each value once plain (learned across sources) and once with its source. Source-only names ("sniper.x")
     already carry their source."""

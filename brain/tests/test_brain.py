@@ -1324,3 +1324,48 @@ def test_the_hour_line_comes_once_an_hour_even_when_the_loop_fails(conn, s, capl
     assert sv.hour_line(now + 3600)
     assert sum("brain hour:" in r.message for r in caplog.records) == 2
     assert "learning account equity" in [r.message for r in caplog.records if "brain hour:" in r.message][-1]
+
+
+def test_labels_of_a_path_after_costs_and_a_rug():
+    from brain import labels
+    t0 = 1_000_000
+    up = [[t0 + 60 * i, 1.0 + 0.05 * i] for i in range(10)] + [[t0 + 60 * i, 1.2] for i in range(10, 61)]
+    lab = labels.label(up, 0.05)
+    assert lab["label_max15"] == pytest.approx(1.45 - 1 - 0.05) and lab["label_ret60"] == pytest.approx(0.15)
+    assert lab["label_rug"] == 0 and set(json.loads(lab["label_outcomes"])) == set(NAMES)
+    rug = [[t0, 1.0], [t0 + 60, 1.3], [t0 + 120, 0.02], [t0 + 3600, 0.02]]
+    lab = labels.label(rug, 0.05)
+    assert lab["label_rug"] == 1 and lab["label_ret60"] == -1.0
+    outs = json.loads(lab["label_outcomes"])  # a plan that took its +30 % target before the rug keeps it
+    assert all(v < -0.5 or v == pytest.approx(BY_NAME[k].take_profit - 0.05) for k, v in outs.items())
+    assert labels.label([[t0, 1.0]], 0.05) is None
+
+
+def test_every_opportunity_is_followed_for_an_hour_and_the_pool_learns_its_labels(conn, s):
+    from brain import labels, opportunities as O
+    from brain.pool import Pool
+    clock = [time.time()]
+    curve = {"price_sol": 1e-6, "complete": False}
+    calls = []
+
+    def snaps(mints):
+        calls.append(len(mints))
+        return {m: snap(mint=m, price=2e-6) for m in mints}
+    lb = labels.Labeler(conn, s, snapshots=snaps, clock=lambda: clock[0],
+                        curve_now=lambda c, m, now: dict(curve) if m == MINT else None)
+    lb.step()  # first start: begins after what is there
+    O.report(conn, "sniper", "a", MINT, clock[0], {"buyers": 12})
+    O.report(conn, "signals", "b", "Other" + MINT[5:], clock[0], {"wallets_n": 3})
+    conn.execute("UPDATE opportunities SET reported_at=?", (int(clock[0]),))
+    for i in range(62):
+        clock[0] += 60
+        curve["price_sol"] = 1e-6 * (1 + 0.02 * min(i, 30))  # the curve coin runs +60 %, then holds
+        lb.step()
+    rows = {r["ref"]: r for r in conn.execute("SELECT * FROM opportunities")}
+    assert rows["a"]["label_at"] and rows["a"]["label_max60"] > 0.4 and rows["a"]["label_n"] >= 60
+    assert rows["b"]["label_at"] and rows["b"]["label_n"] >= 15  # DexScreener every 3 min
+    assert max(calls) <= labels.DS_CALLS * 30 and not lb.track
+    pm = Pool(len(PLANS))
+    assert learner.learn_labels(conn, pm, s) == 2 and pm.n == pytest.approx(2 * learner.LABEL_WEIGHT)
+    assert learner.learn_labels(conn, pm, s) == 0  # the cursor moved on
+    assert pm.predict(tokens("pool", {"src": "sniper", "buyers": "1e1"}))[0][0] > 0
