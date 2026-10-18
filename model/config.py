@@ -60,6 +60,7 @@ class ModelSettings:
     event_dedupe_min: int = int(_f("MODEL_EVENT_DEDUPE_MIN", 10))
     retrain_hours: float = _f("MODEL_RETRAIN_HOURS", 6)
     wallet_weight_prior_n: float = _f("MODEL_WALLET_WEIGHT_PRIOR_N", 400)  # evidence needed to trust learned weights 50 %
+    wallet_weight_cap: float = _f("MODEL_WALLET_WEIGHT_CAP", 0.25)  # no single wallet component above this share
     min_train_events: int = int(_f("MODEL_MIN_TRAIN_EVENTS", 40))
     min_train_pos: int = int(_f("MODEL_MIN_TRAIN_POSITIVES", 6))
     l2: float = _f("MODEL_L2", 5.0)

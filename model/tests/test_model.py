@@ -446,3 +446,30 @@ def test_snapshots_from_pools_too_thin_for_their_market_cap_are_ignored():
                      [("C", 0, 0.001, 1e6, 5e4), ("C", 60, 0.264, 2.64e8, 4e3), ("C", 120, 0.0011, 1.1e6, 5e4)])
     idx = PriceIndex.from_db(conn)
     assert idx.max_between("C", -1, 600) < 0.01
+
+
+def test_wallet_weights_learn_on_net_and_no_component_dominates():
+    import random as _r
+    from model import learn
+    from research.wallet_stats import COMPONENTS
+    rng = _r.Random(3)
+    ev_ = []
+    for _ in range(3000):
+        c = {k: rng.random() for k in COMPONENTS}
+        ev_.append((c, int(rng.random() < 0.15 + 0.7 * c["timing"])))  # only timing explains the outcome
+    w, info = learn.learn_wallet_weights(ev_, prior_n=10, cap=0.25)
+    assert abs(sum(w.values()) - 1) < 1e-9
+    assert max(w.values()) <= 0.25 + 1e-9 and w["timing"] == max(w.values())
+    w0, _ = learn.learn_wallet_weights(ev_, prior_n=10, cap=0)
+    assert w0["timing"] > 0.5  # uncapped: timing would swamp everything
+    assert learn.cap_weights(dict(a=0.7, b=0.2, c=0.1), 0.5) == pytest.approx(dict(a=0.5, b=1 / 3, c=1 / 6))
+
+
+def test_backtest_reports_walk_forward_net_of_wallet_ranking(market):
+    import json
+    conn, truth, now, vid = market
+    m = json.loads(conn.execute("SELECT metrics_json FROM model_versions WHERE id=?", (vid,)).fetchone()[0])
+    wr = m["wallet_rank"]
+    assert {"all", "net", "pumped", "prior"} <= set(wr)
+    assert all(v["n"] > 0 and v["ci_low"] <= v["mean_net"] for v in wr.values())
+    assert wr["net"]["mean_net"] >= wr["all"]["mean_net"]  # skilled wallets in the fixture: ranking must help

@@ -33,8 +33,8 @@ def run_once(conn=None, now=None, write_files=True):
         log.warning("no trades in the database yet")
         return None
     bt = backtest.run(ds, msettings)
-    # production weights: all wallet buys whose outcome is known by now
-    known = [(we["comps"], we["y"]) for we in bt["wallet_events"] if we["ts"] + we["sec"] <= now]
+    # production weights: all wallet buys whose outcome is known by now, learned on profit after costs
+    known = [(we["comps"], we["win"]) for we in bt["wallet_events"] if we["ts"] + we["sec"] <= now]
     weights, winfo = learn.learn_wallet_weights(known)
     st, _ = wallet_stats.compute(ds, now + 1)
     tiers = tier_all(st, weights)

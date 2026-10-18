@@ -14,7 +14,7 @@ import time
 
 from model import learn
 from model.config import msettings
-from model.tiers import tier_all
+from model.tiers import tier_all, wallet_score
 from research import events as ev
 from research import exits, stats, wallet_stats
 
@@ -49,8 +49,22 @@ def _wallet_events(ds, stats_k, a, b, h_name, horizons, limit=4000, rng=None):
         lab = ev.labels_at(mint, ts, ds.pidx, hz).get(h_name)
         if lab is None:
             continue
-        out.append(dict(ts=ts, sec=hz[0][1], comps=stats_k[w]["components"], y=lab["pumped"]))
+        out.append(dict(ts=ts, sec=hz[0][1], comps=stats_k[w]["components"], n_tokens=stats_k[w]["n_tokens"],
+                        y=lab["pumped"], win=lab["win"], net=lab["net"]))
     return out
+
+
+def _rank_forward(acc, wev, variants):
+    """Walk-forward check of the wallet weights: for the next window's wallet buys, the net result after costs
+    of the top fifth of wallets by score under each weight variant (learned on profit after costs, learned on
+    'pumped' without a cap as before, fixed prior)."""
+    if len(wev) < 10:
+        return
+    k = max(1, len(wev) // 5)
+    acc.setdefault("all", []).extend(we["net"] for we in wev)
+    for name, w in variants.items():
+        top = sorted(wev, key=lambda we: -wallet_score(dict(components=we["comps"], n_tokens=we["n_tokens"]), w))[:k]
+        acc.setdefault(name, []).extend(we["net"] for we in top)
 
 
 def _coin_events(ds, tmap, a, b, ms):
@@ -83,7 +97,7 @@ def _coin_events(ds, tmap, a, b, ms):
 def run(ds, ms=msettings, max_points=24):
     cps = checkpoints(ds.ts_list, max_points)
     res = dict(checkpoints=cps, events=[], wallet_events=[], preds={h[0]: [] for h in ms.horizons},
-               weights=[], tier_counts=[], tier_forward={})
+               weights=[], tier_counts=[], tier_forward={}, wallet_rank={})
     if not cps:
         log.info("not enough history for a walk-forward backtest (%.1f h)", (ds.end - ds.start) / 3600)
         return res
@@ -92,8 +106,10 @@ def run(ds, ms=msettings, max_points=24):
     for k, c in enumerate(cps):
         nxt = bounds[k + 1]
         st, _ = wallet_stats.compute(ds, c, use_flags=False)
-        known = [(we["comps"], we["y"]) for we in res["wallet_events"] if we["ts"] + we["sec"] <= c]
-        weights, winfo = learn.learn_wallet_weights(known)
+        done = [we for we in res["wallet_events"] if we["ts"] + we["sec"] <= c]
+        weights, winfo = learn.learn_wallet_weights([(we["comps"], we["win"]) for we in done])
+        variants = dict(net=weights, prior=None,
+                        pumped=learn.learn_wallet_weights([(we["comps"], we["y"]) for we in done], cap=0)[0])
         tiers = tier_all(st, weights)
         keep = [w for w, (t, sc, s) in tiers.items() if t or sc >= ms.event_min_score]
         cl = wallet_stats.clusters(ds, keep, c)
@@ -105,6 +121,7 @@ def run(ds, ms=msettings, max_points=24):
         # forward check of tiers: how often a tiered wallet's next buys pumped
         wev = _wallet_events(ds, st, c, nxt, h_wallet, ms.horizons)
         res["wallet_events"].extend(wev)
+        _rank_forward(res["wallet_rank"], wev, variants)
         for x in wallet_stats.first_buys(ds, c, nxt):
             tier = (tmap.get(x[0]) or (None,))[0] or "none"
             if x[0] not in st or x[2] < getattr(ds, "hindsight", {}).get(x[1], 0):
@@ -218,4 +235,13 @@ def metrics(res, ms):
         tf[tier] = dict(n=n, pump_rate=r, ci_low=lo, ci_high=hi, median_max_ret=stats.median(mr),
                         mean_net=sum(nets) / len(nets) if nets else None, win_rate_net=wins / len(nets) if nets else None)
     out["tier_forward"] = tf
+    wr = {}
+    for name, nets in res.get("wallet_rank", {}).items():
+        if not nets:
+            continue
+        mu = sum(nets) / len(nets)
+        sd = (sum((x - mu) ** 2 for x in nets) / max(1, len(nets) - 1)) ** 0.5
+        wr[name] = dict(n=len(nets), mean_net=mu, ci_low=mu - 1.96 * sd / len(nets) ** 0.5,
+                        median_net=stats.median(nets), win_rate=sum(1 for x in nets if x > 0) / len(nets))
+    out["wallet_rank"] = wr
     return out

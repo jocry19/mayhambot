@@ -30,15 +30,19 @@ def prior_model(horizon):
         std=[1.0] * len(FEATURE_NAMES), n=0, pos=0)
 
 
-def learn_wallet_weights(wallet_events, prior_n=None):
-    """wallet_events: list of (components dict, pumped 0/1). Returns (weights, info)."""
+def learn_wallet_weights(wallet_events, prior_n=None, cap=None):
+    """wallet_events: list of (components dict, outcome 0/1). The outcome is 'win' (the copied buy made money
+    after our round-trip costs) in production; 'pumped' only for comparison. Returns (weights, info).
+    No single component may get more than `cap` of the total: one learned component (for example timing, which
+    tracks 'pumped' but not profit after costs) must not drown out the rest."""
     prior_n = msettings.wallet_weight_prior_n if prior_n is None else prior_n
+    cap = msettings.wallet_weight_cap if cap is None else cap
     n = len(wallet_events)
     pos = sum(y for _, y in wallet_events)
-    info = dict(n=n, pos=pos, learned=None, coef=None, lam=0.0)
+    info = dict(n=n, pos=pos, learned=None, coef=None, lam=0.0, cap=cap)
     if n < 50 or pos < 5 or pos == n:
         return dict(PRIOR_WALLET_WEIGHTS), info
-    X = [[c[k] for k in COMPONENTS] for c, _ in wallet_events]
+    X = [[c.get(k, 0.5) for k in COMPONENTS] for c, _ in wallet_events]
     y = [yy for _, yy in wallet_events]
     m = stats.logistic_fit(X, y, l2=msettings.l2)
     coef = dict(zip(COMPONENTS, m["coef"]))
@@ -50,7 +54,29 @@ def learn_wallet_weights(wallet_events, prior_n=None):
     lam = n / (n + prior_n)
     w = {k: (1 - lam) * PRIOR_WALLET_WEIGHTS[k] + lam * learned[k] for k in COMPONENTS}
     s = sum(w.values())
-    return {k: v / s for k, v in w.items()}, dict(info, learned=learned, coef=coef, lam=lam)
+    w = cap_weights({k: v / s for k, v in w.items()}, cap)
+    return w, dict(info, learned=learned, coef=coef, lam=lam)
+
+
+def cap_weights(w, cap):
+    """Normalized weights with no entry above `cap`; the excess goes to the others in proportion to their size."""
+    if not cap or cap * len(w) < 1:
+        return w
+    w = dict(w)
+    for _ in range(len(w)):
+        over = {k for k, v in w.items() if v > cap + 1e-12}
+        if not over:
+            break
+        excess = sum(w[k] - cap for k in over)
+        for k in over:
+            w[k] = cap
+        free = {k: v for k, v in w.items() if v < cap - 1e-12}
+        ft = sum(free.values())
+        if ft <= 1e-12:
+            break
+        for k, v in free.items():
+            w[k] = v + excess * v / ft
+    return w
 
 
 def fit_token_models(events, horizons=None, l2=None, now=None, target="pumped"):
