@@ -338,3 +338,25 @@ def test_held_back_quoted_trades_replay_once_priced(tmp_path, monkeypatch):
     st.v_sol, st.v_tok, st.last_trade_ts = 40.0, 8e8, time.time()
     svc.engine.launches["QC"] = st
     assert svc.quote_price("QC") == pytest.approx(5e-8)
+
+
+def test_quote_decimals_and_the_dev_buy_of_a_quoted_create(tmp_path, monkeypatch):
+    from core import http as core_http
+    from sniper import feed, service
+    assert rpcws.quote_decimals("XYZpump") == 6 and rpcws.quote_decimals(rpcws.WSOL_MINT) == 9
+    assert rpcws.quote_decimals("PEPEunknownMint111") is None
+    monkeypatch.setattr(rpcws, "QUOTE_PRICE", lambda m: 1e-5)
+    monkeypatch.setattr(rpcws, "quote_decimals", lambda m: None)   # decimals not known yet: held back as well
+    assert rpcws.decode_trade(QUOTED_PUMP) is None and rpcws._UNPRICED[0] == rpcws.PUMP_TOKEN_MINT
+    t = rpcws.trade_tokens(QUOTED_PUMP)                 # the dev buy's size counts without any price
+    assert t["is_buy"] and t["token_raw"] == 3924100500456 and t["v_sol_lamports"] is None
+    monkeypatch.undo()
+    svc = service.Service(cfg(), db_path=str(tmp_path / "d.db"))
+    calls = []
+    monkeypatch.setattr(svc, "sol_usd", lambda: 160.0)
+    monkeypatch.setattr(feed, "token_prices_sol", lambda mints, sol_usd: {m: 1e-3 for m in mints})
+    monkeypatch.setattr(core_http, "post_json", lambda url, p, **kw: calls.append(p["params"][0])
+                        or {"result": {"value": {"decimals": 9}}})
+    monkeypatch.setitem(rpcws.QUOTE_WANTED, "QuoteX1", time.time())
+    svc.quote_round()
+    assert calls == ["QuoteX1"] and rpcws.QUOTE_DECIMALS.pop("QuoteX1") == 9

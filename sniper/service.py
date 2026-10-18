@@ -500,19 +500,36 @@ class Service:
         """Every 5 s: prices of the quote tokens the decoder needed in the last 10 minutes (stale after 2 min)."""
         now = time.time()
         want = [m for m, t in list(rpcws.QUOTE_WANTED.items())
-                if now - t <= 600 and now - self.quote_px.get(m, (0, None))[0] > self.QUOTE_FRESH]
+                if now - t <= 600 and (now - self.quote_px.get(m, (0, None))[0] > self.QUOTE_FRESH
+                                       or rpcws.quote_decimals(m) is None)]
         for m in [m for m, t in list(rpcws.QUOTE_WANTED.items()) if now - t > 3600]:
             rpcws.QUOTE_WANTED.pop(m, None)
         if not want or not self.sol_usd():
+            self._replay_quoted(now)
             return
+        for m in [m for m in want if rpcws.quote_decimals(m) is None][:5]:
+            try:
+                j = http.post_json(self.cfg.rpc_url, {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply",
+                                                      "params": [m]}, retries=1)
+                dec = ((j.get("result") or {}).get("value") or {}).get("decimals")
+                if isinstance(dec, int) and 0 <= dec <= 12:
+                    rpcws.QUOTE_DECIMALS[m] = dec
+            except Exception as e:  # noqa: BLE001
+                log.debug("decimals of %s: %s", m, e)
         got = feed.token_prices_sol(sorted(want, key=lambda m: -rpcws.QUOTE_WANTED.get(m, 0))[:60], self.sol_usd())
         for m, px in got.items():
             self.quote_px[m] = (now, px)
-            for msg in rpcws.replay_quoted(m, time.time()):     # the first trades of its launches, held back
-                self.quote_replayed += 1
-                self._on_rpc_trade(msg)
+        self._replay_quoted(now)
         for m in [m for m in list(rpcws.QUOTE_PENDING) if m not in rpcws.QUOTE_WANTED]:
             rpcws.QUOTE_PENDING.pop(m, None)
+
+    def _replay_quoted(self, now):
+        """Hand over the trades held back for quote tokens whose price and decimals are known now."""
+        for m in list(rpcws.QUOTE_PENDING):
+            if rpcws.quote_decimals(m) is not None and self.quote_price(m, now):
+                for msg in rpcws.replay_quoted(m, time.time()):   # the first trades of its launches
+                    self.quote_replayed += 1
+                    self._on_rpc_trade(msg)
 
     def curve_live_round(self):
         """Every few seconds: latest curve state of the launches that traded, for other processes (copytrade)."""

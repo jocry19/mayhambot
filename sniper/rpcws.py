@@ -95,8 +95,15 @@ QUOTE_PENDING = {}        # quote mint -> deque of (rx time, data, signature, sl
 _UNPRICED = [None]        # quote mint of the last event decode_trade held back (read right after by the parser)
 
 
+# decimals of quote tokens: pump.fun coins (mint ends in "pump") always have 6; others are read from the chain
+# (service.quote_round, getTokenSupply). Unknown decimals hold the trade back like a missing price.
+QUOTE_DECIMALS = {"So11111111111111111111111111111111111111112": 9, PUMP_TOKEN_MINT: 6,
+                  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 6}
+
+
 def quote_decimals(mint):
-    return 9 if mint == "So11111111111111111111111111111111111111112" else 6   # pump.fun coins and PUMP: 6
+    d = QUOTE_DECIMALS.get(mint)
+    return d if d is not None else (6 if mint.endswith("pump") else None)
 
 
 def quote_fields(raw):
@@ -133,16 +140,29 @@ def _quoted(raw, vtok, rtok):
         px = QUOTE_PRICE(qm) if QUOTE_PRICE else None
     except Exception:  # noqa: BLE001
         px = None
-    if not px or px <= 0:
+    dec = quote_decimals(qm)
+    if not px or px <= 0 or dec is None:
         import time as _t
         QUOTE["unpriced"] += 1
         QUOTE_WANTED[qm] = _t.time()
         _UNPRICED[0] = qm
         return None
-    k = px / 10 ** quote_decimals(qm) * 1e9          # lamports per raw quote unit
+    k = px / 10 ** dec * 1e9          # lamports per raw quote unit
     QUOTE["trades"] += 1
     QUOTE_BY_MINT[qm] = QUOTE_BY_MINT.get(qm, 0) + 1
     return int(amt * k), int(vq * k), int(rq * k), qm
+
+
+def trade_tokens(data_b64):
+    """Side, trader and token amount of a TradeEvent without any price (for the dev buy of a quoted create)."""
+    try:
+        raw = base64.b64decode(data_b64)
+    except (ValueError, TypeError):
+        return None
+    if len(raw) < 113 or raw[:8] != TRADE_DISC:
+        return None
+    return {"mint": b58(raw[8:40]), "sol_lamports": None, "token_raw": struct.unpack_from("<Q", raw, 48)[0],
+            "is_buy": raw[56] == 1, "user": b58(raw[57:89]), "v_sol_lamports": None, "v_tok_raw": None}
 
 
 def decode_trade(data_b64):
@@ -280,11 +300,17 @@ def parse_creates(m):
         t = decode_trade(d)
         if t:
             trades.append(t)
+        elif _UNPRICED[0]:
+            t = trade_tokens(d)       # quoted curve, price not known yet: the dev buy's size still counts
+            if t:
+                trades.append(t)
     out = []
     for c in creates:
         dev = c.get("creator") or c["user"]
         buy = next((t for t in trades if t["mint"] == c["mint"] and t["is_buy"]), None)
-        if buy:
+        if buy and buy.get("v_sol_lamports") is None:
+            v_sol, v_tok = PUMP_INITIAL_V_SOL, PUMP_INITIAL_V_TOK     # placeholder until its first priced trade
+        elif buy:
             v_sol, v_tok = buy["v_sol_lamports"] / 1e9, buy["v_tok_raw"] / 1e6
         elif c.get("v_tok_raw") and (reserves_ok(c["v_sol_lamports"] / 1e9, c["v_tok_raw"] / 1e6) or curve_ok(
                 c["v_sol_lamports"] / 1e9, c["v_tok_raw"] / 1e6, 0.0, c["v_tok_raw"] / 1e6 - PUMP_TOKEN_OFFSET)):
@@ -294,7 +320,8 @@ def parse_creates(m):
                 REJECTS["create"] += 1
             v_sol, v_tok = PUMP_INITIAL_V_SOL, PUMP_INITIAL_V_TOK
         out.append({"signature": v.get("signature") or "", "mint": c["mint"], "traderPublicKey": dev, "txType": "create",
-                    "initialBuy": buy["token_raw"] / 1e6 if buy else 0.0, "solAmount": buy["sol_lamports"] / 1e9 if buy else 0.0,
+                    "initialBuy": buy["token_raw"] / 1e6 if buy else 0.0,
+                    "solAmount": (buy["sol_lamports"] or 0) / 1e9 if buy else 0.0,
                     "bondingCurveKey": c["bonding_curve"], "vTokensInBondingCurve": v_tok, "vSolInBondingCurve": v_sol,
                     "marketCapSol": v_sol / v_tok * 1e9 if v_tok else 0.0, "name": c["name"], "symbol": c["symbol"],
                     "uri": c["uri"], "pool": "pump", "slot": (res.get("context") or {}).get("slot"), "src": "rpc_logs"})
