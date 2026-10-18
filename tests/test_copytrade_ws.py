@@ -1100,3 +1100,40 @@ def test_a_wallet_at_bot_pace_is_switched_off_instead_of_read_sixty_times(env, m
     assert not tracker._burst_bot(conn, {"address": "X", "source": "auto"},
                                   [{"signature": f"c{i}", "blockTime": now - i * 60} for i in range(60)])
     assert not tracker._burst_bot(conn, {"address": "Y", "source": "manual"}, sigs)
+
+
+def test_transaction_and_signature_reads_go_to_helius_first_within_a_share(monkeypatch):
+    calls = []
+
+    class Pub:
+        counts, hosts = {}, {}
+
+        def call(self, method, params, priority="bulk"):
+            calls.append("public")
+            return "pub"
+
+    rpc = chain.Rpc(Settings(rpc_url="https://mainnet.helius-rpc.com/?api-key=k", poll_rpc_url=""))
+    rpc.public = Pub()
+    main = {"fail": False}
+
+    def fake_call(self, m, p, priority="live"):
+        calls.append("main")
+        if main["fail"]:
+            raise RuntimeError("429")
+        return "main"
+
+    monkeypatch.setattr(chain.Rpc, "call", fake_call)
+    assert rpc.read("getTransaction", []) == "pub" and calls == ["public"]  # no main_first: public as before
+    rpc.main_first = lambda: True
+    calls.clear()
+    assert rpc.read("getTransaction", []) == "main" and rpc.read("getSignaturesForAddress", []) == "main"
+    assert rpc.read("getTokenSupply", []) == "pub"  # other methods unchanged
+    main["fail"] = True
+    assert rpc.read("getTransaction", []) == "pub"  # Helius error: public fallback
+    main["fail"] = False
+    monkeypatch.setattr(chain.Rpc, "MAIN_FIRST_PER_MIN", 3)
+    calls.clear()
+    assert rpc.read("getTransaction", []) == "pub" and calls == ["public"]  # share of the minute used up
+    rpc.main_first = lambda: False
+    rpc._mf.clear()
+    assert rpc.read("getTransaction", []) == "pub"

@@ -9,7 +9,8 @@ import base64
 import hashlib
 import logging
 import struct
-from collections import Counter
+import time
+from collections import Counter, deque
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -67,6 +68,12 @@ class Rpc:
         self.counts: dict[str, int] = {}  # "public:getTransaction" -> n (hourly usage log)
         self.pooled = url is not None and _is_pool_url(self.url)  # rotate over core's public endpoint pool
         self.hosts: dict[str, int] = {}  # public endpoint host -> calls (hourly usage log)
+        # Helius first for transaction and signature reads while main_first() says the budget allows it (the user
+        # keeps an eye on the key's quota, 18.10.); at most MAIN_FIRST_PER_MIN a minute, so the rest of
+        # copytrade's 120/min Helius budget stays free for live whale reads and our own trades
+        self.main_first = None
+        self._mf: deque = deque()
+        self.main_first_n = 0
 
     @property
     def poll_fallbacks(self) -> int:
@@ -97,10 +104,38 @@ class Rpc:
             raise RuntimeError(f"rpc {method}: {d['error']}")
         return d.get("result")
 
+    MAIN_FIRST = frozenset({"getTransaction", "getSignaturesForAddress"})
+    MAIN_FIRST_PER_MIN = 90
+
+    def _main_first(self, method: str) -> bool:
+        if method not in self.MAIN_FIRST or not self.public or self.main_first is None:
+            return False
+        now = time.time()
+        while self._mf and self._mf[0] < now - 60:
+            self._mf.popleft()
+        try:
+            if len(self._mf) >= self.MAIN_FIRST_PER_MIN or not self.main_first():
+                return False
+        except Exception:
+            return False
+        self._mf.append(now)
+        return True
+
     def read(self, method: str, params: list[Any], main_if_empty: bool = False, priority: str = "bulk",
              main_on_error: bool = True) -> Any:
         """Public RPC first, main RPC on errors (or on an empty answer when main_if_empty). Bulk reads, and live
-        reads with main_on_error=False (a retry follows), never spend main RPC credits."""
+        reads with main_on_error=False (a retry follows), never spend main RPC credits. Transaction and
+        signature reads go to the main RPC first while main_first() allows (public on its errors)."""
+        if self._main_first(method):
+            try:
+                r = self.call(method, params, priority)
+                self.main_first_n += 1
+                return r
+            except CreditsExhausted:
+                pass
+            except Exception as e:
+                log.debug("main rpc %s failed, using public: %s", method, e)
+            return self.public.call(method, params, priority)
         if self.public:
             try:
                 r = self.public.call(method, params, priority)

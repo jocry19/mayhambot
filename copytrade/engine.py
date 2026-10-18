@@ -20,6 +20,7 @@ class Engine:
         self.s = s
         self.conn = store.connect(s)
         self.rpc = chain.Rpc(s)
+        self.rpc.main_first = lambda: tracker.main_budget_ok(s)
         self.exs = make_executors(s, self.rpc)
         self.strategy = Strategy(self.conn, s, self.exs)
         self._stop = stop_event or threading.Event()
@@ -119,11 +120,12 @@ class Engine:
                 + (f" ({', '.join(f'{h} {n}' for h, n in sorted(self.rpc.endpoints().items(), key=lambda x: -x[1]))})"
                    if self.rpc.endpoints() else "")
                 + f", helius {hel} ({', '.join(f'{k[7:]} {v}' for k, v in sorted(u.items(), key=lambda x: -x[1]) if k.startswith('helius:'))}"
-                  f"; {tracker.MAIN_READS['early']} early websocket reads), fallbacks "
+                  f"; {tracker.MAIN_READS['early']} early websocket reads, "
+                  f"{self.rpc.main_first_n} reads Helius-first), fallbacks "
                   f"{self.rpc.fallbacks}, public bulk failures {self.rpc.bulk_failures}")
         tracker.DETECTED.update(wslog=0, ws=0, poll=0, gap=0)
         tracker.MAIN_READS["early"] = 0
-        self.rpc.fallbacks = self.rpc.bulk_failures = 0
+        self.rpc.fallbacks = self.rpc.bulk_failures = self.rpc.main_first_n = 0
         tracker.WS_LATENCY.clear()
         chain.LOG_STATS.clear()
         chain.LOG_VENUES.clear()
