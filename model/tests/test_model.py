@@ -582,3 +582,29 @@ def test_unconfirmed_jump_at_the_hold_end_counts_only_up_to_the_target():
     assert exits.replay(idx, "M", 0, r) == pytest.approx(0.5 - 0.06)
     lab = ev_.labels_at("M", 0, idx, [("15m", 900, 0.3)], delay=0)["15m"]
     assert lab["net"] == pytest.approx(0.3 - 0.06)  # sold at the pump threshold, not +1900 %
+
+
+def test_hung_discovery_does_not_hold_back_the_retrain(monkeypatch, tmp_path):
+    import threading
+    from research import discovery, public_seeds
+    hang = threading.Event()
+    monkeypatch.setattr(discovery, "run_once", lambda conn: hang.wait(30))
+    monkeypatch.setattr(public_seeds, "run", lambda conn: {})
+    monkeypatch.setattr(train, "connect", lambda: db.connect(str(tmp_path / "l.db")))
+    calls = []
+
+    class Stop(Exception):
+        pass
+
+    def due(conn, every, last_ok):
+        calls.append(time.time())
+        if len(calls) >= 3:
+            raise Stop
+        return last_ok
+    monkeypatch.setattr(train, "retrain_if_due", due)
+    import model.predict as mp
+    monkeypatch.setattr(mp, "update_outcomes", lambda conn: 0)
+    with pytest.raises(Stop):
+        train.loop(discover=True, tick=0.01)
+    hang.set()
+    assert len(calls) == 3  # the retrain check kept ticking while discovery hung

@@ -215,32 +215,61 @@ def retrain_if_due(conn, every, last_ok):
     return last_ok
 
 
-def loop(every_hours=None, discover=False):
-    every = (every_hours or msettings.retrain_hours) * 3600
-    last_seed = 0.0
+def _discovery_loop(state):
+    """Wallet discovery and public seeds in their own thread with their own connection: a hung network call
+    there (18.10.: no 'discovery:' line for over an hour after 'public seeds', 0 % CPU) must not hold back the
+    retrain, which used to wait behind it in the same loop."""
+    from research import discovery, public_seeds
     from research.config import rsettings
     conn = connect()
-    last_ok = last_success(conn)
-    log.info("service start: last successful retrain %s, next retrain at %s",
-             _utc(last_ok) if last_ok else "never", _utc(max(time.time(), last_ok + every)))
+    last_seed = 0.0
     while True:
-        last_ok = retrain_if_due(conn, every, last_ok)  # first, so a due retrain is not held back by discovery
-        if discover and time.time() - last_seed >= rsettings.seed_every_hours * 3600:
+        state["round_started"] = time.time()
+        if time.time() - last_seed >= rsettings.seed_every_hours * 3600:
             try:
-                from research import public_seeds
                 log.info("public seeds: %s", public_seeds.run(conn))
             except Exception:  # noqa: BLE001
                 log.exception("public seeding failed")
             last_seed = time.time()
-        if discover:
-            try:
-                from research import discovery
-                discovery.run_once(conn)
-            except Exception:  # noqa: BLE001
-                log.exception("discovery failed")
         try:
-            from model.predict import update_outcomes
-            update_outcomes(conn)
+            discovery.run_once(conn)
         except Exception:  # noqa: BLE001
-            log.exception("outcome update failed")
-        time.sleep(rsettings.discover_every_min * 60 if discover else min(every, 1800))
+            log.exception("discovery failed")
+        state["round_started"] = None
+        time.sleep(rsettings.discover_every_min * 60)
+
+
+def _stack_of(thread):
+    import sys
+    import traceback
+    frame = sys._current_frames().get(thread.ident)
+    return "".join(traceback.format_stack(frame)) if frame else "(no frame)"
+
+
+def loop(every_hours=None, discover=False, tick=60, stall_s=2700):
+    every = (every_hours or msettings.retrain_hours) * 3600
+    conn = connect()
+    last_ok = last_success(conn)
+    log.info("service start: last successful retrain %s, next retrain at %s",
+             _utc(last_ok) if last_ok else "never", _utc(max(time.time(), last_ok + every)))
+    state, worker, warned = {"round_started": None}, None, None
+    if discover:
+        import threading
+        worker = threading.Thread(target=_discovery_loop, args=(state,), name="discovery", daemon=True)
+        worker.start()
+    last_outcomes = 0.0
+    while True:
+        last_ok = retrain_if_due(conn, every, last_ok)
+        if time.time() - last_outcomes >= 900:
+            try:
+                from model.predict import update_outcomes
+                update_outcomes(conn)
+            except Exception:  # noqa: BLE001
+                log.exception("outcome update failed")
+            last_outcomes = time.time()
+        rs = state["round_started"]
+        if worker is not None and rs and time.time() - rs > stall_s and warned != rs:
+            log.warning("discovery round running for %.0f min, stuck here:\n%s", (time.time() - rs) / 60,
+                        _stack_of(worker))
+            warned = rs
+        time.sleep(tick)
