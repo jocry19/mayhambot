@@ -687,8 +687,9 @@ def test_trader_sells_half_then_the_rest_when_the_state_turns(conn, s):
     assert t.scan() == 1
     p0 = conn.execute("SELECT * FROM brain_positions").fetchone()
     bal0 = store.balance(conn, s.start_balance_sol)
+    assert t.manage() == 0  # the buy minute: watched, never judged
+    clock[0] += 180
     mk.snaps[MINT] = snap(price=p0["entry_price_sol"] * 1.5)  # +50 %, the outlook doubtful: half off the table
-    clock[0] += 120
     assert t.manage() == 0
     p1 = conn.execute("SELECT * FROM brain_positions").fetchone()
     assert p1["tokens"] == pytest.approx(p0["tokens"] / 2) and json.loads(p1["meta"])["partial_sol"] > 0
@@ -945,3 +946,42 @@ def test_organic_exit_keeps_a_late_trail_on_a_doubled_coin(conn, s):
     clock[0] += 5
     assert t.manage() == 1
     assert conn.execute("SELECT exit_reason FROM brain_positions").fetchone()[0] == "trail"
+
+
+def test_organic_exit_never_judges_a_fresh_buy_or_a_coin_it_has_not_watched(conn, s):
+    """18.10.: the model sold fresh buys after 0-2 s at -6..-8 % (the spread) and, after a restart, ten coins at once."""
+    class Bearish:
+        n = 10_000
+
+        def predict(self, toks):
+            return [(-0.1, 0.05)]
+    s.organic_exit = "on"
+    set_tier(conn, WHALE, "ultra")
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    clock = [time.time()]
+    t = make_trader(conn, s, trained(), mk, clock=lambda: clock[0], exit_model=Bearish())
+    t.scan()
+    add_whale_buy(conn, "n", ts=clock[0])
+    t.scan()
+    clock[0] += 1
+    assert t.manage() == 0  # 1 s after the buy: no verdict however bearish
+    clock[0] += 120
+    assert t.manage() == 0  # still inside the grace minutes
+    t2 = make_trader(conn, s, trained(), mk, clock=lambda: clock[0], exit_model=Bearish())  # a restart
+    clock[0] += 120
+    assert t2.manage() == 0  # past the grace, but the new process has not watched the coin yet
+    clock[0] += 61
+    assert t2.manage() == 1
+    assert conn.execute("SELECT exit_reason FROM brain_positions").fetchone()[0] == "organic"
+
+
+def test_replay_gives_no_organic_verdict_in_the_grace_minutes():
+    class Bearish:
+        def predict(self, toks):
+            return [(-0.1, 0.05)]
+    t0 = 1_700_000_000
+    cs = [(t0 + 60 * i, 1.0, 1.0, 1.0, 1.0, 10.0) for i in range(30)]
+    s = config.Settings()
+    gain, mins, why = exits.replay(Bearish(), cs, t0 + 60, "market", None, None, [], [], s, 0.0)
+    assert why == "organic" and mins >= exits.GRACE_MIN
