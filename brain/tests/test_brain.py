@@ -1002,13 +1002,17 @@ def test_pockets_release_only_a_pattern_beyond_chance_in_both_halves_and_fall_ba
           + [-0.1 + rng.gauss(0, 0.1) for _ in range(60)], now - 3000)  # paid once, then stopped
     _opps(conn, "whale", {"tier": "ultra"}, [0.3 + rng.gauss(0, 0.1) for _ in range(40)], now - 1000)  # too few
     res = pockets.scan(conn, now)
-    assert res["market|dex=pumpswap"]["live"]
-    assert not res["market|dex=raydium"]["live"] and "whale|tier=ultra" not in res
+    assert res["market|dex=pumpswap"]["released"]
+    assert not res["market|dex=raydium"]["released"] and "neuere Hälfte" in res["market|dex=raydium"]["reason"]
+    assert "whale|tier=ultra" not in res
     b = pockets.Book(conn, lambda: now)
     assert b.match("market", {"dex": "pumpswap", "why": "x"}) == "market|dex=pumpswap"
     assert b.match("market", {"dex": "raydium"}) is None
     assert "market|dex=pumpswap" in store.get(conn, "pockets")["live"]
     assert "1 von" in journal.write(conn, Brain(len(PLANS)), config.Settings(), now)
+    tab = pockets.table(conn)
+    row = next(r for r in tab["pockets"] if r["key"] == "market|dex=pumpswap")
+    assert tab["rule"]["min_n"] == 100 and row["released_at"] and row["label"].startswith("Markt-Coins")
 
 
 def test_kelly_on_the_lower_bound_outside_released_pockets(s):

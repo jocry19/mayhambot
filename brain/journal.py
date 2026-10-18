@@ -161,11 +161,11 @@ def write(conn, model, s, now: float | None = None) -> str:
         lines.append("Heute kam noch kein Ergebnis zurück (kurze Pläne nach etwa 1 Stunde, lange nach gut 4 Stunden).")
     pk = store.get(conn, "pockets") or {}
     if pk.get("checked"):
-        best = next(iter((pk.get("top") or {}).items()), None)
+        best = next(iter(pk.get("rows") or []), None)
         lines.append(f"Taschen (Einsatz nur bei positiver 95-%-Untergrenze in beiden Zeithälften, ≥ 100 Fälle): "
                      f"{len(pk.get('live') or [])} von {pk['checked']} freigegeben"
-                     + (f"; beste Untergrenze {best[0]} {_p(best[1]['lb'])} bei {best[1]['n']} Fällen" if best else "")
-                     + ".")
+                     + (f"; beste Untergrenze {best['label']} {_p(best['lower95'])} bei {best['n']} Fällen"
+                        if best else "") + ".")
 
     # what changed in the beliefs since the last entry
     eff = effects(model, min_evidence=5)
