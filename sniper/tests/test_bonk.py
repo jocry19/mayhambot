@@ -187,3 +187,25 @@ def test_opportunities_use_the_decision_snapshot_and_net_costs(tmp_path):
     assert a["features"]["n_buyers"] == 6 and a["features"]["mcap_decide_sol"] == 55.0 and a["decided_after_sec"] == 20
     assert 0.8 < a["outcome_net"] < 1.0 and not a["seen_trades"] and a["reason"] == "activity"
     assert b["outcome_net"] == -1.0
+
+
+def test_decisions_and_results_reach_the_shared_opportunity_table(tmp_path):
+    import json
+    from sniper import opportunity, store
+    from sniper.engine import Engine
+    from sniper.tests.test_sniper import Curve, FakeEnricher
+    conn = store.connect(str(tmp_path / "g.db"))
+    c = cfg()
+    eng = Engine(c, conn, enricher=FakeEnricher())
+    cv = Curve("GELEG")
+    eng.handle(cv.create(), T0)
+    eng.handle(cv.buy("W1", 0.2), T0 + 2)
+    eng.tick(T0 + c.decide_sec + 1)                 # one buyer: skipped as too little activity
+    r = conn.execute("SELECT source_action, source_reason, features FROM opportunities WHERE ref='GELEG'").fetchone()
+    assert r and r[0] == "passed" and r[1] == "activity"
+    f = json.loads(r[2])
+    assert f["buyers"] == 1 and f["dex"] == "pumpfun" and f["sniper.seen_trades"] is True and f["sniper.mc_sol"] > 27
+    store.update_launch(conn, "GELEG", ret_60m=-0.95, rugged=1)
+    assert opportunity.report_result(conn, "GELEG", c)
+    assert tuple(conn.execute("SELECT source_result, source_horizon_min FROM opportunities WHERE ref='GELEG'").fetchone()) \
+        == (-1.0, 60)

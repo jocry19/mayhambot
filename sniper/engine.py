@@ -12,7 +12,7 @@ import threading
 import time
 from collections import deque
 
-from sniper import research, store
+from sniper import opportunity, research, store
 from sniper.analyze import analyze
 from sniper.paper import PaperBook
 from sniper.state import LaunchState
@@ -335,6 +335,7 @@ class Engine:
             st.decision = "queued" if reason is None else "skip"
             st.queued_ts = now if reason is None else None
             store.save_launch(self.conn, self._row(st, a, now, st.decision, reason, 1))
+            opportunity.report_decision(self.conn, st.mint, self.cfg)
             return
         a = analyze(st, self.cfg, None, self.tiers, now)
         st.prescore = round(a.momentum * (1 - a.risk / 100), 1)
@@ -369,6 +370,7 @@ class Engine:
         # what the learned rule saw (stage 2 overwrites these columns): research trains on exactly this
         row["stage1_json"] = store.j({k: row.get(k) for k in research.BASE_FEATURES})
         store.save_launch(self.conn, row)
+        opportunity.report_decision(self.conn, st.mint, self.cfg)   # skips now; queued ones after stage 2
 
     def _outcomes(self, st, now):
         if st.decided_ts is None or st.done:
@@ -415,6 +417,8 @@ class Engine:
             if st.n_seen or st.external_ts:   # a path with movement: replays of exit rules need it
                 store.save_path(self.conn, st.mint, st.created_ts, st.decided_ts, base, st.path.points())
         store.update_launch(self.conn, st.mint, **upd)
+        if upd.get("done"):
+            opportunity.report_result(self.conn, st.mint, self.cfg)
 
     def _outcome_mcap(self, st, now):
         """Market cap for an outcome at `now`: the live curve, else a DexScreener price at most 3 DexScreener rounds
@@ -478,6 +482,7 @@ class Engine:
             st.decision = "skip"
             store.update_launch(self.conn, st.mint, decision="skip",
                                 skip_reason=getattr(st, "stage1_reason", None) or "budget")
+            opportunity.report_decision(self.conn, st.mint, self.cfg)
 
     def _gates(self, st, a, enr, p_rug, conn, now):
         """Skip reason after stage 2: the analysis, the rug model, the learned rule (replaces the score), the
@@ -542,6 +547,7 @@ class Engine:
             row = self._row(st, a, now, st.decision, reason, 2)
             row.update(calls_rpc=enr.get("calls_rpc"), calls_api=enr.get("calls_api"), prescore=st.prescore)
             store.save_launch(conn, row)
+            opportunity.report_decision(conn, st.mint, self.cfg)
             store.save_wallets(conn, st.mint, a.wallets)
             if not pos and st.subscribed and reason in ("bundle", "insider", "hard", "dev_sold"):
                 pass  # keep watching: outcomes of skipped launches show what the filter is worth
