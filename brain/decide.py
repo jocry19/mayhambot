@@ -115,6 +115,13 @@ def headline(kind: str, raw: dict, symbol: str) -> str:
         if raw.get("call") and raw["call"] > 1:
             t += f", Call Nr. {raw['call']}"
         return t + "."
+    if kind == "pool":
+        t = f"{raw.get('source') or '?'} meldet {sym}"
+        if raw.get("action"):
+            t += f" ({raw['action']}{': ' + str(raw['reason']) if raw.get('reason') else ''})"
+        if raw.get("score") is not None:
+            t += f", Score {raw['score']:.2f}"
+        return t + f", {raw.get('delay_s', 0):.0f} s nach dem Ereignis."
     if kind == "market":
         t = (f"Markt-Coin {sym} ({raw.get('dex') or '?'}): {raw.get('smart') or 0} Smart-Käufer, Kurs 5 min "
              f"{(raw.get('pc_m5') or 0):+.0f} %, 1 h {(raw.get('pc_h1') or 0):+.0f} %, {raw.get('txns_m5') or 0} Trades in 5 min")

@@ -299,7 +299,7 @@ def regime_check(conn, model, xm, now: float | None = None) -> dict | None:
     if now - (last.get("at") or 0) < REGIME_COOLDOWN_S:
         return None
     rows = conn.execute("SELECT realized_plan, pred_mean FROM brain_opps WHERE evaluated_at>=? AND realized_plan IS "
-                        "NOT NULL AND pred_mean IS NOT NULL", (int(now - REGIME_WINDOW_S),)).fetchall()
+                        "NOT NULL AND pred_mean IS NOT NULL AND kind!='pool'", (int(now - REGIME_WINDOW_S),)).fetchall()
     if len(rows) < REGIME_MIN_N:
         return None
     errs = [r[0] - r[1] for r in rows]
@@ -343,7 +343,8 @@ def backfill_exits(conn, xm, s, candles_fn=None, limit: int = 150) -> int:
     return len(rows)
 
 
-def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: int | None = None, xm=None) -> int:
+def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: int | None = None, xm=None,
+             pool=None) -> int:
     """Replay opportunities in two steps and learn each step at once: the short plans (up to 45 min) about an hour
     after the decision, the long ones when the longest plan is over (~4.2 h). Then score the decision made back then.
     Returns the number of replays learned."""
@@ -359,6 +360,8 @@ def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: i
     model.forget(now)
     if xm is not None:
         xm.forget(now)
+    if pool is not None:
+        pool.forget(now)
     n = 0
     hz = horizon_s()
     for o in rows:
@@ -404,7 +407,10 @@ def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: i
             if o["learned_real"] and pi is not None:
                 ys.pop(pi, None)  # the real fill already taught this plan
             if ys:
-                model.update(_toks(o["kind"], o["features"]), ys, 1.0)
+                if o["kind"] != "pool":
+                    model.update(_toks(o["kind"], o["features"]), ys, 1.0)
+                elif pool is not None:
+                    pool.update(_toks(o["kind"], o["features"]), ys, 1.0)
                 n += 1
             if xm is not None and not final:
                 try:
@@ -427,10 +433,32 @@ def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: i
             conn.execute("UPDATE brain_opps SET evaluated_at=?, gains=?, realized_plan=?, realized_base=?, "
                          "realized_best=? WHERE id=?", (int(now), json.dumps(merged), ya.get(pi),
                                                         ya.get(NAMES.index(BASE)), max(ya.values()), o["id"]))
+            if o["kind"] == "pool":
+                _pool_outcome(conn, o, ya, merged, cost, pi, now)
     return n
 
 
-def learn_trade(conn, model, s, pos) -> bool:
+def _pool_outcome(conn, o, ya: dict, merged: list, cost: float, pi, now: float) -> None:
+    """Write the honest result back to the shared opportunities row: net after costs with the plan the brain chose
+    (else the base plan), every plan's net for the challenger models, and whether the coin rugged."""
+    try:
+        oid = int(json.loads(o["raw"] or "{}").get("opp") or 0)
+    except (TypeError, ValueError):
+        oid = 0
+    if not oid:
+        return
+    plan = o["plan"] if pi is not None and ya.get(pi) is not None else BASE
+    net = ya.get(NAMES.index(plan))
+    if net is None:
+        return
+    gross = merged[NAMES.index(plan)]
+    rug = int(min(g for g in merged if g is not None) <= -0.9)
+    conn.execute("UPDATE opportunities SET evaluated_at=?, exit_plan=?, outcome_net=?, outcome_gross=?, cost=?, rug=?, "
+                 "outcomes=? WHERE id=?", (int(now), plan, round(net, 5), gross, round(cost, 5), rug,
+                                          json.dumps({NAMES[i]: round(v, 5) for i, v in ya.items()}), oid))
+
+
+def learn_trade(conn, model, s, pos, pool=None) -> bool:
     """A closed position teaches its plan at once with the real fill (double weight)."""
     o = conn.execute("SELECT * FROM brain_opps WHERE id=?", (pos["opp_id"],)).fetchone()
     if not o or o["learned_real"] or pos["pnl_pct"] is None or pos["plan"] not in NAMES:
@@ -440,6 +468,10 @@ def learn_trade(conn, model, s, pos) -> bool:
             return False  # the organic exit's result is not the plan's: the plan learns from its replay
     except (TypeError, ValueError):
         pass
+    if o["kind"] == "pool":
+        if pool is None:
+            return False
+        model = pool
     model.forget()
     model.update(_toks(o["kind"], o["features"]), {NAMES.index(pos["plan"]): pos["pnl_pct"]}, REAL_WEIGHT)
     conn.execute("UPDATE brain_opps SET learned_real=1 WHERE id=?", (o["id"],))
@@ -514,7 +546,7 @@ def honest(conn, since: float = 0, evaluated_since: float = 0) -> dict:
     real = conn.execute("SELECT pnl_pct, pnl_sol, meta, entry_price_sol, high_price_sol FROM brain_positions "
                         "WHERE status='closed' AND closed_at>=?", (int(since),)).fetchall()
     by_kind = {}
-    for k in ("whale", "signal", "signal_v2", "launch", "market"):
+    for k in ("whale", "signal", "signal_v2", "launch", "market", "pool"):
         kr = [r for r in rows if r["kind"] == k]
         if kr:
             kt = [r for r in kr if r["wanted"]]

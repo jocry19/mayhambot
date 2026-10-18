@@ -9,6 +9,7 @@ phase, the Zentrale's walk-forward features, the signal's EV and re-calls, the s
 from __future__ import annotations
 
 import json
+import math
 import logging
 import time
 
@@ -49,6 +50,8 @@ SHARED = {"hour", "age", "mom", "pressure", "safety", "phase", "form", "delay", 
 
 def tokens(kind: str, feats: dict) -> list[str]:
     """Sparse context tokens of one opportunity."""
+    if kind == "pool":
+        return pool_tokens(feats)
     out = [f"kind={kind}"]
     # signal v2 (smart money accumulating over hours) is a different call than v1 (a burst): its own tokens for
     # everything signal-specific, so the two never share what they learn; only the market context generalizes
@@ -329,3 +332,59 @@ def market(conn, row, snap, now: float) -> tuple[dict, dict]:
            "delay_s": round(delay, 1)}
     return f, raw
 
+
+
+# ------------------------------------------------------------------ pooled opportunities (opportunities table)
+POOL_MAX_FEATS = 60
+
+
+def gb(v) -> str:
+    """Generic bucket of a raw value: bools yes/no, text as is, numbers by half decades (1e4.5 = 31.6k..100k), signed."""
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, str):
+        return v.strip().lower()[:24] or "?"
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return "?"
+    if not math.isfinite(x):
+        return "?"
+    if x == 0:
+        return "0"
+    e = max(-6.0, min(12.0, math.floor(math.log10(abs(x)) * 2) / 2))
+    return f"{'-' if x < 0 else ''}1e{e:g}"
+
+
+def pool(conn, row, snap, now: float) -> tuple[dict, dict]:
+    """A row of the shared opportunities table: the source and every raw feature it reported, bucketed generically,
+    plus the brain's own market context (hour, age, momentum, pressure, phase, rug verdict, liquidity)."""
+    try:
+        raw = json.loads(row["features"] or "{}")
+    except (TypeError, ValueError):
+        raw = {}
+    src = row["source"]
+    f = {"src": src}
+    for k in sorted(raw)[:POOL_MAX_FEATS]:
+        f[k] = gb(raw[k])
+    delay = now - (row["src_ts"] or row["ts"] or now)
+    f["delay"] = b(delay, (5, 15, 30, 90), ("<5s", "5-15s", "15-30s", "30-90s", ">90s"))
+    if snap is not None:
+        f["liq"] = liq_bucket(snap)
+    f.update(market_feats(conn, row["mint"], snap, now, "pool"))
+    return f, {"source": src, "opp": row["id"], "delay_s": round(delay, 1), "action": row["source_action"],
+               "reason": row["source_reason"], "score": row["source_score"]}
+
+
+def pool_tokens(feats: dict) -> list[str]:
+    """Each value once plain (learned across sources) and once with its source. Source-only names ("sniper.x")
+    already carry their source."""
+    src = feats.get("src") or "?"
+    out = ["kind=pool", f"src={src}"]
+    for k, v in sorted(feats.items()):
+        if k in ("src", "kind") or v in MISSING or isinstance(v, bool):
+            continue
+        out.append(f"{k}={v}")
+        if "." not in k:
+            out.append(f"{src}|{k}={v}")
+    return out
