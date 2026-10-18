@@ -437,8 +437,32 @@ def _status(led):
 
 def credits_status():
     """Whole-plan view: {month, key_fp (8 hex of sha256, never the key), key_changed_at, used, limit,
-    warn_level (share of the month used, 0..1), warn (>= 80 %), history [{month, key_fp, used, until}]}."""
-    return _status(_ledger_read())
+    warn_level (share of the month used, 0..1), warn (>= 80 %), history [{month, key_fp, used, until},
+    cap_at / cap_at_no_stream: unix time the plan runs out at today's rate, all services / without sniper's
+    stream (None = not this month)]}."""
+    led = _ledger_read()
+    out = _status(led)
+    out.update(cap_forecast(led, out))
+    return out
+
+
+def cap_forecast(led=None, status=None):
+    """When the month's credits run out at today's rate (the ledger's day is UTC): {cap_at, cap_at_no_stream}.
+    The calendar ratio alone hid a day that burnt ten times the days before (18.10.)."""
+    led = _ledger_read() if led is None else led
+    st = status or _status(led)
+    day = _now_parts()[1]
+    per = {s: (v.get("days") or {}).get(day, 0) for s, v in led.get("services", {}).items()}
+    now = time.time()
+    hours = (now % 86400) / 3600
+
+    def cap(spent):
+        if not (st.get("limit") and spent > 0 and hours >= 1):
+            return None
+        left_h = max(0.0, st["limit"] - st.get("used", 0)) / (spent / hours)
+        return now + left_h * 3600 if left_h < 31 * 24 else None
+    today = sum(per.values())
+    return {"cap_at": cap(today), "cap_at_no_stream": cap(today - per.get("sniper", 0))}
 
 
 def _key_fp():
@@ -502,14 +526,33 @@ def daily_limit_on():
     return (os.getenv("HELIUS_DAILY_LIMIT") or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def plan_used_up():
+    """The month's Helius credits (HELIUS_CREDITS_MONTH, all services, this key) are spent per the ledger."""
+    st = _status(_ledger_read())
+    return bool(st.get("limit")) and st.get("used", 0) >= st["limit"]
+
+
+def helius_paused(service=None):
+    """HELIUS_PAUSE=signals,sniper (the user's switch, nothing sets it on its own): those services leave Helius
+    as if their share were used up, standard RPC goes to the public pool, DAS/Enhanced raise CreditsExhausted,
+    own transactions (TX_METHODS) keep Helius. Order if the plan gets tight (18.10.): pause sniper's stream and
+    signals first, research and brain next; safety and copytrade (whale detection) last."""
+    svc = service if service is not None else _service
+    return bool(svc) and svc in {x.strip() for x in (os.getenv("HELIUS_PAUSE") or "").split(",")}
+
+
 def credits_left_today(service=None):
     """Credits this service may still spend today (None = no limit, e.g. a process without a service name;
     inf while HELIUS_DAILY_LIMIT is off, so callers comparing it with a reserve keep the Helius lane)."""
     svc = service if service is not None else _service
     if not svc:
         return None
+    if helius_paused(svc):
+        return 0.0
     if not daily_limit_on():
-        return float("inf")
+        # free use, but once the ledger says the month is used up every service goes public by itself
+        # instead of hammering a key Helius now refuses (own transactions keep Helius: TX_METHODS)
+        return 0.0 if plan_used_up() else float("inf")
     st = credits(svc)
     if not st or st["credits_day_budget"] is None:
         return None
@@ -575,6 +618,9 @@ def _charge(cost, force=False):
 
     def book(led):
         st = _svc_stats(led, svc)
+        if _service and not force and (helius_paused() or (not daily_limit_on() and st["credits_month_all"]
+                                                          >= st["credits_month_limit"])):
+            return st, False
         if _service and st["credits_day_budget"] is not None and not force and daily_limit_on():
             day_left = st["credits_day_budget"] * CREDIT_BURST.get(svc, 1.0) - st["credits_today"]
             if cost > min(day_left, st["credits_cap"] - st["credits_month"]) and cost > _borrowable(led, svc):

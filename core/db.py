@@ -1,4 +1,5 @@
 """SQLite storage. Schema is created on connect; columns are only ever added, never removed."""
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -245,13 +246,23 @@ def insert_trades(conn, trades) -> int:
     return added
 
 
+# token_prices doubled in 6 h on 18.10. (926k rows a day): a coin gets a new row only when its last one is
+# PRICE_ROW_EVERY_S old (45: a 60-s refresher with jitter keeps every row) or price or liquidity moved
+# PRICE_ROW_MOVE since it, so peaks and liquidity drops stay for safety's rug checks and intel's labels.
+PRICE_ROW_EVERY_S = int(os.getenv("PRICE_ROW_EVERY_S") or 45)
+PRICE_ROW_MOVE = 0.03
+
+
 def upsert_tokens(conn, tokens, tracked=None, snap_every=0, dense=()):
     """tracked=None/True marks tokens as watched; False only stores price data (never un-watches).
-    snap_every: a token_prices snapshot only if the mint's last one is at least this old (mints in `dense` always)."""
+    snap_every: a token_prices snapshot only if the mint's last one is at least this old (default
+    PRICE_ROW_EVERY_S, and always when the price moved PRICE_ROW_MOVE); mints in `dense` always get one.
+    One executemany per table, so the write transaction stays short with many writers on the file."""
     now = int(time.time())
     dense = set(dense)
-    for t in tokens:
-        conn.execute(
+    every = snap_every or PRICE_ROW_EVERY_S
+    flag = 1 if tracked is None else int(tracked)
+    conn.executemany(
             """INSERT INTO tokens(mint, symbol, name, pool_address, dex, price_usd, mcap_usd, liquidity_usd,
                    pair_created_at, price_change_m5, price_change_h1, price_change_h24, volume_h1,
                    txns_m5, txns_h1, first_seen, last_updated, tracked)
@@ -269,16 +280,17 @@ def upsert_tokens(conn, tokens, tracked=None, snap_every=0, dense=()):
                    txns_m5=excluded.txns_m5, txns_h1=excluded.txns_h1,
                    last_updated=excluded.last_updated,
                    tracked=MAX(COALESCE(tracked,0), ?)""",
-            (t.mint, t.symbol, t.name, t.pool_address, t.dex, t.price_usd, t.mcap_usd, t.liquidity_usd,
-             t.pair_created_at, t.price_change_m5, t.price_change_h1, t.price_change_h24, t.volume_h1,
-             t.txns_m5, t.txns_h1, now, now, 1 if tracked is None else int(tracked), 1 if tracked is None else int(tracked)),
-        )
-        if t.price_usd and snap_every and t.mint not in dense and conn.execute(
-                "SELECT 1 FROM token_prices WHERE mint=? AND ts>?", (t.mint, now - snap_every)).fetchone():
-            continue
-        if t.price_usd:
-            conn.execute("INSERT OR REPLACE INTO token_prices (mint, ts, price_usd, mcap_usd, liquidity_usd) VALUES (?,?,?,?,?)",
-                         (t.mint, now, t.price_usd, t.mcap_usd, t.liquidity_usd))
+            [(t.mint, t.symbol, t.name, t.pool_address, t.dex, t.price_usd, t.mcap_usd, t.liquidity_usd,
+              t.pair_created_at, t.price_change_m5, t.price_change_h1, t.price_change_h24, t.volume_h1,
+              t.txns_m5, t.txns_h1, now, now, flag, flag) for t in tokens],
+    )
+    conn.executemany(
+        """INSERT OR REPLACE INTO token_prices (mint, ts, price_usd, mcap_usd, liquidity_usd)
+           SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM token_prices WHERE mint=? AND ts>? AND ts<?
+                  AND ABS(price_usd / ? - 1) < ? AND ABS(COALESCE(liquidity_usd, 0) - ?) <= ? * ABS(?))""",
+        [(t.mint, now, t.price_usd, t.mcap_usd, t.liquidity_usd, t.mint, now - (0 if t.mint in dense else every), now,
+          t.price_usd, PRICE_ROW_MOVE, t.liquidity_usd or 0, PRICE_ROW_MOVE, t.liquidity_usd or 0)
+         for t in tokens if t.price_usd])
     conn.commit()
 
 

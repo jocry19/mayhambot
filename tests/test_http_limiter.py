@@ -57,6 +57,7 @@ def _fresh(monkeypatch, tmp_path, service=""):
         monkeypatch.setattr(http, name, {})
     monkeypatch.setattr(http, "_service", service)
     monkeypatch.delenv("HELIUS_DAILY_LIMIT", raising=False)
+    monkeypatch.delenv("HELIUS_PAUSE", raising=False)
 
 
 def test_no_service_means_no_budget(monkeypatch, tmp_path):
@@ -161,6 +162,53 @@ def test_plan_pace_compares_the_month_with_the_calendar(monkeypatch, tmp_path):
     for _ in range(11):
         http._charge(1000)
     assert http.plan_pace()["ratio"] > 1
+
+
+def test_helius_pause_moves_a_service_to_the_public_pool(monkeypatch, tmp_path):
+    _credit_env(monkeypatch, tmp_path, "signals", day=1)
+    monkeypatch.delenv("HELIUS_DAILY_LIMIT")
+    monkeypatch.setenv("HELIUS_PAUSE", "sniper, signals")
+    helius = "https://beta.helius-rpc.com/?api-key=k"
+    assert http.credits_left_today() == 0 and http.rpc_url("getBalance", helius) in http.public_rpc_urls()
+    assert http.rpc_url("sendTransaction", helius) == helius            # own transactions keep Helius
+    try:
+        http._charge(10)
+    except http.CreditsExhausted:
+        pass
+    else:
+        raise AssertionError("expected CreditsExhausted")
+    assert http.credits_left_today("copytrade") == float("inf")          # others untouched
+
+
+def test_cap_forecast_at_todays_rate_with_and_without_the_sniper_stream(monkeypatch, tmp_path):
+    import calendar
+    _credit_env(monkeypatch, tmp_path, "sniper", day=18, month_credits=1_000_000)   # 12:00 UTC
+    monkeypatch.delenv("HELIUS_DAILY_LIMIT")
+    http._charge(240_000)                     # sniper 20k an hour
+    monkeypatch.setattr(http, "_service", "copytrade")
+    http._charge(12_000)                      # copytrade 1k an hour
+    f = http.credits_status()
+    now = calendar.timegm((2026, 10, 18, 12, 0, 0))
+    assert abs(f["cap_at"] - (now + 748_000 / 21_000 * 3600)) < 60          # about 35.6 h
+    assert f["cap_at_no_stream"] is None                                    # 748 h: after the month
+
+
+def test_used_up_month_sends_every_service_public_even_without_day_limits(monkeypatch, tmp_path):
+    _credit_env(monkeypatch, tmp_path, "brain", day=18, month_credits=1000)
+    monkeypatch.delenv("HELIUS_DAILY_LIMIT")
+    http._charge(999)
+    assert http.credits_left_today() == float("inf")
+    http._charge(1)
+    helius = "https://beta.helius-rpc.com/?api-key=k"
+    assert http.credits_left_today() == 0 and http.credits_left_today("research") == 0
+    assert http.rpc_url("getTokenLargestAccounts", helius) in http.public_rpc_urls()
+    assert http.rpc_url("sendTransaction", helius) == helius
+    try:
+        http._charge(1)
+    except http.CreditsExhausted:
+        pass
+    else:
+        raise AssertionError("expected CreditsExhausted")
 
 
 def _lend_env(monkeypatch, tmp_path, service):

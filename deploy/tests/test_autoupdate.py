@@ -151,6 +151,22 @@ def test_urgent_commit_skips_the_bundling(repo):
     assert autoupdate.run_once(alerts.append, health=ok, now=1e9 + 601).startswith("eingespielt")
 
 
+def test_deploy_waits_for_a_running_retrain_unless_urgent(repo):
+    work, push, head, alerts = repo
+    ok = lambda: (True, "2 von 2 Dienste laufen stabil")   # noqa: E731
+    marker = ops.db_path().parent / "TRAINING"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("1")
+    push("a")
+    assert autoupdate.run_once(alerts.append, health=ok, now=1e9) == "warte (Wallet-Modell trainiert gerade)"
+    old = time.time() - 91 * 60          # a marker the dead process left behind does not block forever
+    os.utime(marker, (old, old))
+    assert autoupdate.run_once(alerts.append, health=ok, now=1e9).startswith("eingespielt")
+    marker.write_text("1")
+    push("b", msg="hotfix: copytrade exit")
+    assert autoupdate.run_once(alerts.append, health=ok, now=1e9 + 601).startswith("eingespielt")
+
+
 def test_dirty_checkout_waits(repo):
     work, push, head, alerts = repo
     (work / "mayham.py").write_text(FAKE_MAYHAM + "\n# local edit\n")

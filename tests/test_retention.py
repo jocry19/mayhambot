@@ -161,3 +161,23 @@ def test_trades_days_zero_keeps_all_trades(tmp_path):
     n = c.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
     out = retention.cleanup(c, now=now, delete=True, trades_days=0, pause_s=0)
     assert c.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == n and out["prices"] > 0
+
+
+def test_price_rows_thin_at_write_time_but_keep_moves(tmp_path, monkeypatch):
+    """18.10.: token_prices grew 926k rows a day. A coin gets a row at most every 45 s unless price or liquidity moved 3 %."""
+    from core import db
+    from core.models import Token
+    conn = db.connect(str(tmp_path / "t.db"))
+    t = [1_760_000_000]
+    monkeypatch.setattr(db.time, "time", lambda: t[0])
+
+    def write(p, liq=1000.0):
+        db.upsert_tokens(conn, [Token(mint="m", symbol="M", price_usd=p, liquidity_usd=liq, pool_address="x")])
+    for dt, p, liq in ((0, 1.0, 1000), (20, 1.01, 1000), (30, 1.10, 1000), (40, 1.11, 1005), (45, 1.11, 400),
+                       (60, 1.11, 400), (91, 1.11, 400)):
+        t[0] = 1_760_000_000 + dt
+        write(p, liq)
+    rows = conn.execute("SELECT ts - 1760000000, price_usd FROM token_prices ORDER BY ts").fetchall()
+    # 30: price moved 9 %, 45: liquidity pulled (a rug safety must see), 91: 46 s after the last row
+    assert [r[0] for r in rows] == [0, 30, 45, 91]
+    assert conn.execute("SELECT price_usd FROM tokens WHERE mint='m'").fetchone()[0] == 1.11   # latest always kept

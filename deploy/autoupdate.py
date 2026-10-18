@@ -377,6 +377,9 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
     gap = mins * 60 - 90
     if now - st.get("last_deploy", 0) < gap:
         return f"warte (höchstens ein Deploy pro {mins:g} min, gebündelt)"
+    # a deploy restarts research and kills a running wallet-model retrain (~30 min on the Mac); urgent fixes still go
+    if not urgent and ops.training():
+        return "warte (Wallet-Modell trainiert gerade)"
 
     # no deploy without a fresh, verified backup (integrity_check in ops.backup; a damaged copy is never written).
     # The hourly backup job counts when it is young enough: a backup of the grown DB takes ~10 min on the Mac.

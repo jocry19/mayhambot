@@ -562,6 +562,16 @@ def ops_report() -> str:
 COMPACTING = "COMPACTING"   # written by mayham.py next to the DB while the one-time VACUUM runs before the services
 
 
+def training(now: float | None = None) -> bool:
+    """True while the research service retrains the wallet model (data/TRAINING, written by model/train.py; a
+    marker older than TRAINING_MAX_MIN is stale: the process died without removing it)."""
+    f = db_path().parent / "TRAINING"
+    try:
+        return 0 <= (now or time.time()) - f.stat().st_mtime < cfg("TRAINING_MAX_MIN", 90) * 60
+    except OSError:
+        return False
+
+
 def compacting(now: float | None = None) -> bool:
     """True while the supervisor compacts the database before starting the services (no service is up then)."""
     f = db_path().parent / COMPACTING
@@ -1106,9 +1116,24 @@ def helius_credits() -> dict | None:
     key = ((status or {}).get("key_fp") or led.get("key_fp")
            or hashlib.sha256(cfg("HELIUS_API_KEY", "").encode()).hexdigest()[:8])
     per = {n: (v.get("credits_today", 0), v.get("credits_day_budget")) for n, v in (stats or {}).items()}
+    # when the month runs out at today's rate (the ledger's day is UTC); the calendar ratio alone hid a day that
+    # burns ten times the days before (18.10.: x0.79 while the cap was a day away)
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    hours = (now_utc - now_utc.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds() / 3600
+    def _cap(spent):
+        if not (limit and spent > 0 and hours >= 1):
+            return None
+        left_h = max(0.0, limit - month_used) / (spent / hours)
+        return (now_utc + dt.timedelta(hours=left_h)).timestamp() if left_h < 31 * 24 else None
+    cap_at = _cap(today)
+    # second case: sniper's stream 2 leaves Helius on its own once the month runs ahead of the calendar
+    cap_at_no_stream = _cap(today - per.get("sniper", (0, None))[0]) if "sniper" in per else None
+    if status and "cap_at" in status:   # core's own forecast (same rule, read straight from the ledger)
+        cap_at, cap_at_no_stream = status["cap_at"], status.get("cap_at_no_stream")
     return {"month": month, "month_used": month_used, "month_limit": limit, "today": today,
             "day_budget": budget if limit_on else None, "key": str(key),
-            "warn_level": (status or {}).get("warn_level"), "pace": pace, "per_service": per}
+            "warn_level": (status or {}).get("warn_level"), "pace": pace, "cap_at": cap_at,
+            "cap_at_no_stream": cap_at_no_stream, "per_service": per}
 
 
 def _fmt_int(x) -> str:
@@ -1120,7 +1145,11 @@ def credits_line(c: dict) -> str:
     18.10. the user watches the plan, so the line shows the month and the plan against the calendar instead."""
     day = f"heute {_fmt_int(c['today'])}" + (f" von {_fmt_int(c['day_budget'])}" if c["day_budget"] else "")
     pace = f" (Kalender x{c['pace']:.2f})".replace(".", ",") if c.get("pace") is not None else ""
-    return f"Helius-Credits: {day}, Monat {_fmt_int(c['month_used'])} von {_fmt_int(c['month_limit'])}{pace}"
+    when = lambda t: time.strftime('%d.%m. %H:%M', time.localtime(t)) if t else "nach Monatsende"  # noqa: E731
+    cap = f", Kappe bei heutiger Rate am {when(c['cap_at'])}" if c.get("cap_at") else ""
+    if cap and "cap_at_no_stream" in c:
+        cap += f" (ohne Sniper-Strom 2: {when(c['cap_at_no_stream'])})"
+    return f"Helius-Credits: {day}, Monat {_fmt_int(c['month_used'])} von {_fmt_int(c['month_limit'])}{pace}{cap}"
 
 
 def check_credit_alerts(st: dict):

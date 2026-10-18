@@ -113,12 +113,14 @@ def test_retrain_if_due_keeps_last_success_on_failure(monkeypatch):
     assert train.last_success(conn) == 0.0
     calls = []
 
+    marker = os.path.join(os.path.dirname(conn.execute("PRAGMA database_list").fetchone()[2]), "TRAINING")
+
     def boom(c):
-        calls.append(1)
+        calls.append(os.path.exists(marker))   # the updater sees the retrain running
         raise RuntimeError("database is locked?")
     monkeypatch.setattr(train, "run_once", boom)
     assert train.retrain_if_due(conn, 3600, 0.0) == 0.0  # failed: still due next cycle
-    assert calls
+    assert calls == [True] and not os.path.exists(marker)
     monkeypatch.setattr(train, "run_once", lambda c: None)
     assert train.retrain_if_due(conn, 3600, time.time() - 60) > 0  # not due: untouched, no call
 

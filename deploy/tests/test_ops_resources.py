@@ -230,3 +230,9 @@ def test_credits_line_shows_the_plan_not_the_old_day_shares():
     assert ops.credits_line(c) == "Helius-Credits: heute 201.758, Monat 273.462 von 1.000.000 (Kalender x0,55)"
     c.update(day_budget=59167, pace=None)   # HELIUS_DAILY_LIMIT=1: the shares limit again and are shown
     assert ops.credits_line(c) == "Helius-Credits: heute 201.758 von 59.167, Monat 273.462 von 1.000.000"
+    c["cap_at"] = time.mktime((2026, 10, 19, 13, 5, 0, 0, 0, -1))
+    assert ops.credits_line(c).endswith(", Kappe bei heutiger Rate am 19.10. 13:05")
+    c["cap_at_no_stream"] = time.mktime((2026, 10, 25, 9, 0, 0, 0, 0, -1))
+    assert ops.credits_line(c).endswith(", Kappe bei heutiger Rate am 19.10. 13:05 (ohne Sniper-Strom 2: 25.10. 09:00)")
+    c["cap_at_no_stream"] = None
+    assert ops.credits_line(c).endswith("(ohne Sniper-Strom 2: nach Monatsende)")

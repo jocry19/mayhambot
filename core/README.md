@@ -155,6 +155,7 @@ http.credits()                    # {service: {credits_today, credits_month, cre
 http.credits_left_today()         # this service, None = unlimited (process without a service name), inf = limit off
 http.daily_limit_on()             # HELIUS_DAILY_LIMIT=1: the day shares refuse calls; default off since 18.10.
                                   # (the user watches the plan and the key), shares then only book and show usage
+http.helius_paused()              # HELIUS_PAUSE=sniper,signals (user's switch): those services go public, own tx keep Helius
 http.plan_pace()                  # {used, on_pace, ratio}: ratio > 1 = month ahead of the calendar; then bulk
                                   # consumers step back first (sniper stream 2), copytrade whales and rug checks keep Helius
 http.rpc_url(method, helius_url)  # Helius URL, or the public RPC once today's share is used up (standard methods only)

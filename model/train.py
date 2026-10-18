@@ -190,12 +190,24 @@ def retrain_if_due(conn, every, last_ok):
     from core.db import retry_locked
     t0 = time.time()
     log.info("retrain started (last successful %s)", _utc(last_ok) if last_ok else "never")
+    # data/TRAINING next to the DB while a retrain runs: the auto-updater holds its deploy (a restart killed the
+    # ~30-min retrain on the Mac whenever deploys came every 30 min, 18.10.)
+    db_file = conn.execute("PRAGMA database_list").fetchone()[2]
+    marker = Path(db_file).parent / "TRAINING" if db_file else None
+    try:
+        if marker:
+            marker.write_text(str(int(t0)))
+    except OSError:
+        marker = None
     try:
         vid = retry_locked(conn, lambda: run_once(conn), attempts=2)
     except Exception:  # noqa: BLE001
         conn.rollback()
         log.exception("retrain failed after %.0f s, retrying next cycle", time.time() - t0)
         return last_ok
+    finally:
+        if marker:
+            marker.unlink(missing_ok=True)
     if vid:
         log.info("retrain finished in %.0f s, model v%d, champion %s", time.time() - t0, vid, _champions(conn, vid))
         last_ok = time.time()
