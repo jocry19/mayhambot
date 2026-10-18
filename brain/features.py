@@ -146,13 +146,27 @@ def market_feats(conn, mint: str, snap, now: float, kind: str) -> dict:
         age = snap.age_hours if snap.pair_created_ms else None
         f["age"] = b(age, (1, 6, 24), ("<1h", "1-6h", "6-24h", ">24h"))
         f["mom"] = b(snap.change_m5, (-10, 0, 10, 30), ("<-10%", "-10-0%", "0-10%", "10-30%", ">30%"))
+        f["run1h"] = b(getattr(snap, "change_h1", None), (0, 20, 50, 150), ("<0%", "0-20%", "20-50%", "50-150%", ">150%"))
         tx = (snap.buys_m5 or 0) + (snap.sells_m5 or 0)
         f["pressure"] = b(snap.buys_m5 / tx if tx >= 5 else None, (0.45, 0.6), ("<45%", "45-60%", ">60%"))
+    f["hist"] = _history(conn, mint, now)
     f["safety"] = _safety(conn, mint) or "?"
     f["phase"] = _phase(conn, now) or "?"
     f["form"] = form(conn, kind) or "?"
     f.update(_trusted(conn, mint))
     return f
+
+
+def _history(conn, mint: str, now: float) -> str:
+    """How long our own price record on the coin reaches back (token_prices, last 6 h): none, <45m, 45m+."""
+    try:
+        n, first = conn.execute("SELECT COUNT(*), MIN(ts) FROM token_prices WHERE mint=? AND ts>=?",
+                                (mint, int(now) - 6 * 3600)).fetchone()
+    except Exception:
+        return "?"
+    if not n or first is None:
+        return "none"
+    return "45m+" if n >= 3 and first <= now - 45 * 60 else "<45m"
 
 
 def _crowd(conn, mint: str, wallet: str, now: float) -> tuple[int, bool]:

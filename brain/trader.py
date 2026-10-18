@@ -33,7 +33,13 @@ RECORD_MIN_N = 20
 RECORD_EVERY_S = 60
 CURVE_FEE = 0.0125  # pump.fun protocol + creator fee on a curve sale
 CURVE_V_SOL_DEFAULT = 30.0
-RUG_BAN_S = 24 * 3600
+RUG_BAN_S = 24 * 3600  # kept for readers; since 18.10. evening a coin we sold as a rug is never bought again
+PAUSE_DECIDED_TS = 1792335960  # user 18.10.2026 17:06 CEST "Ja, pausieren"; the gate went live 17:51:38
+HIST_SPAN_S = 45 * 60  # a buy needs our own price history on the coin reaching back this far (token_prices) ...
+HIST_MIN_POINTS = 3  # ... with at least this many points in the last 6 h
+HIST_LOOK_S = 6 * 3600
+HIST_POOL_AGE_S = 60 * 60  # ... or a pool at least this old (the market's own price history)
+NO_HIST_POOL_SAMPLE = 0.2  # share of learning-account buys without price history that go through anyway
 REENTRY_S = 6 * 3600  # no second brain position in a coin within this window: a coin we just lost on is no new idea
 TRAIL_MIN_HOLD_S = 60  # the trail arms after a minute: the first quotes after a buy are noise, not a run
 PRICE_RETRY_S = 30  # a coin without a DexScreener pair yet gets this long to show one before it is decided
@@ -486,6 +492,25 @@ class Trader:
             (opportunities_model(self.pm), round(d.mean, 5), round(d.std, 5), round(q10, 5), round(d.sample, 5),
              dec, None if not pid else dec, d.size_sol if pid else None, int(self.clock()), pid, oid))
 
+    def _history(self, mint: str, snap=None) -> str | None:
+        """None when the coin has a price history before the buy: its pool (DexScreener pair_created) at least
+        HIST_POOL_AGE_S old, or our own record in token_prices (HIST_MIN_POINTS in 6 h, the first at least
+        HIST_SPAN_S old); else the reason not to buy. token_prices alone is not enough: since 45cf59a it holds most
+        coins only from our buy on."""
+        now = int(self.clock())
+        born = (getattr(snap, "pair_created_ms", 0) or 0) / 1000
+        if born and now - born >= HIST_POOL_AGE_S:
+            return None
+        try:
+            n, first = self.conn.execute("SELECT COUNT(*), MIN(ts) FROM token_prices WHERE mint=? AND ts>=?",
+                                         (mint, now - HIST_LOOK_S)).fetchone()
+        except Exception:  # no table (a reader's or a test's database): nothing to judge by
+            return None
+        if n < HIST_MIN_POINTS or first is None or first > now - HIST_SPAN_S:
+            age = f", erster Punkt vor {(now - first) / 60:.0f} min" if first else ""
+            return f"kein Kursverlauf vorhanden ({n} Punkte{age})"
+        return None
+
     def _gate(self, kind: str, mint: str, snap, d, row=None, raw=None) -> str | None:
         """Hard limits the model never overrides: a market to trade, the rug check, risk limits."""
         if kind != "pool" and self.s.main_trade != "on":
@@ -517,7 +542,17 @@ class Trader:
         if (not features.on_curve(snap) and age_s is not None and 0 <= age_s < MIGRATION_COOL_S
                 and mint.endswith(LAUNCHPAD_SUFFIXES)):
             return f"frisch migriert ({age_s / 60:.0f} min), die erste Stunde danach fällt im Mittel"
-        if (getattr(snap, "change_h1", None) or 0) >= PUMPED_H1_PCT:
+        hist = self._history(mint, snap)
+        if hist and kind == "pool" and self.rng.random() < NO_HIST_POOL_SAMPLE:
+            hist = None  # the learning account samples brand-new coins (feature hist) so it still learns them
+        if hist:
+            # 18.10. evening, closed buys since 00:00: without a price 60 min before the buy main n 45 -19.1 %
+            # (-1.42 SOL), learning n 169 -23.2 % (-1.19 SOL), over 80 % of all losses; with one -3.8 % and -5.4 %.
+            # Almost always brand-new coins; the labels still follow every one of them, so the pool keeps learning
+            return hist
+        if kind != "pool" and (getattr(snap, "change_h1", None) or 0) >= PUMPED_H1_PCT:
+            # the learning account buys these and measures them (feature run1h): our own buys over +50 % ran better
+            # on a small n (main 9 +3.1 %, learning 4 +43.5 %) against the overhaul's 13,658 coins (-5 to -10 %)
             return f"schon gepumpt (+{snap.change_h1:.0f} % in 1 h), danach fällt es im Mittel"
         if features.on_curve(snap):
             if snap.fdv < self.s.min_curve_mcap_usd:
@@ -527,9 +562,9 @@ class Trader:
         c = self.conn
         if c.execute("SELECT 1 FROM brain_positions WHERE mint=? AND status='open'", (mint,)).fetchone():
             return "schon eine offene Position in diesem Coin"
-        if c.execute("SELECT 1 FROM brain_positions WHERE mint=? AND exit_reason='rug' AND closed_at>=?",
-                     (mint, int(self.clock() - RUG_BAN_S))).fetchone():
-            return "Coin als Rug verkauft, 24 h gesperrt"  # 18.10.: DOPE bought again 3 min after its rug sale
+        if c.execute("SELECT 1 FROM brain_positions WHERE mint=? AND exit_reason='rug'", (mint,)).fetchone():
+            # 18.10.: DOPE bought again 3 min after its rug sale; evening: Glow, IOF, Protestor again after the 24 h
+            return "Coin schon einmal als Rug verkauft, dauerhaft gesperrt"
         born = (getattr(snap, "pair_created_ms", 0) or 0) / 1000
         young = not born or self.clock() - born <= NAME_COPY_S  # an old coin is the original, not the copy
         copy_of = young and self._name_copy(mint, (snap.symbol if snap else "") or (
@@ -962,9 +997,15 @@ class Trader:
         paused while no pocket of the lab's report carries; since = when the pause began (kept across reads)."""
         old = store.get(self.conn, "main_paused") or {}
         paused = not released
-        since = (old.get("since") if old.get("paused") else None) or int(now) if paused else None
-        val = {"paused": paused, "since": since, "until_verdict": "traegt", "released": released,
-               "reason": "Hauptkonto pausiert: keine Tasche trägt laut Prüfstand" if paused else ""}
+        live = dec = None
+        if paused and old.get("paused"):
+            live = old.get("live_since") or old.get("since") or int(now)
+            dec = old.get("decided_at", PAUSE_DECIDED_TS if live >= PAUSE_DECIDED_TS else None)
+        elif paused:
+            live = int(now)
+            dec = PAUSE_DECIDED_TS if not old and now >= PAUSE_DECIDED_TS else None  # a later pause is the lab's own
+        val = {"paused": paused, "since": dec or live, "decided_at": dec, "live_since": live, "until_verdict": "traegt",
+               "released": released, "reason": "Hauptkonto pausiert: keine Tasche trägt laut Prüfstand" if paused else ""}
         if val != old:
             store.put(self.conn, "main_paused", val)
 

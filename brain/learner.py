@@ -26,8 +26,9 @@ from .plans import BASE, NAMES, PLANS, gains_from_grid, nearest_delay
 
 log = logging.getLogger("brain.learner")
 
-RETRY_S = 2 * 86400
+RETRY_S = 12 * 3600  # 18.10.: two days let the oldest unreplayable rows block every newer one
 CACHE_GRACE_S = 30 * 60
+EVAL_WINDOW = 3000  # unevaluated rows looked at per round, oldest first
 REAL_WEIGHT = 2.0
 PRIOR_DELAY_S = 60  # copytrade's grid delay used for prior whale replays: the brain enters ~30-90 s after the whale
 SIGNAL_CT_MAX_DELAY_S = 30  # copytrade replays signals 15 s after the signal; a later brain decision replays itself
@@ -353,10 +354,14 @@ def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: i
     # copytrade's own learner replays the same buys and caches their candles: for the final step wait a little for
     # that before spending GeckoTerminal calls (shared free limit), and fetch at most `net` coins per round
     net = limit or s.evals_per_round
-    rows = conn.execute("SELECT * FROM brain_opps WHERE evaluated_at IS NULL AND ts<? ORDER BY ts LIMIT ?",
-                        (int(now) - short_horizon_s(), max(400, 10 * net))).fetchall()
+    n_pool = evaluate_pool(conn, now)
+    # pooled rows are judged from their labels (evaluate_pool), not replayed: 20,000 a day held the oldest 400
+    # unevaluated rows and with them every newer replay (18.10.: 22,743 decided since 09:00, 0 evaluated)
+    rows = [o for o in conn.execute("SELECT * FROM brain_opps WHERE evaluated_at IS NULL AND kind!='pool' AND ts<? "
+                                    "ORDER BY ts LIMIT ?", (int(now) - short_horizon_s(), EVAL_WINDOW)).fetchall()
+            if now >= _retry.get(o["id"], (0, 0))[1] or o["ts"] < now - RETRY_S]  # rows waiting out a backoff
     if not rows:
-        return 0
+        return n_pool
     model.forget(now)
     if xm is not None:
         xm.forget(now)
@@ -435,10 +440,49 @@ def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: i
                                                         ya.get(NAMES.index(BASE)), max(ya.values()), o["id"]))
             if o["kind"] == "pool":
                 _pool_outcome(conn, o, ya, merged, cost, pi, now)
+    return n + n_pool
+
+
+def evaluate_pool(conn, now: float, limit: int = 5000) -> int:
+    """The brain's pooled decisions judged by their opportunity's labels (labels.py: every plan's net after the
+    row's costs on the hour after the report): realized_plan/base/best and the write-back to the shared row. The pool
+    model learns the labels in learn_labels, not here again. A row whose opportunity got no label in 3 h is closed
+    without gains."""
+    rows = conn.execute("SELECT * FROM brain_opps WHERE kind='pool' AND evaluated_at IS NULL AND ts<? ORDER BY ts "
+                        "LIMIT ?", (int(now) - 3600, limit)).fetchall()
+    n = 0
+    for o in rows:
+        try:
+            oid = int(json.loads(o["raw"] or "{}").get("opp") or 0)
+        except (TypeError, ValueError):
+            oid = 0
+        try:
+            lab = conn.execute("SELECT label_at, label_outcomes, label_rug, label_cost FROM opportunities WHERE id=?",
+                               (oid,)).fetchone()
+        except Exception:
+            lab = None
+        outs = {}
+        if lab and lab[0]:
+            try:
+                outs = json.loads(lab[1] or "{}")
+            except (TypeError, ValueError):
+                outs = {}
+        merged = [outs.get(name) for name in NAMES]
+        if not any(g is not None for g in merged):
+            if o["ts"] < now - 3 * 3600:
+                conn.execute("UPDATE brain_opps SET evaluated_at=?, gains='[]' WHERE id=?", (int(now), o["id"]))
+            continue
+        ya = {i: g for i, g in enumerate(merged) if g is not None}  # labels are after costs already
+        pi = NAMES.index(o["plan"]) if o["plan"] in NAMES else None
+        conn.execute("UPDATE brain_opps SET evaluated_at=?, gains=?, realized_plan=?, realized_base=?, realized_best=? "
+                     "WHERE id=?", (int(now), json.dumps(merged), ya.get(pi), ya.get(NAMES.index(BASE)),
+                                    max(ya.values()), o["id"]))
+        _pool_outcome(conn, o, ya, merged, float(lab[3] or 0.0), pi, now, rug=int(lab[2] or 0))
+        n += 1
     return n
 
 
-def _pool_outcome(conn, o, ya: dict, merged: list, cost: float, pi, now: float) -> None:
+def _pool_outcome(conn, o, ya: dict, merged: list, cost: float, pi, now: float, rug: int = 0) -> None:
     """Write the honest result back to the shared opportunities row: net after costs with the plan the brain chose
     (else the base plan), every plan's net for the challenger models, and whether the coin rugged."""
     try:
@@ -452,7 +496,7 @@ def _pool_outcome(conn, o, ya: dict, merged: list, cost: float, pi, now: float) 
     if net is None:
         return
     gross = merged[NAMES.index(plan)]
-    rug = int(min(g for g in merged if g is not None) <= -0.9)
+    rug = max(int(rug), int(min(g for g in merged if g is not None) <= -0.9))
     cur = conn.execute("SELECT exit_plan FROM opportunities WHERE id=?", (oid,)).fetchone()
     if cur and cur[0] == "real":  # the position's real fill is already there: add only the replays beside it
         conn.execute("UPDATE opportunities SET outcomes=?, rug=MAX(COALESCE(rug,0), ?) WHERE id=?",
