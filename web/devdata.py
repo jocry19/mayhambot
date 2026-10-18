@@ -216,6 +216,11 @@ def _brain_demo(conn, r, tokens, now):
     store.put(conn, "pockets", {"rule": {"min_n": 100, "conf": 0.95, "last_n": 50, "window_days": 7}, "at": now - 240, "pockets": pk,
                                 "discrimination": {"whale": {"n": 212, "rank_corr": 0.14}, "launch": {"n": 96, "rank_corr": 0.03},
                                                    "signal": {"n": 61, "rank_corr": -0.05}, "signal_v2": {"n": 18, "rank_corr": 0.31}}})
+    # the learning account: small stakes on everything the sampling lets through (brain kind "pool"), closed only
+    conn.executemany("INSERT INTO brain_positions(kind, mint, symbol, opened_at, entry_price_sol, size_sol, status, closed_at, pnl_sol, "
+                     "pnl_pct, exit_reason) VALUES ('pool',?,?,?,1e-6,0.03,'closed',?,?,?,?)",
+                     [(f"DemoPool{i}", f"P{i}", ts, ts + 1800, round(0.03 * g, 5), round(g, 4), r.choice(("organic", "stop", "rug")))
+                      for i, ts, g in ((i, now - r.randint(3600, 3 * 86400), max(-1.0, r.gauss(-0.12, 0.3))) for i in range(60))])
     # the shared opportunity table of every source (brain/opportunities.py), the model getting better day by day
     from brain import opportunities as bo
 

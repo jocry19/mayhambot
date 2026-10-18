@@ -795,6 +795,7 @@ def test_brain_view(demo, empty, tmp_path):
     assert any(x.get("rank_ic") is not None for x in lc["days"]) and all(-1 <= x["rank_ic"] <= 1 for x in lc["days"] if x.get("rank_ic") is not None)
     assert sum(x["n_opps"] for x in lc["days"]) >= sum(x["n_scored"] for x in lc["days"]) > 0
     assert all(x["trade_lo_7d"] <= x["trade_mean_7d"] <= x["trade_hi_7d"] for x in lc["days"] if x.get("trade_lo_7d") is not None)
+    assert sum(x["learn_n_trades"] for x in lc["days"]) == 60 and any(x["learn_trade_mean_7d"] is not None for x in lc["days"])  # pool apart
     assert len(lc["deciles"]) == 10 and sum(x["n"] for x in lc["deciles"]) == lc["n_7d"] and lc["cal_gap_7d"] >= 0
     held = d["open"] + d["closed"]
     assert {p["exit_mode"] for p in held} <= {"organic", "plan"}

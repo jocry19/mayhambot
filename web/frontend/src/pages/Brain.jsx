@@ -289,7 +289,7 @@ function Learning({ L, days }) {
   const sc = ds.filter((x) => x.n_scored > 0);
   const last = sc[sc.length - 1] || ds[ds.length - 1] || {};
   const ic = ds.filter((x) => x.rank_ic != null);
-  const tr = ds.filter((x) => x.trade_mean_7d != null);
+  const tr = ds.filter((x) => x.trade_mean_7d != null || x.learn_trade_mean_7d != null);
   const lastTr = tr[tr.length - 1];
   const dl = (x) => dayLabel(x.ts);
   return (
@@ -298,7 +298,8 @@ function Learning({ L, days }) {
         <Tile label="Rangkorrelation" value={L.rank_ic == null ? "–" : n(L.rank_ic, 2)} cls={sign(L.rank_ic)}
           sub="Vorhersage gegen Ergebnis, letzter Tag mit ≥ 10 Fällen; 0 = rät, 1 = perfekte Reihenfolge" />
         <Tile label="Netto je Trade, 7 Tage" value={pctSigned(lastTr?.trade_mean_7d, 1)} cls={sign(lastTr?.trade_mean_7d)}
-          sub={lastTr ? `95 %: ${pctSigned(lastTr.trade_lo_7d, 1)} bis ${pctSigned(lastTr.trade_hi_7d, 1)} · ${n(lastTr.n_trades_7d)} Trades` : "noch kein Trade abgeschlossen"} />
+          sub={lastTr ? <>Leistungskonto, 95 %: {pctSigned(lastTr.trade_lo_7d, 1)} bis {pctSigned(lastTr.trade_hi_7d, 1)} · {n(lastTr.n_trades_7d)} Trades
+            <br />Lernkonto: <span className={sign(lastTr.learn_trade_mean_7d)}>{pctSigned(lastTr.learn_trade_mean_7d, 1)}</span> · {n(lastTr.learn_n_trades_7d)} Trades</> : "noch kein Trade abgeschlossen"} />
         <Tile label="Kalibrierung, 7 Tage" value={L.cal_gap_7d == null ? "–" : `±${pct(L.cal_gap_7d, 1)}`}
           sub={`Ø Abstand Vorhersage zu Ergebnis je Zehntel · ${n(L.n_7d)} Fälle`} />
         <Tile label={last.ts ? `Bewertet am ${dayLabel(last.ts)}` : "Bewertet je Tag"} value={`${n(last.n_scored)} / ${n(L.opps_goal)}`}
@@ -316,18 +317,20 @@ function Learning({ L, days }) {
             })} /> : <Empty>Noch kein Tag mit 10 nachgeprüften Vorhersagen</Empty>}
         </div>
         <div>
-          <div className="help">Netto je Trade des Kontos, gleitend 7 Tage, mit 95 %-Band</div>
+          <div className="help">Netto je Trade, gleitend 7 Tage: Leistungskonto mit 95 %-Band, Lernkonto getrennt</div>
           {tr.length ? <EChart height={180} deps={[L]} ariaLabel="Netto je Trade, 7-Tage-Mittel mit Unsicherheit"
             build={(c) => baseOption(c, {
-              tooltip: { ...baseOption(c).tooltip, formatter: (ps) => { const x = tr[ps[0].dataIndex]; return `<b>${dl(x)}</b>${tipRow(c.s[0], "Ø 7 Tage", pctSigned(x.trade_mean_7d, 1))}${tipRow("transparent", "95 %", `${pctSigned(x.trade_lo_7d, 1)} bis ${pctSigned(x.trade_hi_7d, 1)}`)}${tipRow("transparent", "Trades", `${n(x.n_trades_7d)} (an diesem Tag ${n(x.n_trades)})`)}`; } },
+              tooltip: { ...baseOption(c).tooltip, formatter: (ps) => { const x = tr[ps[0].dataIndex]; return `<b>${dl(x)}</b>${tipRow(c.s[0], "Leistungskonto Ø 7 Tage", pctSigned(x.trade_mean_7d, 1))}${tipRow("transparent", "95 %", `${pctSigned(x.trade_lo_7d, 1)} bis ${pctSigned(x.trade_hi_7d, 1)}`)}${tipRow("transparent", "Trades", `${n(x.n_trades_7d)} (an diesem Tag ${n(x.n_trades)})`)}${tipRow(c.s[1], "Lernkonto Ø 7 Tage", pctSigned(x.learn_trade_mean_7d, 1))}${tipRow("transparent", "Trades", `${n(x.learn_n_trades_7d)} (an diesem Tag ${n(x.learn_n_trades)})`)}`; } },
               xAxis: catAxis(c, tr.map(dl), { boundaryGap: false }), yAxis: valueAxis(c, (v) => pctSigned(v, 0)),
               series: [
                 { type: "line", stack: "band", symbol: "none", lineStyle: { opacity: 0 }, data: tr.map((x) => x.trade_lo_7d ?? x.trade_mean_7d) },
                 { type: "line", stack: "band", symbol: "none", lineStyle: { opacity: 0 }, areaStyle: { color: c.s[0], opacity: 0.15 }, data: tr.map((x) => (x.trade_hi_7d ?? x.trade_mean_7d) - (x.trade_lo_7d ?? x.trade_mean_7d)) },
-                { type: "line", symbolSize: 8, lineStyle: { width: 2, color: c.s[0] }, itemStyle: { color: c.s[0] }, data: tr.map((x) => x.trade_mean_7d),
+                { type: "line", symbolSize: 8, lineStyle: { width: 2, color: c.s[1] }, itemStyle: { color: c.s[1] }, connectNulls: true, data: tr.map((x) => x.learn_trade_mean_7d) },
+                { type: "line", symbolSize: 8, lineStyle: { width: 2, color: c.s[0] }, itemStyle: { color: c.s[0] }, connectNulls: true, data: tr.map((x) => x.trade_mean_7d),
                   markLine: { silent: true, symbol: "none", lineStyle: { color: c.muted, type: "dashed", width: 1 }, label: { color: c.muted, formatter: "0", position: "insideEndTop" }, data: [{ yAxis: 0 }] } },
               ],
             })} /> : <Empty>Noch kein abgeschlossener Trade</Empty>}
+          {tr.length > 0 && <div className="legend-row">{["Leistungskonto", "Lernkonto"].map((l, i) => <span key={l}><i style={{ background: `var(--series-${i + 1})` }} />{l}</span>)}</div>}
         </div>
         <div>
           <div className="help">Kalibrierung je Zehntel der Vorhersage, letzte 7 Tage (Ergebnis gedeckelt bei {pctSigned(L.cap?.[1], 0)})</div>

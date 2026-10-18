@@ -2541,21 +2541,25 @@ def _brain_learning(conn, now, days, st=None):
             _, gap = _calibration(ps)
             out[d].update(n_scored=len(ps), rank_ic=_f(_spearman([p for p, _ in ps], [y for _, y in ps]), 4),
                           cal_gap=_f(gap, 4))
-    trades = defaultdict(list)
+    # two books: the learning account (brain's "pool" positions: small stakes on everything the sampling lets
+    # through) and the performance account (the rest); kept apart so neither flatters the other
+    trades = {"perform": defaultdict(list), "learn": defaultdict(list)}
     if has(conn, "brain_positions"):
-        for r in rows(conn, "SELECT closed_at, pnl_pct FROM brain_positions WHERE status='closed' AND closed_at>=? "
+        for r in rows(conn, "SELECT closed_at, pnl_pct, kind FROM brain_positions WHERE status='closed' AND closed_at>=? "
                             "AND pnl_pct IS NOT NULL", (lo - 6 * 86400,)):
-            trades[day(r["closed_at"])].append(float(r["pnl_pct"]))
+            trades["learn" if r["kind"] == "pool" else "perform"][day(r["closed_at"])].append(float(r["pnl_pct"]))
     mult = {d["ts"]: d.get("mult") for d in days}
     for d, x in out.items():
-        x["n_trades"] = len(trades.get(d, []))
-        x["trade_mean"] = _f(_mean(trades.get(d, [])), 4)
-        w = [v for k in range(7) for v in trades.get(d - k * 86400, [])]
-        m = _mean(w)
-        half = 1.96 * statistics.stdev(w) / math.sqrt(len(w)) if len(w) >= 2 else None
-        x.update(n_trades_7d=len(w), trade_mean_7d=_f(m, 4),
-                 trade_lo_7d=_f(m - half, 4) if half is not None else None,
-                 trade_hi_7d=_f(m + half, 4) if half is not None else None, mult=mult.get(d))
+        x["mult"] = mult.get(d)
+        for acc, pre in (("perform", ""), ("learn", "learn_")):
+            t = trades[acc]
+            w = [v for k in range(7) for v in t.get(d - k * 86400, [])]
+            m = _mean(w)
+            half = 1.96 * statistics.stdev(w) / math.sqrt(len(w)) if len(w) >= 2 else None
+            x.update({f"{pre}n_trades": len(t.get(d, [])), f"{pre}trade_mean": _f(_mean(t.get(d, [])), 4),
+                      f"{pre}n_trades_7d": len(w), f"{pre}trade_mean_7d": _f(m, 4),
+                      f"{pre}trade_lo_7d": _f(m - half, 4) if half is not None else None,
+                      f"{pre}trade_hi_7d": _f(m + half, 4) if half is not None else None})
     srcs = _opp_sources(conn, now) if shared else []
     recent = [p for d, ps in pairs.items() if d >= t_end - 7 * 86400 for p in ps]
     deciles, gap = _calibration(recent)
