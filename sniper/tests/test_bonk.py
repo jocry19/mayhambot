@@ -542,3 +542,19 @@ def test_migration_coverage_counts_curves_completed_by_the_create_apart(tmp_path
         eng.handle({"txType": "migrate", "mint": m, "pool": "pump-amm"}, T0 + 5)
     c = eng.coverage(T0 + 10)
     assert c["migrate"] == {"n": 2, "share": 0.5} and c["migrate_instant"]["n"] == 1
+
+
+def test_trade_before_its_create_is_kept_and_replayed(tmp_path):
+    from sniper import store
+    from sniper.engine import Engine
+    from sniper.tests.test_sniper import Curve, FakeEnricher
+    eng = Engine(cfg(), store.connect(str(tmp_path / "o.db")), enricher=FakeEnricher())
+    cv = Curve("PROINU")
+    create = cv.create()
+    big = cv.buy("W75n", 68.7)                                  # same slot, delivered before the create
+    assert eng.handle(big, T0) is None
+    st = eng.handle(create, T0 + 0.4)
+    assert st.n_seen == 1 and st.created_ts == T0 and "W75n" in st.balances
+    eng.handle(cv.buy("OLD", 0.1) | {"mint": "UNKNOWN"}, T0 + 1)  # an untracked coin's trade stays an orphan
+    eng.handle(cv.buy("LATE", 0.1) | {"mint": "UNKNOWN"}, T0 + 100)
+    assert len(eng.orphans["UNKNOWN"]) == 2 and "PROINU" not in eng.orphans

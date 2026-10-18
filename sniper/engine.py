@@ -10,7 +10,7 @@ import json
 import logging
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 
 from sniper import opportunity, research, store
 from sniper.analyze import analyze
@@ -18,6 +18,8 @@ from sniper.paper import PaperBook
 from sniper.state import LaunchState, curve_progress
 
 log = logging.getLogger("sniper")
+
+ORPHAN_SEC, ORPHAN_PER_MINT, ORPHAN_MINTS = 30.0, 40, 20000   # trades held for a create that comes later
 
 SKIP_LABELS = {
     "activity": "zu wenig Aktivität",
@@ -101,6 +103,7 @@ class Engine:
         # launches decided without a trade that got their first one later: (decision time, seconds after it).
         # Tells "the stream missed them" (many, early) from "nobody traded them" (few)
         self.late_first = deque(maxlen=20000)
+        self.orphans, self._orphan_pruned = OrderedDict(), 0.0   # trades that came before their create
         self._resume()
 
     # ------------------------------------------------------------------ restart
@@ -156,6 +159,18 @@ class Engine:
         return st
 
     # ------------------------------------------------------------------ stream
+    def _orphan(self, mint, m, now):
+        q = self.orphans.get(mint)
+        if q is None:
+            q = self.orphans[mint] = deque(maxlen=ORPHAN_PER_MINT)
+        q.append((now, m))
+        while len(self.orphans) > ORPHAN_MINTS:
+            self.orphans.popitem(last=False)
+        if now - self._orphan_pruned > ORPHAN_SEC:
+            self._orphan_pruned = now
+            for k in [k for k, v in self.orphans.items() if not v or now - v[-1][0] > ORPHAN_SEC]:
+                del self.orphans[k]
+
     def handle(self, m, now=None):
         now = now or time.time()
         kind = (m.get("txType") or "").lower()
@@ -171,9 +186,20 @@ class Engine:
                 self.launches[mint] = st
                 self.to_sub.add(mint)
                 self.counters["creates"] += 1
+                early = self.orphans.pop(mint, None)
+                if early:
+                    st.created_ts = min(st.created_ts, early[0][0])   # the create happened before its slot's trades
+                    for t, om in early:
+                        if now - t <= ORPHAN_SEC and st.apply_trade(om, t) is not None:
+                            self.counters["trades"] += 1
+                            self.counters["orphans_replayed"] = self.counters.get("orphans_replayed", 0) + 1
                 return st
             st = self.launches.get(mint)
             if st is None:
+                # a trade of the create's own slot can reach us before the create (second stream, bundles): keep
+                # it a few seconds, the create replays it (PROINU 18.10.: a 74 % buy in the create slot was lost)
+                if kind in ("buy", "sell"):
+                    self._orphan(mint, m, now)
                 return None
             if kind == "migrate" or m.get("pool") in ("pump-amm", "raydium") and kind not in ("buy", "sell"):
                 st.migrated, st.migrated_ts = True, now
