@@ -99,7 +99,7 @@ def report_opportunity(conn, source, ref, mint, now, price, m, reason=None, acti
         return False
 
 
-def record(conn, mint, reason, m, price, now, kind="v1"):
+def record(conn, mint, reason, m, price, now, kind="v1", report=True):
     if reason in SKIP or not price:
         return False
     if conn.execute("SELECT 1 FROM signal_shadow WHERE mint=? AND reason=? AND kind=? AND ts>?",
@@ -117,8 +117,9 @@ def record(conn, mint, reason, m, price, now, kind="v1"):
                   (now - created) / 60 if created else None, t[3] if t else None, t[4] if t else None,
                   t[5] if t else None, t[6] if t else None, t[7] if t else None,
                   price / before - 1 if before else None, trade_cost(t[0] if t else None, m.get("liquidity_usd"))))
-    report_opportunity(conn, "signals_v2" if kind == "v2" else "signals", f"shadow:{cur.lastrowid}", mint, now, price, m,
-                       reason, "passed", kind, mkt)
+    if report:  # unproven kinds (narrative) stay out of the brain's opportunities
+        report_opportunity(conn, "signals_v2" if kind == "v2" else "signals", f"shadow:{cur.lastrowid}", mint, now, price,
+                           m, reason, "passed", kind, mkt)
     return True
 
 

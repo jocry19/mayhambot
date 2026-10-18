@@ -14,9 +14,12 @@ import time
 from core import db, scoring, wallets
 from core.config import settings
 from core.sources import market, wallet_source
-from signals import accum, engine, funnel, notifier, plan, shadow
+from signals import accum, engine, funnel, narrative, notifier, plan, shadow
 
 log = logging.getLogger("mayhambot.run")
+
+
+NARRATIVE_WATCH_MAX = 40  # about 2 extra DexScreener calls per cycle
 
 
 def refresh_watchlist(conn, cycle):
@@ -32,8 +35,13 @@ def refresh_watchlist(conn, cycle):
     # calls of the last hours stay watched, so their prices keep coming for the target / stop follow-up
     hot += [r[0] for r in conn.execute("SELECT DISTINCT mint FROM signals WHERE ts > ?",
                                        (int(time.time()) - plan.FOLLOW_HOURS * 3600,)) if r[0] not in hot]
+    try:  # coins of brand-new / growing narratives (market_terms): prices only, not tracked (no trade fetches)
+        narr = narrative.watch_mints(conn)[:NARRATIVE_WATCH_MAX]
+    except Exception as e:  # noqa: BLE001 - narratives must never stop the watchlist
+        log.warning("narrative watch failed: %s", e)
+        narr = []
     tracked = [r[0] for r in conn.execute("SELECT mint FROM tokens WHERE tracked=1")]
-    infos = market.token_info(list(dict.fromkeys(tracked + hot)))
+    infos = market.token_info(list(dict.fromkeys(tracked + hot + narr)))
     dense = dense_mints(conn, infos)
     # 18.10.: cycles 14-19 failed on "database is locked" here (TokenRefresher and research write tokens too)
     db.retry_locked(conn, lambda: db.upsert_tokens(conn, [t for t in infos if t.mint in set(hot)], tracked=True,
@@ -344,6 +352,12 @@ def cycle(conn, i):
         shadow.update(conn)  # what the rejected coins did since: the funnel's gates checked on data
     except Exception:  # noqa: BLE001
         log.exception("signal shadow update failed")
+    try:
+        n = narrative.scan(conn, settings.min_liquidity_usd)
+        if n:
+            log.info("narrative: %d coins of new narratives booked (shadow, kind narrative)", n)
+    except Exception:  # noqa: BLE001 - the narrative book must never stop the cycle
+        log.exception("narrative scan failed")
     try:
         notifier.notify_followups(plan.check_levels(conn) + plan.check_staged(conn))  # target / stop reached: follow-up alert for manual trading
     except Exception:  # noqa: BLE001 - follow-ups must never stop signals

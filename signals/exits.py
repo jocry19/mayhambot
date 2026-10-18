@@ -101,12 +101,15 @@ def _net(p, r):
     return None if x is None else min(x, CAP) - p.get("cost", COST)
 
 
-def paths(conn, days=7, now=None, kind=None):
+def paths(conn, days=7, now=None, kind=None, table="signals", reason_like=None):
+    """table 'signal_shadow' replays shadow rows (no symbol there), optionally only reasons LIKE reason_like."""
     now = now or int(time.time())
-    q = ("SELECT id, ts, mint, symbol, price_usd, outcome_flag, cost FROM signals WHERE ts>=? AND ts<=? AND price_usd>0"
-         + (" AND COALESCE(kind,'v1')=?" if kind else ""))
+    sym = "symbol" if table == "signals" else "NULL"
+    q = (f"SELECT id, ts, mint, {sym}, price_usd, outcome_flag, cost FROM {table} WHERE ts>=? AND ts<=? AND price_usd>0"
+         + (" AND COALESCE(kind,'v1')=?" if kind else "") + (" AND reason LIKE ?" if reason_like else ""))
+    args = (now - days * 86400, now - HOURS * 3600) + ((kind,) if kind else ()) + ((reason_like,) if reason_like else ())
     out = []
-    for s in conn.execute(q + " ORDER BY ts", (now - days * 86400, now - HOURS * 3600) + ((kind,) if kind else ())).fetchall():
+    for s in conn.execute(q + " ORDER BY ts", args).fetchall():
         t0, p0 = s[1], s[4]
         snap = conn.execute("SELECT ts, price_usd FROM token_prices WHERE mint=? AND ts>? AND ts<=? AND price_usd>0",
                             (s[2], t0, t0 + HOURS * 3600)).fetchall()
@@ -153,8 +156,8 @@ def verdict(conn, days=14, now=None, kind=None, min_n=MIN_N_DECIDE):
     return out
 
 
-def compare(conn, days=7, now=None, rules=None, kind=None):
-    ps = paths(conn, days, now, kind)
+def compare(conn, days=7, now=None, rules=None, kind=None, table="signals", reason_like=None):
+    ps = paths(conn, days, now, kind, table, reason_like)
     res = {}
     for name, r in (rules or RULES).items():
         nets = [_net(p, r) for p in ps]

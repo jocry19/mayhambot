@@ -248,6 +248,11 @@ def write_report(conn, path=None, now=None):
     from signals import shadow  # rejected coins by reason and what they did next (calls: outcomes_* above)
     rep.update(shadow_24h=shadow.summary(conn, 24, now), shadow_7d=shadow.summary(conn, 168, now),
                shadow_v2_7d=shadow.summary(conn, 168, now, kind="v2"))
+    from signals import narrative  # new-narrative leaders: shadow only until ready() (alerts need 30+ in the plus)
+    rep.update(narrative_7d=shadow.summary(conn, 168, now, kind="narrative"),
+               narrative_exits_14d=exits.compare(conn, 14, now, kind="narrative", table="signal_shadow",
+                                                 reason_like="% leader"),
+               narrative_ready=narrative.ready(conn, now))
     rs = rep["recent_signals"]
     rep["tradable_strict_share"] = round(sum(r["tradable_strict"] for r in rs) / len(rs), 3) if rs else None
     tmp = path.with_suffix(".tmp")
