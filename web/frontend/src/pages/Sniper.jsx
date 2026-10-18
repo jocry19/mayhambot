@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { LoadBar } from "./System.jsx";
+import { CapForecast, LoadBar } from "./System.jsx";
 import { EChart, baseOption, catAxis, timeAxis, tipRow, valueAxis } from "../chart.jsx";
 import { ago, dt, dur, n, pct, pctSigned, sign, sol, solSigned, usd, usePoll } from "../lib.js";
 import { Callout, Card, Delta, Empty, Icon, Seg, Table, Tabs, Tile } from "../ui.jsx";
@@ -337,7 +337,7 @@ export default function Sniper() {
         <BudgetTable s={d.stream} />
       </Card>
 
-      <Card title="Abfragen nach Anbieter" sub={`Abfragen je tief geprüftem Launch: RPC ${n(st.calls_per_deep_launch?.rpc, 1)} · pump.fun ${n(st.calls_per_deep_launch?.pump_api, 1)}`} flush>
+      <Card title="Abfragen nach Anbieter" sub={<>Abfragen je tief geprüftem Launch: RPC {n(st.calls_per_deep_launch?.rpc, 1)} · pump.fun {n(st.calls_per_deep_launch?.pump_api, 1)}{d.stream.credits && <><br />Helius-Plan {n(d.stream.credits.used)} von {n(d.stream.credits.limit)} · <CapForecast t={d.stream.credits} /></>}</>} flush>
         <Table rows={d.stream.api} rowKey={(r) => r.group} empty="Der Sniper hat noch keine Verbrauchsdaten geschrieben" cols={[
           { k: "group", l: "Anbieter", fmt: (r) => <span className="mono">{r.group}</span> },
           { k: "calls_window", l: "Calls 10 min", r: true, fmt: (r) => n(r.calls_window) },

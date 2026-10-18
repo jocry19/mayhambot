@@ -25,6 +25,18 @@ function CreditBar({ used, cap, v, share }) {
   );
 }
 
+/** When the month's plan runs out at today's rate (core.http.cap_forecast), with and without the sniper's stream. */
+export function CapForecast({ t }) {
+  if (!t || (t.cap_at === undefined && t.cap_at_no_stream === undefined)) return null;
+  const when = (x) => (x ? dt(x) : "nicht mehr in diesem Monat");
+  const soon = t.cap_at && t.cap_at - Date.now() / 1000 < 3 * 86400;
+  return (
+    <span className={soon ? "t2 down" : "t2"} title="Hochgerechnet aus dem Verbrauch des heutigen UTC-Tags; danach lehnt Helius ab und die Dienste gehen aufs öffentliche RPC">
+      Kappe bei heutiger Rate: <b>{when(t.cap_at)}</b> (ohne Sniper-Strom 2: {when(t.cap_at_no_stream)})
+    </span>
+  );
+}
+
 /** Whole-month Helius line for the top of the page. */
 export function CreditsTotal({ t }) {
   if (!t) return null;
@@ -36,6 +48,7 @@ export function CreditsTotal({ t }) {
       <span className={`load ${cls}`}><span className="load-track wide"><span className="load-fill" style={{ width: `${Math.min(100, t.load * 100)}%` }} /></span>
         <span className="load-num">{pct(t.load, 1)}</span></span>
       {t.key_fp && <span className="t2" title="Fingerabdruck des Helius-Keys (nie der Key selbst)">Key …<span className="mono">{t.key_fp}</span>{t.key_changed_at ? ` · gewechselt ${dt(t.key_changed_at)}` : ""}</span>}
+      <CapForecast t={t} />
       {t.load >= 0.8 && <span className="t2">Ab 100 % lehnt Helius ab; die Dienste weichen dann auf das öffentliche RPC aus.</span>}
       {t.history?.length > 0 && (
         <details className="credits-hist">

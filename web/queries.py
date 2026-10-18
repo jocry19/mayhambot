@@ -1668,7 +1668,9 @@ def sniper_stream(conn, now=None):
     cap = out["deep_per_hour_cap"]
     deep = (out.get("budget") or {}).get("deep")
     out["load_deep"] = deep["load"] if deep and deep.get("load") is not None else (_f(out["deep_1h"] / cap, 3) if cap else None)
-    out["api"] = [r for r in api_usage().get("rows", []) if r["service"] == "sniper"]
+    au = api_usage()
+    out["api"] = [r for r in au.get("rows", []) if r["service"] == "sniper"]
+    out["credits"] = au.get("credits")  # whole plan, with when it runs out at today's rate (with / without this stream)
     return out
 
 
@@ -2289,7 +2291,8 @@ def api_usage(now=None):
         try:
             cs = chttp.credits_status() or {}
             total.update(key_fp=cs.get("key_fp") or None, key_changed_at=cs.get("key_changed_at"),
-                         warn=cs.get("warn"), history=[{k: h.get(k) for k in ("month", "key_fp", "used", "until", "reason")}
+                         warn=cs.get("warn"), cap_at=cs.get("cap_at"), cap_at_no_stream=cs.get("cap_at_no_stream"),
+                         history=[{k: h.get(k) for k in ("month", "key_fp", "used", "until", "reason")}
                                                       for h in (cs.get("history") or [])][::-1])
             if cs.get("used") is not None and cs.get("limit"):
                 total.update(used=_f(cs["used"], 0), limit=cs["limit"], load=_f(cs.get("warn_level"), 4))

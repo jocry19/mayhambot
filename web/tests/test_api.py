@@ -240,6 +240,7 @@ def test_api_usage(demo, tmp_path, monkeypatch, capsys):
     assert ("sniper", "helius") in rows and rows[("sniper", "helius")]["stale"]  # share but no process yet
     tot = c.get("/api/system").json()["api_usage"]["credits"]
     assert tot["used"] == 820000 and tot["limit"] == 1000000 and tot["load"] == 0.82
+    assert "cap_at" in tot and "cap_at_no_stream" in tot  # when the plan runs out at today's rate (None after midnight's first hour)
     assert rows[("research", "helius")]["stale"] and rows[("research", "helius")]["load"] is None
     assert rows[("safety", "api.dexscreener.com")]["load"] is None
     from cli.report import api_line
