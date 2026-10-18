@@ -549,3 +549,17 @@ def test_fixed_candidate_that_holds_becomes_the_learned_rule():
     assert not research.matches(rule, {"mcap_decide_sol": 49.0, "n_buyers": 9})
     assert research.fixed_rule(dict(held, holds=False)) is None
     assert research.fixed_rule(dict(held, folds=held["folds"][:1])) is None        # 12 test trades are too few
+
+
+def test_entry_timing_measures_the_value_of_speed():
+    # every launch runs from 30 to 60 SOL in its first 20 s, then drifts back to 45: early buyers win
+    path = [[0, 30, 30, 30], [5, 36, 33, 36], [10, 45, 40, 45], [15, 55, 50, 55], [20, 60, 58, 60],
+            [25, 50, 48, 52], [60, 45, 44, 46], [20 + 13 * 60, 45, 44, 46]]
+    rows = [{"mint": f"T{i}", "created_ts": T0, "decided_ts": T0 + 20, "mcap_decide_sol": 60.0} for i in range(40)]
+    paths = {r["mint"]: path for r in rows}
+    out = research.entry_timing(rows, paths, RULE, 0.0, 0.0, secs=(2, 20))
+    by = {e["sec"]: e for e in out}
+    assert by[2]["n"] == 40 and by[2]["net"] > 0.4 and by[2]["at_decision"] < 0
+    assert by[20]["net"] < 0
+    rep = {"n": 40, "with_path": 40, "cost_round_trip": 0.1, "base": {}, "entry": {"rule": {}, "rows": out}}
+    assert "Einstieg nach 2 s" in research.summary(rep)

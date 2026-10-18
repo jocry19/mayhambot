@@ -184,6 +184,8 @@ ab wann); davor enthielten sie den Pump vor dem Entscheid. Die Forschung nutzt b
 oder ≤ −50 % nach Dev-/Insider-Abverkauf. Pump-Launches mit kaputtem Basispreis (< 27,9 SOL) bekommen kein Label
 (NULL), damit kein Rug-Modell darauf lernt. Alte Zeilen korrigiert `store.relabel_rugs` einmal je `RUG_LABEL_VERSION`.
 
+
+**Tempo** (seit 18.10., Plan „Hundertmal“ Hebel 5): Die Forschung spielt zusätzlich alle Launches mit Preisverlauf nach, als wären sie 2, 5, 10 oder 20 s nach der Erstellung gekauft worden. Der Kurs ist dabei das Hoch des 5-s-Fensters, also pessimistisch. Ausstieg und Kosten sind dieselben, und zum Vergleich steht derselbe Launch beim echten Entscheid. Die Logzeile „Tempo …“ zeigt so, was Geschwindigkeit allein bringt, bevor der Entscheid nach vorn wandert.
 ## Einstellungen (`.env`, alle optional)
 
 | Variable | Standard | Bedeutung |

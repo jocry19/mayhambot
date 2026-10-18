@@ -301,6 +301,34 @@ def exit_grid(rows, paths, side_cost, tx_cost, top=8):
     return res[:top]
 
 
+ENTRY_SEC = (2, 5, 10, 20)
+
+
+def entry_timing(rows, paths, rule, side_cost, tx_cost, secs=ENTRY_SEC):
+    """Plan "Hundertmal", lever 5 (tempo): what buying every launch with a stored path earns when entered `s`
+    seconds after creation instead of at the decision, with the same exits and costs. Entry at the high of the
+    5-s bucket that holds second s (pessimistic). No features are known that early, so this is the pure value
+    of speed; the same launches at their real decision moment are the comparison."""
+    out = []
+    with_p = [r for r in rows if paths.get(r["mint"])]
+    for s in secs:
+        rs, ref = [], []
+        for r in with_p:
+            p = paths[r["mint"]]
+            b = next((q for q in p if q[0] <= s < q[0] + 5), None)
+            if not b or not b[3]:
+                continue
+            sc = side_cost + (r["fee_pct"] - _FEE_BASE[0]) / 100 if r.get("fee_pct") else side_cost
+            rs.append(min(MAX_TRADE_NET, replay(p, b[0] + 5, b[3], rule, sc, tx_cost)[0]))
+            dt = (r.get("decided_ts") or r["created_ts"]) - r["created_ts"]
+            ref.append(min(MAX_TRADE_NET, replay(p, dt, r["mcap_decide_sol"], rule, sc, tx_cost)[0]))
+        if len(rs) >= 30:
+            lo, _hi = boot_ci(rs, n=300)
+            out.append({"sec": s, "n": len(rs), "net": round(mean(rs), 4), "ci_low": round(lo, 4),
+                        "win": round(sum(1 for v in rs if v > 0) / len(rs), 3), "at_decision": round(mean(ref), 4)})
+    return out
+
+
 def calibrate_risk(rows):
     """Rug and doubling rate per bucket of every bundle/insider feature, overall and among launches that
     pumped at least 30 % (a rug needs a pump first, so activity alone does not drown the signal). A threshold is
@@ -534,6 +562,10 @@ def run(conn, cfg=None, hours=0, save=False, now=None):
         rep["risk"] = calibrate_risk(rows)
         rep["rules"] = rule_search(rows, paths, cfg)
         rep["block0"] = signature_test(rows, paths, cfg)
+        best = tuple((rep["exits"] or [{}])[0].get("rule", {}).values()) or cur
+        rep["entry"] = {"rule": dict(zip(("tp1_pct", "tp1_frac", "trail_pct", "stop_pct", "time_stop_min",
+                                          "max_hold_min"), best)),
+                        "rows": entry_timing(rows, paths, best, side_cost, tx_cost)}
         # candidate from the winners study: a running curve (MC >= 50 SOL) with >= 5 buyers at the decision
         rep["mc50_buyers5"] = signature_test(rows, paths, cfg, conds=[("mcap_decide_sol", 50), ("n_buyers", 5)])
     if save:
@@ -613,6 +645,12 @@ def summary(rep, top=8):
                      "festen Regeln.")
     elif rs:
         L.append(f"\nRegelsuche: {rs.get('status')}.")
+    en = rep.get("entry") or {}
+    if en.get("rows"):
+        L.append("\nTempo (alle Launches mit Preisverlauf, bester Ausstieg, gleiche Kosten): "
+                 + "; ".join(f"Einstieg nach {e['sec']} s {100 * e['net']:+.1f} % (n {e['n']}, untere Grenze "
+                             f"{100 * e['ci_low']:+.1f} %, beim Entscheid {100 * e['at_decision']:+.1f} %)"
+                             for e in en["rows"]))
     for key, title in (("block0", "Block-0-Signatur (>= 3 Mini-Käufe in 5 s)"),
                        ("mc50_buyers5", "MC >= 50 SOL und >= 5 Käufer beim Entscheid")):
         b0 = rep.get(key)
