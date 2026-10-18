@@ -438,3 +438,13 @@ def test_trade_link_against_paper_trades(conn):
     assert out["n"] == 30 and out["positions"] == 31
     r = next(x for x in out["features"] if x["feature"] == "micro_ofi_15m")
     assert r["ic"] == pytest.approx(1.0) and r["win_high"] > r["win_low"]
+
+
+def test_universe_puts_open_brain_positions_first(conn):
+    conn.execute("CREATE TABLE brain_positions (mint TEXT, status TEXT)")
+    conn.executemany("INSERT INTO brain_positions VALUES (?,?)", [("BrainOpen", "open"), ("BrainShut", "closed")])
+    for i in range(5):
+        trade(conn, f"u{i}", R, MINT, "buy", NOW - 60 - i, 10)
+    conn.commit()
+    u = service.universe(conn, NOW, limit=2)
+    assert u[0] == "BrainOpen" and "BrainShut" not in u and MINT in u

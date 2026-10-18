@@ -16,12 +16,14 @@ log = logging.getLogger("intel")
 
 
 def universe(conn, now, limit=150):
-    """Coins worth watching: most traded in the last 2 h, open copy-trader positions, recent signals, sniper entries
+    """Coins worth watching: open brain and copy-trader positions, most traded in the last 2 h, recent signals, sniper entries
     and migrations, coins the signal engine tracks."""
     out = [r[0] for r in conn.execute("SELECT mint, COUNT(*) n FROM trades WHERE ts>? AND ts<=? GROUP BY mint ORDER BY n DESC LIMIT ?",
                                       (now - 7200, now, limit))]
     if store.has(conn, "ct_positions"):
         out = [r[0] for r in conn.execute("SELECT DISTINCT mint FROM ct_positions WHERE status='open'")] + out
+    if store.has(conn, "brain_positions"):  # the brain's exit checks read intel_latest, so its open coins always come first
+        out = [r[0] for r in conn.execute("SELECT DISTINCT mint FROM brain_positions WHERE status='open'")] + out
     out += [r[0] for r in conn.execute("SELECT DISTINCT mint FROM signals WHERE ts>?", (now - 6 * 3600,))]
     if store.has(conn, "sniper_launches"):
         out += [r[0] for r in conn.execute("SELECT mint FROM sniper_launches WHERE created_ts>? AND (decision='enter' OR migrated=1) "
