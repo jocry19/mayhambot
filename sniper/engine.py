@@ -98,6 +98,9 @@ class Engine:
         self.counters = {"creates": 0, "trades": 0, "migrations": 0, "stage1": 0, "stage2": 0, "entries": 0}
         # stream coverage (plan 18.10., goal >= 90 %): (ts, had trades) per pump decision and per migration
         self.cover = {"decide": deque(maxlen=20000), "migrate": deque(maxlen=5000)}
+        # launches decided without a trade that got their first one later: (decision time, seconds after it).
+        # Tells "the stream missed them" (many, early) from "nobody traded them" (few)
+        self.late_first = deque(maxlen=20000)
         self._resume()
 
     # ------------------------------------------------------------------ restart
@@ -187,6 +190,9 @@ class Engine:
                     self.counters["dupes"] = self.counters.get("dupes", 0) + 1
                     return st          # duplicate (both RPC streams, replay) or the dev buy of the create transaction
                 self.counters["trades"] += 1
+                if st.zero_decide_ts and not st.late_seen:
+                    st.late_seen = True
+                    self.late_first.append((st.zero_decide_ts, now - st.zero_decide_ts))
                 if mint in self.book.open:
                     self.book.check(self.conn, st, now, self.quote_fn)
                 return st
@@ -206,6 +212,13 @@ class Engine:
             for k, q in self.cover.items():
                 xs = [ok for t, ok in q if now - t <= window]
                 out[k] = {"n": len(xs), "share": round(sum(xs) / len(xs), 3) if xs else None}
+            # decisions at least 5 min old: how many without a trade got one within 5 min after all
+            old = [ok for t, ok in self.cover["decide"] if 300 <= now - t <= window + 300]
+            late = sum(1 for t, dt in self.late_first if 300 <= now - t <= window + 300 and dt <= 300)
+            zero = sum(1 for ok in old if not ok)
+            seen = sum(old)
+            out["late"] = {"zero": zero, "late_5m": late, "never_5m": zero - late,
+                           "share_of_traded": round(seen / (seen + late), 3) if seen + late else None}
         return out
 
     def attach_wallet(self, mint, sig, wallet):
@@ -353,6 +366,8 @@ class Engine:
             self.counters["stage1_zero"] = self.counters.get("stage1_zero", 0) + 1
         if st.pool == "pump":
             self.cover["decide"].append((now, bool(F.get("n_trades"))))
+            if not F.get("n_trades"):
+                st.zero_decide_ts = now
         reason = None
         if st.pool == "pump" and (st.base_mcap_sol or 0) < st.base_floor():
             reason = "no_price"   # below the curve's start price: a broken quote, neither tradable nor measurable

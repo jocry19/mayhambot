@@ -360,3 +360,14 @@ def test_quote_decimals_and_the_dev_buy_of_a_quoted_create(tmp_path, monkeypatch
     monkeypatch.setitem(rpcws.QUOTE_WANTED, "QuoteX1", time.time())
     svc.quote_round()
     assert calls == ["QuoteX1"] and rpcws.QUOTE_DECIMALS.pop("QuoteX1") == 9
+
+
+def test_coverage_tells_missed_from_untraded(tmp_path):
+    from sniper import store
+    from sniper.engine import Engine
+    eng = Engine(cfg(), store.connect(str(tmp_path / "z.db")), enricher=None)
+    t = T0 - 600
+    eng.cover["decide"].extend([(t, True), (t, True), (t, False), (t, False), (t, False)])
+    eng.late_first.extend([(t, 40.0), (t, 900.0)])    # one traded 40 s after the decision, one only after 15 min
+    lt = eng.coverage(T0)["late"]
+    assert lt == {"zero": 3, "late_5m": 1, "never_5m": 2, "share_of_traded": 0.667}

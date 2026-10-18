@@ -652,6 +652,12 @@ class Service:
         pct = lambda v: "?" if v["share"] is None else f"{100 * v['share']:.0f} %"  # noqa: E731
         log.info("Abdeckung (1 h): Launches mit Trades beim Entscheid %s von %d, Migrationen mit Trades %s von %d "
                  "(Ziel je 90 %%)", pct(c["decide"]), c["decide"]["n"], pct(c["migrate"]), c["migrate"]["n"])
+        lt = c.get("late") or {}
+        if lt.get("zero"):
+            log.info("Abdeckung (1 h, Entscheide ≥ 5 min alt): %d ohne Trade beim Entscheid, davon %d binnen 5 min "
+                     "doch gehandelt und %d nie | von allen Launches mit Trades binnen 5 min sahen wir beim Entscheid %s",
+                     lt["zero"], lt["late_5m"], lt["never_5m"],
+                     "?" if lt["share_of_traded"] is None else f"{100 * lt['share_of_traded']:.0f} %")
 
     def research_round(self):
         """Hourly: research on the real outcomes (own DB connection, CPU only, no network); an accepted rule is

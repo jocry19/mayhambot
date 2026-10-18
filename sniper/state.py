@@ -154,6 +154,8 @@ class LaunchState:
     learned: bool = False                             # picked by the accepted research rule (sniper.research)
     create_slot: int | None = None                    # slot of the creation (RPC create stream), bundle reference
     path: PricePath | None = None                     # bucketed mcap path for exit replays (sniper_paths)
+    zero_decide_ts: float | None = None               # decided without a single trade (engine.late_first)
+    late_seen: bool = False
     quote_mint: str | None = None                     # pump: the curve is quoted in this token (PUMP, a coin), not SOL
     start_mcap_sol: float | None = None               # pump: market cap at the curve's start (v_sol - real_sol)
     fee_pct: float | None = None                      # curve fee seen in the trades (bonk: per platform, ~1-6 %)
