@@ -38,6 +38,6 @@ Nur eine tragende Tasche soll Einsatz im Hauptkonto bekommen. Jede Zeile im Beri
 Entscheider: `market` für Kursreihen- und Migrations-Hypothesen, `launch` für `launch_*`, `pool` für `label_*`, dazu
 `source` = die meldende Quelle), damit der Entscheider die Freigabe der richtigen Art zuordnet.
 
-Als Dienst `lab` in mayham.py: die nächste Runde zählt ab `at` im letzten Bericht (ein Deploy-Neustart rechnet nicht neu), wartet während `data/TRAINING` (Retrain) und läuft mit nice 10.
+Als Dienst `lab` in mayham.py: die nächste Runde zählt ab `at` im letzten Bericht (ein Deploy-Neustart rechnet nicht neu), wartet während `data/TRAINING` (Retrain) und läuft mit nice 10; jede Runde rechnet in einem eigenen Prozess, damit der Speicher danach frei ist.
 
 Einstellungen: `LAB_EVERY_H` (6), `LAB_WINDOW_H` (72, Rückblick), `LAB_STAKE_SOL` (0,1), `LAB_DIR` (data/lab).
