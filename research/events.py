@@ -187,7 +187,8 @@ def labels_at(mint, t, pidx, horizons, delay=None):
         mr = min(MAX_RET, (mx / p0 - 1)) if mx else 0.0
         ret = (end / p0 - 1) if end else None
         # tradeable outcome: sell at the pump threshold if it was reached, else at the horizon end, minus costs
-        gross = thr if mr >= thr else (ret if ret is not None else 0.0)
+        # (a close above the threshold also sells at the threshold: the close is not checked like the highs are)
+        gross = thr if mr >= thr or (ret is not None and ret >= thr) else (ret if ret is not None else 0.0)
         net = min(MAX_RET, gross) - rsettings.cost_roundtrip
         out[name] = dict(max_ret=mr, ret=ret, pumped=int(mr >= thr), net=net, win=int(net > 0))
     return out

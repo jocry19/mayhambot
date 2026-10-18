@@ -28,7 +28,10 @@ def replay(pidx, mint, t, rule):
         gross = rule["tp"]
     else:
         end = pidx.price_at(mint, end_t)
-        gross = end / p0 - 1 if end else -1.0
+        # a closing print above the take profit means the level was passed: we sold there. The high index only
+        # trusts a print confirmed within 3x by the one before (prices.PriceIndex._add), the close does not, so
+        # without this cap one unconfirmed jump at the hold end counted in full (+157 % mean at 15 m, 10/2026)
+        gross = min(end / p0 - 1, rule["tp"]) if end else -1.0
     return gross - rsettings.cost_roundtrip
 
 

@@ -564,3 +564,15 @@ def test_weight_variant_is_picked_by_walk_forward_net():
     evs = [dict(comps={"win": 0.5}, win=1, y=1, ex=None)] * 3
     v = learn.wallet_weight_variants(evs)
     assert set(v) == set(learn.WEIGHT_TARGETS)
+
+
+def test_unconfirmed_jump_at_the_hold_end_counts_only_up_to_the_target():
+    from research import events as ev_, exits
+    from research.prices import PriceIndex
+    idx = PriceIndex()
+    # 20x jump on the last print before the hold end: not confirmed as a high, but the close used to count in full
+    idx._add("M", [(0, 1.0), (300, 1.05), (800, 21.0), (5000, 21.0)])
+    r = dict(tp=0.5, sl=-0.2, hold="15m", hold_s=900)
+    assert exits.replay(idx, "M", 0, r) == pytest.approx(0.5 - 0.06)
+    lab = ev_.labels_at("M", 0, idx, [("15m", 900, 0.3)], delay=0)["15m"]
+    assert lab["net"] == pytest.approx(0.3 - 0.06)  # sold at the pump threshold, not +1900 %
