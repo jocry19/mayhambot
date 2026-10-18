@@ -364,6 +364,23 @@ def test_bulk_leaves_room_for_live(monkeypatch, tmp_path):
     assert clock["t"] > t
 
 
+def test_bulk_does_not_starve_while_higher_lanes_keep_waiting(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    http._marker_times.clear()
+    clock = _clock(monkeypatch)
+    live = http.os.path.join(http._LOCK_DIR, f"{PUB}.live")
+    sleep = http.time.sleep
+
+    def busy(s):  # some live caller somewhere touches its marker all the time
+        http._marker_times[live] = clock["t"]
+        sleep(s)
+    monkeypatch.setattr(http.time, "sleep", busy)
+    http._marker_times[live] = clock["t"]
+    t = clock["t"]
+    http._window_wait(PUB, "m1", "bulk")  # the window is empty: only the marker holds it back
+    assert http.LANE_YIELD_MAX_S <= clock["t"] - t < http.LANE_YIELD_MAX_S + 1
+
+
 def test_per_method_cap(monkeypatch, tmp_path):
     _fresh(monkeypatch, tmp_path)
     http._marker_times.clear()

@@ -150,10 +150,28 @@ def test_backup_logs_table_sizes(tmp_path, monkeypatch):
     log = (tmp_path / "logs" / "dbsize.log").read_text()
     assert "trades:" in log and "100 Zeilen" in log
     assert "neueste 100k Zeilen nach Quelle: geckoterminal 100" in log
-    assert ops.log_db_sizes(tmp_path / "data" / "mayhambot.db") is None     # next one only after 6 h
+    assert ops.log_db_sizes(tmp_path / "data" / "mayhambot.db") is None     # next one only after 3 h
+    old = time.time() - 3 * 3600 + 20 * 60      # a backup 20 min early still measures (hourly backups jitter)
+    os.utime(tmp_path / "logs" / "dbsize.log", (old, old))
+    assert ops.log_db_sizes(tmp_path / "data" / "mayhambot.db") is not None
     assert "Einmal-Wallets" in ops.log_db_sizes(tmp_path / "data" / "mayhambot.db", profile=True, every_h=0)
     assert (tmp_path / "data" / "db_sizes.json").exists()
     assert json.loads((tmp_path / "data" / "db_sizes.json").read_text())[-1]["file_mb"] is not None
+
+
+def test_backup_checks_fully_every_six_hours_and_logs_its_phases(tmp_path, monkeypatch, capsys):
+    _setup(tmp_path, monkeypatch, {"BACKUP_DIR": str(tmp_path / "bk")})
+    c = sqlite3.connect(tmp_path / "data" / "mayhambot.db")
+    c.execute("CREATE TABLE t(x)")
+    c.commit()
+    c.close()
+    monkeypatch.setattr(ops, "backup_dir", lambda: tmp_path / "bk")
+    assert ops.backup(None) == 0
+    out = capsys.readouterr().out
+    assert "Kopie" in out and "Prüfung voll" in out and "Packen" in out
+    assert ops.backup(None) == 0
+    assert "Prüfung kurz" in capsys.readouterr().out     # the next hour: quick_check only
+    assert ops._full_check_due(time.time() + 6 * 3600)
 
 
 def test_retention_counts_only_when_switched_off(tmp_path, monkeypatch):

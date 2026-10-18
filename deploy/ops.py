@@ -23,6 +23,7 @@ Settings (optional, in .env):
   BACKUP_KEEP_HOURS     keep every backup this long (default 24), then one per day ...
   BACKUP_KEEP_DAYS      ... for this many days (default 14)
   BACKUP_MAX_GB         and never more than this in total, oldest go first, the newest 3 always stay (default 5)
+  BACKUP_FULL_CHECK_HOURS full integrity_check of the copy this often (default 6), quick_check in between
   BACKUP_GZIP_LEVEL     1 (fast, default) to 9 (smallest); level 6 took ~3x longer for ~5 % less size
   FEED_STALL_MIN        alert/restart when no new market data for this long (default 15)
   ALERT_REPEAT_HOURS    repeat an unresolved alert every N hours (default 6)
@@ -723,19 +724,37 @@ def _repair_indexes(path: Path, timeout: float = 60, names=None, check=True) -> 
         c.close()
 
 
-def _snapshot_db(src: Path, dst: Path):
+def _full_check_due(now: float | None = None) -> bool:
+    """The full integrity_check reads the whole copy once more (1.7 GB on 18.10., minutes of disk next to the
+    writers every hour); it runs every BACKUP_FULL_CHECK_HOURS (6), quick_check in between."""
+    every = cfg("BACKUP_FULL_CHECK_HOURS", 6.0)
+    try:
+        last = float(json.loads((ROOT / "data" / "backup_check.json").read_text()).get("full_check_at", 0))
+    except (OSError, ValueError, AttributeError):
+        last = 0.0
+    return not every or (now or time.time()) - last >= every * 3600 - 1800
+
+
+def _snapshot_db(src: Path, dst: Path, phases: dict | None = None, full: bool = True):
     """Online-consistent copy via SQLite's backup API (safe while the app writes).
 
     Broken indexes (10/2026: rows missing from idx_trades_wallet_ts and ct_swaps' key) are rebuilt in the copy
-    and, natively on this machine, in the live database (user's choice); damaged tables still abort."""
+    and, natively on this machine, in the live database (user's choice); damaged tables still abort.
+    phases: filled with the seconds of the copy and the check. full=False: quick_check (no index comparison)."""
+    phases = {} if phases is None else phases
+    t0 = time.time()
     s = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=60)
     d = sqlite3.connect(dst)
     # one step: a paged backup restarts on every write from another connection and may never finish;
     # in WAL mode a single-step read does not block the writers
     s.backup(d)
     s.close()
+    phases["Kopie"] = time.time() - t0
+    t0 = time.time()
     # full integrity_check: quick_check does not compare indexes with their tables on every SQLite version
-    problems = [r[0] for r in d.execute("PRAGMA integrity_check").fetchall() if r[0] != "ok"]
+    check = "integrity_check" if full else "quick_check"
+    problems = [r[0] for r in d.execute(f"PRAGMA {check}").fetchall() if r[0] != "ok"]
+    phases["Prüfung voll" if full else "Prüfung kurz"] = time.time() - t0
     ok = problems[0] if problems else "ok"
     if ok != "ok":
         d.close()
@@ -763,11 +782,13 @@ def _snapshot_db(src: Path, dst: Path):
 
 def log_db_sizes(path: Path, profile=False, every_h: float | None = None) -> str | None:
     """Size per table (on the backup's own copy, so the live file is not read twice) into data/db_sizes.json and
-    one block in logs/dbsize.log, at most every DB_SIZES_EVERY_HOURS (6) from the backup. Never fails the backup.
+    one block in logs/dbsize.log, at most every DB_SIZES_EVERY_HOURS (3) from the backup, with 30 min slack: the
+    backups come about hourly with jitter, and a strict 6 h gate missed the 19:04 one by 4 minutes (18.10.), so the
+    file went 7 h without an entry. Never fails the backup.
     profile: also the trades breakdown (minutes on the Mac's 640k rows, so only on demand)."""
     log = ROOT / "logs" / "dbsize.log"
-    every_h = cfg("DB_SIZES_EVERY_HOURS", 6.0) if every_h is None else every_h
-    if every_h and log.exists() and time.time() - log.stat().st_mtime < every_h * 3600:
+    every_h = cfg("DB_SIZES_EVERY_HOURS", 3.0) if every_h is None else every_h
+    if every_h and log.exists() and time.time() - log.stat().st_mtime < every_h * 3600 - 1800:
         return None
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -826,8 +847,18 @@ def leave_background_band():
         pass
 
 
+def _mark_full_check():
+    """In a file of its own: the watchdog rewrites its state file from a copy it read earlier."""
+    try:
+        (ROOT / "data").mkdir(parents=True, exist_ok=True)
+        (ROOT / "data" / "backup_check.json").write_text(json.dumps({"full_check_at": int(time.time())}))
+    except OSError:  # a missed mark only means the next backup checks fully again
+        pass
+
+
 def backup(args) -> int:
     t0 = time.time()
+    phases = {}
     leave_background_band()
     out = backup_dir()
     out.mkdir(parents=True, exist_ok=True)
@@ -841,8 +872,13 @@ def backup(args) -> int:
             src = db_path()
             if src.exists():
                 snap = td / "mayhambot.db"
-                _snapshot_db(src, snap)
-                log_db_sizes(snap)
+                full = _full_check_due()
+                _snapshot_db(src, snap, phases, full=full)
+                if full:
+                    _mark_full_check()
+                t1 = time.time()
+                if log_db_sizes(snap):
+                    phases["Größen"] = time.time() - t1
                 tar.add(snap, "data/mayhambot.db")
             if (ROOT / ".env").exists():
                 e = td / "env"
@@ -866,8 +902,10 @@ def backup(args) -> int:
     os.chmod(final, 0o600)
     removed = prune_backups(out)
     kept = list(out.glob("mayhambot-*.tar.gz"))
-    print(f"Backup: {final} ({final.stat().st_size / 1e6:.1f} MB, {time.time() - t0:.0f} s), {removed} alte entfernt, "
-          f"{len(kept)} Backups mit {sum(f.stat().st_size for f in kept) / 1e9:.2f} GB")
+    phases["Packen"] = time.time() - t0 - sum(phases.values())
+    split = ", ".join(f"{k} {v:.0f} s" for k, v in phases.items())
+    print(f"Backup: {final} ({final.stat().st_size / 1e6:.1f} MB, {time.time() - t0:.0f} s: {split}), {removed} alte "
+          f"entfernt, {len(kept)} Backups mit {sum(f.stat().st_size for f in kept) / 1e9:.2f} GB")
     return 0
 
 

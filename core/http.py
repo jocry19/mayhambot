@@ -727,6 +727,10 @@ METHOD_LIMITS = _parse_map("PUBLIC_RPC_METHOD_LIMITS", {"getTokenLargestAccounts
 # Methods that should go to one endpoint first: 'method=host' (PUBLIC_RPC_PREFER).
 METHOD_PREFER = _parse_map("PUBLIC_RPC_PREFER", {"getTokenLargestAccounts": "solana-rpc.publicnode.com"})
 LIVE_MARKER_SECONDS = 2.0
+# a lower lane steps aside for higher ones at most this long per call, then it only obeys the window caps: with
+# ten services some live or normal caller is waiting nearly always, and a bulk round could starve (18.10.: the
+# research discovery round hung and the retrain behind it never ran)
+LANE_YIELD_MAX_S = float(os.getenv("LANE_YIELD_MAX_S", "30"))
 LANE_RANK = {"live": 2, "normal": 1, "bulk": 0}  # waiting order: live before normal before bulk
 
 
@@ -771,9 +775,9 @@ def _window_wait(host, method, priority):
                 per_method = max(1, per_method // 2) if _halved(host, now) else per_method
                 # live: whole window; normal (service cycles): all but half the live share; bulk: no live share
                 cap = total_cap if live else int(total_cap * (1 - live_share() * (0.5 if rank == 1 else 1.0)))
-                live_waiting = False  # a higher lane is waiting -> step aside
+                live_waiting = False  # a higher lane is waiting -> step aside (for LANE_YIELD_MAX_S at most)
                 for r, mk in markers.items():
-                    if r > rank:
+                    if r > rank and now - t0 < LANE_YIELD_MAX_S:
                         try:
                             live_waiting = live_waiting or now - os.path.getmtime(mk) < LIVE_MARKER_SECONDS
                         except OSError:
