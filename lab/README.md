@@ -34,7 +34,9 @@ pumpswap 0,30 %, Raydium/Meteora 0,25 %. Beispiele bei 0,1 SOL: pumpswap mit 500
 
 `traegt`: nach Kosten in allen drei Zeitdritteln positiv, n ≥ 200, ≥ 50 Coins, t ≥ 3 über die Coin-Mittel
 (ein Coin mit vielen Einstiegen zählt einmal). `kandidat`: im Mittel positiv und in zwei von drei Dritteln.
-Nur eine tragende Tasche soll Einsatz im Hauptkonto bekommen.
+Nur eine tragende Tasche soll Einsatz im Hauptkonto bekommen. Jede Zeile im Bericht trägt `brain_kind` (die Art im
+Entscheider: `market` für Kursreihen- und Migrations-Hypothesen, `launch` für `launch_*`, `pool` für `label_*`, dazu
+`source` = die meldende Quelle), damit der Entscheider die Freigabe der richtigen Art zuordnet.
 
 Als Dienst `lab` in mayham.py: die nächste Runde zählt ab `at` im letzten Bericht (ein Deploy-Neustart rechnet nicht neu), wartet während `data/TRAINING` (Retrain) und läuft mit nice 10.
 
