@@ -32,10 +32,14 @@ STAGED_TRAIL = 0.10  # staged pump (safety check 'staged', data.pattern, 15784c6
 STAGED_AFTER_HIGH_S = 15 * 60  # ... or 15 min after the high (74 % drained within 60 min, mostly 15-60 min after it)
 STAGED_REFRESH_S = 300
 STAGED_YOUNG_H = 1.0
+STAGED_OLD_REFRESH_S = 900  # older coins: the exit risk is read less often
+EXIT_RISK_SELL = 60  # safety check 'exit' (status ok): ~-60 % liquidity in 60 min, insider sales ~25 % of it, or two
+# medium reasons together (safety thread 18.10., derived from its ramp, to be calibrated on the exits it causes)
 INFLOW_DROP = 0.6  # 5-min buys under this share of their peak while in profit: the rush is over
 EXIT_NAMES = {"target": "Ziel erreicht", "stop": "Stop-Loss", "trail": "Trailing-Stop", "time": "Zeit abgelaufen",
               "whale": "Wal verkauft", "inflow_peak": "Ansturm vorbei", "rug": "Liquidität abgezogen",
-              "no_market": "kein Markt", "organic": "Zustand des Coins gekippt"}
+              "no_market": "kein Markt", "organic": "Zustand des Coins gekippt",
+              "staged": "inszenierter Pump", "exit_risk": "Insider ziehen ab"}
 VERDICT_EVERY_S = 600
 MARKET_MIN_N = 30
 MARKET_WINDOW_S = 3 * 86400
@@ -52,11 +56,16 @@ def _depth(snap) -> float:
     return snap.liquidity_usd or getattr(snap, "curve_liq_usd", 0.0) or 0.0
 
 
-def _default_staged(conn, mint) -> bool:
+def _default_staged(conn, mint) -> tuple[bool, float | None]:
+    """(confirmed staged pump?, exit risk 0-85 or None) from one quick safety assessment."""
     import safety  # type: ignore
 
     a = safety.assess(mint, conn, deep=False)
-    return bool(((a.checks or {}).get("staged") or {}).get("data", {}).get("pattern"))
+    checks = a.checks or {}
+    staged = bool(((checks.get("staged") or {}).get("data") or {}).get("pattern"))
+    ex = checks.get("exit") or {}
+    risk = ex.get("risk") if ex.get("status") == "ok" else None
+    return staged, risk
 
 
 def _default_curve(conn, mint, now):
@@ -124,7 +133,7 @@ class Trader:
         self._executor = executor
         self.safety_check = safety_check or _default_safety
         self.staged_check = staged_check or _default_staged
-        self._staged: dict[str, tuple[float, bool]] = {}
+        self._staged: dict[str, tuple[float, bool, float | None]] = {}
         self.curve_now = curve_now or _default_curve
         self._snaps: dict = {}  # the last market snapshot per open mint, for the curve exits between two price rounds
         try:  # once, before the first trade on the split accounts
@@ -639,8 +648,9 @@ class Trader:
             self.conn.execute("UPDATE brain_positions SET meta=? WHERE id=?", (json.dumps(meta), p["id"]))
         if p["entry_liq_usd"] and _depth(snap) < (1 - RUG_LIQ_DROP) * p["entry_liq_usd"]:
             return "rug", False
-        if self._staged_exit(p, snap, now, max(p["high_price_sol"] or entry, px)):
-            return "staged", False
+        why = self._safety_exit(p, snap, now, max(p["high_price_sol"] or entry, px))
+        if why:
+            return why, False
         if px <= entry * (1 - exits.CRASH_STOP):
             return "stop", False
         held = (now - p["opened_at"]) / 60
@@ -679,20 +689,28 @@ class Trader:
             return "organic", False
         return None, act == "half"
 
-    def _staged_exit(self, p, snap, now: float, high: float) -> bool:
-        """A confirmed staged pump (safety check 'staged'): out 10 % under the high or 15 min after it, before the
-        drain. Read from the stored safety result, again every 5 min while the coin is young; a found pattern stays."""
-        at, hit = self._staged.get(p["mint"], (0.0, False))
-        if not hit and not (at and (now - at < STAGED_REFRESH_S or (snap.age_hours or 0) > STAGED_YOUNG_H)):
+    def _safety_exit(self, p, snap, now: float, high: float) -> str | None:
+        """From the stored safety assessment, every 5 min while the coin is young, every 15 min after: a confirmed
+        staged pump (out 10 % under the high or 15 min after it, before the drain; a found pattern stays) or the
+        insiders leaving (check 'exit' risk >= EXIT_RISK_SELL)."""
+        at, hit, risk = self._staged.get(p["mint"], (0.0, False, None))
+        every = STAGED_REFRESH_S if (snap.age_hours or 0) <= STAGED_YOUNG_H else STAGED_OLD_REFRESH_S
+        if not at or now - at >= every:
             try:
-                hit = bool(self.staged_check(self.conn, p["mint"]))
+                r = self.staged_check(self.conn, p["mint"])
+                st, risk = r if isinstance(r, tuple) else (r, None)
+                hit = hit or bool(st)
             except Exception as e:
                 log.debug("staged %s: %s", p["mint"][:6], e)
-            self._staged[p["mint"]] = (now, hit)
+            self._staged[p["mint"]] = (now, hit, risk)
+        if risk is not None and risk >= EXIT_RISK_SELL:
+            return "exit_risk"
         if not hit:
-            return False
+            return None
         hi_ts = self.live.high_at.get(p["id"], p["opened_at"])
-        return snap.price_sol <= high * (1 - STAGED_TRAIL) or now - hi_ts >= STAGED_AFTER_HIGH_S
+        if snap.price_sol <= high * (1 - STAGED_TRAIL) or now - hi_ts >= STAGED_AFTER_HIGH_S:
+            return "staged"
+        return None
 
     def sell_half(self, p, snap) -> bool:
         """Take half off the table: the rest keeps running, the proceeds are booked at once."""
@@ -729,8 +747,9 @@ class Trader:
         high = max(p["high_price_sol"] or entry, px)
         if p["entry_liq_usd"] and _depth(snap) < (1 - RUG_LIQ_DROP) * p["entry_liq_usd"]:
             return "rug"
-        if self._staged_exit(p, snap, now, high):
-            return "staged"
+        why = self._safety_exit(p, snap, now, high)
+        if why:
+            return why
         trail_on = (p["trail_activate"] and now - p["opened_at"] >= TRAIL_MIN_HOLD_S
                     and high / entry - 1 >= p["trail_activate"])
         stop_px = max(entry * (1 - p["stop_loss"]), high * (1 - p["trail_drawdown"]) if trail_on else 0)

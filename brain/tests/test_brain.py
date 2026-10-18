@@ -1369,3 +1369,22 @@ def test_every_opportunity_is_followed_for_an_hour_and_the_pool_learns_its_label
     assert learner.learn_labels(conn, pm, s) == 2 and pm.n == pytest.approx(2 * learner.LABEL_WEIGHT)
     assert learner.learn_labels(conn, pm, s) == 0  # the cursor moved on
     assert pm.predict(tokens("pool", {"src": "sniper", "buyers": "1e1"}))[0][0] > 0
+
+
+def test_insiders_leaving_close_the_position(conn, s):
+    mk = Market()
+    set_tier(conn, WHALE, "ultra")
+    mk.snaps[MINT] = snap()
+    clock = [time.time()]
+    risk = [20.0]
+    t = make_trader(conn, s, trained(), mk, clock=lambda: clock[0], staged_check=lambda c, m: (False, risk[0]))
+    t.scan()
+    add_whale_buy(conn, "x1", ts=clock[0])
+    assert t.scan() == 1
+    assert t.manage() == 0
+    risk[0] = 65.0
+    clock[0] += 60
+    assert t.manage() == 0  # read again only after the refresh
+    clock[0] += 900  # a coin three hours old: every 15 min
+    assert t.manage() == 1
+    assert conn.execute("SELECT exit_reason FROM brain_positions").fetchone()[0] == "exit_risk"
