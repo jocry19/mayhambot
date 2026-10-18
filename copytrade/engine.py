@@ -65,6 +65,10 @@ class Engine:
         if time.time() - float(store.get_state(c, "last_bookkeeping") or 0) >= stats.LEDGER_EVERY_S:
             store.set_state(c, "last_bookkeeping", str(int(time.time())))
             try:
+                fix = stats.fix_ledger_once(c, s)
+                if fix and fix["applied"]:
+                    log.warning("ledger fix %s: balance %.4f -> %.4f SOL (%s)", fix["mode"], fix["old"], fix["new"],
+                                fix["cause"])
                 line = stats.bookkeeping_line(c, s)
                 (log.warning if "DIFF" in line else log.info)(line)
                 store.set_state(c, "bookkeeping", json.dumps({"ledger": stats.ledger(c, s), "costs": stats.costs(c)}))

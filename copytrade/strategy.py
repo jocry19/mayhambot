@@ -27,7 +27,7 @@ import sqlite3
 import threading
 import time
 
-from . import control, learn, market, ranking, store
+from . import control, learn, market, ranking, store, tracker
 from .chain import Swap, _decimals_cache
 from .config import Settings
 
@@ -212,7 +212,11 @@ class Strategy:
     def _explore_ok(self, swap: Swap) -> bool:
         """The exploration account copies this buy: account on, whale buy big enough, wallet tier in CT_EXPLORE_TIERS."""
         s = self.s
-        if not s.explore or "explore" not in self.exs or swap.sol_amount < s.explore_min_sol:
+        if not s.explore or "explore" not in self.exs:
+            return False
+        if swap.wallet in tracker.BLOCK0:  # block-0 group: $1 buys in a launch's first moment, explored at any size
+            return True
+        if swap.sol_amount < s.explore_min_sol:
             return False
         tiers = {t.strip() for t in s.explore_tiers.split(",") if t.strip()}
         return (store.wallet_info(self.conn, swap.wallet).get("tier") or "none") in tiers
@@ -253,8 +257,9 @@ class Strategy:
             return self._skip("whale", swap.mint, f"zu spät erkannt ({age:.0f}s)", wallet=swap.wallet)
         p = control.preset(self.conn, "whale")
         ex = self.executor("whale")
+        block0 = swap.wallet in tracker.BLOCK0
         nb, kb = launch_bot_share(self.conn, swap.wallet)
-        if nb >= LAUNCH_BOT_MIN_N and kb / nb >= LAUNCH_BOT_SHARE:
+        if not block0 and nb >= LAUNCH_BOT_MIN_N and kb / nb >= LAUNCH_BOT_SHARE:
             return self._skip("whale", swap.mint, f"Launch-/Dev-Bot ({kb} von {nb} Käufen in den ersten "
                               f"{LAUNCH_BOT_S} s eines Coins), nicht kopierbar", wallet=swap.wallet)
         rank = ranking.wallet_rank(self.conn, swap.wallet)
@@ -276,6 +281,8 @@ class Strategy:
                 size *= edge["size_factor"]  # conviction: more size for a clearer edge, never above 1.5x
         if not why and swap.sol_amount < s.min_whale_buy_sol:
             why = f"Wal-Kauf zu klein ({swap.sol_amount:.2f} SOL)"
+        if block0:  # exploration only: the plan's test is >= +5 % net over 100 copies before anything stricter
+            why = why or "Block-0-Gruppe (nur Erkundung)"
         # accounts that take this buy: the strict one when every wallet gate passed, exploration when eligible
         accounts = ([] if why else ["paper"]) + (["explore"] if expl else [])
         if not accounts:
@@ -365,8 +372,8 @@ class Strategy:
                 "model_score": winfo.get("model_score"), "cluster": ent if ent != swap.wallet else None,
                 "exit_capture": winfo.get("exit_capture"), "capture": feats["capture"],
                 "param_version": exits["version"], "safety": safe, "edge": edge, "intel": iraw,
-                "thesis": learn.thesis(iraw)}
-        reason = (f"Wal {swap.wallet[:6]}… kaufte {swap.sol_amount:.1f} SOL"
+                "thesis": learn.thesis(iraw), "group": "block0" if block0 else None}
+        reason = (f"Wal {swap.wallet[:6]}… kaufte {swap.sol_amount:.3g} SOL"
                   + (f", Wal-Score {info['wallet_score']}" if rank else ", unbewertet")
                   + (f", Vorteil Ø {edge['mean']:+.1%} aus {edge['n']} Käufen, Größe ×{edge['size_factor']:.2f}"
                      if edge else "")
@@ -380,7 +387,7 @@ class Strategy:
         first = None
         for acc in accounts:
             if acc == "explore":
-                a_size, a_reason = s.explore_size_sol, f"Erkundung ({tier}): {reason}"
+                a_size, a_reason = s.explore_size_sol, f"Erkundung ({'block0' if block0 else tier}): {reason}"
                 a_info = {**info, "account": "explore", "edge": None, "strict_skip": why,
                           "learned_block": blocked or None}
                 a_ex = "explore"

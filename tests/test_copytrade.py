@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from copytrade import chain, market, ranking, stats, store, strategy
+from copytrade import chain, market, ranking, stats, store, strategy, tracker
 from copytrade.config import SOL_MINT, Settings
 from copytrade.execution import PaperExecutor
 
@@ -1082,3 +1082,28 @@ def test_ledger_check_and_measured_costs(env):
     assert "DIFF +0.2500" in stats.bookkeeping_line(conn, s)
     c = stats.costs(conn)["paper/whale"]
     assert c["n_entry"] == 1 and c["entry"] > 0 and c["n_exit"] == 1 and c["exit"] > 0
+
+
+def test_block0_group_is_explored_at_any_size_and_tagged(env, monkeypatch):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path), ex)
+    monkeypatch.setattr(strategy, "launch_bot_share", lambda c, w: (20, 20))  # looks like a launch bot
+    assert st.on_whale_buy(whale_buy(sol=0.005)) is None  # not in the group: under every minimum
+    monkeypatch.setattr(tracker, "BLOCK0", {W})
+    pid = st.on_whale_buy(whale_buy(sol=0.005))
+    import json as _json
+
+    rows = conn.execute("SELECT mode, meta FROM ct_positions").fetchall()
+    assert pid and [r[0] for r in rows] == ["explore"] and _json.loads(rows[0][1])["group"] == "block0"
+
+
+def test_ledger_fix_runs_once_and_keeps_the_old_value(env):
+    s, conn, ex, state = env
+    ex.balance(conn)
+    ex.adjust_balance(conn, 0.22)
+    rec = stats.fix_ledger_once(conn, s)
+    assert rec["applied"] and rec["old"] == pytest.approx(s.paper_start_balance_sol + 0.22)
+    assert abs(stats.ledger(conn, s)["paper"]["diff"]) < 1e-9
+    ex.adjust_balance(conn, 0.1)
+    assert stats.fix_ledger_once(conn, s) is None  # once only: later differences are reported, not corrected
+    assert conn.execute("SELECT 1 FROM ct_events WHERE kind='verify'").fetchone()

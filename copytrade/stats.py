@@ -1,6 +1,7 @@
 """Statistics for the dashboard and the CLI (pandas DataFrames)."""
 from __future__ import annotations
 
+import json
 import statistics
 import time
 
@@ -315,3 +316,33 @@ def bookkeeping_line(conn, s: Settings) -> str:
         parts.append(f"cost {k}: n {d['n']}, entry {pct(d['entry'])} (n {d['n_entry']}), exit {pct(d['exit'])}"
                      f" (n {d['n_exit']}), whale lag {pct(d['lag'])}")
     return "bookkeeping: " + "; ".join(parts or ["no paper account yet"])
+
+
+LEDGER_FIX_KEY = "ledger_fix_2026_10_18"  # one-time correction, its record stays in ct_state
+
+
+def fix_ledger_once(conn, s: Settings, mode: str = "paper") -> dict | None:
+    """Set a paper balance to its ledger once (18.10., user's go: the strict balance stood 0.2202 SOL above it, a
+    double credit from before the atomic booking). Old and new value stay in ct_state and the event log, so the
+    correction can be checked and undone. Later differences are only reported by the hourly check."""
+    from . import store
+
+    if store.get_state(conn, LEDGER_FIX_KEY) is not None:
+        return None
+    d = ledger(conn, s).get(mode)
+    if not d:
+        return None
+    applied = abs(d["diff"]) > LEDGER_TOLERANCE_SOL
+    rec = {"mode": mode, "old": d["balance"], "new": d["expected"] if applied else d["balance"], "diff": d["diff"],
+           "ts": int(time.time()), "applied": applied, "cause": "Doppelgutschrift vor atomarer Buchung"}
+    key = "paper_balance_sol" if mode == "paper" else "explore_balance_sol"
+    conn.execute("BEGIN IMMEDIATE")
+    if applied:
+        conn.execute("UPDATE ct_state SET value=? WHERE key=?", (str(d["expected"]), key))
+    conn.execute("INSERT OR REPLACE INTO ct_state(key, value) VALUES (?, ?)", (LEDGER_FIX_KEY, json.dumps(rec)))
+    conn.commit()
+    if applied:
+        store.event(conn, "verify", f"Kontostand {mode} an die Trades angeglichen: {d['balance']:.4f} -> "
+                                    f"{d['expected']:.4f} SOL ({d['diff']:+.4f}, {rec['cause']}); alter Wert in "
+                                    f"ct_state {LEDGER_FIX_KEY}", data=rec)
+    return rec
