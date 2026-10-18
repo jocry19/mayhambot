@@ -76,3 +76,15 @@ def test_every_candidate_is_an_opportunity_for_the_brain(tmp_path):
     f = json.loads(rows[0][3])
     assert f["wallets_n"] == 1 and f["inflow_usd"] == 300 and f["dex"] == "pumpswap" and f["pc_5m"] == 6.5
     assert f["risk"] == 20 and f["signals.reason"] == "few_entities"
+
+
+def test_band_candidates_broken_down_by_reason():
+    from signals import shadow
+    keys = ("reason", "entities", "net_usd", "min_net", "safety_risk", "ret_1h", "max_ret_1h", "max_ret_4h")
+    rows = [dict(zip(keys, v)) for v in (("thin_liq", 2, 900, 3000, None, 0.1, 0.6, 0.6),
+                                        ("cooldown", 3, 1500, 3000, None, -0.2, 0.1, 0.2),
+                                        ("thin_liq", 1, 900, 3000, None, 0.1, 0.6, 0.6))]
+    rows = [type("R", (dict,), {"keys": dict.keys})(r) for r in rows]
+    g = shadow.groups(rows)
+    assert g["band candidate, thin_liq"]["n"] == 1 and g["band candidate, cooldown"]["n"] == 1
+    assert shadow._band(dict(entities=2, smart_buyers=2, net_usd=900)) is True

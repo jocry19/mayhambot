@@ -125,7 +125,10 @@ def fetch_trades(conn, watch, budget=None):
     return total
 
 
-HELIUS_RESERVE = 0.2  # keep the last 20 % of today's Helius share for live work (quick safety checks)
+# Backfill may take the paid lane only while more than this share of today's Helius credits is left (18.10.: at 0.2
+# it ate 3183 credits/day while 0 signals fired; the rest of the share is for live checks and the learning account).
+HELIUS_RESERVE = float(os.getenv("SIGNALS_HELIUS_RESERVE", 0.6))
+BACKFILL_REFRESH_S = int(float(os.getenv("BACKFILL_REFRESH_HOURS", 72)) * 3600)  # a wallet's history again after
 
 
 def helius_ok():
@@ -151,7 +154,8 @@ def backfill(conn, deadline=None):
     mints = set()
     from core.sources.wallet_history import SkipForNow
     use_helius = helius_ok()
-    for w in wallets.backfill_candidates(conn, settings.backfill_wallets_per_cycle):
+    for w in wallets.backfill_candidates(conn, settings.backfill_wallets_per_cycle,
+                                          refresh_s=BACKFILL_REFRESH_S):
         if deadline and time.time() > deadline:
             break
         try:

@@ -92,9 +92,10 @@ def test_backfill_leaves_helius_reserve(monkeypatch):
     monkeypatch.setattr(http, "_service", "signals", raising=False)
     monkeypatch.setattr(http, "credits", lambda svc: {"credits_day_budget": 1000})
     monkeypatch.setattr(http, "CREDIT_BURST", {})
-    monkeypatch.setattr(http, "credits_left_today", lambda service=None: 500)
+    monkeypatch.setattr(run, "HELIUS_RESERVE", 0.6)
+    monkeypatch.setattr(http, "credits_left_today", lambda service=None: 700)
     assert run.helius_ok()
-    monkeypatch.setattr(http, "credits_left_today", lambda service=None: 150)
+    monkeypatch.setattr(http, "credits_left_today", lambda service=None: 500)   # 40 % used: backfill goes public
     assert not run.helius_ok()
     monkeypatch.setattr(http, "credits_left_today", lambda service=None: None)
     assert run.helius_ok()

@@ -296,8 +296,9 @@ RPC_10_CREDITS = {"getProgramAccounts", "getTransactionsForAddress", "getTransfe
 # Share of the usable month (after the reserve) per service, percent. Override: HELIUS_SHARE_<SERVICE>.
 # brain: every paper buy needs a rug verdict (getTokenLargestAccounts), which the public nodes refuse in long 429
 # stretches; with no share of its own it only borrowed and fell through to mainnet-beta. Research spends little.
-DEFAULT_CREDIT_SHARES = {"research": 45, "signals": 12.5, "safety": 12.5, "copytrade": 12.5, "sniper": 12.5,
-                         "brain": 5}
+# 18.10.: signals 12.5 -> 7.5 (its backfill is capped, see signals/run.py), brain 5 -> 10 for the learning account
+DEFAULT_CREDIT_SHARES = {"research": 45, "signals": 7.5, "safety": 12.5, "copytrade": 12.5, "sniper": 12.5,
+                         "brain": 10}
 # Services that react to events may run ahead of their even daily share (still never past their month share).
 CREDIT_BURST = {"safety": 1.5, "sniper": 1.5, "brain": 1.5}
 PUBLIC_RPC = "https://api.mainnet-beta.solana.com"

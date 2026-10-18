@@ -34,7 +34,7 @@ def _has_table(conn, name):
     return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
 
 
-def backfill_candidates(conn, limit, skip_research=True):
+def backfill_candidates(conn, limit, skip_research=True, refresh_s=6 * 3600):
     """Wallets worth fetching full history for: early, profitable entries, not bots, not recently backfilled.
     skip_research: leave out wallets research/ already loads (research_wallets) or the model scored."""
     skip = ""
@@ -48,7 +48,7 @@ def backfill_candidates(conn, limit, skip_research=True):
            WHERE w.is_bot=0 AND w.backfilled_at < ? AND p.buy_usd >= ?{skip}
            GROUP BY w.address
            ORDER BY w.manual DESC, MAX(COALESCE(p.peak_multiple,0)) * (SUM(p.roi > 0) + 1) DESC
-           LIMIT ?""", (int(time.time()) - 6 * 3600, settings.min_position_usd, limit))]
+           LIMIT ?""", (int(time.time()) - refresh_s, settings.min_position_usd, limit))]
 
 
 def mark_backfilled(conn, address):

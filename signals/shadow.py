@@ -39,6 +39,14 @@ def _market(conn, mint, price, now):
     return t, before, created
 
 
+def _band(m):
+    try:
+        from signals import engine
+        return bool(engine.in_band(dict(m, smart_buyers=m.get("smart_buyers") or 0, net_usd=m.get("net_usd") or 0)))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def report_opportunity(conn, source, ref, mint, now, price, m, reason=None, action="passed", kind="v1", mkt=None):
     """One row in the brain's shared opportunities table (brain.opportunities.report): raw values under the shared
     names, everything else as signals.<name>; the funnel's verdict is a feature (source_reason), not a gate."""
@@ -67,7 +75,7 @@ def report_opportunity(conn, source, ref, mint, now, price, m, reason=None, acti
          "signals.txns_m5": t[5] if t else None, "signals.txns_h1": t[6] if t else None,
          "signals.volume_h1": t[7] if t else None, "signals.holders": m.get("holders"),
          "signals.hold_share": m.get("share"), "signals.span_min": m.get("span_min"),
-         "signals.receivers": m.get("n_receivers"),
+         "signals.receivers": m.get("n_receivers"), "signals.band": _band(m),
          "signals.lag_last_s": now - m["smart_last_ts"] if m.get("smart_last_ts") else None}
     try:
         return report(conn, source, ref, mint, now, f, symbol=(t[8] if t else "") or "", price_usd=price,
@@ -197,7 +205,10 @@ def groups(rows):
     # confidence hypotheses (see funnel.CONFIDENCE_GROUPS): the same features among the rejected coins
     ent = lambda r: (r["entities"] or 0) if "entities" in r.keys() else 0  # noqa: E731 - retro rows have none
     out["any reason: entities>=3"] = _stats([r for r in rows if ent(r) >= 3])
-    out["any reason: net 500-2000, entities>=2"] = _stats([r for r in rows if ent(r) >= 2 and 500 <= (r["net_usd"] or 0) <= 2000])
+    band = [r for r in rows if ent(r) >= 2 and 500 <= (r["net_usd"] or 0) <= 2000]
+    out["any reason: net 500-2000, entities>=2"] = _stats(band)
+    for k in sorted({r["reason"] for r in band}):  # why band candidates did not become calls
+        out[f"band candidate, {k}"] = _stats([r for r in band if r["reason"] == k])
     return out
 
 
