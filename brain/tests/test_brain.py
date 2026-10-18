@@ -1038,3 +1038,17 @@ def test_challenge_stakes_slide_with_the_patterns_trust(conn, s):
     key, tr = t.pockets.match("market", {"dex": "pumpswap"})
     assert key and tr > 0.9
     assert t.pockets.match("whale", {"tier": "ultra"}) == (None, 0.5)
+
+
+def test_every_source_reports_into_one_opportunity_table(conn):
+    from brain import opportunities as O
+    assert O.report(conn, "sniper", "sig1", MINT, 1000, {"mc_usd": 12000.0, "buyers": 7, "bundle": True,
+                                                         "sniper.risk": 40, "bad": float("nan"), "none": None,
+                                                         "obj": {"x": 1}}, price_sol=1e-6)
+    assert not O.report(conn, "sniper", "sig1", MINT, 1001, {})  # one row per (source, ref)
+    assert O.report(conn, "copytrade", "sig1", MINT, 1002, {"wallet_tier": "ultra", "delay_s": 3.5})
+    O.source_result(conn, "sniper", "sig1", -1.0)
+    rows = conn.execute("SELECT * FROM opportunities ORDER BY id").fetchall()
+    assert [r["source"] for r in rows] == ["sniper", "copytrade"]
+    assert json.loads(rows[0]["features"]) == {"mc_usd": 12000.0, "buyers": 7, "bundle": True, "sniper.risk": 40}
+    assert rows[0]["source_result"] == -1.0 and rows[0]["reported_at"]
