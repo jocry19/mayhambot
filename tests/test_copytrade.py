@@ -852,9 +852,10 @@ def test_bonding_curve_coins_only_explored_and_late_copies_skipped(env, monkeypa
     assert st.on_whale_buy(whale_buy()) is None  # strict account: curve coins lost -17 % net in the research data
     assert any("Bonding Curve" in r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'"))
     monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": "smart"})
-    assert st.on_whale_buy(whale_buy(sol=1.0))
-    assert [r[0] for r in conn.execute("SELECT mode FROM ct_positions")] == ["explore"]
+    assert st.on_whale_buy(whale_buy(sol=1.0)) is None  # exploration neither: 22 curve copies -18.7 %, 9 % winners
     state["snap"] = dataclasses.replace(state["snap"], dex_id="pumpswap")
+    assert st.on_whale_buy(chain.Swap("sigSwap", W, int(time.time()) - 5, "buy", MINT, 1e6, 1.0, 3e-6))
+    assert [r[0] for r in conn.execute("SELECT mode FROM ct_positions")] == ["explore"]
     late = chain.Swap("sigLate", W, int(time.time()) - strategy.MAX_ENTRY_AGE_S - 5, "buy", MINT, 1e6, 1.0, 3e-6)
     assert st.on_whale_buy(late) is None
 
@@ -866,6 +867,7 @@ def test_curve_depth_from_price_lets_exploration_buy_a_curve_coin(env, monkeypat
     assert market.curve_liquidity_usd("pumpfun", 30 / 1.073e9, 100.0) == pytest.approx(6000)
     assert market.curve_liquidity_usd("pumpswap", 30 / 1.073e9, 100.0) == 0
     s, conn, ex, state = env
+    monkeypatch.setattr(strategy, "EXPLORE_CURVE", True)  # the curve path itself (block-0 copies use it)
     st = strategy.Strategy(conn, Settings(db_path=s.db_path, thompson=False), ex)
     monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": "smart"})
     state["snap"] = dataclasses.replace(state["snap"], dex_id="pumpfun", liquidity_usd=0.0)
@@ -1220,6 +1222,7 @@ def test_first_minute_curve_coin_priced_from_the_sniper_curve(env, monkeypatch):
     from sniper import store as sstore
 
     s, conn, ex, state = env
+    monkeypatch.setattr(strategy, "EXPLORE_CURVE", True)  # the curve path itself (block-0 copies use it)
     st = strategy.Strategy(conn, Settings(db_path=s.db_path, thompson=False), ex)
     monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": "smart"})
     monkeypatch.setattr(market, "snapshot", lambda m, s=None: None)  # DexScreener: no pair yet
@@ -1232,3 +1235,19 @@ def test_first_minute_curve_coin_priced_from_the_sniper_curve(env, monkeypatch):
 
     p = conn.execute("SELECT mode, meta FROM ct_positions WHERE id=?", (pid,)).fetchone()
     assert p["mode"] == "explore" and _json.loads(p["meta"])["dex"] == "pumpfun"
+
+
+def test_a_rug_blocked_coin_is_not_checked_again_on_every_repeat_buy(env, monkeypatch):
+    import safety
+
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, thompson=False), ex)
+    monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": "smart"})
+    real, calls = safety.assess, []
+    monkeypatch.setattr(safety, "assess", lambda *a, **k: calls.append(1) or real(*a, **k))
+    safety.block(conn, MINT, "Test-Rug")
+    for i in range(5):  # one bot buying the same coin again and again (10/18: 437 buys of GHOSTI)
+        assert st.on_whale_buy(chain.Swap(f"sigR{i}", W, int(time.time()) - 5, "buy", MINT, 1e6, 1.0, 3e-6)) is None
+    assert len(calls) == 1
+    safety.allow(conn, MINT, "geprüft")  # your manual allow still wins at once
+    assert st.on_whale_buy(chain.Swap("sigR9", W, int(time.time()) - 5, "buy", MINT, 1e6, 1.0, 3e-6))

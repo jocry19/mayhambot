@@ -62,7 +62,14 @@ MAX_ENTRY_AGE_S = 30
 # vs -6.5 % and 28 % after migration (n 449); the strict account skips them, exploration keeps measuring
 CURVE_DEX = "pumpfun"
 BLOCK0_SIZE = 0.5  # block-0 copies at half the exploration size: most likely dev/bundle insiders (Erkenntnisse 1d)
-SMALL_SUMMARY_S = 600  # one summary line for the whale buys under the copy minimum
+SMALL_SUMMARY_S = 600
+# a coin the rug check blocked is not checked again for this long (whale path): 10/18 one block-0 bot bought GHOSTI
+# 437 times in a day and every buy ran the check again (412 identical blocks), on the rug thread's RPC budget
+SAFETY_BLOCK_TTL_S = 1800
+# pump.fun bonding-curve coins: exploration stops copying them too (block-0 aside, its test needs launch coins).
+# Exploration 10/16-18: 22 curve copies -18.7 % mean, 9 % winners, -4.1 of the -6.2 summed; pumpswap 40 copies
+# -3.8 %, 33 % winners. Same direction as the research 10/17 (n 418, -17 % vs -6.5 % after migration)
+EXPLORE_CURVE = False  # one summary line for the whale buys under the copy minimum
 
 
 class ExploreExecutor:
@@ -113,6 +120,7 @@ class Strategy:
         self._sconn = None  # own connection for the sniper's curve state (sniper.store.connect)
         self._opp: dict | None = None  # the whale decision in progress, reported to brain.opportunities
         self._staged: dict[str, tuple[float, bool]] = {}  # mint -> (checked at, staged pump pattern)
+        self._blocked: dict[str, tuple[float, dict, str]] = {}  # mint -> (blocked at, safety info, reason)
         self._high_ts: dict[int, float] = {}  # position -> when its high was last raised (this process)
         self._pending: list[tuple[float, Swap]] = []  # whale buys waiting for the learned entry delay
         self._small = [0, 0.0, time.time()]  # whale buys too small for either account since the last summary
@@ -194,10 +202,14 @@ class Strategy:
             return "Guthaben zu klein"
         return None
 
-    def _safety(self, strategy: str, mint: str) -> tuple[dict, str | None]:
+    def _safety(self, strategy: str, mint: str, cached: bool = False) -> tuple[dict, str | None]:
         """Rug/honeypot/insider check (safety/) right before every buy, paper and live alike: the stored result while
         it is fresh, else the quick check (about 4 RPC calls). A coin no check could clear is not bought, so the
-        paper results show what the protection is worth (10/2026: 28 of 57 paper buys had no check at all)."""
+        paper results show what the protection is worth (10/2026: 28 of 57 paper buys had no check at all).
+        cached: a block from the last SAFETY_BLOCK_TTL_S stands without a new check (repeat buys of one coin)."""
+        hit = self._blocked.get(mint) if cached else None
+        if hit and time.time() - hit[0] < SAFETY_BLOCK_TTL_S and not self._allowed(mint):
+            return hit[1], hit[2]
         try:
             import safety  # type: ignore
 
@@ -210,10 +222,22 @@ class Strategy:
             return {"level": "unchecked", "checked": False}, "Rug-Prüfung nicht möglich (kein Kauf ohne Prüfung)"
         if info["blocked"]:
             why = "; ".join(info["reasons"][:2]) or info["level"]
+            self._blocked[mint] = (time.time(), info, f"Rug-Schutz blockiert ({why})")
+            if len(self._blocked) > 2000:
+                self._blocked = {m: v for m, v in self._blocked.items() if time.time() - v[0] < SAFETY_BLOCK_TTL_S}
             return info, f"Rug-Schutz blockiert ({why})"
         if not info["checked"]:
             return info, "Rug-Prüfung ohne Ergebnis (kein Kauf ohne Prüfung)"
         return info, None
+
+    def _allowed(self, mint: str) -> bool:
+        """You released this coin by hand (safety override 'allow'): a cached block no longer stands."""
+        try:
+            from safety import store as sstore  # type: ignore
+
+            return sstore.override(self.conn, mint) == "allow"
+        except Exception:
+            return False
 
     def _skip(self, strategy: str, mint: str, why: str, snap=None, **data) -> None:
         if self._opp is not None and strategy == "whale":
@@ -375,6 +399,10 @@ class Strategy:
                                snap, account="explore")
             else:
                 return self._skip("whale", swap.mint, f"Liquidität zu klein (${liq:,.0f})", snap)
+        if snap.dex_id == CURVE_DEX and "explore" in accounts and not (EXPLORE_CURVE or block0):
+            accounts.remove("explore")
+            if not accounts:
+                return self._skip("whale", swap.mint, "noch auf der Bonding Curve (pump.fun)", snap)
         if snap.dex_id == CURVE_DEX and "paper" in accounts:
             accounts.remove("paper")
             if not accounts:
@@ -391,7 +419,7 @@ class Strategy:
         avg_m5 = snap.buys_h1 / 12 if snap.buys_h1 else 0
         if avg_m5 and snap.buys_m5 > 3 * avg_m5 and snap.change_m5 > 30:
             return self._skip("whale", swap.mint, "Copy-Trader sind schon drin", snap)
-        safe, sw_why = self._safety("whale", swap.mint)
+        safe, sw_why = self._safety("whale", swap.mint, cached=True)
         if sw_why:
             return self._skip("whale", swap.mint, sw_why, snap, wallet=swap.wallet, safety=safe)
         wash = wash_share(self.conn, swap.mint)
