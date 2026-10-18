@@ -486,7 +486,8 @@ class Service:
             "rpc_ws_msgs": self.logs.msgs, "rpc_ws_mode": self.logs.mode, "rpc_ws_wanted": len(self.logs.want),
             "rpc_ws_attempts": self.logs.attempts, "rpc_ws_rejects": self.logs.rejects,
             "rpc_ws_reconnects": self.logs.reconnects,
-            "learned_rule": (self.engine.learned or {}).get("conditions"), "research_ts": self._research_ts, **self.stream_health(now), **self._launch_status(now)}))
+            "learned_rule": (self.engine.learned or {}).get("conditions"), "research_ts": self._research_ts,
+            "coverage_1h": self.engine.coverage(now), **self.stream_health(now), **self._launch_status(now)}))
 
     def any_connected(self):
         return bool(self.connected or self.logs.connected or (self.creates and self.creates.connected))
@@ -520,6 +521,13 @@ class Service:
             next((s for s, r in rates.items() if r["connected"]), None)
         return {"launch_sources": rates, "active_launch_source": active,
                 "launches_per_min": round(sum(r["first_per_min"] for r in rates.values()), 1)}
+
+    def coverage_round(self):
+        """Hourly: how much of the market the trade stream sees (plan 18.10.: goal 90 % for both)."""
+        c = self.engine.coverage(time.time())
+        pct = lambda v: "?" if v["share"] is None else f"{100 * v['share']:.0f} %"  # noqa: E731
+        log.info("Abdeckung (1 h): Launches mit Trades beim Entscheid %s von %d, Migrationen mit Trades %s von %d "
+                 "(Ziel je 90 %%)", pct(c["decide"]), c["decide"]["n"], pct(c["migrate"]), c["migrate"]["n"])
 
     def research_round(self):
         """Hourly: research on the real outcomes (own DB connection, CPU only, no network); an accepted rule is
@@ -631,6 +639,7 @@ class Service:
                  asyncio.create_task(self.every(600, self.tiers_round, 600)),
                  asyncio.create_task(self.every(3600, self.prune_round, 120)),
                  asyncio.create_task(self.every(3600, self.research_round, 300)),
+                 asyncio.create_task(self.every(3600, self.coverage_round, 3600)),
                  asyncio.create_task(self.every(300 if duration is None else 60, self.report, 60))]
         if self.cfg.use_geckoterminal:
             tasks.append(asyncio.create_task(self.every(self.cfg.gt_every_sec, self.gt_round, 30)))

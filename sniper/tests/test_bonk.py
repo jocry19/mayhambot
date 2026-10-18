@@ -147,3 +147,13 @@ def test_bonk_stream_never_shares_the_pump_rpc(tmp_path):
     c = cfg()
     c.bonk_ws_url = c.ws_url2 or c.ws_url
     assert Service(c, db_path=str(tmp_path / "b.db")).logs_bonk is None
+
+
+def test_coverage_counts_decisions_and_migrations(tmp_path):
+    from sniper import store
+    from sniper.engine import Engine
+    eng = Engine(cfg(), store.connect(str(tmp_path / "c.db")), enricher=None)
+    eng.cover["decide"].extend([(T0, True), (T0, False), (T0, False), (T0 - 7200, True)])
+    eng.cover["migrate"].append((T0, True))
+    c = eng.coverage(T0 + 10)
+    assert c["decide"] == {"n": 3, "share": 0.333} and c["migrate"] == {"n": 1, "share": 1.0}

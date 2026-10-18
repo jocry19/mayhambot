@@ -10,6 +10,7 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 
 from sniper import research, store
 from sniper.analyze import analyze
@@ -95,6 +96,8 @@ class Engine:
         self.stream_pools = None   # pools whose trades we receive (None = all); the RPC log stream decodes pump only
         self.book = PaperBook(cfg, conn)
         self.counters = {"creates": 0, "trades": 0, "migrations": 0, "stage1": 0, "stage2": 0, "entries": 0}
+        # stream coverage (plan 18.10., goal >= 90 %): (ts, had trades) per pump decision and per migration
+        self.cover = {"decide": deque(maxlen=20000), "migrate": deque(maxlen=5000)}
         self._resume()
 
     # ------------------------------------------------------------------ restart
@@ -172,6 +175,8 @@ class Engine:
             if kind == "migrate" or m.get("pool") in ("pump-amm", "raydium") and kind not in ("buy", "sell"):
                 st.migrated, st.migrated_ts = True, now
                 self.counters["migrations"] += 1
+                if st.pool == "pump":
+                    self.cover["migrate"].append((now, st.n_seen > 0))
                 if st.decided_ts:
                     store.update_launch(self.conn, mint, migrated=1, migrated_ts=int(now))
                 return st
@@ -186,6 +191,15 @@ class Engine:
                     self.book.check(self.conn, st, now, self.quote_fn)
                 return st
         return None
+
+    def coverage(self, now, window=3600):
+        """Share of pump.fun launches with at least one trade at the decision, and of migrations whose run we saw."""
+        out = {}
+        with self.lock:
+            for k, q in self.cover.items():
+                xs = [ok for t, ok in q if now - t <= window]
+                out[k] = {"n": len(xs), "share": round(sum(xs) / len(xs), 3) if xs else None}
+        return out
 
     def attach_wallet(self, mint, sig, wallet):
         with self.lock:
@@ -328,6 +342,8 @@ class Engine:
         self.counters["stage1_pump"] = self.counters.get("stage1_pump", 0) + 1
         if not F.get("n_trades"):
             self.counters["stage1_zero"] = self.counters.get("stage1_zero", 0) + 1
+        if st.pool == "pump":
+            self.cover["decide"].append((now, bool(F.get("n_trades"))))
         reason = None
         if st.pool == "pump" and (st.base_mcap_sol or 0) < st.base_floor():
             reason = "no_price"   # below the curve's start price: a broken quote, neither tradable nor measurable
