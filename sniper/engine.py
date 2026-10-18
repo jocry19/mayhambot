@@ -404,7 +404,7 @@ class Engine:
         # what the learned rule saw (stage 2 overwrites these columns): research trains on exactly this
         row["stage1_json"] = store.j({k: row.get(k) for k in research.BASE_FEATURES})
         store.save_launch(self.conn, row)
-        opportunity.report_decision(self.conn, st.mint, self.cfg)   # skips now; queued ones after stage 2
+        opportunity.report_decision(self.conn, st.mint, self.cfg)   # skips and queued ones now; stage 2 supplements
 
     def _outcomes(self, st, now):
         if st.decided_ts is None or st.done:
@@ -516,7 +516,7 @@ class Engine:
             st.decision = "skip"
             store.update_launch(self.conn, st.mint, decision="skip",
                                 skip_reason=getattr(st, "stage1_reason", None) or "budget")
-            opportunity.report_decision(self.conn, st.mint, self.cfg)
+            opportunity.report_decision(self.conn, st.mint, self.cfg, followup=True)
 
     def _gates(self, st, a, enr, p_rug, conn, now):
         """Skip reason after stage 2: the analysis, the rug model, the learned rule (replaces the score), the
@@ -581,7 +581,7 @@ class Engine:
             row = self._row(st, a, now, st.decision, reason, 2)
             row.update(calls_rpc=enr.get("calls_rpc"), calls_api=enr.get("calls_api"), prescore=st.prescore)
             store.save_launch(conn, row)
-            opportunity.report_decision(conn, st.mint, self.cfg)
+            opportunity.report_decision(conn, st.mint, self.cfg, followup=True)
             store.save_wallets(conn, st.mint, a.wallets)
             if not pos and st.subscribed and reason in ("bundle", "insider", "hard", "dev_sold"):
                 pass  # keep watching: outcomes of skipped launches show what the filter is worth

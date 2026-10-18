@@ -212,6 +212,55 @@ def test_decisions_and_results_reach_the_shared_opportunity_table(tmp_path):
         == (-1.0, 60)
 
 
+def test_queued_launch_is_reported_at_the_first_look_and_supplemented_after_the_deep_check(tmp_path):
+    import json
+    import brain.opportunities as bo
+    from sniper import opportunity, store
+    from sniper.engine import Engine
+    from sniper.tests.test_sniper import Curve, FakeEnricher, early_from, organic
+    conn = store.connect(str(tmp_path / "q.db"))
+    c = cfg()
+    eng = Engine(c, conn, enricher=FakeEnricher())
+    cv = Curve("BUNDLE")
+    eng.handle(cv.create(), T0)
+    bundle = [(f"bndl{i}", cv.buy(f"bndl{i}", 3.0, seen=False)) for i in range(4)]
+    organic(eng, cv, T0 + 1, n=30)
+    st = eng.tick(T0 + c.decide_sec + 1)
+    r = conn.execute("SELECT ts, source_action, features FROM opportunities WHERE ref='BUNDLE'").fetchone()
+    assert r and r[1] == "queued" and r[0] == T0 + c.decide_sec + 1      # reported at the first look
+    assert "sniper.final_action" not in json.loads(r[2])
+    eng.finalize(st[0], {"early": early_from(cv, bundle=bundle)}, now=T0 + 22)
+    assert conn.execute("SELECT COUNT(*) FROM opportunities WHERE source='sniper'").fetchone()[0] == 1
+    if not hasattr(bo, "supplement"):
+        return   # brain without supplement: the 20-s row stays
+    r = conn.execute("SELECT ts, source_action, features, supplemented_at FROM opportunities WHERE ref='BUNDLE'").fetchone()
+    f = json.loads(r[2])
+    assert r[0] == T0 + c.decide_sec + 1 and r[1] == "queued" and r[3]          # moment kept, supplement stamped
+    assert f["sniper.final_action"] == "skip" and f["sniper.final_reason"] == "bundle" and f["sniper.deep"] is True
+    assert f["bundle"] is True and f["sniper.bundle_wallets"] == 4
+
+
+def test_budget_skip_of_a_queued_launch_supplements_its_row(tmp_path):
+    import json
+    import brain.opportunities as bo
+    from sniper import store
+    from sniper.engine import Engine
+    from sniper.tests.test_sniper import Curve, organic
+    conn = store.connect(str(tmp_path / "b.db"))
+    c = cfg()
+    eng = Engine(c, conn)
+    cv = Curve("NOBUDGET")
+    eng.handle(cv.create(), T0)
+    [cv.buy(f"bndl{i}", 3.0, seen=False) for i in range(4)]
+    organic(eng, cv, T0 + 1, n=30)
+    st = eng.tick(T0 + c.decide_sec + 1)[0]
+    assert conn.execute("SELECT source_action FROM opportunities WHERE ref='NOBUDGET'").fetchone()[0] == "queued"
+    eng.skip_budget(st)
+    if hasattr(bo, "supplement"):
+        f = json.loads(conn.execute("SELECT features FROM opportunities WHERE ref='NOBUDGET'").fetchone()[0])
+        assert f["sniper.final_action"] == "skip" and f["sniper.final_reason"] == "bundle" and f["sniper.deep"] is False
+
+
 def test_silent_stream_moves_to_the_next_rpc():
     ls = rpcws.LogStream("wss://a", lambda m: None, 1, mode="program", program=rpcws.PUMP_PROGRAM,
                          fallbacks=["wss://b", "wss://a", ""])

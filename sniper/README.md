@@ -100,6 +100,10 @@ Rund 40 % der pump.fun-Launches werden nicht mehr in SOL, sondern in PUMP oder e
 
 Kauft der Creator die Curve schon beim Erstellen fast ganz (79,31 %), migriert der Coin sofort, und die Käufe danach laufen über den pump-AMM, nicht über die Curve. Der Datenstrom sieht sie nicht. `launch_block_round` (alle 15 s) liest für entschiedene Launches, die binnen 60 s nach dem Erstellen migriert sind, die ersten Signaturen des Mints (`getSignaturesForAddress`, öffentlicher RPC) und je Transaktion der ersten 3 Slots, wer den Token bekam und wie viel SOL er dafür zahlte (`sniper/launchblock.py`). Das Ergebnis landet in `sniper_launch_wallets` mit der Rolle `launch_block` und in `sniper_launches.block_buyers` und `block_buy_sol`, für das Masche-Veto der Rug-Prüfung.
 
+### Frühmeldung in die Gelegenheiten-Tabelle (seit 18.10.)
+
+Jeder pump.fun-Launch geht beim ersten Blick (20 s, `SNIPER_DECIDE_SEC`) in die gemeinsame Tabelle `opportunities` (`ref` = Mint), auch die, die in die Warteschlange zum Tiefencheck gehen (`source_action` = `queued`, Merkmale aus Stufe 1). Nach dem Tiefencheck, oder wenn ein wartender Launch aus Budgetgründen übersprungen wird, liefert `opportunity.report_decision(..., followup=True)` per `brain.opportunities.supplement` in dieselbe Zeile nach: Funder-Gruppen, Bundle und Insider nach Slot, Safety, `risk`, `rug_p` und das Endurteil (`sniper.final_action`, `sniper.final_reason`, `sniper.deep`). Aktivitätsmerkmale bleiben beim Stand von 20 s. Launches ohne Trades werden weiter beim zweiten Blick (75 s) gemeldet. Das Stundenlog zählt beides unter „Gelegenheiten seit Start“.
+
 ## Score
 
     momentum = 100 × (0,25 Käufer + 0,30 Netto-SOL + 0,15 Kaufdruck + 0,20 Smart Money + 0,10 Streuung)   (nur organische Käufer)

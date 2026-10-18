@@ -93,28 +93,68 @@ def _load(conn, mint):
     return dict(zip([c[0] for c in cur.description], t)) if t else None
 
 
-def report_decision(conn, mint, cfg):
+DEEP = {"shared_funder_groups": "sniper.funder_groups", "bundle_flag": "bundle", "bundle_wallets": "sniper.bundle_wallets",
+        "bundle_pct": "sniper.bundle_pct", "insider_flag": "sniper.insiders", "hard_flag": "sniper.hard",
+        "block0_wallets": "sniper.block0", "safety_risk": "sniper.safety_risk", "safety_level": "sniper.safety_level",
+        "risk": "risk", "rug_p": "sniper.rug_p", "model_p": "sniper.model_p", "has_socials": "sniper.socials",
+        "n_ultra": "sniper.ultra_buyers", "top10_pct": "top10_pct"}
+
+
+def deep_features(row):
+    """What the deep check (stage 2) adds to the 20-s report: funders, bundle and insiders by slot, safety, the
+    final verdict. Activity stays the stage-1 snapshot, so nothing from after the report's moment leaks in."""
+    out = {name: row.get(col) for col, name in DEEP.items()}
+    if out["bundle"] is not None:
+        out["bundle"] = bool(out["bundle"])
+    out.update({"sniper.deep": bool((row.get("stage") or 0) >= 2), "sniper.final_action": row.get("decision") or "",
+                "sniper.final_reason": row.get("skip_reason") or "", "sniper.final_score": row.get("score")})
+    return out
+
+
+def _action(decision):
+    return {"enter": "took", "queued": "queued"}.get(decision, "passed")
+
+
+def report_decision(conn, mint, cfg, followup=False):
     """One decided launch into the shared opportunity table (brain.opportunities); a repeat is ignored there.
-    Never raises: the table belongs to the brain and must not stop the sniper."""
+    Queued launches are reported at the first look (20 s) with the stage-1 features; `followup` (after the deep
+    check, or the budget skip of a queued launch) then adds the deep-check features to that same row via
+    brain.opportunities.supplement. Never raises: the table belongs to the brain and must not stop the sniper."""
     try:
         from brain.opportunities import report
         row = _load(conn, mint)
-        if not row or row.get("source") != "pumpportal" or row.get("decision") in (None, "pending", "queued"):
+        if not row or row.get("source") != "pumpportal" or row.get("decision") in (None, "pending"):
             return False
         o = from_row(row, cfg)
         f = o["features"]
         sol_usd = row.get("sol_usd") or 0.0
         price = (f.get("mcap_decide_sol") or 0) / 1e9 or None
-        new = report(conn, "sniper", mint, mint, o["ts"] or time.time(), shared_features(o, row), symbol=row.get("symbol") or "",
+        feats = shared_features(o, row)
+        if followup:
+            feats.update(deep_features(row))
+        new = report(conn, "sniper", mint, mint, o["ts"] or time.time(), feats, symbol=row.get("symbol") or "",
                      src_ts=row.get("created_ts"), price_sol=price, price_usd=price * sol_usd if price and sol_usd else None,
                      mcap_usd=(f.get("mcap_decide_sol") or 0) * sol_usd or None, source_score=row.get("score"),
-                     source_action="took" if o["action"] == "enter" else "passed", source_reason=o["reason"])
+                     source_action=_action(o["action"]), source_reason=o["reason"])
+        if not new and followup:
+            try:
+                from brain.opportunities import supplement
+            except ImportError:      # brain without supplement yet: the 20-s row stays as it is
+                supplement = None
+            if supplement:
+                supplement(conn, "sniper", mint, deep_features(row), ts=time.time())
+                COUNTS["supplemented"] += 1
+        if new:
+            COUNTS["early" if o["action"] == "queued" else "reported"] += 1
         conn.commit()
         return new
     except Exception as e:  # noqa: BLE001
         import logging
         logging.getLogger("sniper").debug("Gelegenheit %s nicht gemeldet: %s", mint, e)
         return False
+
+
+COUNTS = {"early": 0, "reported": 0, "supplemented": 0}   # since start, for the log
 
 
 def report_result(conn, mint, cfg):

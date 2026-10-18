@@ -691,6 +691,10 @@ class Service:
                      "doch gehandelt und %d nie | von allen Launches mit Trades binnen 5 min sahen wir beim Entscheid %s",
                      lt["zero"], lt["late_5m"], lt["never_5m"],
                      "?" if lt["share_of_traded"] is None else f"{100 * lt['share_of_traded']:.0f} %")
+        from sniper import opportunity
+        oc = opportunity.COUNTS
+        log.info("Gelegenheiten seit Start: %d Queue-Launches beim ersten Blick gemeldet, %d davon nach dem Tiefencheck "
+                 "ergänzt, %d direkt entschieden gemeldet", oc["early"], oc["supplemented"], oc["reported"])
 
     def research_round(self):
         """Hourly: research on the real outcomes (own DB connection, CPU only, no network); an accepted rule is
