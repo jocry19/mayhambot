@@ -203,3 +203,28 @@ def quantile(xs, q):
     if not xs:
         return None
     return xs[min(len(xs) - 1, max(0, int(q * (len(xs) - 1) + 0.5)))]
+
+
+def spearman(xs, ys):
+    """Rank correlation (average ranks for ties); None for fewer than 3 pairs or a constant input."""
+    if len(xs) < 3:
+        return None
+
+    def ranks(v):
+        order = sorted(range(len(v)), key=lambda i: v[i])
+        r = [0.0] * len(v)
+        i = 0
+        while i < len(order):
+            j = i
+            while j + 1 < len(order) and v[order[j + 1]] == v[order[i]]:
+                j += 1
+            for k in range(i, j + 1):
+                r[order[k]] = (i + j) / 2
+            i = j + 1
+        return r
+    rx, ry = ranks(xs), ranks(ys)
+    mx, my = sum(rx) / len(rx), sum(ry) / len(ry)
+    sxy = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    sxx = sum((a - mx) ** 2 for a in rx)
+    syy = sum((b - my) ** 2 for b in ry)
+    return sxy / (sxx * syy) ** 0.5 if sxx > 0 and syy > 0 else None

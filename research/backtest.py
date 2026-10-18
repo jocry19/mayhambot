@@ -175,6 +175,21 @@ def calibration(ps, ys, bins=5):
     return dict(bins=out, ece=ece)
 
 
+SCORE_BANDS = ((0, 20), (20, 30), (30, 45), (45, 101))  # the score bands the strategy trades on (score = 100 p)
+
+
+def score_bands(rows, key):
+    """Per band of 100 * rows[key]: cases, median and mean net after costs, win rate. Shows whether a higher
+    score means more money (the live finding of 10/2026: P(pump) ranked volatility, the top band lost most)."""
+    out = []
+    for lo, hi in SCORE_BANDS:
+        nets = [p["net"] for p in rows if lo <= 100 * p[key] < hi]
+        if nets:
+            out.append(dict(band=f"{lo}-{min(hi, 100)}", n=len(nets), median_net=stats.median(nets),
+                            mean_net=sum(nets) / len(nets), win_rate=sum(1 for x in nets if x > 0) / len(nets)))
+    return out
+
+
 def net_metrics(P):
     """After-cost view: mean net return of all events, of the top fifth by pump score, and (once trained) of the
     top fifth by the after-cost model, with that model's AUC on 'profit after costs'."""
@@ -188,7 +203,14 @@ def net_metrics(P):
     out = dict(n=len(rows), mean_net_all=mean([p["net"] for p in rows]),
                win_rate_all=mean([float(p["net"] > 0) for p in rows]),
                mean_net_top_pump=mean([p["net"] for p in sorted(rows, key=lambda p: -p["p"])[:k]]))
+    k5 = sorted(rows, key=lambda p: p["p"])
+    out.update(rank_corr_pump_net=stats.spearman([p["p"] for p in rows], [p["net"] for p in rows]),
+               mean_net_bottom_pump=mean([p["net"] for p in k5[:k]]),
+               bands_pump=score_bands(rows, "p"))
     nm = [p for p in rows if p.get("p_net") is not None]
+    if nm:
+        out.update(rank_corr_netmodel_net=stats.spearman([p["p_net"] for p in nm], [p["net"] for p in nm]),
+                   bands_net=score_bands(nm, "p_net"))
     if len(nm) >= 20 and 0 < sum(p["win"] for p in nm) < len(nm):
         kk = max(1, len(nm) // 5)
         top = sorted(nm, key=lambda p: -p["p_net"])[:kk]

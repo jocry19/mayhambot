@@ -529,3 +529,22 @@ def test_prediction_outcome_is_written_back_as_source_result(tmp_path):
         assert res[0] is None
     else:
         assert res[0] == pytest.approx(max(-1.0, ret) - 0.06) and res[1] == 60
+
+
+def test_score_bands_and_rank_correlation_show_an_inverted_score():
+    from research import backtest
+    rows = [dict(p=p / 100, net=-p / 100, y=0) for p in range(1, 80)]  # higher score, worse result
+    nm = backtest.net_metrics(rows)
+    assert nm["rank_corr_pump_net"] == pytest.approx(-1.0)
+    assert [b["band"] for b in nm["bands_pump"]] == ["0-20", "20-30", "30-45", "45-100"]
+    assert nm["bands_pump"][0]["median_net"] > nm["bands_pump"][-1]["median_net"]
+    assert nm["mean_net_bottom_pump"] > nm["mean_net_top_pump"]
+    assert stats.spearman([1, 2, 2, 3], [1, 2, 2, 3]) == pytest.approx(1.0) and stats.spearman([1, 1, 1], [1, 2, 3]) is None
+
+
+def test_report_shows_bands_and_wallet_rank(market):
+    conn, truth, now, vid = market
+    md = conn.execute("SELECT markdown FROM research_reports ORDER BY id DESC LIMIT 1").fetchone()
+    if md is None:
+        pytest.skip("no stored report")
+    assert "Score-Bänder 1h" in md[0] and "Wallet-Rangfolge vorwärts" in md[0]

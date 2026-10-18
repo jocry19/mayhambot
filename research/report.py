@@ -166,8 +166,8 @@ def build(conn, version_id, bt, tiers_now, weights, weight_info, models, prev=No
                 tier_counts=counts, weights=weights, weight_info=weight_info,
                 tier_profiles={}, tier_forward=m.get("tier_forward", {}),
                 combos=combos(evs, main), univariate=univariate(evs, main),
-                backtest={k: v for k, v in m.items() if k not in ("tier_forward", "selection", "exits")},
-                exits=m.get("exits") or {},
+                backtest={k: v for k, v in m.items() if k not in ("tier_forward", "selection", "exits", "wallet_rank")},
+                exits=m.get("exits") or {}, wallet_rank=m.get("wallet_rank") or {},
                 models={h: {"kind": mm.get("kind"), "algo": (mm.get("cfg") or {}).get("algo", mm.get("kind")),
                             "drop": (mm.get("cfg") or {}).get("drop"), "n": mm.get("n"), "pos": mm.get("pos"),
                             "weights": sorted(({"feature": f, "label": FEATURE_LABELS[f], "weight": c}
@@ -351,6 +351,23 @@ def render(d):
             if qs and qs[0].get("mean_net") is not None:
                 L.append(f"Score-Fünftel {h} (1 = höchster Score), Ø netto: " +
                          " · ".join(f"{q['quintile']}: {_pct(q['mean_net'])} (n {q['n']})" for q in qs) + "\n")
+        for h, v in bt.items():
+            nm = v.get("net") or {}
+            for key, name in (("bands_pump", "Pump-Score"), ("bands_net", "Netto-Modell")):
+                if nm.get(key):
+                    L.append(f"Score-Bänder {h} ({name}), Median netto: " + " · ".join(
+                        f"{b['band']}: {_pct(b['median_net'])} (n {b['n']})" for b in nm[key]) + "\n")
+            rc, rn = nm.get("rank_corr_pump_net"), nm.get("rank_corr_netmodel_net")
+            if rc is not None:
+                L.append(f"Rangkorrelation {h} mit Netto: Pump-Score {rc:+.2f}"
+                         + (f", Netto-Modell {rn:+.2f}" if rn is not None else "")
+                         + f"; unterstes Fünftel nach Pump-Score Ø {_pct(nm.get('mean_net_bottom_pump'))}\n")
+        wr = d.get("wallet_rank") or {}
+        if wr.get("all"):
+            names = dict(all="alle Käufe", net="Gewichte auf Netto", pumped="Gewichte auf Pump (alt)", prior="feste Startgewichte")
+            L.append("Wallet-Rangfolge vorwärts (oberstes Fünftel der Wallets nach Score, nächster Kauf, netto): " + " · ".join(
+                f"{names.get(k, k)} Ø {_pct(v['mean_net'])} (Untergrenze {_pct(v['ci_low'])}, Median {_pct(v['median_net'])}, n {v['n']})"
+                for k, v in wr.items()) + "\n")
         ex = d.get("exits") or {}
         if ex.get("top"):
             def rule(r):
