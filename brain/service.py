@@ -79,11 +79,14 @@ class Service:
 
     def _pooled(self, since: float) -> str:
         try:
-            rows = self.conn.execute("SELECT source, COUNT(*), COALESCE(SUM(decision IN ('learn','perform')),0) "
-                                     "FROM opportunities WHERE reported_at>=? GROUP BY source", (int(since),)).fetchall()
+            rows = self.conn.execute("SELECT source, COUNT(*), COUNT(decision), "
+                                     "COALESCE(SUM(decision IN ('learn','perform')),0) FROM opportunities "
+                                     "WHERE reported_at>=? GROUP BY source", (int(since),)).fetchall()
         except Exception:
             return "pooled none"
-        return "pooled " + (", ".join(f"{r[0]} {r[1]}/{r[2]} bought" for r in rows) or "none")
+        # reported / decided / bought: reported but undecided = too old when read (BRAIN_MAX_POOL_AGE_S), the brain's
+        # own sources, or the same coin from the same source within 6 h
+        return "pooled reported/decided/bought " + (", ".join(f"{r[0]} {r[1]}/{r[2]}/{r[3]}" for r in rows) or "none")
 
     def save(self) -> None:
         if self.dirty:

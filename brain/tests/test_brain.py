@@ -1211,3 +1211,20 @@ def test_stakes_need_predictions_that_separate_winners_from_losers(conn, s):
     assert t.settings(now, 0.99, 0.0).max_stake == s.unproven_stake  # trusted pattern, blunt predictions: small
     assert t.settings(now, 0.99, 1.0).max_stake > s.unproven_stake
     assert "discrimination" in store.get(conn, "pockets")
+
+
+def test_a_real_call_always_gets_a_learning_buy(conn, s):
+    from brain import opportunities as O
+    from brain.pool import Pool
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    pm = Pool(len(PLANS))
+    for _ in range(80):  # the pool thinks signals lose
+        pm.update(tokens("pool", {"src": "signals"}), {i: -0.4 for i in range(len(PLANS))})
+    t = make_trader(conn, s, trained(), mk, pool_model=pm)
+    t.scan()
+    O.report(conn, "signals", "signal:7", MINT, time.time(), {"wallets_n": 3}, source_action="alerted")
+    assert t.scan() == 1
+    p = conn.execute("SELECT * FROM brain_positions").fetchone()
+    assert p["kind"] == "pool" and p["size_sol"] == pytest.approx(s.learn_size_sol, rel=0.2)
+    assert conn.execute("SELECT decision FROM opportunities").fetchone()[0] == "learn"
