@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS opportunities (
     source TEXT NOT NULL, ref TEXT NOT NULL, mint TEXT NOT NULL, symbol TEXT,
     ts INTEGER NOT NULL, src_ts INTEGER, reported_at INTEGER,
     price_sol REAL, price_usd REAL, mcap_usd REAL, liq_usd REAL,
-    features TEXT, source_score REAL, source_action TEXT, source_result REAL,
+    features TEXT, source_score REAL, source_action TEXT, source_reason TEXT, source_result REAL,
+    source_horizon_min REAL,
     model TEXT, pred_mean REAL, pred_sd REAL, pred_q10 REAL, draw REAL,
     decision TEXT, account TEXT, size_sol REAL, decided_at INTEGER, position_id INTEGER,
     evaluated_at INTEGER, exit_plan TEXT, outcome_net REAL, outcome_gross REAL, cost REAL, rug INTEGER,
@@ -83,20 +84,22 @@ def _clean(features: dict | None) -> dict:
 def report(conn, source: str, ref: str, mint: str, ts: float, features: dict | None = None, *, symbol: str = "",
            src_ts: float | None = None, price_sol: float | None = None, price_usd: float | None = None,
            mcap_usd: float | None = None, liq_usd: float | None = None, source_score: float | None = None,
-           source_action: str | None = None) -> bool:
+           source_action: str | None = None, source_reason: str | None = None) -> bool:
     """Report one opportunity. ts = the moment a trader could have bought (unix s); ref = the source's own id, unique
     per source (a repeat report is ignored). features: flat {name: number | str | bool}, raw values (the brain
     buckets them itself), shared names from SHARED, everything else as "<source>.<name>". Returns True if new."""
     ensure(conn)
     cur = conn.execute(
         "INSERT OR IGNORE INTO opportunities(source, ref, mint, symbol, ts, src_ts, reported_at, price_sol, price_usd, "
-        "mcap_usd, liq_usd, features, source_score, source_action) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "mcap_usd, liq_usd, features, source_score, source_action, source_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (source, str(ref), mint, symbol or "", int(ts), int(src_ts) if src_ts else None, int(time.time()),
-         price_sol, price_usd, mcap_usd, liq_usd, json.dumps(_clean(features)), source_score, source_action))
+         price_sol, price_usd, mcap_usd, liq_usd, json.dumps(_clean(features)), source_score, source_action, source_reason))
     return cur.rowcount > 0
 
 
-def source_result(conn, source: str, ref: str, net: float) -> None:
-    """Optional: a source that traded the opportunity itself writes its own realized net result (fraction)."""
+def source_result(conn, source: str, ref: str, net: float, horizon_min: float | None = None) -> None:
+    """Optional: a source that traded or followed the opportunity itself writes its own net result after costs
+    (fraction, rug -1.0) and the horizon it measured over."""
     ensure(conn)
-    conn.execute("UPDATE opportunities SET source_result=? WHERE source=? AND ref=?", (net, source, str(ref)))
+    conn.execute("UPDATE opportunities SET source_result=?, source_horizon_min=? WHERE source=? AND ref=?",
+                 (net, horizon_min, source, str(ref)))
