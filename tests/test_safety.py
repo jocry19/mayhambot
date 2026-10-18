@@ -899,3 +899,19 @@ def test_brand_scam_without_sniper_record_is_read_from_the_chain_and_blocked_unt
     a = engine.Assessment(mint="m", ts=int(time.time()), score=90, level="critical", blocked=True, coverage=1.0,
                           checks={"masche": {"status": "gap"}})
     assert engine.ttl_for(a, CFG) == CFG.ttl_young_sec
+
+
+def test_pair_created_at_in_seconds_or_ms_and_old_rows_repaired():
+    from safety import sources, store
+    assert sources.epoch_s(1792297962000) == 1792297962 and sources.epoch_s(1792297962) == 1792297962
+    assert sources.epoch_s(None) is None and sources.epoch_s("x") is None
+    c = conn()
+    store.ensure_schema(c)
+    c.execute("INSERT INTO safety_tokens(mint, ts, pair_created_at) VALUES ('A', 1, 1792297), ('B', 1, 1792297962)")
+    c.commit()
+    store._repaired.discard(id(c))
+    store.ensure_schema(c)
+    store._repaired.discard(id(c))
+    store.ensure_schema(c)    # idempotent
+    got = dict(c.execute("SELECT mint, pair_created_at FROM safety_tokens"))
+    assert got == {"A": 1792297000, "B": 1792297962}

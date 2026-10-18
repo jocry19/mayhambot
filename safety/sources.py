@@ -21,6 +21,18 @@ _last_call = {}
 SCARCE_METHODS = {"getTokenLargestAccounts"}
 
 
+def epoch_s(x):
+    """Unix seconds from a timestamp in seconds or milliseconds. DexScreener documents pairCreatedAt as ms, but a
+    seconds value divided by 1000 again lands in January 1970 (market module, 0b962a9). None when missing."""
+    try:
+        v = float(x or 0)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    return int(v / 1000) if v > 1e11 else int(v)
+
+
 class BudgetExceeded(Exception):
     pass
 

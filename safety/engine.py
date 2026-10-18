@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass, field
 
 from safety import checks, store
 from safety.config import settings as default_settings
-from safety.sources import BudgetExceeded, Fetcher
+from safety.sources import BudgetExceeded, Fetcher, epoch_s
 
 log = logging.getLogger("mayhambot.safety")
 VERSION = "safety-v1"
@@ -192,7 +192,7 @@ def assess(mint, conn=None, deep=True, force=False, fetcher=None, cfg=None, prio
         a.deep_ts = int(time.time()) if deep_ran else (prev.deep_ts if prev else None)
         pair = ctx._memo.get("pair") or {}
         if pair.get("pairCreatedAt"):
-            a.pair_created_at = int(float(pair["pairCreatedAt"]) / 1000)
+            a.pair_created_at = epoch_s(pair["pairCreatedAt"])
         elif prev:
             a.pair_created_at = prev.pair_created_at
         store.save_assessment(conn, a)

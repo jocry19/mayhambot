@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from core.models import SOL_MINT
 
 from safety import store
-from safety.sources import BudgetExceeded
+from safety.sources import BudgetExceeded, epoch_s
 
 log = logging.getLogger("mayhambot.safety")
 
@@ -256,7 +256,7 @@ class Context:
             if d is None:
                 d = {"state": "paging", "pages": 0, "before": None, "tail": [], "reachable": None}
                 pair = self.pair() if "pair" in self._memo else None
-                created = int(float((pair or {}).get("pairCreatedAt") or 0) / 1000)
+                created = epoch_s((pair or {}).get("pairCreatedAt")) or 0
                 if created and self.now - created > self.cfg.launch_max_age_h * 3600:
                     d.update(state="unreachable", reachable=False, why="too_old")
                     store.save_launch(self.conn, self.mint, d)
@@ -884,7 +884,7 @@ def _launch_wallets(ctx):
         try:
             for w, role in ctx.conn.execute(sql, (ctx.mint,)):
                 out.setdefault(w, {"dev": "Ersteller", "bundle": "Bundle-Käufer", "insider": "Insider",
-                                   "early": "Frühkäufer"}.get(role, "Launch-Käufer"))
+                                   "early": "Frühkäufer", "launch_block": "Launch-Block-Käufer"}.get(role, "Launch-Käufer"))
                 if role == "dev":
                     creator = creator or w
         except Exception:  # noqa: BLE001 - sniper not installed
@@ -972,7 +972,7 @@ def _created_ts(ctx):
             return int(r[0])
     try:
         p = ctx.pair() or {}
-        return int(float(p["pairCreatedAt"]) / 1000) if p.get("pairCreatedAt") else None
+        return epoch_s(p.get("pairCreatedAt"))
     except Exception:  # noqa: BLE001
         return None
 
@@ -1187,7 +1187,9 @@ def check_exit(ctx):
     return r.finish(cap=85)
 
 
+# masche runs before watchlist: its launch analysis (coins without a sniper record) stores the launch buyers the
+# watchlist then checks against the setup wallets in the same pass
 QUICK = [check_authorities, check_sell_sim, check_liquidity, check_lp, check_socials, check_wash,
-         check_rugcheck, check_holders, check_exit, check_history, check_watchlist,
-         check_block0, check_staged, check_masche]
+         check_rugcheck, check_holders, check_exit, check_history, check_masche, check_watchlist,
+         check_block0, check_staged]
 DEEP = [check_dev, check_insiders, check_bundles]

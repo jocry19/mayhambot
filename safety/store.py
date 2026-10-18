@@ -49,6 +49,9 @@ CREATE TABLE IF NOT EXISTS safety_launch (
 MIGRATIONS = [("safety_tokens", "deep_ts", "INTEGER")]
 
 
+_repaired = set()   # id() of connections whose pair_created_at rows were repaired
+
+
 def ensure_schema(conn):
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='safety_bad_wallets'").fetchone() is None:
         db.retry_locked(conn, lambda: conn.executescript(SCHEMA))
@@ -59,6 +62,14 @@ def ensure_schema(conn):
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
                 conn.commit()
             db.retry_locked(conn, add)
+    if id(conn) not in _repaired:
+        # pair_created_at stored as ms/1000 of a seconds value (January 1970): back to seconds, once, idempotent
+        def fix():
+            conn.execute("UPDATE safety_tokens SET pair_created_at = pair_created_at * 1000 "
+                         "WHERE pair_created_at BETWEEN 1 AND 100000000")
+            conn.commit()
+        db.retry_locked(conn, fix)
+        _repaired.add(id(conn))
     return conn
 
 
