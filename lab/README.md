@@ -18,7 +18,7 @@ Ergebnis: `data/lab/report.json` (für Dashboard und Entscheider) und `data/lab/
 |---|---|---|---|
 | `ueberlebende_*`, `nach_pump_*`, `ruecksetzer_*`, `abgekuehlt_*`, `jung_abgekuehlt_*`, `*_regime_oben/unten_*` | `token_prices` (alle 5 min ein Entscheidungspunkt je Coin, je Coin höchstens alle 2 h ein Einstieg) | erster Kurs ≥ 60 s nach dem Punkt | Kurs nach 60 bzw. 240 min, Tief unter 10 % = Rug −100 % |
 | `nach_migration_Nm_60m` | `sniper_launches.migrated_ts` + `token_prices` | N min nach der Migration | 60 min halten |
-| `launch_mcA-B_*` | `sniper_paths` | beim Entscheid des Snipers, nach MC-Band in SOL | Ziel ×k / Stopp s (Fill 3 % unter der Marke) oder halten |
+| `launch_mcA-B_*` | `sniper_paths`, ohne Marken-Masche (Ersteller ≥ 75 % oder Ersteller plus Start-Block ≥ 70 %, die safety hart sperrt) | beim Entscheid des Snipers, nach MC-Band in SOL | Ziel ×k / Stopp s (Fill 3 % unter der Marke) oder halten |
 | `label_<quelle>_<regel>` | `opportunities.label_rules` | Label-Einstieg | jede Ausstiegsregel der Labels, Kosten neu gerechnet |
 
 Neue Hypothesen kommen als Eintrag in `PANEL_HYPS` oder als eigene Familie dazu; Namen nie umbenennen, damit die

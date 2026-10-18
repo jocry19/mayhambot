@@ -169,14 +169,26 @@ SNIPE_BANDS = ((30, 50), (50, 100), (100, 200), (200, 400))
 SNIPE_EXITS = ((2, 0.3), (3, 0.5), (10, 0.3), (1e9, 0.99))
 
 
+MASCHE_DEV_PCT, MASCHE_SHARE_PCT = 75.0, 70.0  # safety check_masche defaults (SAFETY_MASCHE_*): a hard veto
+
+
+def _masche(dev, bundle) -> bool:
+    """Launches safety blocks as the brand scam (creator, or creator plus create-block buyers, took the curve):
+    no account can buy them, so they stay out of the launch pockets (18.10.: 21 of 124 coins in mc200-400)."""
+    d = float(dev or 0)
+    return d >= MASCHE_DEV_PCT or d + float(bundle or 0) >= MASCHE_SHARE_PCT
+
+
 def snipe_entries(conn, since: int) -> pd.DataFrame:
     """Launches bought at the sniper's decision (sniper_paths, market cap in SOL), by market cap band at the
     decision, with a take profit x k and a stop s (k 1e9 / s 0.99 = held to the end of the path)."""
     S = pd.read_sql("SELECT p.mint, p.created_ts, p.decided_ts, p.points_json, l.mcap_decide_sol mcd, "
-                    "l.sol_usd FROM sniper_paths p JOIN sniper_launches l USING(mint) WHERE p.created_ts>=?",
-                    conn, params=(since,))
+                    "l.sol_usd, l.dev_buy_pct dev, l.bundle_pct bundle FROM sniper_paths p "
+                    "JOIN sniper_launches l USING(mint) WHERE p.created_ts>=?", conn, params=(since,))
     out = []
     for r in S.itertuples():
+        if _masche(r.dev, r.bundle):
+            continue
         mcd = r.mcd or 0
         band = next((b for b in SNIPE_BANDS if b[0] <= mcd < b[1]), None)
         if band is None:

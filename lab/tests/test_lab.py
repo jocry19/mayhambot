@@ -14,7 +14,8 @@ def _db():
     c.executescript("""
     CREATE TABLE token_prices (mint TEXT, ts INTEGER, price_usd REAL, mcap_usd REAL, liquidity_usd REAL);
     CREATE TABLE tokens (mint TEXT PRIMARY KEY, dex TEXT, pair_created_at INTEGER);
-    CREATE TABLE sniper_launches (mint TEXT, migrated INTEGER, migrated_ts INTEGER, mcap_decide_sol REAL, sol_usd REAL);
+    CREATE TABLE sniper_launches (mint TEXT, migrated INTEGER, migrated_ts INTEGER, mcap_decide_sol REAL, sol_usd REAL,
+        dev_buy_pct REAL, bundle_pct REAL);
     CREATE TABLE sniper_paths (mint TEXT, created_ts INTEGER, decided_ts INTEGER, points_json TEXT);
     CREATE TABLE opportunities (source TEXT, mint TEXT, ts INTEGER, liq_usd REAL, mcap_usd REAL, features TEXT,
         label_at INTEGER, label_rug INTEGER, label_rules TEXT);
@@ -66,6 +67,17 @@ def test_snipe_target_stop_and_rug():
     assert abs(hypotheses._snipe(pts, 20, 10, 0.3) - ((0.7 * 0.97) - 1)) < 1e-9
     rug = [[0, 30, 30, 30], [20, 40, 40, 40], [300, 2, 2, 2]]
     assert hypotheses._snipe(rug, 20, 1e9, 0.99) == -1.0
+
+
+def test_snipe_entries_leave_out_masche_launches():
+    c = _db()
+    pts = json.dumps([[0, 30, 30, 30], [20, 120, 120, 120], [300, 150, 140, 160]])
+    for m, dev, bundle in (("ok", 5, 10), ("dev", 79.31, 0), ("block", 40, 35)):
+        c.execute("INSERT INTO sniper_launches (mint, mcap_decide_sol, sol_usd, dev_buy_pct, bundle_pct) "
+                  "VALUES (?,?,?,?,?)", (m, 120, 180, dev, bundle))
+        c.execute("INSERT INTO sniper_paths VALUES (?,?,?,?)", (m, 1000, 1020, pts))
+    E = hypotheses.snipe_entries(c, 0)
+    assert set(E.mint) == {"ok"} and E.hyp.str.startswith("launch_mc100-200").all()
 
 
 def test_evaluate_needs_all_thirds_and_enough_coins():
