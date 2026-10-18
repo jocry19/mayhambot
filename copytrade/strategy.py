@@ -58,6 +58,7 @@ MAX_ENTRY_AGE_S = 30
 # coins still on the pump.fun bonding curve: research 10/17 (44 h, 6 % costs) -17 % net and 13 % pump rate (n 418)
 # vs -6.5 % and 28 % after migration (n 449); the strict account skips them, exploration keeps measuring
 CURVE_DEX = "pumpfun"
+BLOCK0_SIZE = 0.5  # block-0 copies at half the exploration size: most likely dev/bundle insiders (Erkenntnisse 1d)
 SMALL_SUMMARY_S = 600  # one summary line for the whale buys under the copy minimum
 
 
@@ -450,7 +451,8 @@ class Strategy:
         first = None
         for acc in accounts:
             if acc == "explore":
-                a_size, a_reason = s.explore_size_sol, f"Erkundung ({'block0' if block0 else tier}): {reason}"
+                a_size = s.explore_size_sol * (BLOCK0_SIZE if block0 else 1)
+                a_reason = f"Erkundung ({'block0' if block0 else tier}): {reason}"
                 a_info = {**info, "account": "explore", "edge": None, "strict_skip": why,
                           "learned_block": blocked or None}
                 a_ex = "explore"

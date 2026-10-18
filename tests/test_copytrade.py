@@ -1093,8 +1093,9 @@ def test_block0_group_is_explored_at_any_size_and_tagged(env, monkeypatch):
     pid = st.on_whale_buy(whale_buy(sol=0.005))
     import json as _json
 
-    rows = conn.execute("SELECT mode, meta FROM ct_positions").fetchall()
+    rows = conn.execute("SELECT mode, meta, size_sol FROM ct_positions").fetchall()
     assert pid and [r[0] for r in rows] == ["explore"] and _json.loads(rows[0][1])["group"] == "block0"
+    assert rows[0][2] == pytest.approx(s.explore_size_sol * strategy.BLOCK0_SIZE)
 
 
 def test_ledger_fix_runs_once_and_keeps_the_old_value(env):
