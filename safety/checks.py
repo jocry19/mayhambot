@@ -647,6 +647,21 @@ def check_liquidity(ctx):
     return r.finish()
 
 
+def _pump_migrated(ctx):
+    """True when the sniper saw this pump.fun coin graduate (migrated=1). Backup 2026-10-18: of 630 PumpSwap pools
+    rugcheck read 601 as 100 % burned; the 24 at 0 % were pools someone set up by hand (non-pump mints such as
+    GHOSTI with three pools, pump mints the sniper never saw graduate), and their liquidity fell >= 80 % within
+    24 h in 8 of 15 (lower bound 30 %) vs 49 of 325 burned pools; 8 went to ~0 $, an LP pull. So 0 % on PumpSwap
+    stays a risk unless the coin really graduated."""
+    if not ctx.mint.endswith("pump"):
+        return False
+    try:
+        row = ctx.conn.execute("SELECT migrated FROM sniper_launches WHERE mint=?", (ctx.mint,)).fetchone()
+    except Exception:  # noqa: BLE001 - sniper table missing
+        return False
+    return bool(row and row[0])
+
+
 def check_lp(ctx):
     r = CheckResult("lp", "LP-Lock")
     p = ctx.pair() or {}
@@ -668,6 +683,10 @@ def check_lp(ctx):
             locked = v
             break
         locked = v if locked is None else max(locked, v)
+    if locked is not None and dex == "pumpswap" and locked < ctx.cfg.lp_locked_ok_pct and _pump_migrated(ctx):
+        # a pump.fun graduation burns the LP of the pool it creates, whatever rugcheck reads for it
+        locked = None
+        r.data["pump_migrated"] = True
     if locked is not None:
         r.data["lp_locked_pct"] = round(locked, 1)
         if locked >= ctx.cfg.lp_locked_ok_pct:
@@ -676,7 +695,9 @@ def check_lp(ctx):
             r.add(ramp(ctx.cfg.lp_locked_ok_pct - locked, 0, ctx.cfg.lp_locked_ok_pct, 25, 75),
                   f"Nur {locked:.0f} % der Pool-Liquidität sind gesperrt/verbrannt: der Rest kann abgezogen werden (Rug Pull).")
         return r.finish()
-    if dex == "pumpswap":
+    if dex == "pumpswap" and r.data.get("pump_migrated"):
+        r.positives.append("PumpSwap-Pool aus der pump.fun-Migration: die LP wurde dabei verbrannt.")
+    elif dex == "pumpswap":
         r.status = "unknown"
         r.add(10, "PumpSwap-Pool: LP nach pump.fun-Migration normalerweise verbrannt, aber nicht bestätigt.")
     elif dex in CONCENTRATED_DEXES or any(x in ("clmm", "dlmm", "whirlpool") for x in labels):

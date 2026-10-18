@@ -801,3 +801,21 @@ def test_rug_snapshot_falls_back_to_the_pool_pick_not_mainnet_beta(monkeypatch):
     assert picked == ["getTokenLargestAccounts"]
     cfg.public_rpc_url = "https://my.own.node"          # an explicitly configured node is kept
     assert [u for u, _ in f._targets("getTokenLargestAccounts")][1] == "https://my.own.node"
+
+
+def test_lp_zero_on_pumpswap_counts_only_unless_the_coin_graduated(monkeypatch):
+    from types import SimpleNamespace
+    c = conn()
+    s = clean()
+    s["dex"], s["rugcheck"] = "pumpswap", {"markets": [{"pubkey": POOL, "lp": {"lpLockedPct": 0}}], "risks": []}
+    lp = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(s), cfg=CFG, force=True).checks["lp"]
+    assert lp["risk"] >= 70          # a pool set up by hand: the LP can be pulled
+    monkeypatch.setattr(checks, "_pump_migrated", lambda ctx: True)
+    lp = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(s), cfg=CFG, force=True).checks["lp"]
+    assert lp["risk"] == 0 and lp["data"]["pump_migrated"] and lp["status"] == "ok"
+    monkeypatch.undo()
+    c.execute("CREATE TABLE sniper_launches (mint TEXT, migrated INTEGER)")
+    c.executemany("INSERT INTO sniper_launches VALUES (?, ?)", [("Abcpump", 1), ("Xyzpump", 0), ("Abc", 1)])
+    ctx = lambda m: SimpleNamespace(mint=m, conn=c)  # noqa: E731
+    assert checks._pump_migrated(ctx("Abcpump")) and not checks._pump_migrated(ctx("Xyzpump"))
+    assert not checks._pump_migrated(ctx("Abc")) and not checks._pump_migrated(ctx("Newpump"))
