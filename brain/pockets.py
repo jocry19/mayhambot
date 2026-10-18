@@ -118,7 +118,7 @@ def table(conn) -> dict:
     """What the dashboard reads (read only): {"rule", "at", "pockets": [rows, best lower bound first]}."""
     st = store.get(conn, "pockets") or {}
     return {"rule": {"min_n": MIN_N, "conf": 0.95, "last_n": LAST_N, "window_days": WINDOW_S // 86400},
-            "at": st.get("at"), "pockets": st.get("rows") or []}
+            "at": st.get("at"), "pockets": st.get("rows") or st.get("pockets") or []}
 
 
 class Book:
