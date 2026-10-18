@@ -30,6 +30,7 @@ DETECTED = {"wslog": 0, "ws": 0, "poll": 0, "gap": 0}  # swaps per source since 
 WS_LATENCY: list[float] = []  # seconds from websocket notification to recognised swap (hourly mean)
 # (source, side, seconds from the swap's block time to our recognition) of recent swaps, for the hourly line
 LAG: deque = deque(maxlen=5000)
+GAPS: deque = deque(maxlen=2000)  # (found_at, wallet) of swaps polling found that the websockets missed
 
 
 def _mark(sig: str) -> bool:
@@ -409,6 +410,8 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk",
             raise
         src = "gap" if covered else "poll"
         DETECTED[src] += len(out)
+        if covered:
+            GAPS.extend((time.time(), sw.wallet) for sw in out)
         for sw in out:
             try:
                 record_detection(conn, sw, src, sol_usd=solusd)

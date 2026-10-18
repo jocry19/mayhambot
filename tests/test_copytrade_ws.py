@@ -501,13 +501,23 @@ def test_watchdog_acts_on_gaps_polling_found_once_per_ten_minutes():
     a, b = w.streams
     a.last_notification, b.last_notification = time.time() - 30, time.time() - 900
     now = time.time()
-    tracker.LAG.clear()
+    tracker.GAPS.clear()
     for _ in range(3):
-        tracker.LAG.append(("gap", "buy", 50.0, now - 60))
-    assert w.watchdog(now) == [b.name]  # the one silent longest
+        tracker.GAPS.append((now - 60, W))
+    assert w.watchdog(now) == [b.name]  # both had the wallet: the one silent longest
     b._kick = None
     assert w.watchdog(now + 60) == []
-    tracker.LAG.clear()
+    # gaps of a wallet only a had subscribed (b benched it) are a's, however silent b is
+    w2 = _fake_streams()
+    a2, b2 = w2.streams
+    a2.last_notification, b2.last_notification = now - 30, now - 900
+    X = "X" * 44
+    a2._subs = {W: 1, X: 2}
+    tracker.GAPS.clear()
+    for _ in range(3):
+        tracker.GAPS.append((now - 60, X))
+    assert w2.watchdog(now) == [a2.name]
+    tracker.GAPS.clear()
 
 
 def test_kicked_stream_moves_to_the_next_endpoint():

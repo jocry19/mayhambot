@@ -105,7 +105,7 @@ class Rpc:
         return d.get("result")
 
     MAIN_FIRST = frozenset({"getTransaction", "getSignaturesForAddress"})
-    MAIN_FIRST_PER_MIN = 90
+    MAIN_FIRST_PER_MIN = 110  # of copytrade's 120/min: bursts above it overflowed to mainnet-beta (429s, 18.10. 08:00)
 
     def _main_first(self, method: str) -> bool:
         if method not in self.MAIN_FIRST or not self.public or self.main_first is None:

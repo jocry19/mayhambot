@@ -858,6 +858,9 @@ class Strategy:
             log.error("position %s was no longer 'closing' when its sale was booked", p["id"])
             return False
         self._report_result(p, pct)
+        # one line per exit, so the log alone counts them (mode, strategy, symbol, reason, result)
+        log.info("exit %s %s %s %s: %+.1f%% (%+.4f SOL)", p["mode"], p["strategy"], p["symbol"] or p["mint"][:6],
+                 reason, pct * 100, pnl)
         store.event(self.conn, "sell", f"VERKAUF [{p['strategy']}/{p['mode']}] {p['symbol']} {pct:+.1%} "
                                        f"({pnl:+.3f} SOL), Grund: {EXIT_NAMES.get(reason, reason)}",
                     data={"position": p["id"], "reason": reason})

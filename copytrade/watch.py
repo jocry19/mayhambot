@@ -389,10 +389,14 @@ class Watcher:
             if len(cand) >= 6 and len(missed) * 5 >= len(cand) * 3:  # >= 60 % of at least 6
                 a.reconnect(f"missed {len(missed)} of {len(cand)}")
                 kicked.append(a.name)
-        gaps = sum(1 for src, _, _, t in list(tracker.LAG) if src == "gap" and t > now - 600)
+        # gaps count against a stream only for wallets it had subscribed: a wallet benched off the Helius stream
+        # whose swaps the stale public streams missed is no reason to reconnect Helius (07:58: "62 gaps")
+        gap_w = [w for t, w in list(tracker.GAPS) if t > now - 600]
         live = [a for a in self.streams if a.connected and now - a.connected_at > 300 and a.name not in kicked]
-        if gaps >= 3 and live and now - self._last_gap_kick > 600:
-            a = min(live, key=lambda x: x.last_notification)
+        own = {a.name: sum(1 for w in gap_w if w in a.covered()) for a in live}
+        if live and now - self._last_gap_kick > 600 and max(own.values()) >= 3:
+            a = max(live, key=lambda x: (own[x.name], -x.last_notification))
+            gaps = own[a.name]
             a.reconnect(f"{gaps} gaps found by polling")
             kicked.append(a.name)
             self._last_gap_kick = now
