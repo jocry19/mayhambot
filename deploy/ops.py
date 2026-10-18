@@ -1067,13 +1067,16 @@ def helius_credits() -> dict | None:
     """Month/day totals of the shared Helius credit ledger (core.http), None when there is no ledger yet."""
     import hashlib  # noqa: PLC0415
     month = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m")
-    stats, led, status = None, {}, None
+    stats, led, status, pace, limit_on = None, {}, None, None, False
     try:
         sys.path.insert(0, str(ROOT))
         from core import http as core_http  # noqa: PLC0415
         stats = core_http.credits()
         if hasattr(core_http, "credits_status"):
             status = core_http.credits_status()
+        if hasattr(core_http, "plan_pace"):
+            pace = core_http.plan_pace().get("ratio")
+        limit_on = getattr(core_http, "daily_limit_on", lambda: True)()
     except Exception:  # noqa: BLE001 - app venv missing: read the ledger file directly
         pass
     f = ROOT / "data" / "ratelimit" / "credits-helius.json"
@@ -1104,8 +1107,8 @@ def helius_credits() -> dict | None:
            or hashlib.sha256(cfg("HELIUS_API_KEY", "").encode()).hexdigest()[:8])
     per = {n: (v.get("credits_today", 0), v.get("credits_day_budget")) for n, v in (stats or {}).items()}
     return {"month": month, "month_used": month_used, "month_limit": limit, "today": today,
-            "day_budget": budget, "key": str(key), "warn_level": (status or {}).get("warn_level"),
-            "per_service": per}
+            "day_budget": budget if limit_on else None, "key": str(key),
+            "warn_level": (status or {}).get("warn_level"), "pace": pace, "per_service": per}
 
 
 def _fmt_int(x) -> str:
@@ -1113,8 +1116,11 @@ def _fmt_int(x) -> str:
 
 
 def credits_line(c: dict) -> str:
+    """The day's sum against the summed day shares only while those shares limit (HELIUS_DAILY_LIMIT=1); since
+    18.10. the user watches the plan, so the line shows the month and the plan against the calendar instead."""
     day = f"heute {_fmt_int(c['today'])}" + (f" von {_fmt_int(c['day_budget'])}" if c["day_budget"] else "")
-    return f"Helius-Credits: {day}, Monat {_fmt_int(c['month_used'])} von {_fmt_int(c['month_limit'])}"
+    pace = f" (Kalender x{c['pace']:.2f})".replace(".", ",") if c.get("pace") is not None else ""
+    return f"Helius-Credits: {day}, Monat {_fmt_int(c['month_used'])} von {_fmt_int(c['month_limit'])}{pace}"
 
 
 def check_credit_alerts(st: dict):

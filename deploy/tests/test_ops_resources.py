@@ -223,3 +223,10 @@ def test_supervised_single_crash_loop_is_left_to_the_supervisor(tmp_path, monkey
         ops.watchdog(args)
         clock[0] += 120
     assert len(restarts) == 1                # still down after 15 min: the watchdog steps in
+
+
+def test_credits_line_shows_the_plan_not_the_old_day_shares():
+    c = {"today": 201758, "day_budget": None, "month_used": 273462, "month_limit": 1_000_000, "pace": 0.55}
+    assert ops.credits_line(c) == "Helius-Credits: heute 201.758, Monat 273.462 von 1.000.000 (Kalender x0,55)"
+    c.update(day_budget=59167, pace=None)   # HELIUS_DAILY_LIMIT=1: the shares limit again and are shown
+    assert ops.credits_line(c) == "Helius-Credits: heute 201.758 von 59.167, Monat 273.462 von 1.000.000"
