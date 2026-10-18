@@ -384,7 +384,7 @@ def test_held_back_quoted_trades_replay_once_priced(tmp_path, monkeypatch):
     svc.quote_px.pop(rpcws.PUMP_TOKEN_MINT, None)
     assert rpcws.parse_notification(note_) == [] and rpcws.QUOTE_PENDING[rpcws.PUMP_TOKEN_MINT]
     seen = []
-    monkeypatch.setattr(svc, "_on_rpc_trade", seen.append)
+    monkeypatch.setattr(svc, "_on_rpc_trade", lambda m, src="1": seen.append(m))
     monkeypatch.setattr(svc, "sol_usd", lambda: 160.0)
     monkeypatch.setattr(feed, "token_prices_sol", lambda mints, sol_usd: {m: 2.5e-5 for m in mints})
     svc.quote_round()
@@ -558,3 +558,39 @@ def test_trade_before_its_create_is_kept_and_replayed(tmp_path):
     eng.handle(cv.buy("OLD", 0.1) | {"mint": "UNKNOWN"}, T0 + 1)  # an untracked coin's trade stays an orphan
     eng.handle(cv.buy("LATE", 0.1) | {"mint": "UNKNOWN"}, T0 + 100)
     assert len(eng.orphans["UNKNOWN"]) == 2 and "PROINU" not in eng.orphans
+
+
+def test_third_stream_on_its_own_host_and_first_arrivals_counted(tmp_path):
+    from sniper import service
+    from sniper.tests.test_sniper import Curve
+    svc = service.Service(cfg(), db_path=str(tmp_path / "s3.db"))
+    assert svc.logs3 and svc.logs3.url == "wss://solana.drpc.org" and svc.logs3 in svc._streams()
+    assert svc.logs3.url not in [svc.logs.url, *svc.logs2.urls]
+    cv = Curve("THREE")
+    svc.engine.handle(cv.create(), time.time())
+    b = cv.buy("W1", 0.5)
+    svc._on_rpc_trade(dict(b), "3")          # stream 3 first
+    svc._on_rpc_trade(dict(b), "2")          # the same trade again: a duplicate, no first arrival
+    assert svc.first_by == {"1": 0, "2": 0, "3": 1}
+    assert service.Service(cfg(ws_url3=""), db_path=str(tmp_path / "n3.db")).logs3 is None
+    assert service.Service(cfg(ws_url3=cfg().ws_url2), db_path=str(tmp_path / "d3.db")).logs3 is None
+
+
+def test_migration_time_is_kept_once_and_reaches_rows_not_in_memory(tmp_path):
+    from sniper import store
+    from sniper.engine import Engine
+    from sniper.tests.test_sniper import Curve, FakeEnricher
+    conn = store.connect(str(tmp_path / "mt.db"))
+    eng = Engine(cfg(), conn, enricher=FakeEnricher())
+    cv = Curve("MIG")
+    eng.handle(cv.create(), T0)
+    eng.handle(cv.buy("W1", 0.2), T0 + 2)
+    eng.tick(T0 + cfg().decide_sec + 1)
+    eng.handle({"txType": "migrate", "mint": "MIG", "pool": "pump-amm"}, T0 + 40)
+    eng.handle({"txType": "migrate", "mint": "MIG", "pool": "pump-amm"}, T0 + 41)   # second stream
+    assert eng.launches["MIG"].migrated_ts == T0 + 40
+    conn.execute("UPDATE sniper_launches SET migrated=0, migrated_ts=NULL WHERE mint='MIG'")
+    del eng.launches["MIG"]                                                          # restart: not in memory
+    eng.handle({"txType": "migrate", "mint": "MIG", "pool": "pump-amm"}, T0 + 90)
+    eng.handle({"txType": "migrate", "mint": "MIG", "pool": "pump-amm"}, T0 + 95)
+    assert tuple(conn.execute("SELECT migrated, migrated_ts FROM sniper_launches WHERE mint='MIG'").fetchone()) == (1, T0 + 90)

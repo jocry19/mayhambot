@@ -195,6 +195,13 @@ class Engine:
                             self.counters["orphans_replayed"] = self.counters.get("orphans_replayed", 0) + 1
                 return st
             st = self.launches.get(mint)
+            if st is None and kind == "migrate":
+                # a launch no longer in memory (restart, finished): its row still gets the migration time, which
+                # the decision maker reads as the coin's age on the AMM
+                r = self.conn.execute("SELECT migrated_ts FROM sniper_launches WHERE mint=?", (mint,)).fetchone()
+                if r is not None and not r[0]:
+                    store.update_launch(self.conn, mint, migrated=1, migrated_ts=int(now))
+                return None
             if st is None:
                 # a trade of the create's own slot can reach us before the create (second stream, bundles): keep
                 # it a few seconds, the create replays it (PROINU 18.10.: a 74 % buy in the create slot was lost)
@@ -202,6 +209,8 @@ class Engine:
                     self._orphan(mint, m, now)
                 return None
             if kind == "migrate" or m.get("pool") in ("pump-amm", "raydium") and kind not in ("buy", "sell"):
+                if st.migrated and st.migrated_ts:
+                    return st          # the same migration from the second stream
                 st.migrated, st.migrated_ts = True, now
                 self.counters["migrations"] += 1
                 if st.pool == "pump":
@@ -377,7 +386,8 @@ class Engine:
                    safety_risk=F.get("safety_risk"), safety_level=F.get("safety_level"), model_p=F.get("model_p"),
                    mcap_decide_sol=st.base_mcap_sol, mcap_decide_usd=(st.base_mcap_sol or 0) * sol_usd or None,
                    sol_usd=sol_usd or None, reasons_json=store.j(a.reasons[:8]), positives_json=store.j(a.positives[:6]),
-                   migrated=int(st.migrated), rug_p=F.get("rug_p"), block0_wallets=F.get("block0_wallets"),
+                   migrated=int(st.migrated), migrated_ts=int(st.migrated_ts) if st.migrated_ts else None,
+                   rug_p=F.get("rug_p"), block0_wallets=F.get("block0_wallets"),
                    fee_pct=st.fee_pct, start_mcap_sol=st.start_mcap_sol,
                    quote_mint=st.quote_mint)
         if stage >= 2:

@@ -62,9 +62,14 @@ class Service:
         urls2 = [u for u in [self.helius_ws, cfg.ws_url2, *[u.strip() for u in cfg.ws_url2_fallbacks.split(",")]]
                  if u and u != cfg.ws_url]
         urls2 = list(dict.fromkeys(urls2))
-        self.logs2 = rpcws.LogStream(urls2[0], self._on_rpc_trade, 1, name="RPC-Log-Datenstrom 2", mode="program",
+        self.logs2 = rpcws.LogStream(urls2[0], lambda m: self._on_rpc_trade(m, "2"), 1, name="RPC-Log-Datenstrom 2", mode="program",
                                      program=rpcws.PUMP_PROGRAM, stale_sec=cfg.stale_sec, fallbacks=urls2[1:]) \
             if urls2 and (cfg.ws_url2 or self.helius_ws) else None
+        u3 = cfg.ws_url3.strip()
+        self.logs3 = rpcws.LogStream(u3, lambda m: self._on_rpc_trade(m, "3"), 1, name="RPC-Log-Datenstrom 3",
+                                     mode="program", program=rpcws.PUMP_PROGRAM, stale_sec=cfg.stale_sec) \
+            if u3 and u3 not in (cfg.ws_url, *urls2) else None
+        self.first_by = {"1": 0, "2": 0, "3": 0}      # launch trades each stream delivered before the others
         self.helius_bytes, self.helius_credits, self.helius_paused = 0, 0.0, ""
         # curves quoted in another token: SOL per quote token, from our own live curve or DexScreener
         self.quote_px = {rpcws.WSOL_MINT: (float("inf"), 1.0)}          # mint -> (ts, SOL per token)
@@ -166,7 +171,7 @@ class Service:
         status = m.pop("poolStatus", 0)
         rx = m.get("_rx") or time.time()
         sig = m.get("signature")
-        self._on_rpc_trade(m)
+        self._on_rpc_trade(m, "bonk")
         st = self.engine.launches.get(mint)
         if st is None:
             return
@@ -239,12 +244,16 @@ class Service:
                 self.bonk_asked.pop(m, None)
                 self.logs_bonk.unsubscribe({pool})
 
-    def _on_rpc_trade(self, m):
+    def _on_rpc_trade(self, m, src="1"):
         now = m.pop("_rx", None) or time.time()
         if self.record:  # same format as PumpPortal lines, so replay sees the RPC trades too
             self.record.write(json.dumps({"t": round(now, 3), "m": json.dumps(m)}) + "\n")
         self.rpc_trades += 1
+        c = self.engine.counters
+        before = c.get("trades", 0)
         self.engine.handle(m, now)
+        if c.get("trades", 0) > before:
+            self.first_by[src] = self.first_by.get(src, 0) + 1
 
     def sol_usd(self):
         """Cached SOL price; never blocks (the event loop calls this). Refreshed by sol_round."""
@@ -380,7 +389,7 @@ class Service:
         self.engine.free_stream = self.trades_via == "rpc" and self.program_since() is not None
 
     def _streams(self):
-        return [self.logs] + ([self.logs2] if self.logs2 else [])
+        return [self.logs] + [lg for lg in (self.logs2, self.logs3) if lg]
 
     def program_since(self):
         """Since when at least one program-wide stream delivers every pump.fun trade (None if none does)."""
@@ -393,7 +402,8 @@ class Service:
         if self.trades_via != "rpc" or not self.logs.connected:
             return []
         now = now or time.time()
-        dead = [m for m in self.logs.not_live(now) if not (self.logs2 and self.logs2.is_live(m))]
+        dead = [m for m in self.logs.not_live(now)
+                if not any(lg and lg.is_live(m) for lg in (self.logs2, self.logs3))]
         if self.logs_bonk:
             dead += [self.bonk_pools[p] for p in self.logs_bonk.not_live(now) if p in self.bonk_pools]
         if not dead:
@@ -537,7 +547,7 @@ class Service:
             if rpcws.quote_decimals(m) is not None and self.quote_price(m, now):
                 for msg in rpcws.replay_quoted(m, time.time()):   # the first trades of its launches
                     self.quote_replayed += 1
-                    self._on_rpc_trade(msg)
+                    self._on_rpc_trade(msg, "q")
 
     def launch_block_round(self):
         """Launches that migrated at once: their launch-block buyers (AMM buys the curve stream never sees) into
@@ -767,7 +777,9 @@ class Service:
                **{f"why_{k}": v for k, v in rpcws.REJECT_WHY.items()},
                "rej": rpcws.REJECTS["trade"], "drops": self.logs.server_drops, "silent": self.logs.silent_reconnects,
                "s1": c.get("stage1_pump", 0), "zero": c.get("stage1_zero", 0), "def": c.get("deferred", 0),
-               "found": c.get("deferred_found", 0), "lost": c.get("subs_lost", 0)}
+               "found": c.get("deferred_found", 0), "lost": c.get("subs_lost", 0),
+               **{f"first{k}": v for k, v in self.first_by.items()},
+               "decoded3": self.logs3.decoded if self.logs3 else 0, "bytes3": self.logs3.bytes if self.logs3 else 0}
         prev, t0 = getattr(self, "_diag", (None, None))
         if prev:
             d = {k: cur[k] - prev.get(k, 0) for k in cur}
@@ -785,6 +797,11 @@ class Service:
                      "aus" if not l2 else ("verbunden" if l2.connected else "getrennt"),
                      l2.url.split("?")[0] if l2 else "-", l2.switches if l2 else 0, d["decoded2"] / mins,
                      d["delivered2"] / mins, d["drops2"], d["trades"], d["dupes"], why)
+            l3 = self.logs3
+            log.info("Datenstrom-Diagnose: Strom 3 %s (%s), %.0f/min dekodiert, %.1f MB/min | Launch-Trades zuerst "
+                     "über Strom 1/2/3: %d/%d/%d", "aus" if not l3 else ("verbunden" if l3.connected else "getrennt"),
+                     l3.url.split("?")[0] if l3 else "-", d["decoded3"] / mins, d["bytes3"] / 1e6 / mins,
+                     d["first1"], d["first2"], d["first3"])
             log.info("Datenvolumen: Strom 1 %.1f MB/min, Strom 2 %.1f MB/min | Helius %.0f Credits in %.0f min "
                      "(hochgerechnet %.0f/Tag, gesamt %.0f)%s", d["bytes1"] / 1e6 / mins, d["bytes2"] / 1e6 / mins,
                      d["hcred"], mins, d["hcred"] / mins * 1440, self.helius_credits,
@@ -824,6 +841,7 @@ class Service:
                  asyncio.create_task(self.sub_loop()),
                  asyncio.create_task(self.logs.run(stop_ev)),
                  *([asyncio.create_task(self.logs2.run(stop_ev))] if self.logs2 else []),
+                 *([asyncio.create_task(self.logs3.run(stop_ev))] if self.logs3 else []),
                  *([asyncio.create_task(self.logs_bonk.run(stop_ev)), asyncio.create_task(self.bonk_wallet_loop())]
                    if self.logs_bonk else []),
                  *([asyncio.create_task(self.creates.run(stop_ev))] if self.creates else []),
@@ -854,6 +872,8 @@ class Service:
             self.connected = self.logs.connected = False
             if self.logs2:
                 self.logs2.connected = False
+            if self.logs3:
+                self.logs3.connected = False
             if self.logs_bonk:
                 self.logs_bonk.connected = False
             if self.creates:

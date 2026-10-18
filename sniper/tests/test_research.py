@@ -504,7 +504,7 @@ def test_second_program_stream_fills_gaps_without_double_trades(tmp_path):
     for lg in svc._streams():
         lg.subscribe({"TWICE"})
         lg.on_msg(dict(msg))
-    assert eng.launches["TWICE"].n_seen == 1 and eng.counters["dupes"] == 1
+    assert eng.launches["TWICE"].n_seen == 1 and eng.counters["dupes"] == len(svc._streams()) - 1
     svc.trades_via = "rpc"
     svc.logs.connected, svc.logs._conn_since, svc.logs.want_ts["TWICE"] = True, 0, 0
     svc.logs2.subs = {rpcws.PUMP_PROGRAM: 1}
