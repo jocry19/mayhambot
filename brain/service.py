@@ -133,21 +133,25 @@ class Service:
 
     def _labelled(self, since: float) -> str:
         try:
-            n, rug, m60 = self.conn.execute("SELECT COUNT(*), COALESCE(SUM(label_rug),0), AVG(label_max60) FROM "
-                                            "opportunities WHERE label_at>=?", (int(since),)).fetchone()
+            n, rug, m60 = self.conn.execute("SELECT COUNT(*), COALESCE(SUM(label_rug),0), AVG(MIN(label_max60, ?)) "
+                                            "FROM opportunities WHERE label_at>=?", (labels.CAP, int(since))).fetchone()
             follow = len((store.get(self.conn, "label_track") or {}).get("rows") or {})
         except Exception:
             return "labels none"
-        out = (f"labels {n} written ({rug} rugs, mean best-in-60-min {m60:+.1%} after costs), {follow} followed"
+        out = (f"labels {n} written ({rug} rugs, mean best-in-60-min {m60:+.1%} after costs, capped at +1000%), "
+               f"{follow} followed"
                if n else f"labels 0 written, {follow} followed")
         sk = learner.label_skill(self.conn, since)
         if sk and sk.get("rho") is not None:
-            # the pool model's ranking on the hour's labels, one row per source and coin; the top tenth must stay
-            # above 0 after costs for hours before any main-account stake rides on it
-            hist = (store.get(self.conn, "label_skill_hist") or [])[-23:] + [[int(since), sk["n"], sk["rho"], sk["top"]]]
+            # the pool model's ranking on the hour's labels, one row per source and coin; the top tenth's median must
+            # stay above 0 after costs for hours before any main-account stake rides on it (a mean is carried by
+            # one glitch: 18.10. +155724 %)
+            row = [int(since), sk["n"], sk["rho"], sk["top"], sk["top_median"]]
+            hist = (store.get(self.conn, "label_skill_hist") or [])[-23:] + [row]
             store.put(self.conn, "label_skill_hist", hist)
             tp = sk.get("top_plan")
-            out += (f", skill rho {sk['rho']:+.2f} top tenth held {sk['top']:+.1%}"
+            out += (f", skill rho {sk['rho']:+.2f} top tenth held median {sk['top_median']:+.1%} "
+                    f"mean {sk['top']:+.1%}"
                     + (f" max60 {sk['top_max60']:+.1%}" if sk.get("top_max60") is not None else "")
                     + (f" best plan {tp[0]} {tp[1]:+.1%}" if tp else "")
                     + f" bottom {sk['bottom']:+.1%} (n {sk['n']} coins)")

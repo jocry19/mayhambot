@@ -24,6 +24,11 @@ log = logging.getLogger("brain.trader")
 DEDUP_S = 6 * 3600  # one opportunity per (whale entity or kind, coin) in this window: repeat buys are no new idea
 POOL_DRAWS = 3000  # the learning account's draws its quantile is taken over
 POOL_DRAWS_MIN = 200
+RECORD_N = 30  # the brain's own trades of a kind its exploring is judged on
+RECORD_MIN_N = 20
+RECORD_EVERY_S = 60
+CURVE_FEE = 0.0125  # pump.fun protocol + creator fee on a curve sale
+CURVE_V_SOL_DEFAULT = 30.0
 RUG_BAN_S = 24 * 3600
 REENTRY_S = 6 * 3600  # no second brain position in a coin within this window: a coin we just lost on is no new idea
 TRAIL_MIN_HOLD_S = 60  # the trail arms after a minute: the first quotes after a buy are noise, not a run
@@ -161,6 +166,7 @@ class Trader:
         self.supp = {"read": set(), "old": set(), "own": set()}  # supplemented row ids this hour (hour line)
         self.late_lag: list[tuple[float, float]] = []  # (tracker lag, brain lag) of those, seconds
         self.pending: dict[tuple[str, str], tuple] = {}  # (kind, ref) -> (row, entity, first seen): waiting for a pair
+        self._records: dict = {}  # kind -> (checked at, (mean net, n) or None)
         self.pool_draws: collections.deque = collections.deque(maxlen=POOL_DRAWS)  # recent learning-account draws
         try:
             self.pool_draws.extend(r[0] for r in reversed(conn.execute(
@@ -468,6 +474,12 @@ class Trader:
 
     def _gate(self, kind: str, mint: str, snap, d, row=None, raw=None) -> str | None:
         """Hard limits the model never overrides: a market to trade, the rug check, risk limits."""
+        if kind != "pool" and d.explore:
+            rec = self._record(kind)
+            if rec:
+                # exploring costs the brain's own money only while the kind's real trades pay (18.10. midday: whale
+                # -10 % a trade over 92, stops -23 %): a kind whose last trades lost buys only what it is convinced of
+                return f"Bewährung: {kind} zuletzt {rec[0]:+.1%} je Trade über {rec[1]}, nur überzeugte Käufe"
         if kind == "market" and not self.market_live():
             if not self.challenge_on(self.clock()):
                 return "Nebenquelle: erst beobachten, bis sie im Nachspielen vorne liegt"
@@ -846,7 +858,12 @@ class Trader:
         if not fill or not fill.ok:
             return False
         if getattr(fill, "source", "") == "no_route" and features.on_curve(snap):
-            return False  # a coin on the bonding curve has a market; a missing quote is a hiccup, retry next round
+            # a coin on the bonding curve has a market, the curve itself: Jupiter often has no route for curve coins,
+            # and retrying left time-stopped positions open for hours (18.10.: VANCE2028 198 min, Normie 173 min).
+            # Sold on the curve instead: constant product at the live curve price, curve fee, the paper fees
+            fill = self._curve_fill(p, snap, fill)
+            if fill is None:
+                return False
         now = int(self.clock())
         meta = _meta(p)
         partial = meta.get("partial_sol", 0.0) or 0.0  # the half sold earlier was booked then
@@ -881,6 +898,43 @@ class Trader:
         except Exception as e:
             log.exception("learning from trade %s failed: %s", p["id"], e)
         return True
+
+    def _record(self, kind: str):
+        """(mean net, n) of the kind's last RECORD_N closed trades when they lost on average, else None."""
+        now = self.clock()
+        at, val = self._records.get(kind, (0.0, None))
+        if now - at < RECORD_EVERY_S:
+            return val
+        rows = self.conn.execute("SELECT pnl_pct FROM brain_positions WHERE kind=? AND status='closed' AND pnl_pct IS "
+                                 "NOT NULL ORDER BY closed_at DESC LIMIT ?", (kind, RECORD_N)).fetchall()
+        m = sum(r[0] for r in rows) / len(rows) if rows else 0.0
+        val = (m, len(rows)) if len(rows) >= RECORD_MIN_N and m < 0 else None
+        self._records[kind] = (now, val)
+        return val
+
+    def _curve_fill(self, p, snap, quote):
+        """A paper sale on the bonding curve (no Jupiter route): SOL out of the constant-product curve at the live
+        price, curve fee from the output, the executor's fees. None without a price."""
+        from copytrade.execution import Fill
+
+        px = snap.price_sol if snap is not None else 0.0
+        tokens = p["tokens"] or 0.0
+        if not px or tokens <= 0:
+            return None
+        v_sol = 0.0
+        try:
+            cv = self.curve_now(self.conn, p["mint"], self.clock())
+            v_sol = float((cv or {}).get("v_sol") or 0.0)
+        except Exception:
+            pass
+        if v_sol <= 0:
+            v_sol = CURVE_V_SOL_DEFAULT  # pump.fun's virtual SOL at the start: the shallowest the curve gets
+        v_tok = v_sol / px
+        gross = v_sol - v_sol * v_tok / (v_tok + tokens)
+        net = max(0.0, gross * (1 - CURVE_FEE) - (getattr(quote, "fees_sol", 0.0) or 0.0))
+        return Fill(True, tokens=tokens, sol=net, price_sol=net / tokens, price_impact=1 - gross / (tokens * px),
+                    fees_sol=getattr(quote, "fees_sol", 0.0) or 0.0, tx=f"paper-curve-{int(self.clock() * 1000)}",
+                    source="curve_estimate")
 
     def _book(self, kind: str, delta: float) -> None:
         key = store.account(kind)
