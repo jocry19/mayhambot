@@ -910,7 +910,7 @@ def test_challenge_explores_side_sources_with_account_stakes_and_pauses_after_lo
         conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (h0 - k * 3600 + 3500, eq * 0.9, 0, eq * 0.9))
     t._challenge_at = (-1e18, False)
     assert not t.challenge_on(time.time())
-    assert t.settings(time.time()) is s
+    assert t.settings(time.time(), "market").kelly_frac == s.kelly_frac  # paused: even a released pocket stakes normally
     assert "Challenge pausiert" in journal.write(conn, unsure, s)
 
 
@@ -985,3 +985,44 @@ def test_replay_gives_no_organic_verdict_in_the_grace_minutes():
     s = config.Settings()
     gain, mins, why = exits.replay(Bearish(), cs, t0 + 60, "market", None, None, [], [], s, 0.0)
     assert why == "organic" and mins >= exits.GRACE_MIN
+
+
+def _opps(conn, kind, feats, results, t0):
+    for i, r in enumerate(results):
+        conn.execute("INSERT INTO brain_opps(ts, kind, ref, features, realized_plan, evaluated_at) VALUES (?,?,?,?,?,?)",
+                     (t0 + i, kind, f"{kind}{i}{random.random()}", json.dumps(feats), r, t0 + i))
+
+
+def test_pockets_release_only_a_pattern_beyond_chance_in_both_halves_and_fall_back(conn):
+    from brain import pockets
+    now = time.time()
+    rng = random.Random(5)
+    _opps(conn, "market", {"dex": "pumpswap", "why": "momentum"}, [0.08 + rng.gauss(0, 0.1) for _ in range(120)], now - 5000)
+    _opps(conn, "market", {"dex": "raydium", "why": "momentum"}, [0.15 + rng.gauss(0, 0.1) for _ in range(60)]
+          + [-0.1 + rng.gauss(0, 0.1) for _ in range(60)], now - 3000)  # paid once, then stopped
+    _opps(conn, "whale", {"tier": "ultra"}, [0.3 + rng.gauss(0, 0.1) for _ in range(40)], now - 1000)  # too few
+    res = pockets.scan(conn, now)
+    assert res["market|dex=pumpswap"]["live"]
+    assert not res["market|dex=raydium"]["live"] and "whale|tier=ultra" not in res
+    b = pockets.Book(conn, lambda: now)
+    assert b.match("market", {"dex": "pumpswap", "why": "x"}) == "market|dex=pumpswap"
+    assert b.match("market", {"dex": "raydium"}) is None
+    assert "market|dex=pumpswap" in store.get(conn, "pockets")["live"]
+    assert "1 von" in journal.write(conn, Brain(len(PLANS)), config.Settings(), now)
+
+
+def test_kelly_on_the_lower_bound_outside_released_pockets(s):
+    import dataclasses
+    m = trained()
+    s = dataclasses.replace(s, max_stake=100.0, kelly_frac=0.01)  # no cap: the edge alone decides
+    lb = choose(m, "whale", {"tier": "ultra"}, dataclasses.replace(s, kelly_edge="lb"), random.Random(3), equity=10.0)
+    mean = choose(m, "whale", {"tier": "ultra"}, dataclasses.replace(s, kelly_edge="mean"), random.Random(3), equity=10.0)
+    assert lb.enter and mean.enter and lb.size_sol < mean.size_sol
+
+
+def test_challenge_stakes_run_only_in_a_released_pocket(conn, s):
+    t = make_trader(conn, s, trained(), Market())
+    now = time.time()
+    assert t.settings(now).kelly_edge == "lb" and t.settings(now).kelly_frac == s.kelly_frac
+    big = t.settings(now, "market|dex=pumpswap")
+    assert big.kelly_edge == "mean" and big.kelly_frac == s.challenge_kelly_frac and big.max_stake == s.challenge_max_stake

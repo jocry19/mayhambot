@@ -154,3 +154,14 @@ Auf Wunsch des Nutzers (10/2026, „komme was wolle“): überzeugte Käufe mit 
 Kontos; Erkundungen mit 2 % des Kontos; die noch unbelegten Nebenquellen werden sofort auf Papier erkundet (bis 12
 Probekäufe je Stunde, Rug-Prüfung nur beim Kauf). Haben die letzten 3 vollen Stunden zusammen mehr als 15 % verloren
 (`BRAIN_CHALLENGE_STOP` 0,85), pausiert der Modus 6 Stunden mit den normalen Einsätzen; das Tagebuch meldet es.
+
+## Taschen (Einsatz nur für bewiesene Muster)
+
+Jede Gelegenheit jeder Quelle steht mit ihrem nachgespielten Ergebnis nach Kosten in `brain_opps`, genommen oder
+nicht (Schatten-Buch). `pockets.py` prüft alle 10 min jede Quelle allein und jede Quelle mit einem Merkmal
+(`market|dex=pumpswap`) über 7 Tage: freigegeben ist eine Tasche erst mit ≥ 100 Fällen, positiver 95-%-Untergrenze
+des Mittelwerts in der älteren UND der neueren Hälfte und positivem Schnitt der letzten 50 (kippt der, fällt sie
+sofort zurück). Nur in einer freigegebenen Tasche setzt Kelly auf den Mittelwert und der Challenge-Modus seine
+größeren Einsätze; sonst rechnet Kelly mit der Untergrenze der Kante, ein unbewiesener Vorteil setzt also das
+Minimum (Plan „Hundertmal besser“, 18.10.: bei negativem Erwartungswert verlieren größere Einsätze nur schneller).
+Stand in `brain_state.pockets`, Zeile im Tagebuch.

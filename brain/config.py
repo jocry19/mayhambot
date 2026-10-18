@@ -37,6 +37,7 @@ class Settings:
     challenge_max_stake: float = field(default_factory=lambda: _f("BRAIN_CHALLENGE_MAX_STAKE", 0.35))
     challenge_explore_share: float = field(default_factory=lambda: _f("BRAIN_CHALLENGE_EXPLORE_SHARE", 0.02))
     challenge_stop: float = field(default_factory=lambda: _f("BRAIN_CHALLENGE_STOP", 0.85))
+    kelly_edge: str = "lb"  # Kelly on the edge's lower bound ("lb") or its mean ("mean", released pockets only)
     explore_share: float = 0.0  # exploration stake as a share of the account (0 = min_size_sol); set by the challenge
     max_open: int = field(default_factory=lambda: int(_f("BRAIN_MAX_OPEN", 100)))
     max_daily_loss_sol: float = field(default_factory=lambda: _f("BRAIN_MAX_DAILY_LOSS_SOL", 0))
