@@ -11,6 +11,7 @@ MIN_SOL = 0.01
 # highest transaction version getTransaction returns: v1 transactions exist on mainnet, and an RPC answers -32015
 # for any transaction above this, so the newest (often exactly the pump AMM setup buys) would be missing
 TX_VERSION = 1
+WSOL = "So11111111111111111111111111111111111111112"
 
 
 def _owner_deltas(meta, mint):
@@ -36,6 +37,10 @@ def tx_buyers(tx, mint, exclude=()):
             for k in (((tx.get("transaction") or {}).get("message") or {}).get("accountKeys") or [])]
     pre, post = meta.get("preBalances") or [], meta.get("postBalances") or []
     lam = {k: (pre[i] - post[i]) / 1e9 for i, k in enumerate(keys) if i < len(pre) and i < len(post)}
+    # the SOL actually spent is native plus wrapped SOL: a buyer that wraps 5000 SOL and keeps the unspent rest in
+    # its WSOL account loses 5000 native lamports but spends 1 SOL; one that wrapped earlier pays only in WSOL
+    for w, d in _owner_deltas(meta, WSOL).items():
+        lam[w] = lam.get(w, 0.0) - d
     out = []
     for owner, d in _owner_deltas(meta, mint).items():
         # a buyer pays SOL from its own account; the curve, the pool vaults and the migration gain tokens without

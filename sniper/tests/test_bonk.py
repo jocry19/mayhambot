@@ -487,3 +487,21 @@ def test_coverage_line_runs_by_the_clock_and_survives_a_restart(tmp_path, caplog
         svc.coverage_round(now)
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Abdeckung")]
     assert lines and lines[0].startswith("Abdeckung (22 min seit Start): Launches mit Trades beim Entscheid 50 % von 2")
+
+
+def test_launch_block_counts_spent_sol_not_wrapped_sol():
+    from sniper import launchblock
+    W = launchblock.WSOL
+    tb = lambda xs: [{"mint": m, "owner": o, "accountIndex": i, "uiTokenAmount": {"uiAmount": a}}  # noqa: E731
+                     for i, (m, o, a) in enumerate(xs)]
+    # wraps 5000 SOL, spends 1 SOL of it on the AMM, keeps 4999 in its WSOL account
+    keep = {"meta": {"err": None, "preBalances": [5001e9, 0], "postBalances": [1e9, 0],
+                     "preTokenBalances": tb([(W, "BIG", 0.0), ("M", "POOL", 100e6)]),
+                     "postTokenBalances": tb([(W, "BIG", 4999.0), ("M", "POOL", 99e6), ("M", "BIG", 1e6)])},
+            "transaction": {"message": {"accountKeys": [{"pubkey": "BIG"}, {"pubkey": "POOL"}]}}}
+    # wrapped earlier: pays 150 SOL in WSOL only, native lamports just the fee
+    wrapped = {"meta": {"err": None, "preBalances": [1e9], "postBalances": [0.99999e9],
+                        "preTokenBalances": tb([(W, "OLD", 150.0)]), "postTokenBalances": tb([(W, "OLD", 0.0), ("M", "OLD", 5e6)])},
+               "transaction": {"message": {"accountKeys": [{"pubkey": "OLD"}]}}}
+    assert [(w, round(sol, 3)) for w, _t, sol in launchblock.tx_buyers(keep, "M")] == [("BIG", 1.0)]
+    assert [(w, round(sol, 2)) for w, _t, sol in launchblock.tx_buyers(wrapped, "M")] == [("OLD", 150.0)]
