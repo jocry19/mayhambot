@@ -45,7 +45,9 @@ STAGED_TRAIL = 0.10  # staged pump (safety check 'staged', data.pattern): exit 1
 STAGED_AFTER_HIGH_S = 15 * 60  # ... or 15 min after the last high: 74 % drained within 60 min, mostly 15-60 min after it
 STAGED_REFRESH_S = 300  # the pattern can only form within 45 min of the launch: re-read young coins every 5 min
 STAGED_YOUNG_H = 1.0
-RUG_LIQ_DROP = 0.8  # liquidity this far under its value at entry: the pool was pulled, exit at once
+RUG_LIQ_DROP = 0.5  # liquidity half its value at entry: the pool is being pulled, exit before the price stop (18.10.: two
+# stops booked at -100 %, the price fell through them between polls). A pool only halves by trading when the price
+# falls 75 %, far past every stop, so this fires on LP pulls only
 PAPER_MODES = ("paper", "explore")  # simulated accounts: strict paper (the live rules) and exploration
 PAPER_TECH_MAX_OPEN = 100  # not a budget: open paper positions are re-priced every few seconds (DexScreener, 30 per call)
 # coin already up this much in the 5 min before the copy (intel px_ret_5m): strict size x RUN5_SIZE. Walk-forward on

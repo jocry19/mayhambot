@@ -1177,3 +1177,18 @@ def test_whale_decisions_go_to_the_opportunity_table_with_our_result(env):
     assert st.close(p, state["snap"], "manual")
     r = conn.execute("SELECT source_result FROM opportunities WHERE ref='sigOpp'").fetchone()
     assert r[0] is not None and r[0] < 0  # sold at once: the round trip's cost
+
+
+def test_half_the_pool_gone_exits_before_the_price_stop(env):
+    import dataclasses
+
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    pid = st.on_whale_buy(whale_buy())
+    state["snap"] = dataclasses.replace(state["snap"], liquidity_usd=80_000 * 0.6)
+    st.update()  # 40 % less pool: still open
+    assert conn.execute("SELECT status FROM ct_positions WHERE id=?", (pid,)).fetchone()[0] == "open"
+    state["snap"] = dataclasses.replace(state["snap"], liquidity_usd=80_000 * 0.45)
+    st.update()  # more than half pulled, price not moved yet: out
+    assert tuple(conn.execute("SELECT status, exit_reason FROM ct_positions WHERE id=?", (pid,)).fetchone()) == \
+        ("closed", "rug")
