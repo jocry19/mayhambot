@@ -2,6 +2,7 @@
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -57,10 +58,14 @@ def main(argv=None):
             if wait > 0:
                 stop.wait(wait)
                 continue
+            # each round in its own process: pandas keeps ~600 MB after a round, a child gives it all back
             try:
-                pruefstand.run_once(settings.db_path, out)
-            except Exception:
-                logging.getLogger("lab").exception("lab round failed")
+                rc = subprocess.run([sys.executable, "-m", "lab", "once"], cwd=ROOT, timeout=3 * 3600,
+                                    stdout=subprocess.DEVNULL).returncode
+            except subprocess.TimeoutExpired:
+                rc = -1
+            if rc != 0:
+                logging.getLogger("lab").error("lab round failed (exit %s)", rc)
                 stop.wait(600)  # no report written: retry later, not in a tight loop
         return 0
     print(__doc__)
