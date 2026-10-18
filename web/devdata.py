@@ -227,6 +227,8 @@ def _brain_demo(conn, r, tokens, now):
     store.put(conn, "equity_transfers", [[split_ts - split_ts % 60, -0.6]])
     pool_pnl = sum(row[0] for row in conn.execute("SELECT pnl_sol FROM brain_positions WHERE kind='pool'"))
     store.put(conn, "learn_balance_sol", round(0.6 + pool_pnl, 4))
+    store.put(conn, "challenge_paused_until", now + 4 * 3600)
+    store.put(conn, "challenge_pauses", [{"at": now - 2 * 3600, "factor": 0.71}])
     # the shared opportunity table of every source (brain/opportunities.py), the model getting better day by day
     from brain import opportunities as bo
 

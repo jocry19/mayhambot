@@ -827,6 +827,8 @@ def test_brain_view(demo, empty, tmp_path):
     assert lr["closed"] == 60 and all(p["kind"] != "pool" for p in d["open"] + d["closed"]) and lr["split"]["moved_sol"] == 0.6
     assert d["account"]["moved_sol"] == -0.6 and abs(lr["result_sol"] - lr["pnl_sol"]) < 1e-3  # 0.6 moved in, rest is its trades
     assert any(p.get("learn_equity_sol") is not None for p in d["equity"])
+    assert abs(d["total"]["equity_sol"] - d["account"]["equity_sol"] - lr["equity_sol"]) < 1e-3 and d["challenge"]["paused_until"]
+    assert d["goal"]["today_total"] is not None and any(x.get("total_mult") for x in d["days"])
     held = d["open"] + d["closed"]
     assert {p["exit_mode"] for p in held} <= {"organic", "plan"}
     for p in d["open"]:

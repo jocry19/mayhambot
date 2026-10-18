@@ -106,7 +106,7 @@ function DayFactor({ days, goal, regimes }) {
           formatter: (ps) => {
             const x = ds[ps[0].dataIndex];
             const reg = (x.regimes || []).map((r) => `<br/><span style="color:${c.warn}">${regimeText(r)}</span>`).join("");
-            return `<b>${dayLabel(x.ts)} (UTC-Tag)</b>${tipRow(x.mult >= 1 ? c.good : c.bad, "Tagesfaktor", fx(x.mult))}${tipRow("transparent", "Konto", `${sol(x.start_sol, 3)} → ${sol(x.end_sol, 3)}`)}${tipRow("transparent", "Ziel", `×${lo} bis ×${hi}`)}${reg}`;
+            return `<b>${dayLabel(x.ts)} (UTC-Tag)</b>${tipRow(x.mult >= 1 ? c.good : c.bad, "Tagesfaktor", fx(x.mult))}${tipRow("transparent", "Konto", `${sol(x.start_sol, 3)} → ${sol(x.end_sol, 3)}`)}${x.total_mult != null ? tipRow("transparent", "beide Konten", `${fx(x.total_mult)} (${sol(x.total_start_sol, 3)} → ${sol(x.total_end_sol, 3)})`) : ""}${tipRow("transparent", "Ziel", `×${lo} bis ×${hi}`)}${reg}`;
           },
         },
         xAxis: catAxis(c, ds.map((x) => dayLabel(x.ts) + (regDays.has(x.ts) ? " ⚑" : ""))),
@@ -445,21 +445,29 @@ export default function Brain() {
       </Callout>
       <div className="tiles wrap-sub">
         <Tile label="Leistungskonto (Papier)" value={sol(a.equity_sol, 3)} sub={`Start ${sol(a.start_sol, 1)} · ${n(a.open)} offen, ${sol(a.open_value_sol, 2)} im Markt`} />
-        <Tile label="Ergebnis" value={solSigned(a.result_sol, 3)} cls={sign(a.result_sol)}
+        <Tile label="Ergebnis Leistungskonto" value={solSigned(a.result_sol, 3)} cls={sign(a.result_sol)}
           sub={a.closed ? `${n(a.closed)} Trades · ${pct(a.win_rate)} im Plus${a.moved_sol ? ` · Umbuchung ${solSigned(a.moved_sol, 2)} nicht mitgezählt` : ""}` : "noch kein Trade abgeschlossen"} />
         {d.learn && (d.learn.closed > 0 || d.learn.open > 0 || d.learn.split) && (
           <Tile label="Lernkonto (Papier)" value={sol(d.learn.equity_sol, 3)}
             sub={<>Ergebnis <span className={sign(d.learn.result_sol)}>{solSigned(d.learn.result_sol, 3)}</span> · {n(d.learn.open)} offen · {n(d.learn.closed)} Trades{d.learn.closed ? `, ${pct(d.learn.win_rate)} im Plus` : ""}</>}
             title="kleine Einsätze auf alles, was die Ziehung durchlässt; eigenes Buch, getrennt vom Leistungskonto" />
         )}
+        {d.learn && d.total?.equity_sol != null && (d.learn.closed > 0 || d.learn.open > 0 || d.learn.split) && (
+          <Tile label="Beide Konten zusammen" value={sol(d.total.equity_sol, 3)}
+            sub={<>Ergebnis <span className={sign(d.total.result_sol)}>{solSigned(d.total.result_sol, 3)}</span> seit Start {sol(a.start_sol, 1)}; Umbuchungen heben sich auf</>}
+            title="Leistungskonto plus Lernkonto: das ehrliche Gesamtergebnis" />
+        )}
         <Tile label="Entscheidungen 24 h" value={n(l.n)} sub={`${n(l.entered)} gekauft · ${n(l.explored)} zum Erkunden · ${n(l.blocked)} von Grenzen gestoppt`} />
         <Tile label="Nachgeprüft" value={`${n(h.n_taken)} / ${n(h.target)}`} sub={<LoadBar v={h.progress} />} title="genommene Gelegenheiten mit bekanntem Ergebnis, Ziel 100" />
         <Tile label="Tagesfaktor heute" value={fx(d.goal.today)} cls={d.goal.today == null ? "" : d.goal.today >= d.goal.mult[0] ? "up" : d.goal.today < 1 ? "down" : ""}
-          sub={`Ziel ×${d.goal.mult[0]} bis ×${d.goal.mult[1]} am Tag (UTC-Tag bisher)`} />
+          sub={<>Leistungskonto, Umbuchung herausgerechnet{d.goal.today_total != null && <>; beide Konten zusammen <b className={d.goal.today_total < 1 ? "down" : d.goal.today_total >= d.goal.mult[0] ? "up" : ""}>{fx(d.goal.today_total)}</b></>}. Ziel ×{d.goal.mult[0]} bis ×{d.goal.mult[1]} am Tag (UTC-Tag bisher)</>} />
         <Tile label="Auswahl-Vorsprung" value={pctSigned(d.alpha, 1)} cls={sign(d.alpha)} sub="genommen minus alles kopiert, Ø je Trade, nachgeprüft" />
         <Tile label="Einfangquote" value={pct(lastOf(d.days, "capture_own") ?? lastOf(d.days, "capture_organic"))}
           sub={lastOf(d.days, "capture_own") != null ? "Anteil am besten Anstieg, eigene Trades (letzter Tag)" : "Anteil am besten Anstieg, organisch nachgespielt"} />
       </div>
+      {d.challenge?.paused_until && (
+        <Callout kind="warn" icon="alert">Stunden-Challenge (×2 je Stunde) pausiert bis {dt(d.challenge.paused_until)}: die letzten 3 vollen Stunden zusammen lagen bei {fx(d.challenge.pauses_24h?.[d.challenge.pauses_24h.length - 1]?.factor, 3)}. Bis dahin gelten die normalen Einsatzgrößen{d.challenge.pauses_24h?.length > 1 ? ` (${n(d.challenge.pauses_24h.length)} Pausen in 24 h)` : ""}.</Callout>
+      )}
       {d.regimes?.length > 0 && d.regimes[d.regimes.length - 1].at > d.now - 86400 && (
         <Callout kind="warn" icon="alert">{regimeText(d.regimes[d.regimes.length - 1])} ({ago(d.regimes[d.regimes.length - 1].at)}).</Callout>
       )}

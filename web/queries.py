@@ -2390,12 +2390,19 @@ def _brain_days(conn, now, regimes):
     out = {lo + k * 86400: {"ts": lo + k * 86400} for k in range(BRAIN_DAYS)}
     if has(conn, "brain_equity"):
         tr = _brain_transfers(conn)
+        learn = "learn_equity_sol" in {c["name"] for c in rows(conn, "PRAGMA table_info(brain_equity)")}
         for r in rows(conn, "SELECT ts / 86400 * 86400 d, MIN(ts) a, MAX(ts) b FROM brain_equity WHERE ts>=? GROUP BY d", (lo,)):
             first = scalar(conn, "SELECT equity_sol FROM brain_equity WHERE ts=?", (r["a"],))
             last = scalar(conn, "SELECT equity_sol FROM brain_equity WHERE ts=?", (r["b"],))
             if r["d"] in out and first and last is not None:
                 last -= _brain_moved(tr, r["a"], r["b"])
                 out[r["d"]].update(start_sol=_f(first, 4), end_sol=_f(last, 4), mult=_f(last / first, 4))
+            if r["d"] in out and learn:
+                # both books together: a transfer between them cancels out, nothing to subtract
+                fa = scalar(conn, "SELECT equity_sol + COALESCE(learn_equity_sol, 0) FROM brain_equity WHERE ts=?", (r["a"],))
+                fb = scalar(conn, "SELECT equity_sol + COALESCE(learn_equity_sol, 0) FROM brain_equity WHERE ts=?", (r["b"],))
+                if fa and fa > 0 and fb is not None:
+                    out[r["d"]].update(total_start_sol=_f(fa, 4), total_end_sol=_f(fb, 4), total_mult=_f(fb / fa, 4))
     ev = defaultdict(list)
     for r in rows(conn, "SELECT evaluated_at, wanted, realized_plan, realized_base FROM brain_opps "
                         "WHERE evaluated_at>=? AND realized_plan IS NOT NULL", (lo,)):
@@ -2776,7 +2783,12 @@ def brain_view(conn, kind=None, show="all", limit=60, now=None):
         "honest": {**h, "target": BRAIN_TARGET, "progress": _f(min(1.0, (h.get("n_taken") or 0) / BRAIN_TARGET), 3),
                    "by_kind": [{"kind": k, "label": BRAIN_KIND.get(k, k), **v} for k, v in (h.get("by_kind") or {}).items()]},
         "prior_check": st.get("prior_check") if isinstance(st.get("prior_check"), dict) else None,
-        "goal": {"mult": list(BRAIN_GOAL_MULT), "today": days[-1].get("mult") if days else None, "hour": BRAIN_HOUR_GOAL},
+        "total": {"equity_sol": _f(bal + open_val + learn["equity_sol"], 4) if bal is not None else None,
+                  "result_sol": _f(bal + open_val + learn["equity_sol"] - start, 4) if bal is not None else None},
+        "challenge": {"paused_until": st.get("challenge_paused_until") if (st.get("challenge_paused_until") or 0) > now else None,
+                      "pauses_24h": [x for x in (st.get("challenge_pauses") or []) if isinstance(x, dict) and (x.get("at") or 0) >= now - 86400]},
+        "goal": {"mult": list(BRAIN_GOAL_MULT), "today": days[-1].get("mult") if days else None,
+                 "today_total": days[-1].get("total_mult") if days else None, "hour": BRAIN_HOUR_GOAL},
         "hours": hours,
         "days": days,
         "regimes": [{"at": x["at"], "n": x.get("n"), "err": _f(x.get("err"), 4), "z": x.get("z")} for x in regimes[-30:]],
