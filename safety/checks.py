@@ -307,7 +307,9 @@ class Context:
                 if got > 0:
                     b = d["buyers"].setdefault(signer, {"wallet": signer, "tokens": 0.0, "sol": 0.0, "slot": x["slot"]})
                     b["tokens"] += got
-                    b["sol"] += max(0.0, -sol_deltas(tx).get(signer, 0.0))
+                    # native plus wrapped SOL actually spent: a bot that wraps a big budget and leaves the rest in
+                    # its WSOL account loses the whole wrap in native lamports (sniper 2b66de4, 18.10.)
+                    b["sol"] += max(0.0, -(sol_deltas(tx).get(signer, 0.0) + token_deltas(tx, SOL_MINT).get(signer, 0.0)))
             d["idx"] += 1
         d.update(state="done", reachable=True, buyers=list(d["buyers"].values()), pending=[])
 
