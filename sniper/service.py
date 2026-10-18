@@ -698,7 +698,8 @@ class Service:
         span = "1 h" if up >= 3600 else f"{up / 60:.0f} min seit Start"
         pct = lambda v: "?" if v["share"] is None else f"{100 * v['share']:.0f} %"  # noqa: E731
         log.info(f"Abdeckung ({span}): Launches mit Trades beim Entscheid %s von %d, Migrationen mit Trades %s von %d "
-                 "(Ziel je 90 %%)", pct(c["decide"]), c["decide"]["n"], pct(c["migrate"]), c["migrate"]["n"])
+                 "(Ziel je 90 %%; dazu %d sofort beim Erstellen migriert, ohne Curve-Handel)", pct(c["decide"]),
+                 c["decide"]["n"], pct(c["migrate"]), c["migrate"]["n"], c["migrate_instant"]["n"])
         lt = c.get("late") or {}
         if lt.get("zero"):
             log.info(f"Abdeckung ({span}, Entscheide ≥ 5 min alt): %d ohne Trade beim Entscheid, davon %d binnen 5 min "

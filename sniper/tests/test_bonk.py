@@ -526,3 +526,19 @@ def test_launch_block_caps_the_spend_at_what_the_pool_received():
                    "postTokenBalances": tb([("M", "POOL", 99e6), (W, "POOL", 85.9), ("M", "BUY", 1e6)])},
           "transaction": {"message": {"accountKeys": [{"pubkey": "BUY"}, {"pubkey": "POOL"}, {"pubkey": "SIDE"}]}}}
     assert [(w, round(sol, 2)) for w, _t, sol in launchblock.tx_buyers(tx, "M")] == [("BUY", 0.9)]
+
+
+def test_migration_coverage_counts_curves_completed_by_the_create_apart(tmp_path):
+    from sniper import store
+    from sniper.engine import Engine
+    from sniper.tests.test_sniper import Curve, FakeEnricher
+    eng = Engine(cfg(), store.connect(str(tmp_path / "m.db")), enricher=FakeEnricher())
+    masche, normal, missed = Curve("MASCHE"), Curve("NORMAL"), Curve("MISSED")
+    eng.handle(masche.create(dev_sol=86.0), T0)                 # the dev buys the whole curve in the create
+    eng.handle(normal.create(), T0)
+    eng.handle(normal.buy("W1", 1.0), T0 + 2)
+    eng.handle(missed.create(), T0)                              # traded, but we saw none of it
+    for m in ("MASCHE", "NORMAL", "MISSED"):
+        eng.handle({"txType": "migrate", "mint": m, "pool": "pump-amm"}, T0 + 5)
+    c = eng.coverage(T0 + 10)
+    assert c["migrate"] == {"n": 2, "share": 0.5} and c["migrate_instant"]["n"] == 1

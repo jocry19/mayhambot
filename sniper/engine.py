@@ -15,7 +15,7 @@ from collections import deque
 from sniper import opportunity, research, store
 from sniper.analyze import analyze
 from sniper.paper import PaperBook
-from sniper.state import LaunchState
+from sniper.state import LaunchState, curve_progress
 
 log = logging.getLogger("sniper")
 
@@ -97,7 +97,7 @@ class Engine:
         self.book = PaperBook(cfg, conn)
         self.counters = {"creates": 0, "trades": 0, "migrations": 0, "stage1": 0, "stage2": 0, "entries": 0}
         # stream coverage (plan 18.10., goal >= 90 %): (ts, had trades) per pump decision and per migration
-        self.cover = {"decide": deque(maxlen=20000), "migrate": deque(maxlen=5000)}
+        self.cover = {"decide": deque(maxlen=20000), "migrate": deque(maxlen=5000), "migrate_instant": deque(maxlen=5000)}
         # launches decided without a trade that got their first one later: (decision time, seconds after it).
         # Tells "the stream missed them" (many, early) from "nobody traded them" (few)
         self.late_first = deque(maxlen=20000)
@@ -179,7 +179,12 @@ class Engine:
                 st.migrated, st.migrated_ts = True, now
                 self.counters["migrations"] += 1
                 if st.pool == "pump":
-                    self.cover["migrate"].append((now, st.n_seen > 0))
+                    # a curve the create alone completed (dev buys all of it, 18.10. "Masche") migrates with no
+                    # curve trade at all: nothing a stream can see, so it is counted apart
+                    if not st.n_seen and (curve_progress(st.v_tok0) or 0) >= 0.99:
+                        self.cover["migrate_instant"].append((now, True))
+                    else:
+                        self.cover["migrate"].append((now, st.n_seen > 0))
                 if st.decided_ts:
                     store.update_launch(self.conn, mint, migrated=1, migrated_ts=int(now))
                 return st
