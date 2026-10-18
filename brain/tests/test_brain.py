@@ -1535,3 +1535,17 @@ def test_a_supplemented_opportunity_is_decided_once_more(conn, s):
     assert len(refs) == 2 and refs[1].endswith("+")
     f = json.loads(conn.execute("SELECT features FROM opportunities").fetchone()[0])
     assert f["buyers"] == 30 and f["sniper.bundle_pct"] == 4.0
+
+
+def test_a_coin_sold_as_rug_is_banned_for_a_day_in_every_path(conn, s):
+    mk = Market()
+    set_tier(conn, WHALE, "ultra")
+    mk.snaps[MINT] = snap()
+    conn.execute("INSERT INTO brain_positions(kind, mint, status, opened_at, closed_at, size_sol, pnl_pct, exit_reason) "
+                 "VALUES ('market', ?, 'closed', ?, ?, 0.1, -1.0, 'rug')", (MINT, int(time.time()) - 8 * 3600,
+                                                                          int(time.time()) - 180))
+    t = make_trader(conn, s, trained(), mk)
+    t.scan()
+    add_whale_buy(conn, "r1")
+    assert t.scan() == 0
+    assert "Rug" in json.loads(conn.execute("SELECT raw FROM brain_opps").fetchone()[0])["gate"]

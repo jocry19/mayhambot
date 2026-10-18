@@ -21,6 +21,7 @@ from .plans import BY_NAME, PLANS
 log = logging.getLogger("brain.trader")
 
 DEDUP_S = 6 * 3600  # one opportunity per (whale entity or kind, coin) in this window: repeat buys are no new idea
+RUG_BAN_S = 24 * 3600
 REENTRY_S = 6 * 3600  # no second brain position in a coin within this window: a coin we just lost on is no new idea
 TRAIL_MIN_HOLD_S = 60  # the trail arms after a minute: the first quotes after a buy are noise, not a run
 PRICE_RETRY_S = 30  # a coin without a DexScreener pair yet gets this long to show one before it is decided
@@ -375,6 +376,8 @@ class Trader:
             st = dataclasses.replace(st, min_size_sol=self.s.learn_size_sol, explore_share=0.0, no_explore="")
         d = decide.choose(model, kind, feats, st, self.rng, equity=self.equity())
         if kind == "pool":
+            d.size_sol = self.s.learn_size_sol  # the learning account always buys at the learning stake (18.10.:
+            # Kelly on the brain's equity made one 0.12 SOL)
             if _always_learn(row):
                 # a real call (1-3 a day) or a band candidate: the learning account always takes it at the learning
                 # stake, so the class gets cases of its own; the hard gates (rug, liquidity) still decide (signals
@@ -448,8 +451,11 @@ class Trader:
         c = self.conn
         if c.execute("SELECT 1 FROM brain_positions WHERE mint=? AND status='open'", (mint,)).fetchone():
             return "schon eine offene Position in diesem Coin"
-        if c.execute("SELECT 1 FROM brain_positions WHERE mint=? AND opened_at>=?",
-                     (mint, int(self.clock() - REENTRY_S))).fetchone():
+        if c.execute("SELECT 1 FROM brain_positions WHERE mint=? AND exit_reason='rug' AND closed_at>=?",
+                     (mint, int(self.clock() - RUG_BAN_S))).fetchone():
+            return "Coin als Rug verkauft, 24 h gesperrt"  # 18.10.: DOPE bought again 3 min after its rug sale
+        if c.execute("SELECT 1 FROM brain_positions WHERE mint=? AND (opened_at>=? OR closed_at>=?)",
+                     (mint, int(self.clock() - REENTRY_S), int(self.clock() - REENTRY_S))).fetchone():
             return "Coin in den letzten 6 h schon gehandelt"
         if kind == "whale" and row is not None:
             if c.execute("SELECT 1 FROM ct_swaps WHERE wallet=? AND mint=? AND side='sell' AND ts>=?",
