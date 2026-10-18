@@ -377,8 +377,8 @@ def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: i
             horizon = hz
         else:
             todo, allow, horizon = SHORT, net > 0, short_horizon_s()
-        if o["kind"] == "market" and net <= (limit or s.evals_per_round) // 2:
-            allow = False  # the side source gets at most half of the round's candle downloads (shared free limit)
+        if o["kind"] in ("market", "pool") and net <= (limit or s.evals_per_round) // 2:
+            allow = False  # side sources get at most half of the round's candle downloads (shared free limit)
         try:
             gains = replay(conn, o, candles_fn, allow, todo, horizon)
             if allow and (not final or _ct_gains(conn, o) is None):

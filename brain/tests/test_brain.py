@@ -1137,3 +1137,22 @@ def test_a_rug_counts_minus_one_hundred_in_the_shared_table(conn, s):
     assert learner.evaluate(conn, Brain(len(PLANS)), s, rug, limit=5, pool=pm) == 1
     row = conn.execute("SELECT * FROM opportunities").fetchone()
     assert row["rug"] == 1 and row["outcome_net"] <= -0.9
+
+
+def test_the_learning_account_has_its_own_ceiling(conn, s):
+    from brain import opportunities as O
+    from brain.pool import Pool
+    s.pool_max_open = 1
+    mk = Market()
+    pm = Pool(len(PLANS))
+    for _ in range(50):
+        pm.update(tokens("pool", {"src": "sniper"}), {i: 0.3 for i in range(len(PLANS))})
+    t = make_trader(conn, s, trained(), mk, pool_model=pm)
+    t.scan()
+    now = time.time()
+    for i in range(2):
+        m = f"Mint{i:040d}"[:44]
+        mk.snaps[m] = snap(mint=m)
+        O.report(conn, "sniper", f"L{i}", m, now, {"buyers": 12})
+    assert t.scan() == 1
+    assert "Lernkonto" in conn.execute("SELECT note FROM brain_opps WHERE decision='skip'").fetchone()[0]
