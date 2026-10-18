@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import sys
@@ -907,3 +908,26 @@ def test_sniper_filter_value_ignores_unit_errors(demo, tmp_path):
             k = f.get("n_ret_60m", f.get("n_measured"))
             assert abs(f["pnl_without_sol"] - f["avg_ret_60m"] * ft["size_sol"] * k) <= 1e-4 * ft["size_sol"] * k + 1e-3  # avg rounded to 4 places
     assert before.keys() <= {x["code"] for x in v["stats"]["filters"]}
+
+
+def test_lab_view_reads_report(tmp_path, monkeypatch):
+    from web import devdata
+    from web import queries as Q
+
+    monkeypatch.delenv("LAB_DIR", raising=False)
+    monkeypatch.delenv("LAB_EVERY_H", raising=False)
+    now = 1_700_000_000
+    assert Q.lab_view(now=now)["available"] is False
+    devdata.lab_report(os.path.join(Q.ROOT_DIR, "data", "lab"), now=now)
+    v = Q.lab_view(now=now)
+    assert v["available"] and v["n"] == 12 and v["age_h"] == 2.0 and not v["stale"]
+    assert v["carries"] == len(v["carrying"]) == sum(r["verdict"] == "traegt" for r in v["results"])
+    assert {r["family"] for r in v["results"]} >= {"Label-Regel", "Launch", "nach Migration", "Überlebende · Regime"}
+    assert Q.lab_view(now=now + 20 * 3600)["stale"] is True
+    rep = os.path.join(Q.ROOT_DIR, "data", "lab", "report.json")
+    with open(rep) as f:
+        d = json.load(f)
+    d["info"]["error_paths"] = "boom https://x.example/?api-key=SECRET123"
+    with open(rep, "w") as f:
+        json.dump(d, f)
+    assert "SECRET123" not in json.dumps(Q.lab_view(now=now)["errors"])

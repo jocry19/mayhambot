@@ -2856,3 +2856,49 @@ def brain_summary(conn, now=None):
             "closed": a["closed"], "decisions_24h": v["last24"]["n"], "entered_24h": v["last24"]["entered"],
             "n_taken": h.get("n_taken"), "taken_mean": h.get("taken_mean"), "passed_mean": h.get("passed_mean"),
             "copy_all_mean": h.get("copy_all_mean"), "target": h["target"]}
+
+
+LAB_FAMILIES = (("label_", "Label-Regel"), ("launch_", "Launch"), ("nach_migration", "nach Migration"),
+                ("jung_abgekuehlt", "jung abgekühlt"), ("ueberlebende", "Überlebende"), ("nach_pump", "nach Pump"),
+                ("ruecksetzer", "Rücksetzer"), ("abgekuehlt", "abgekühlt"))
+
+
+def _lab_family(hyp):
+    for pre, label in LAB_FAMILIES:
+        if hyp.startswith(pre):
+            return label + (" · Regime" if "_regime_" in hyp else "")
+    return "sonstige"
+
+
+def lab_view(now=None):
+    """The test bench (lab/): read-only on data/lab/report.json, which `python -m lab` writes every LAB_EVERY_H
+    hours. Verdict per hypothesis after costs, net per coin, the three time thirds; nothing here trades."""
+    now = int(now or time.time())
+    path = os.path.join(os.getenv("LAB_DIR") or os.path.join(ROOT_DIR, "data", "lab"), "report.json")
+    rep = _json_file(path)
+    every_h = _f(os.getenv("LAB_EVERY_H", "6"), 2) or 6.0
+    if not isinstance(rep, dict):
+        return {"available": False, "every_h": every_h,
+                "note": "Der Prüfstand hat noch keinen Bericht geschrieben (Dienst lab rechnet alle "
+                        f"{every_h:g} Stunden)."}
+    res = [r for r in rep.get("results") or [] if isinstance(r, dict) and r.get("hyp")]
+    for r in res:
+        r["family"] = _lab_family(str(r["hyp"]))
+        th = [x for x in r.get("thirds") or [] if isinstance(x, (int, float))]
+        r["thirds_pos"] = sum(1 for x in th if x > 0)
+    counts = defaultdict(int)
+    for r in res:
+        counts[r.get("verdict") or "?"] += 1
+    info = rep.get("info") if isinstance(rep.get("info"), dict) else {}
+    at = int(rep.get("at") or 0) or None
+    return {
+        "available": True, "at": at, "age_h": round((now - at) / 3600, 1) if at else None,
+        "stale": bool(at and now - at > (2 * every_h + 1) * 3600), "every_h": every_h,
+        "window_h": rep.get("window_h"), "stake_sol": rep.get("stake_sol"),
+        "coins": info.get("coins"), "prices": info.get("prices"),
+        "errors": {k[6:]: _redact(str(v))[:200] for k, v in info.items() if str(k).startswith("error_")},
+        "n": len(res), "carries": counts.get("traegt", 0), "candidates": counts.get("kandidat", 0),
+        "carrying": [r["hyp"] for r in res if r.get("verdict") == "traegt"],
+        "rule": {"min_n": 200, "min_coins": 50, "min_t": 3.0},
+        "results": res,
+    }

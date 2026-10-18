@@ -1009,6 +1009,38 @@ def build(path: str, days: float = 3.0, seed: int = 7, n_tokens: int = 36, n_wal
     return path
 
 
+def lab_report(out_dir: str, now: float | None = None, seed: int = 7) -> str:
+    """Demo test-bench report in the format lab/pruefstand.py writes (data/lab/report.json); dev only."""
+    r = random.Random(seed)
+    now = int(now or time.time())
+    names = ["label_whale_tp2", "label_signals_stop20", "launch_mc30-60_x2_s30", "launch_mc60-120_halten",
+             "nach_migration_5m_60m", "nach_migration_30m_60m", "ueberlebende_6h_60m", "nach_pump_50_240m",
+             "ruecksetzer_30_60m", "abgekuehlt_2h_60m", "jung_abgekuehlt_1h_240m", "ueberlebende_regime_oben_60m"]
+    res = []
+    for i, h in enumerate(names):
+        n, coins = r.randint(40, 900), 0
+        coins = max(5, min(n, int(n * r.uniform(0.15, 0.5))))
+        gross = r.uniform(-0.06, 0.07) + (0.06 if i == 0 else 0)
+        cost = r.uniform(0.02, 0.07)
+        net = gross - cost
+        thirds = [round(net + r.uniform(-0.04, 0.04), 4) for _ in range(3)]
+        se = r.uniform(0.008, 0.03)
+        t = net / se
+        pos = sum(x > 0 for x in thirds)
+        verdict = ("traegt" if n >= 200 and coins >= 50 and pos == 3 and t >= 3
+                   else "kandidat" if net > 0 and pos >= 2 else "traegt nicht")
+        res.append({"hyp": h, "n": n, "coins": coins, "gross": round(gross, 4), "cost": round(cost, 4),
+                    "net": round(net, 4), "net_per_coin": round(net, 4), "se": round(se, 4), "t": round(t, 2),
+                    "thirds": thirds, "rug": round(r.uniform(0, 0.12), 4), "verdict": verdict,
+                    "from": now - 72 * 3600, "to": now - 600})
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "report.json")
+    with open(path, "w") as f:
+        json.dump({"at": now - 2 * 3600, "window_h": 72, "stake_sol": 0.1,
+                   "info": {"prices": 120000, "coins": 1800}, "results": res}, f, ensure_ascii=False)
+    return path
+
+
 def _price(tok, t):
     pts = tok["pts"]
     if not pts:
@@ -1020,3 +1052,4 @@ def _price(tok, t):
 if __name__ == "__main__":
     out = sys.argv[1] if len(sys.argv) > 1 else "/tmp/mayham-demo.db"
     print(build(out))
+    print(lab_report(os.path.splitext(out)[0] + "_lab"))

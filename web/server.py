@@ -258,6 +258,12 @@ def brain(kind: str | None = None, show: str = "all", limit: int = 60):
     return ok(cache.get(("brain", kind, show, limit), 10, lambda: q.brain_view(read_conn(), kind=kind, show=show, limit=limit)))
 
 
+@app.get("/api/lab")
+def lab():
+    """The test bench (lab/): verdict per fixed hypothesis after costs, from data/lab/report.json (read-only)."""
+    return ok(cache.get(("lab",), 30, lambda: q.lab_view()))
+
+
 @app.get("/api/copytrade")
 def copytrade(mode: str = "paper", strategy: str | None = None):
     if mode not in ("paper", "explore", "dry", "live"):

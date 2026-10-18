@@ -223,6 +223,52 @@ const halfCell = (m, lo, k) => (m == null ? <span className="dim">–</span>
   : <span title={`${n(k)} Fälle, Untergrenze ${pctSigned(lo, 1)}`}><span className={sign(m)}>{pctSigned(m, 1)}</span> <span className={`dim ${lo > 0 ? "up" : ""}`}>({pctSigned(lo, 0)})</span></span>);
 
 /** Patterns (plan 18.10., "Richtung neu"): estimate and uncertainty per pattern; the release badge only while brain still sends one. */
+const VERDICT = { traegt: ["good", "trägt"], kandidat: ["warn", "Kandidat"], "traegt nicht": ["", "trägt nicht"] };
+const thirdsCell = (x) => (
+  <span className="row mono" style={{ gap: 6, justifyContent: "flex-end" }} title="Ø netto je Zeitdrittel des Fensters, alt nach neu">
+    {(x.thirds || []).map((v, i) => <span key={i} className={v > 0 ? "up" : v < 0 ? "down" : "dim"}>{pctSigned(v, 1)}</span>)}
+  </span>
+);
+
+function Pruefstand() {
+  const [all, setAll] = useState("top");
+  const { data: L } = usePoll("/api/lab", 60000);
+  if (!L) return null;
+  if (!L.available) return <Card title="Prüfstand"><Empty>{L.note}</Empty></Card>;
+  const r = L.rule || {};
+  const shown = all === "all" ? L.results : L.results.filter((x) => x.verdict !== "traegt nicht").concat(L.results.filter((x) => x.verdict === "traegt nicht").slice(0, 5));
+  return (
+    <Card flush title="Prüfstand"
+      sub={`Feste Hypothesen auf der echten Datenbank, alle ${n(L.every_h)} h über die letzten ${n(L.window_h)} h nachgerechnet, nach Kosten bei ${sol(L.stake_sol, 2)} Einsatz (Börsengebühr, Preiswirkung, Transaktionskosten, Verzug). „Trägt“ heißt: in allen drei Zeitdritteln positiv, n ≥ ${n(r.min_n)}, ≥ ${n(r.min_coins)} Coins und t ≥ ${n(r.min_t)} über die Coin-Mittel. Nur eine tragende Tasche soll Einsatz im Hauptkonto bekommen.${L.at ? ` Stand ${ago(L.at)}.` : ""}`}
+      actions={<Seg value={all} onChange={setAll} options={[["top", "Tragend und Kandidaten"], ["all", `Alle ${n(L.n)}`]]} />}>
+      <div style={{ padding: "0 16px" }}>
+        {L.stale && <Callout kind="warn" icon="alert">Der letzte Bericht ist {n(L.age_h, 1)} h alt, der Prüfstand rechnet sonst alle {n(L.every_h)} h: läuft der Dienst lab?</Callout>}
+        {Object.keys(L.errors || {}).length > 0 && <Callout kind="warn" icon="alert">Nicht berechnet: {Object.entries(L.errors).map(([k, v]) => `${k} (${v})`).join("; ")}</Callout>}
+        <div className="tiles" style={{ margin: "8px 0 12px" }}>
+          <Tile label="Tragen" value={n(L.carries)} cls={L.carries > 0 ? "up" : ""} sub={L.carries > 0 ? L.carrying.join(", ") : "keine Hypothese trägt nach Kosten"} />
+          <Tile label="Kandidaten" value={n(L.candidates)} sub="im Mittel positiv, zwei von drei Dritteln" />
+          <Tile label="Geprüft" value={n(L.n)} sub={`${n(L.coins)} Coins mit Kursreihe`} />
+        </div>
+      </div>
+      <Table rows={shown} rowKey={(x) => x.hyp}
+        empty="Der Bericht enthält noch keine Hypothese mit Einstiegen"
+        expand={(x) => <div className="col" style={{ gap: 4 }}><span className="mono">{x.hyp}</span>
+          <span className="dim">Ø brutto {pctSigned(x.gross, 1)} · Kosten {pct(x.cost, 1)} · netto je Einstieg {pctSigned(x.net, 1)} · Standardfehler {pct(x.se, 1)} · {dt(x.from)} bis {dt(x.to)}</span></div>}
+        cols={[
+          { k: "hyp", l: "Hypothese", fmt: (x) => <span><b className="mono">{x.hyp}</b> <span className="dim">{x.family}</span></span> },
+          { k: "verdict", l: "Urteil", fmt: (x) => <span className={`badge ${(VERDICT[x.verdict] || [""])[0]}`}>{(VERDICT[x.verdict] || ["", x.verdict])[1]}</span> },
+          { k: "net_per_coin", l: "netto je Coin", r: true, fmt: (x) => <b className={sign(x.net_per_coin)}>{pctSigned(x.net_per_coin, 1)}</b> },
+          { k: "t", l: "t", r: true, fmt: (x) => <span className={x.t >= (r.min_t || 3) ? "up b" : "dim"}>{x.t == null ? "–" : n(x.t, 1)}</span> },
+          { k: "thirds_pos", l: "Drittel", r: true, fmt: thirdsCell },
+          { k: "n", l: "Einstiege", r: true, fmt: (x) => <span className={x.n >= (r.min_n || 200) ? "" : "dim"}>{n(x.n)}</span> },
+          { k: "coins", l: "Coins", r: true, fmt: (x) => <span className={x.coins >= (r.min_coins || 50) ? "" : "dim"}>{n(x.coins)}</span> },
+          { k: "cost", l: "Kosten", r: true, fmt: (x) => pct(x.cost, 1) },
+          { k: "rug", l: "Rug", r: true, fmt: (x) => pct(x.rug, 0) },
+        ]} />
+    </Card>
+  );
+}
+
 function Pockets({ p }) {
   const r = p.rule || {};
   const status = (x) => (x.released ? <span className="badge good">freigegeben</span>
@@ -521,6 +567,7 @@ export default function Brain() {
         </Card>
       </div>
 
+      <Pruefstand />
       {d.learning && <Learning L={d.learning} days={d.days} />}
       {d.pockets && <Pockets p={d.pockets} />}
 
