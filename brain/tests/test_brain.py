@@ -1517,3 +1517,21 @@ def test_one_coin_reported_again_by_the_same_source_is_decided_once(conn, s):
         O.report(conn, "sniper", f"{MINT}:{i}", MINT, time.time(), {"buyers": 12}, source_action="passed")
         t.scan()
     assert conn.execute("SELECT COUNT(*) FROM brain_opps WHERE kind='pool'").fetchone()[0] == 1
+
+
+def test_a_supplemented_opportunity_is_decided_once_more(conn, s):
+    from brain import opportunities as O
+    s.pool_trade = "shadow"
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    t, _ = _pool_trader(conn, s, mk)
+    O.report(conn, "sniper", MINT, MINT, time.time(), {"buyers": 12})
+    t.scan()
+    assert O.supplement(conn, "sniper", MINT, {"sniper.bundle_pct": 4.0, "buyers": 30})
+    assert not O.supplement(conn, "sniper", "unknown", {"x": 1})
+    t.scan()
+    t.scan()
+    refs = [r[0] for r in conn.execute("SELECT ref FROM brain_opps WHERE kind='pool' ORDER BY id")]
+    assert len(refs) == 2 and refs[1].endswith("+")
+    f = json.loads(conn.execute("SELECT features FROM opportunities").fetchone()[0])
+    assert f["buyers"] == 30 and f["sniper.bundle_pct"] == 4.0

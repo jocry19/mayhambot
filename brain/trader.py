@@ -272,6 +272,19 @@ class Trader:
                     out.append(("pool", f"opp{r['id']}", r))
             if rows:
                 store.put(c, "cursor_pool", rows[-1]["id"])
+            # rows a source completed later (opportunities.supplement): decided once more with the fuller picture
+            try:
+                scur = self._cursor("cursor_pool_supp", "SELECT MAX(supplemented_at) FROM opportunities")
+                rows = c.execute("SELECT * FROM opportunities WHERE supplemented_at>=? ORDER BY supplemented_at "
+                                 "LIMIT 200", (scur,)).fetchall()
+            except Exception:  # the column comes with the first supplement or the next start
+                rows = []
+            for r in rows:
+                if (r["source"] not in OWN_SOURCES and not r["position_id"]
+                        and now - (r["supplemented_at"] or 0) <= self.s.max_pool_age_s):
+                    out.append(("pool", f"opp{r['id']}+", r))
+            if rows:
+                store.put(c, "cursor_pool_supp", rows[-1]["supplemented_at"])
         if store.has(c, "sniper_launches") and store.has(c, "sniper_positions"):
             # 'enter' is written at stage 2 together with the sniper's paper position, after decided_ts (stage 1):
             # the cursor runs on the position's opened_ts, as copytrade.engine.follow_launches does
@@ -311,7 +324,8 @@ class Trader:
 
                 ent = ct_store.entity(self.conn, row["wallet"])
             elif kind == "pool":
-                ent = row["source"]  # one decision per source and coin in 6 h
+                ent = row["source"] + ("+" if ref.endswith("+") else "")  # one decision per source and coin in 6 h,
+                # one more once the source completed the row
             if (kind, ref) in self.pending or (kind, row["mint"], ent) in batch:
                 continue
             if not self._seen(kind, ref, row["mint"], ent, now):
