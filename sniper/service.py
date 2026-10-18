@@ -90,6 +90,7 @@ class Service:
         self._research_ts = None
         self.ws_msgs = 0
         self._dex_conn = None
+        self._live_conn, self._live_ts = None, 0.0
         self._hb_conn = store.connect(db_path)
 
     def _on_create(self, m, src):
@@ -422,6 +423,16 @@ class Service:
                 log.exception("%s failed", getattr(fn, "__name__", fn))
             await asyncio.sleep(sec)
 
+    def curve_live_round(self):
+        """Every few seconds: latest curve state of the launches that traded, for other processes (copytrade)."""
+        now = time.time()
+        rows = self.engine.curve_live(self._live_ts - 1)
+        self._live_ts = now
+        if rows:
+            if self._live_conn is None:
+                self._live_conn = store.connect(self.db_path)
+            store.save_curve_live(self._live_conn, rows)
+
     def dex_round(self):
         mints = self.engine.due_external()
         if mints:
@@ -639,6 +650,7 @@ class Service:
                  *([asyncio.create_task(self.creates.run(stop_ev))] if self.creates else []),
                  asyncio.create_task(self.every(300, self.sol_round)),
                  asyncio.create_task(self.every(10, self.heartbeat, 1)),
+                 asyncio.create_task(self.every(3, self.curve_live_round, 3)),
                  asyncio.create_task(self.every(self.cfg.dex_every_sec, self.dex_round, 10)),
                  asyncio.create_task(self.every(600, self.tiers_round, 600)),
                  asyncio.create_task(self.every(3600, self.prune_round, 120)),

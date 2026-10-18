@@ -192,6 +192,13 @@ class Engine:
                 return st
         return None
 
+    def curve_live(self, since):
+        """Curve state of every launch that traded after `since` (for store.save_curve_live)."""
+        with self.lock:
+            return [{"mint": st.mint, "ts": st.last_trade_ts, "pool": st.pool, "price_sol": st.price_sol,
+                     "v_sol": st.v_sol, "mcap_sol": st.mcap_sol, "n_trades": st.n_seen, "complete": st.migrated}
+                    for st in self.launches.values() if st.last_trade_ts > since and st.price_sol > 0]
+
     def coverage(self, now, window=3600):
         """Share of pump.fun launches with at least one trade at the decision, and of migrations whose run we saw."""
         out = {}

@@ -131,6 +131,7 @@ Kauf nur bei `score ≥ SNIPER_MIN_SCORE` (40), `risk ≤ SNIPER_MAX_RISK` (45) 
 | `sniper_launches` | eine Zeile je Launch: Quelle, Dev, Zeiten, Stufe, Entscheidung, `skip_reason`, Score/Momentum/Risiko, Flags, Kennzahlen (Bundle-Anteil und -Wallets, Curve-Schätzung `unseen_pct`, Dev-Anteil/-Verkauf, Top-10, Sniper-Bots, Geldquellen-Gruppen, Dev-Historie, Smart Money, Curve-Fortschritt, Socials, Safety, Modell), `reasons_json`, `positives_json`, `features_json` (Stufe 2), Calls, Migration, `ret_1m/5m/15m/60m`, `max_ret_60m`, `min_ret_60m`, `rugged`, `done` |
 | `sniper_launch_wallets` | mint, wallet, role (`bundle`/`insider`/`dev`/`early`), slot, ts, tokens, sol, funder, sold_pct |
 | `sniper_curve` | Curve-Verlauf der ersten 15 min tief geprüfter Launches (ts, mcap_sol, v_sol, n_trades) |
+| `sniper_curve_live` | Letzter Kurvenstand je Mint (ts, pool, price_sol, v_sol, mcap_sol, n_trades, complete), alle 3 s vom laufenden Sniper geschrieben; Lesen aus anderen Prozessen mit `sniper.store.curve_now(conn, mint, max_age_s=30)` |
 | `sniper_positions` | Papier-Positionen: Einstieg, Fill-Quelle, TP1, Peak, realisiert, Ausstiegsgrund, PnL, `params_json`, `events_json` |
 | `sniper_state` | `paper_balance_sol`; `service_status` (Heartbeat alle 10 s, JSON, siehe unten) |
 

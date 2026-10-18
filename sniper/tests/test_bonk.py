@@ -218,3 +218,25 @@ def test_silent_stream_moves_to_the_next_rpc():
     assert ls.next_url() == "wss://b" and ls.next_url() == "wss://a" and ls.switches == 2
     one = rpcws.LogStream("wss://a", lambda m: None, 1, mode="program", program=rpcws.PUMP_PROGRAM)
     assert one.next_url() == "wss://a"
+
+
+def test_curve_live_round_trip_for_other_processes(tmp_path):
+    from sniper import store
+    from sniper.engine import Engine
+    path = str(tmp_path / "l.db")
+    eng = Engine(cfg(), store.connect(path), enricher=None)
+    st = LaunchState(mint="M1", created_ts=T0)
+    st.v_sol, st.v_tok, st.mcap_sol, st.n_seen, st.last_trade_ts = 40.0, 8e8, 50.0, 7, T0 + 5
+    eng.launches["M1"] = st
+    old = LaunchState(mint="M2", created_ts=T0 - 100)
+    old.v_sol, old.v_tok, old.last_trade_ts = 30.0, 1e9, T0 - 90
+    eng.launches["M2"] = old
+    rows = eng.curve_live(T0)
+    assert [r["mint"] for r in rows] == ["M1"]
+    store.save_curve_live(eng.conn, rows)
+    other = store.connect(path)                     # copytrade reads from its own connection
+    c = store.curve_now(other, "M1", max_age_s=30, now=T0 + 20)
+    assert c["price_sol"] == pytest.approx(5e-8) and c["v_sol"] == 40.0 and c["n_trades"] == 7
+    assert c["complete"] is False and c["pool"] == st.pool
+    assert store.curve_now(other, "M1", max_age_s=30, now=T0 + 60) is None
+    assert store.curve_now(other, "XX") is None

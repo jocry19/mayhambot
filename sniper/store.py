@@ -63,6 +63,7 @@ def ensure_schema(conn):
                 db.retry_locked(conn, lambda: conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}"))
     db.retry_locked(conn, lambda: conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sniper_launches_created ON sniper_launches(created_ts)"))
+    db.retry_locked(conn, lambda: conn.execute(CURVE_LIVE))
     global LAUNCH_COLS
     LAUNCH_COLS = None
     return conn
@@ -147,6 +148,41 @@ def save_wallets(conn, mint, rows):
               r.get("funder"), r.get("sold_pct")) for r in rows])
         conn.commit()
     db.retry_locked(conn, write)
+
+
+# latest bonding-curve state per mint, written every few seconds by the running sniper (one row per mint);
+# other processes (copytrade) read it with curve_now() while DexScreener has no pair yet
+CURVE_LIVE = """CREATE TABLE IF NOT EXISTS sniper_curve_live (
+    mint TEXT PRIMARY KEY, ts REAL, pool TEXT, price_sol REAL, v_sol REAL, mcap_sol REAL, n_trades INTEGER,
+    complete INTEGER)"""
+
+
+def save_curve_live(conn, rows):
+    """rows: dicts with mint, ts, pool, price_sol, v_sol, mcap_sol, n_trades, complete."""
+    if not rows:
+        return
+
+    def write():
+        conn.executemany("INSERT OR REPLACE INTO sniper_curve_live VALUES (?,?,?,?,?,?,?,?)",
+                         [(r["mint"], r["ts"], r["pool"], r["price_sol"], r["v_sol"], r["mcap_sol"],
+                           r["n_trades"], int(bool(r["complete"]))) for r in rows])
+        conn.commit()
+    db.retry_locked(conn, write)
+
+
+def curve_now(conn, mint, max_age_s=30, now=None):
+    """Live curve state of `mint` from the sniper: {"ts", "pool", "price_sol", "v_sol", "mcap_sol", "n_trades",
+    "complete"} or None if unknown or older than max_age_s. `ts` is the last trade seen; price in SOL per token;
+    complete = the curve migrated (the price is then only the last curve price)."""
+    try:
+        r = conn.execute("SELECT ts, pool, price_sol, v_sol, mcap_sol, n_trades, complete FROM sniper_curve_live "
+                         "WHERE mint=?", (mint,)).fetchone()
+    except Exception:  # noqa: BLE001  (table not created yet: the sniper never ran on this DB)
+        return None
+    if r is None or (now or time.time()) - r[0] > max_age_s or not r[2]:
+        return None
+    return {"ts": r[0], "pool": r[1], "price_sol": r[2], "v_sol": r[3], "mcap_sol": r[4], "n_trades": r[5],
+            "complete": bool(r[6])}
 
 
 def save_curve(conn, mint, points):
@@ -286,6 +322,7 @@ def prune(conn, keep_days, now=None):
 
     def write():
         conn.execute("DELETE FROM sniper_curve WHERE ts < ?", (cut,))
+        conn.execute("DELETE FROM sniper_curve_live WHERE ts < ?", (int(time.time()) - 86400,))
         conn.execute("DELETE FROM sniper_paths WHERE created_ts < ?", (cut,))
         # stage-1 skips are many and small; stage 2 and entries are kept for learning
         conn.execute("DELETE FROM sniper_launches WHERE decided_ts < ? AND stage = 1", (cut,))
