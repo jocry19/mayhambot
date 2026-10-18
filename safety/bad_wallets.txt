@@ -53,3 +53,10 @@ JAw63BKsupFM7CLkqnkP9XtWwfP5P6fbyg4E4Kqf5vZU  setup  Launch-Block PEPETO BcXeFM 
 CDvBjgJLimQFWgeobydxVTZks2qivLY5woujau1qg9sF  sniper0  Staub-Käufer in 17 Masche-Coins (von 20 gehandelten, Rest unbekannt), Launch-Block Gemini AI und FOMO
 2NXTFee6GFKgYzqyh6XRhcTzzD5xMzyna2FurSqtM9gJ  setup  Launch-Block USDF thKNTw 18.10. 09:01 (einziger Käufer, 79,31 %, sofort migriert; 4.999 SOL ist nur Obergrenze = Wrap-Budget, Sniper 2b66de4)
 B1VDUBg5AABiP5BXHku6XWca6UnJMT3m1BXtSNhxwmeu  setup  Launch-Block Glow 18.10. (987,9 SOL nur Obergrenze = Wrap-Budget laut Sniper 2b66de4, 79,31 %, sofort migriert)
+86kPidQec2gUwi6P4vkWWrn85tPfJQfYRuBX2cAbPqSU  setup  Launch-Block XRC 18.10. (4.940 SOL, Betreiber-Budget nach Sniper 53b0278)
+DYaPMLqvT1hoySyuTgqWbPKorbG5L4a8EJUGGkzyfzCu  setup  Launch-Block CANGD 18.10. (4.930 SOL, Betreiber-Budget)
+AYoGwcv6m9KSpQyPGamLKKq9naXPLHWdfBYvqfh9tM6o  setup  Launch-Block XRC 18.10. (2.970 SOL, Betreiber-Budget)
+BBAAPEEgvAvhRo4RmmUCpyajtxwQM8YjfTKJBgnhc5h3  setup  Launch-Block USDP 18.10. (1.980 SOL, Betreiber-Budget)
+EVUgkGF9Tx1SCg39ov6yxLwJ1KWpTVSWnJovWa6PNJ8n  setup  Launch-Block GTA VI, FOMO 18.10. (3 Launches, 468,5 SOL)
+6y45Cg49USrZYKebesPPAjEtRvhyF1GTA7Z16BUwJsyb  setup  Launch-Block HOLDOWEEN 18.10. (387,3 SOL)
+2w8CSh4YQrkro8bZRPaPppkY9v2vzsiatPWY96vxj2tT  setup  Launch-Block Mercedes, BARRON, BARRON2044 18.10. (164,4 SOL je Launch)

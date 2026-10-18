@@ -924,7 +924,7 @@ def test_coin_sold_as_rug_by_our_own_account_stays_blocked(caplog):
     c.commit()
     a = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
     assert a.blocked and a.checks["rugged"]["hard"] and a.checks["rugged"]["data"]["by"] == "Hirn"
-    c.execute("UPDATE brain_positions SET closed_at=?", (NOW - 2 * 86400,))
+    c.execute("UPDATE brain_positions SET closed_at=?", (NOW - 31 * 86400,))
     c.commit()
     a = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
     assert not a.checks["rugged"]["hard"]

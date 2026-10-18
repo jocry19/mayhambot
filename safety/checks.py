@@ -1218,14 +1218,17 @@ def _log_once(mint, what, text):
 def check_rugged(ctx):
     """A coin one of our own accounts already sold as a rug (brain exit_reason 'rug': liquidity pulled or a sale at
     -90 % or worse; copy trader the same) stays blocked for SAFETY_RUGGED_BLOCK_SEC in every
-    path. DOPE 18.10.: sold as rug at 07:10, bought again as a whale copy at 07:13."""
+    path (30 days: a drained pool does not come back). DOPE 18.10.: sold as rug at 07:10, bought again as a
+    whale copy at 07:13."""
     r = CheckResult("rugged", "Schon als Rug verkauft")
     since = ctx.now - ctx.cfg.rugged_block_sec
     hit = None
     for sql in ("SELECT closed_at, 'Hirn' FROM brain_positions WHERE mint=? AND exit_reason='rug' AND closed_at>=? "
                 "ORDER BY closed_at DESC LIMIT 1",
                 "SELECT closed_at, 'Copy-Trader' FROM ct_positions WHERE mint=? AND exit_reason='rug' "
-                "AND closed_at>=? ORDER BY closed_at DESC LIMIT 1"):
+                "AND closed_at>=? ORDER BY closed_at DESC LIMIT 1",
+                "SELECT closed_ts, 'Sniper' FROM sniper_positions WHERE mint=? AND exit_reason='rug' "
+                "AND closed_ts>=? ORDER BY closed_ts DESC LIMIT 1"):
         try:
             row = ctx.conn.execute(sql, (ctx.mint, since)).fetchone()
         except Exception:  # noqa: BLE001 - that package is not installed
@@ -1236,7 +1239,8 @@ def check_rugged(ctx):
         r.hard = True
         r.data.update(rug_ts=int(hit[0]), by=hit[1])
         mins = max(1, int((ctx.now - hit[0]) // 60))
-        r.add(90, f"{hit[1]} hat diesen Coin vor {mins} min als Rug verkauft (Liquidität abgezogen oder ≥ 90 % "
+        ago = f"{mins} min" if mins < 120 else f"{mins // 60} h" if mins < 2880 else f"{mins // 1440} Tagen"
+        r.add(90, f"{hit[1]} hat diesen Coin vor {ago} als Rug verkauft (Liquidität abgezogen oder ≥ 90 % "
                   "Verlust): gesperrt.")
     return r.finish(cap=95)
 
