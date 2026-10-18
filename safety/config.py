@@ -123,8 +123,10 @@ class SafetySettings:
     ttl_blocked_sec: int = field(default_factory=lambda: _i("SAFETY_TTL_BLOCKED_SEC", 21600))
     wallet_profile_ttl_sec: int = field(default_factory=lambda: _i("SAFETY_WALLET_PROFILE_TTL_SEC", 86400))
     # fixed RPC budget shared by every process calling safety (token bucket in data/ratelimit/)
-    helius_per_min: float = field(default_factory=lambda: _f("SAFETY_HELIUS_PER_MIN", 15))
-    helius_spacing_sec: float = field(default_factory=lambda: _f("SAFETY_HELIUS_SPACING_SEC", 1.0))
+    # 60 / 0.5 s since 18.10. (user: Helius as needed): brain's learning account runs several hundred rug checks an
+    # hour through this bucket; at 15/min they spilled to the public nodes (getTokenLargestAccounts 429 runs)
+    helius_per_min: float = field(default_factory=lambda: _f("SAFETY_HELIUS_PER_MIN", 60))
+    helius_spacing_sec: float = field(default_factory=lambda: _f("SAFETY_HELIUS_SPACING_SEC", 0.5))
     helius_reserve: float = field(default_factory=lambda: _f("SAFETY_HELIUS_RESERVE", 4))   # kept for live buys/signals
     public_rpc_url: str = field(default_factory=lambda: os.getenv("SAFETY_PUBLIC_RPC_URL") or "https://api.mainnet-beta.solana.com")
     public_per_min: float = field(default_factory=lambda: _f("SAFETY_PUBLIC_PER_MIN", 20))  # 0 = no fallback

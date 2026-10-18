@@ -87,9 +87,9 @@ class Fetcher:
         self.calls += n
 
     def _targets(self, method=None):
-        """RPC endpoints in order of preference, each with its own per-minute budget. The refresher goes to the
-        public RPC first and uses the configured (usually Helius) RPC only as overflow; live paths
-        (priority) prefer the faster configured RPC. Only standard 1-credit JSON-RPC methods are used."""
+        """RPC endpoints in order of preference, each with its own per-minute budget: the configured (usually
+        Helius) RPC first, the public node as overflow (since 18.10. for the refresher too: Helius may be used as
+        needed; the refresher still leaves helius_reserve to live paths). Only standard 1-credit methods."""
         c = self.cfg
         own = (self.rpc_url, _host(self.rpc_url))
         pub_url = c.public_rpc_url
@@ -103,7 +103,7 @@ class Fetcher:
         pub = (pub_url, _host(pub_url))
         if own[1] == pub[1] or c.public_per_min <= 0:
             return [own]
-        return [own, pub] if self.priority else [pub, own]
+        return [own, pub]
 
     def _take(self, host, method=None):
         c = self.cfg

@@ -121,11 +121,11 @@ Only standard JSON-RPC methods (1 Helius credit each): `getAccountInfo`, `getTok
 Enhanced API. Jupiter, DexScreener and RugCheck are keyless and not Helius.
 
 - **Fixed per-minute budget shared by every process that calls safety** (token bucket in
-  `data/ratelimit/safety_<host>.budget`): Helius `SAFETY_HELIUS_PER_MIN`=15, at least `SAFETY_HELIUS_SPACING_SEC`=1 s
+  `data/ratelimit/safety_<host>.budget`): Helius `SAFETY_HELIUS_PER_MIN`=60, at least `SAFETY_HELIUS_SPACING_SEC`=0.5 s
   apart; the public RPC (`SAFETY_PUBLIC_RPC_URL`) `SAFETY_PUBLIC_PER_MIN`=20. It sits on top of core.http's
   per-service budget (`MAYHAM_SERVICE=safety`). A call that does not fit is not fired: the check is `skipped`, keeps
   its previous result and runs next cycle.
-- **Routing**: the refresher asks the public RPC first and uses Helius only as overflow, and never touches the last
+- **Routing**: Helius first, the public RPC as overflow (since 18.10. for the refresher too); the refresher never touches the last
   `SAFETY_HELIUS_RESERVE`=4 Helius calls of the minute; live paths (signal about to fire, real-money buy,
   `priority=True`) prefer Helius, may use the reserve and wait up to `SAFETY_PRIORITY_WAIT_SEC`=10 s.
 - **Quick vs deep**: the refresher deep-checks (insiders, launch bundles, dev wallet) only hot coins (open

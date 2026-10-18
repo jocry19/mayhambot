@@ -128,9 +128,10 @@ HOST_GROUP = {"api.helius.xyz": "helius", "mainnet.helius-rpc.com": "helius", "b
 # Calls per minute per service and group, used when the process knows its service name (MAYHAM_SERVICE,
 # set by mayham.py, or set_service()). Override with <GROUP>_BUDGET_<SERVICE>, e.g. HELIUS_BUDGET_SAFETY=90.
 # Helius free plan = 10 req/s = 600/min; these add up to 570/min, and the shared interval smooths peaks.
-# brain 90 (18.10.): its learning account runs several hundred rug checks an hour, ~4 calls each.
+# 18.10. by measured need: signals 120 (backfill waited 418 s in 10 min at 60), research 60 (a few calls a day),
+# brain 90 (learning account: several hundred rug checks an hour, ~4 calls each).
 DEFAULT_BUDGETS = {
-    "helius": {"signals": 60, "research": 120, "copytrade": 120, "safety": 60, "sniper": 120, "brain": 90},
+    "helius": {"signals": 120, "research": 60, "copytrade": 120, "safety": 60, "sniper": 120, "brain": 90},
 }
 USAGE_LOG_EVERY = 600
 
@@ -245,8 +246,14 @@ def _credit_line():
     st = credits(_service)
     if not st or st["credits_cap"] is None:
         return ""
-    return (f", credits today {st['credits_today']:.0f}/{st['credits_day_budget']:.0f}, month "
+    line = (f", credits today {st['credits_today']:.0f}/{st['credits_day_budget']:.0f}, month "
             f"{st['credits_month']:.0f}/{st['credits_cap']:.0f} ({st['share_pct']:.0f}% share)")
+    try:
+        p = plan_pace()
+        line += f", plan {p['used']:.0f}/{p['on_pace']:.0f} on pace (x{p['ratio']:.2f})"
+    except Exception:  # noqa: BLE001 - the usage line never fails over the pace
+        pass
+    return line
 
 
 def _maybe_log_usage(force=False):
