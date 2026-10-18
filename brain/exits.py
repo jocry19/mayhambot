@@ -233,6 +233,8 @@ class Live:
         self.hist: dict[int, list] = {}
         self.vpeak: dict[int, float] = {}
         self.checked: dict[int, float] = {}
+        self.high_at: dict[int, float] = {}  # when the highest price since the buy was seen
+        self._high: dict[int, float] = {}
 
     def observe(self, pid: int, now: float, px: float, vol_m5: float | None) -> None:
         h = self.hist.setdefault(pid, [])
@@ -241,6 +243,8 @@ class Live:
             h.pop(0)
         if vol_m5:
             self.vpeak[pid] = max(self.vpeak.get(pid, 0.0), vol_m5)
+        if px > self._high.get(pid, 0.0):
+            self._high[pid], self.high_at[pid] = px, now
 
     def price_ago(self, pid: int, now: float, secs: float):
         best = None
@@ -260,7 +264,7 @@ class Live:
         return False
 
     def drop(self, pid: int) -> None:
-        for d in (self.hist, self.vpeak, self.checked):
+        for d in (self.hist, self.vpeak, self.checked, self.high_at, self._high):
             d.pop(pid, None)
 
 

@@ -25,7 +25,11 @@ PRICE_RETRY_S = 30  # a coin without a DexScreener pair yet gets this long to sh
 FLIP_MAX = 0.6
 RAN_5M_MAX = 0.05  # 10/2026: whale copies after >5 % in the 5 min before lost 9-20 % on average, flat ones about 0  # wallets that sell this share of their buys within FLIP_S are gone before a copy can follow
 NO_MARKET_S = 15 * 60  # an open position without any price this long is closed as "kein Markt"
-RUG_LIQ_DROP = 0.8
+RUG_LIQ_DROP = 0.6  # pool (curve: curve depth) 60 % under the buy: LP pulled, before the price stop sees it
+STAGED_TRAIL = 0.10  # staged pump (safety check 'staged', data.pattern, 15784c6): 10 % under the high ...
+STAGED_AFTER_HIGH_S = 15 * 60  # ... or 15 min after the high (74 % drained within 60 min, mostly 15-60 min after it)
+STAGED_REFRESH_S = 300
+STAGED_YOUNG_H = 1.0
 INFLOW_DROP = 0.6  # 5-min buys under this share of their peak while in profit: the rush is over
 EXIT_NAMES = {"target": "Ziel erreicht", "stop": "Stop-Loss", "trail": "Trailing-Stop", "time": "Zeit abgelaufen",
               "whale": "Wal verkauft", "inflow_peak": "Ansturm vorbei", "rug": "Liquidität abgezogen",
@@ -39,6 +43,18 @@ MOMENTUM_MIN_M5 = 5.0  # DexScreener 5-min change in percent: a move is on (wide
 MOMENTUM_MIN_TX = 30
 MOMENTUM_EVERY_S = 60
 MOMENTUM_FRESH_S = 180  # and learns this source until its replays earn it)
+
+
+def _depth(snap) -> float:
+    """Liquidity a trade meets: the pool's, else the bonding curve's (DexScreener gives curves no liquidity)."""
+    return snap.liquidity_usd or getattr(snap, "curve_liq_usd", 0.0) or 0.0
+
+
+def _default_staged(conn, mint) -> bool:
+    import safety  # type: ignore
+
+    a = safety.assess(mint, conn, deep=False)
+    return bool(((a.checks or {}).get("staged") or {}).get("data", {}).get("pattern"))
 
 
 def _default_safety(conn, mint):
@@ -60,7 +76,8 @@ def opportunities_model(pm) -> str:
 
 class Trader:
     def __init__(self, conn, s, model, *, snapshots=None, executor=None, safety_check=None, notify=None,
-                 on_close=None, rng: random.Random | None = None, clock=time.time, exit_model=None, pool_model=None):
+                 on_close=None, rng: random.Random | None = None, clock=time.time, exit_model=None, pool_model=None,
+                 staged_check=None):
         self.conn, self.s, self.model = conn, s, model
         self.pm = pool_model if pool_model is not None else Pool(len(PLANS))
         self.xm = exit_model  # organic exits (exits.py); None = the plans' fixed exits only
@@ -73,6 +90,8 @@ class Trader:
         self._snapshots = snapshots
         self._executor = executor
         self.safety_check = safety_check or _default_safety
+        self.staged_check = staged_check or _default_staged
+        self._staged: dict[str, tuple[float, bool]] = {}
         self.notify = notify or (lambda text: None)
         self.on_close = on_close or (lambda pos: None)
         self.rng = rng or random.Random()
@@ -262,7 +281,7 @@ class Trader:
             except Exception as e:
                 log.debug("safety %s: %s", row["mint"][:6], e)
         pocket, trust = self.pockets.match(kind, feats)
-        st = self.settings(now, trust)
+        st = self.settings(now, trust, self.pockets.sharpness(kind))
         model = self.model
         if kind == "pool":  # the learning account: whatever the draw lets through, at a small stake
             import dataclasses
@@ -400,7 +419,7 @@ class Trader:
             (opp_id, kind, row["mint"], symbol, row["wallet"] if kind == "whale" else "", src_ts, now,
              fill.price_sol, fill.sol, fill.tokens, fill.decimals, p.name, p.take_profit, p.stop_loss,
              p.trail_activate, p.trail_drawdown, p.max_hold_min, p.inflow_exit, int(kind == "whale"),
-             snap.liquidity_usd, snap.price_sol, snap.price_sol, now, snap.buys_m5, note,
+             _depth(snap), snap.price_sol, snap.price_sol, now, snap.buys_m5, note,
              json.dumps({"fill_source": fill.source, "impact": fill.price_impact, "ref_price": snap.price_sol})))
         pid = cur.lastrowid
         store.adjust_balance(c, -fill.sol, self.s.start_balance_sol)
@@ -469,7 +488,7 @@ class Trader:
         self._challenge_at = (now, on)
         return on
 
-    def settings(self, now: float, trust: float = 0.5):
+    def settings(self, now: float, trust: float = 0.5, sharp: float = 1.0):
         """The settings a decision runs with. No gate, a slide: the most one position may take of the account grows
         with the trust of the best pattern it belongs to, from BRAIN_UNPROVEN_STAKE (3 %) at 50 % trust or less to the
         full share (the challenge's ½-Kelly up to 35 % while it is on) at 95 %, and falls back the same way when the
@@ -480,7 +499,10 @@ class Trader:
 
         s = self.s
         on = self.challenge_on(now)
-        w = max(0.0, min(1.0, (trust - 0.5) / 0.45))
+        # second brake (plan 18.10.): the slide also needs the predictions of this source to separate winners from
+        # losers out of sample (rank correlation, Book.sharpness); a source whose predictions rank like chance (today
+        # -0.01) stays at the small stake however good a pattern looks
+        w = max(0.0, min(1.0, (trust - 0.5) / 0.45)) * max(0.0, min(1.0, sharp))
         hi_k = s.challenge_kelly_frac if on else s.kelly_frac
         hi_m = s.challenge_max_stake if on else s.max_stake
         lo_m = min(s.unproven_stake, hi_m)
@@ -530,8 +552,10 @@ class Trader:
         if meta.get("exit_mode") != "organic":  # the guards below are part of the organic exit: book them there
             meta["exit_mode"] = "organic"
             self.conn.execute("UPDATE brain_positions SET meta=? WHERE id=?", (json.dumps(meta), p["id"]))
-        if p["entry_liq_usd"] and snap.liquidity_usd < (1 - RUG_LIQ_DROP) * p["entry_liq_usd"]:
+        if p["entry_liq_usd"] and _depth(snap) < (1 - RUG_LIQ_DROP) * p["entry_liq_usd"]:
             return "rug", False
+        if self._staged_exit(p, snap, now, max(p["high_price_sol"] or entry, px)):
+            return "staged", False
         if px <= entry * (1 - exits.CRASH_STOP):
             return "stop", False
         held = (now - p["opened_at"]) / 60
@@ -570,6 +594,21 @@ class Trader:
             return "organic", False
         return None, act == "half"
 
+    def _staged_exit(self, p, snap, now: float, high: float) -> bool:
+        """A confirmed staged pump (safety check 'staged'): out 10 % under the high or 15 min after it, before the
+        drain. Read from the stored safety result, again every 5 min while the coin is young; a found pattern stays."""
+        at, hit = self._staged.get(p["mint"], (0.0, False))
+        if not hit and not (at and (now - at < STAGED_REFRESH_S or (snap.age_hours or 0) > STAGED_YOUNG_H)):
+            try:
+                hit = bool(self.staged_check(self.conn, p["mint"]))
+            except Exception as e:
+                log.debug("staged %s: %s", p["mint"][:6], e)
+            self._staged[p["mint"]] = (now, hit)
+        if not hit:
+            return False
+        hi_ts = self.live.high_at.get(p["id"], p["opened_at"])
+        return snap.price_sol <= high * (1 - STAGED_TRAIL) or now - hi_ts >= STAGED_AFTER_HIGH_S
+
     def sell_half(self, p, snap) -> bool:
         """Take half off the table: the rest keeps running, the proceeds are booked at once."""
         part = p["tokens"] * 0.5
@@ -603,8 +642,10 @@ class Trader:
         entry = _ref_price(p)
         px = snap.price_sol
         high = max(p["high_price_sol"] or entry, px)
-        if p["entry_liq_usd"] and snap.liquidity_usd < (1 - RUG_LIQ_DROP) * p["entry_liq_usd"]:
+        if p["entry_liq_usd"] and _depth(snap) < (1 - RUG_LIQ_DROP) * p["entry_liq_usd"]:
             return "rug"
+        if self._staged_exit(p, snap, now, high):
+            return "staged"
         trail_on = (p["trail_activate"] and now - p["opened_at"] >= TRAIL_MIN_HOLD_S
                     and high / entry - 1 >= p["trail_activate"])
         stop_px = max(entry * (1 - p["stop_loss"]), high * (1 - p["trail_drawdown"]) if trail_on else 0)

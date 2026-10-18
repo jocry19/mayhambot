@@ -77,6 +77,7 @@ def trained(kind="whale", good=("tier=ultra",), n=300, mean=0.2):
 
 def make_trader(conn, s, model, market, **kw):
     kw.setdefault("safety_check", ok_safety)
+    kw.setdefault("staged_check", lambda conn, mint: False)
     return Trader(conn, s, model, snapshots=market, executor=Paper(), rng=random.Random(7), **kw)
 
 
@@ -1156,3 +1157,57 @@ def test_the_learning_account_has_its_own_ceiling(conn, s):
         O.report(conn, "sniper", f"L{i}", m, now, {"buyers": 12})
     assert t.scan() == 1
     assert "Lernkonto" in conn.execute("SELECT note FROM brain_opps WHERE decision='skip'").fetchone()[0]
+
+
+def test_a_pulled_curve_and_a_staged_pump_exit_before_the_price_stop(conn, s):
+    import dataclasses
+    mk = Market()
+    set_tier(conn, WHALE, "ultra")
+    mk.snaps[MINT] = dataclasses.replace(snap(liq=0, dex="pumpfun"), curve_liq_usd=40_000)
+    t = make_trader(conn, s, trained(), mk)
+    t.scan()
+    add_whale_buy(conn, "n")
+    assert t.scan() == 1
+    p = conn.execute("SELECT * FROM brain_positions").fetchone()
+    assert p["entry_liq_usd"] == 40_000  # the curve's depth, not DexScreener's 0
+    mk.snaps[MINT] = dataclasses.replace(snap(liq=0, dex="pumpfun", price=p["entry_price_sol"]),
+                                         curve_liq_usd=12_000)
+    assert t.manage() == 1
+    assert conn.execute("SELECT exit_reason FROM brain_positions").fetchone()[0] == "rug"
+    # a staged pump: out 10 % under the high, whatever the plan says
+    conn.execute("DELETE FROM brain_positions")
+    clock = [time.time()]
+    m2 = "Stgd" + MINT[4:]
+    mk.snaps[m2] = snap(mint=m2)
+    t2 = make_trader(conn, s, trained(), mk, clock=lambda: clock[0], staged_check=lambda c, m: m == m2)
+    t2.scan()
+    add_whale_buy(conn, "n2", mint=m2, ts=clock[0])
+    assert t2.scan() == 1
+    p = conn.execute("SELECT * FROM brain_positions WHERE mint=?", (m2,)).fetchone()
+    ref = json.loads(p["meta"])["ref_price"]
+    mk.snaps[m2] = snap(mint=m2, price=ref * 1.2)
+    clock[0] += 30
+    assert t2.manage() == 0  # still rising
+    mk.snaps[m2] = snap(mint=m2, price=ref * 1.07)  # 11 % under the high
+    clock[0] += 30
+    assert t2.manage() == 1
+    assert conn.execute("SELECT exit_reason FROM brain_positions WHERE mint=?", (m2,)).fetchone()[0] == "staged"
+
+
+def test_stakes_need_predictions_that_separate_winners_from_losers(conn, s):
+    from brain import pockets
+    assert pockets.rank_corr([1, 2, 3, 4], [10, 20, 30, 40]) == pytest.approx(1.0)
+    assert pockets.rank_corr([1, 2, 3, 4], [4, 3, 2, 1]) == pytest.approx(-1.0)
+    t = make_trader(conn, s, trained(), Market())
+    now = time.time()
+    rng = random.Random(4)
+    for i in range(40):  # whale predictions rank the results well, market predictions like chance
+        p = rng.uniform(-0.2, 0.2)
+        for kind, r in (("whale", p + rng.gauss(0, 0.05)), ("market", rng.gauss(0, 0.2))):
+            conn.execute("INSERT INTO brain_opps(ts, kind, ref, features, pred_mean, realized_plan, evaluated_at) "
+                         "VALUES (?,?,?,?,?,?,?)", (int(now) - 100, kind, f"{kind}{i}", "{}", p, r, int(now) - 50))
+    assert t.pockets.sharpness("whale") == 1.0 and t.pockets.sharpness("market") < 0.5
+    assert t.pockets.sharpness("launch") == 0.0  # nothing measured yet
+    assert t.settings(now, 0.99, 0.0).max_stake == s.unproven_stake  # trusted pattern, blunt predictions: small
+    assert t.settings(now, 0.99, 1.0).max_stake > s.unproven_stake
+    assert "discrimination" in store.get(conn, "pockets")
