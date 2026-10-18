@@ -230,7 +230,7 @@ def get(conn, mint, cfg=None):
 
 
 def ttl_for(a, cfg):
-    if a.level == "unchecked" or "coverage" in (a.checks or {}):
+    if a.level == "unchecked" or any(c.get("status") == "gap" for c in (a.checks or {}).values()):
         return cfg.ttl_young_sec  # is_due re-checks after a third of it
     if a.blocked and a.override != "allow":
         return cfg.ttl_blocked_sec

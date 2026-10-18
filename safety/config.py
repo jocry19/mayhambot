@@ -116,6 +116,8 @@ class SafetySettings:
     # brand scam: creator buys the whole curve at create (check masche), holders spread by the creator (holders)
     masche_dev_buy_pct: float = field(default_factory=lambda: _f("SAFETY_MASCHE_DEV_BUY_PCT", 75))
     masche_spread_dev_pct: float = field(default_factory=lambda: _f("SAFETY_MASCHE_SPREAD_DEV_PCT", 50))
+    masche_verify_max_age_sec: int = field(default_factory=lambda: _i("SAFETY_MASCHE_VERIFY_MAX_AGE_SEC", 21600))
+    masche_setup_sol: float = field(default_factory=lambda: _f("SAFETY_MASCHE_SETUP_SOL", 100))
     bad_wallets_file: str = field(default_factory=lambda: os.getenv("SAFETY_BAD_WALLETS_FILE", ""))  # "" = safety/bad_wallets.txt
     use_rugcheck: bool = field(default_factory=lambda: _b("SAFETY_USE_RUGCHECK", True))
 

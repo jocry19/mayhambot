@@ -869,3 +869,33 @@ def test_helius_call_waits_out_the_spacing_instead_of_spilling_to_public(monkeyp
         assert f.rpc_calls[hel] == 3 and not f.rpc_calls.get(pub)
     finally:
         _cleanup(hel, pub)
+
+
+def test_brand_scam_without_sniper_record_is_read_from_the_chain_and_blocked_until_then():
+    from types import SimpleNamespace
+    c = conn()
+
+    def ctx(state, buyers=(), mint="Starbuckspump", age=300):
+        la = {"state": state, "creator": "DEV", "created_slot": 7, "buyers": list(buyers)}
+        return SimpleNamespace(mint=mint, cfg=CFG, now=NOW, conn=c, launch=lambda: la,
+                               mint_info=lambda: {"supply_ui": 1e9},
+                               pair=lambda: {"pairCreatedAt": (NOW - age) * 1000})
+
+    def run(x):
+        return checks._masche_from_chain(x, checks.CheckResult("masche", "m"))
+
+    r = run(ctx("paging"))
+    assert r.hard and r.status == "gap" and r.risk >= 50          # not verified yet: blocked
+    scam = [{"wallet": "DEV", "tokens": 793.1e6, "sol": 86, "slot": 7},
+            {"wallet": "SETUP", "tokens": 150e6, "sol": 160, "slot": 7}]
+    r = run(ctx("done", scam))
+    assert r.hard and r.status == "ok" and r.data["dev_buy_pct"] == 79.31 and r.data["setup_buyers"] == ["SETUP"]
+    r = run(ctx("done", [{"wallet": "DEV", "tokens": 30e6, "sol": 1, "slot": 7}]))
+    assert not r.hard and r.risk == 0
+    assert run(ctx("unreachable")).status == "unknown"
+    assert run(ctx("paging", age=30 * 3600)).status == "unknown"     # too old to page back to the launch
+    assert run(ctx("paging", mint="SomeOtherMint")).status == "unknown"
+    # a pending verification keeps the coin on the short re-check cycle
+    a = engine.Assessment(mint="m", ts=int(time.time()), score=90, level="critical", blocked=True, coverage=1.0,
+                          checks={"masche": {"status": "gap"}})
+    assert engine.ttl_for(a, CFG) == CFG.ttl_young_sec

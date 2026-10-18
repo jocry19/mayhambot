@@ -1088,8 +1088,7 @@ def check_masche(ctx):
     r = CheckResult("masche", "Marken-Masche (Curve-Komplettkauf)")
     d = _dev_buy_pct(ctx)
     if d is None:
-        r.status = "unknown"
-        return r.finish()
+        return _masche_from_chain(ctx, r)
     try:
         row = ctx.conn.execute("SELECT migrated, migrated_ts, created_ts FROM sniper_launches WHERE mint=?",
                                (ctx.mint,)).fetchone()
@@ -1105,6 +1104,53 @@ def check_masche(ctx):
     else:
         r.positives.append(f"Ersteller kaufte beim Start {d:.1f} % des Supplies.")
     return r.finish(cap=95)
+
+
+def _masche_from_chain(ctx, r):
+    """No sniper record (STARBUCKS 18.10.: bought by the brain's market path, -82 %, never seen by the sniper): a
+    young pump.fun coin is released only after our own launch analysis (standard RPC, resumable, cached for good)
+    has read the creator's buy in the create transaction. Until then the check is a hard 'gap' and the coin stays
+    blocked, re-checked on the young TTL. Older coins and launches too busy to page back to stay 'unknown'."""
+    c = ctx.cfg
+    if not ctx.mint.endswith("pump"):
+        r.status = "unknown"
+        return r.finish()
+    created = _created_ts(ctx)
+    if not created or ctx.now - created > c.masche_verify_max_age_sec:
+        r.status = "unknown"
+        return r.finish()
+    la = ctx.launch()
+    state = la.get("state")
+    r.data.update(source="chain", launch_state=state)
+    if state == "unreachable":
+        r.status = "unknown"
+        return r.finish()
+    if state != "done":
+        r.status = "gap"
+        r.hard = True
+        r.add(60, "Junger pump.fun-Coin ohne Launch-Datensatz: der Kauf des Erstellers beim Start wird noch geprüft "
+                  "(Marken-Masche ausschließen), bis dahin gesperrt.")
+        return r.finish()
+    supply = (ctx.mint_info() or {}).get("supply_ui") or 0
+    creator = la.get("creator")
+    buyers = la.get("buyers") or []
+    dev = sum(b["tokens"] for b in buyers if b["wallet"] == creator)
+    setup = [b["wallet"] for b in buyers if b["wallet"] != creator and b.get("slot") == la.get("created_slot")
+             and (b.get("sol") or 0) >= c.masche_setup_sol]
+    if not supply:
+        r.status = "unknown"
+        return r.finish()
+    d = 100 * dev / supply
+    r.data.update(dev_buy_pct=round(d, 2), creator=creator, setup_buyers=setup[:5])
+    if d >= c.masche_dev_buy_pct:
+        r.hard = True
+        r.add(95, f"Der Ersteller kaufte beim Start {d:.1f} % des Supplies (aus der Chain gelesen), also die ganze "
+                  "Bonding-Curve: Muster der Marken-Masche: gesperrt."
+                  + (f" Im selben Block kaufte {short(setup[0])} für ≥ {c.masche_setup_sol:g} SOL (Setup-Kauf)." if setup else ""))
+    else:
+        r.positives.append(f"Ersteller kaufte beim Start {d:.1f} % des Supplies.")
+    return r.finish(cap=95)
+
 
 def check_exit(ctx):
     """Soft rug in progress, from the intel service's latest coin features (no network): insiders selling,
