@@ -87,7 +87,7 @@ class Settings:
     ws_fetchers: int = field(default_factory=lambda: _i("CT_WS_FETCHERS", 4))  # parallel transaction reads
     # websocket reads of any wallet go to the main RPC right after one failed public try while more than this share
     # of the day's Helius budget is left (below it: only Ultra/Smart/manual wallets, on the last try)
-    ws_main_reserve_pct: float = field(default_factory=lambda: _f("CT_WS_MAIN_RESERVE_PCT", 25.0))
+    ws_main_reserve_pct: float = field(default_factory=lambda: _f("CT_WS_MAIN_RESERVE_PCT", 0.0))
     # one more wallet stream on Helius (HELIUS_API_KEY set): the public nodes drop notifications or cap at 100
     # subscriptions; Helius bills 2 credits per 0.1 MB streamed and pauses below the same reserve
     ws_helius: bool = field(default_factory=lambda: _b("CT_WS_HELIUS", True))

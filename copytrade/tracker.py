@@ -452,8 +452,9 @@ def main_budget_ok(s: Settings | None, now: float | None = None) -> bool:
 
         st = core_http.credits("copytrade") or {}
         budget, left = st.get("credits_day_budget"), core_http.credits_left_today("copytrade")
-        pct = getattr(s, "ws_main_reserve_pct", 25.0) if s is not None else 25.0
-        ok = bool(budget) and left is not None and left > budget * pct / 100
+        pct = getattr(s, "ws_main_reserve_pct", 0.0) if s is not None else 0.0
+        # no reserve (the user keeps an eye on the key's quota, 18.10.): Helius until the ledger says it is spent
+        ok = (left is None or left > 0) if pct <= 0 else bool(budget) and left is not None and left > budget * pct / 100
     except Exception as e:
         log.debug("credit check failed: %s", e)
     _budget_cache.update(at=now, ok=ok)
@@ -462,13 +463,13 @@ def main_budget_ok(s: Settings | None, now: float | None = None) -> bool:
 
 def _read_and_store(conn, rpc, wallet, sig, tries, received_at, solusd, s=None, escalate=True):
     tx = None
-    # main RPC credits: while the day's budget is rich, for every wallet right after one failed public try (the
-    # public pool answers 429 for minutes at times, and a late whale buy is worth less than a credit); otherwise
+    # main RPC credits: while the Helius budget allows, every swap-venue transaction goes there first (the public
+    # pool answers 429 for minutes at times, and a late whale buy is worth less than a credit); otherwise
     # only for wallets worth them, and only on the last try. Anyone else is picked up by the polling net later
     key = _key_wallet(conn, wallet)
     params = [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}]
     for i in range(tries):
-        if i == 1 and escalate and hasattr(rpc, "call") and main_budget_ok(s):
+        if i == 0 and escalate and hasattr(rpc, "call") and main_budget_ok(s):
             try:
                 tx = rpc.call("getTransaction", params, "live")
                 MAIN_READS["early"] += 1

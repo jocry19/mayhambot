@@ -331,7 +331,8 @@ class Watcher:
             row = conn.execute("SELECT * FROM ct_wallets WHERE address=?", (wallet,)).fetchone()
             if not row or not row["last_sig"]:
                 return []
-            out = store.retry_locked(tracker.poll, conn, self.s, self.rpc, row, "bulk", True)
+            prio = "live" if tracker.main_budget_ok(self.s, now) else "bulk"  # live: Helius when public fails
+            out = store.retry_locked(tracker.poll, conn, self.s, self.rpc, row, prio, True)
         except Exception as e:
             log.debug("catch-up %s failed: %s", wallet[:6], e)
             return []

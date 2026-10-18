@@ -800,7 +800,7 @@ def test_decimals_are_learnt_from_reads_and_strict_mode_never_guesses():
     assert "MintY" not in chain._decimals_cache
 
 
-def test_rich_budget_sends_any_wallet_to_main_after_one_failed_public_try(env, monkeypatch):
+def test_rich_budget_sends_any_swap_wallet_straight_to_main(env, monkeypatch):
     s, conn, ex, state = env
     calls = []
 
@@ -822,7 +822,7 @@ def test_rich_budget_sends_any_wallet_to_main_after_one_failed_public_try(env, m
     tracker._seen.clear()
     n = tracker.MAIN_READS["early"]
     assert tracker.process_signature(conn, s, rpc, W, "sigN", 3)
-    assert calls == ["public", "main"] and tracker.MAIN_READS["early"] == n + 1
+    assert calls == ["main"] and tracker.MAIN_READS["early"] == n + 1
 
 
 def test_main_budget_check_keeps_a_reserve(monkeypatch):
@@ -833,12 +833,19 @@ def test_main_budget_check_keeps_a_reserve(monkeypatch):
     monkeypatch.setattr(core_http, "credits", lambda svc=None: {"credits_day_budget": 7500.0})
     monkeypatch.setattr(core_http, "credits_left_today", lambda svc=None: left["v"])
     tracker._budget_cache.update(at=0.0, ok=False)
-    assert tracker.main_budget_ok(Settings(), now=1000.0)  # 2000 > 25 % of 7500
+    R = Settings(ws_main_reserve_pct=25.0)
+    assert tracker.main_budget_ok(R, now=1000.0)  # 2000 > 25 % of 7500
     left["v"] = 1800.0
-    assert tracker.main_budget_ok(Settings(), now=1010.0)  # cached for 30 s
-    assert not tracker.main_budget_ok(Settings(), now=1031.0)
+    assert tracker.main_budget_ok(R, now=1010.0)  # cached for 30 s
+    assert not tracker.main_budget_ok(R, now=1031.0)
     left["v"] = None
-    assert not tracker.main_budget_ok(Settings(), now=1200.0)  # no budget known: stay lean
+    assert not tracker.main_budget_ok(R, now=1200.0)  # no budget known: stay lean
+    tracker._budget_cache.update(at=0.0, ok=False)
+    # default since 18.10.: no reserve, Helius until the ledger says the credits are spent
+    left["v"] = 10.0
+    assert tracker.main_budget_ok(Settings(), now=2000.0)
+    left["v"] = 0.0
+    assert not tracker.main_budget_ok(Settings(), now=2100.0)
     tracker._budget_cache.update(at=0.0, ok=False)
 
 
