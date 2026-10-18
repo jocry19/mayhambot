@@ -171,3 +171,19 @@ def test_db_coverage(tmp_path):
     assert c["launches"] == 4 and c["launch_rate"] == 0.5 and c["migrations"] == 1 and c["migration_rate"] == 1.0
     assert c["by_pool"]["pump"]["launch_rate"] == 0.667 and c["by_pool"]["bonk"]["launches"] == 1
     assert sum(h["launches"] for h in c["hourly"]) == 4 and c["target"] == 0.9
+
+
+def test_opportunities_use_the_decision_snapshot_and_net_costs(tmp_path):
+    import json
+    from sniper import opportunity, store
+    conn = store.connect(str(tmp_path / "o.db"))
+    store.save_launch(conn, {"mint": "O1", "source": "pumpportal", "pool": "pump", "created_ts": int(T0),
+                             "decided_ts": int(T0 + 20), "decision": "skip", "skip_reason": "activity",
+                             "n_buyers": 40, "stage1_json": json.dumps({"n_buyers": 6, "mcap_decide_sol": 55.0}),
+                             "ret_60m": 1.0, "rugged": 0})
+    store.save_launch(conn, {"mint": "O2", "source": "pumpportal", "created_ts": int(T0), "decided_ts": int(T0 + 20),
+                             "ret_60m": 0.5, "rugged": 1})
+    a, b = opportunity.recent(conn, cfg(), since=T0)
+    assert a["features"]["n_buyers"] == 6 and a["features"]["mcap_decide_sol"] == 55.0 and a["decided_after_sec"] == 20
+    assert 0.8 < a["outcome_net"] < 1.0 and not a["seen_trades"] and a["reason"] == "activity"
+    assert b["outcome_net"] == -1.0

@@ -538,7 +538,9 @@ def run(conn, cfg=None, hours=0, save=False, now=None):
         rep["mc50_buyers5"] = signature_test(rows, paths, cfg, conds=[("mcap_decide_sol", 50), ("n_buyers", 5)])
     if save:
         store.set_state(conn, "research_report", json.dumps(rep))
-        acc = (rep.get("rules") or {}).get("accepted") or fixed_rule(rep.get("mc50_buyers5"))
+        # mc50_buyers5 stays a measurement (the user, 18.10.: no fixed rules; the decision maker learns from every
+        # launch in the shared opportunity table, sniper.opportunity), so only a searched rule can be accepted
+        acc = (rep.get("rules") or {}).get("accepted")
         store.set_state(conn, "learned_rule", json.dumps({"ts": rep["ts"], **acc}) if acc else "")
     return rep
 
