@@ -43,7 +43,9 @@ class Service:
         # a second program-wide stream on another RPC: the first drops its socket up to once a minute (1002) and the
         # first seconds of a launch get lost in the gap; trades seen twice are removed by signature in the engine
         self.logs2 = rpcws.LogStream(cfg.ws_url2, self._on_rpc_trade, 1, name="RPC-Log-Datenstrom 2", mode="program",
-                                     program=rpcws.PUMP_PROGRAM, stale_sec=cfg.stale_sec) \
+                                     program=rpcws.PUMP_PROGRAM, stale_sec=cfg.stale_sec,
+                                     fallbacks=[u.strip() for u in cfg.ws_url2_fallbacks.split(",")
+                                                if u.strip() and u.strip() != cfg.ws_url]) \
             if cfg.ws_url2 and cfg.ws_url2 != cfg.ws_url else None
         # bonk: LaunchLab events name the pool, not the mint; pools are derived from the mint (rpcws.bonk_pool)
         self.bonk_pools, self.bonk_mints = {}, {}          # pool -> mint, mint -> pool
@@ -503,7 +505,8 @@ class Service:
                         "decode_rejects": dict(rpcws.REJECTS),
                         "replayed": self.logs.replayed, "trades_per_min": rpc,
                         "reject_why": dict(rpcws.REJECT_WHY),
-                        "second": ({"url": self.cfg.ws_url2.split("?")[0], "connected": self.logs2.connected,
+                        "second": ({"url": self.logs2.url.split("?")[0], "connected": self.logs2.connected,
+                                    "silent_reconnects": self.logs2.silent_reconnects, "url_switches": self.logs2.switches,
                                     "program": self.logs2.program_complete_since() is not None,
                                     "server_drops": self.logs2.server_drops, "delivered": self.logs2.delivered}
                                    if self.logs2 else None),
@@ -597,9 +600,10 @@ class Service:
                      mins, d["decoded"] / mins, d["delivered"] / mins, d["replayed"], d["rej"], d["drops"],
                      d["silent"], d["zero"], d["s1"], d["def"], d["found"], d["lost"])
             why = ", ".join(f"{k[4:]} {d[k]}" for k in sorted(d) if k.startswith("why_") and d[k]) or "keine"
-            log.info("Datenstrom-Diagnose: Strom 2 %s, %.0f/min dekodiert, %.0f/min an Launches, %d Trennungen | "
+            log.info("Datenstrom-Diagnose: Strom 2 %s (%s, %d Wechsel), %.0f/min dekodiert, %.0f/min an Launches, %d Trennungen | "
                      "Launch-Trades %d neu, %d doppelt (beide Ströme oder Dev-Kauf) | Dekoder verworfen nach Grund: %s",
-                     "aus" if not l2 else ("verbunden" if l2.connected else "getrennt"), d["decoded2"] / mins,
+                     "aus" if not l2 else ("verbunden" if l2.connected else "getrennt"),
+                     l2.url.split("?")[0] if l2 else "-", l2.switches if l2 else 0, d["decoded2"] / mins,
                      d["delivered2"] / mins, d["drops2"], d["trades"], d["dupes"], why)
         # do the rejected trades belong to our own launches (then they are why launches get decided without trades)?
         cut = time.time() - 300

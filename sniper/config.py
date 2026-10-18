@@ -37,6 +37,9 @@ class SniperSettings:
     # second program-wide trade stream on another public RPC: the first one drops its socket up to once a minute and
     # then misses the first seconds of launches; both feed the engine, duplicates are removed by signature. "" = off
     ws_url2: str = field(default_factory=lambda: _s("SNIPER_WS_URL2", "wss://solana-rpc.publicnode.com"))
+    # stream 2 moves along this list when its RPC confirms the subscription but sends nothing (comma separated,
+    # public endpoints without a key; a key-bearing URL belongs in the .env only)
+    ws_url2_fallbacks: str = field(default_factory=lambda: _s("SNIPER_WS_URL2_FALLBACKS", "wss://solana.drpc.org"))
     # bonk (Raydium LaunchLab): one program-wide stream of its trade events (price, side, size, fee; no trader) and
     # the trader of the first trades of each launch from getTransaction on bonk_rpc_url. "" = no bonk stream
     # off by default: a second program subscription on publicnode starved stream 2 there (18.10.: 60 s silence and

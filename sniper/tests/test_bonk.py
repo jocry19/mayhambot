@@ -209,3 +209,12 @@ def test_decisions_and_results_reach_the_shared_opportunity_table(tmp_path):
     assert opportunity.report_result(conn, "GELEG", c)
     assert tuple(conn.execute("SELECT source_result, source_horizon_min FROM opportunities WHERE ref='GELEG'").fetchone()) \
         == (-1.0, 60)
+
+
+def test_silent_stream_moves_to_the_next_rpc():
+    ls = rpcws.LogStream("wss://a", lambda m: None, 1, mode="program", program=rpcws.PUMP_PROGRAM,
+                         fallbacks=["wss://b", "wss://a", ""])
+    assert ls.urls == ["wss://a", "wss://b"]
+    assert ls.next_url() == "wss://b" and ls.next_url() == "wss://a" and ls.switches == 2
+    one = rpcws.LogStream("wss://a", lambda m: None, 1, mode="program", program=rpcws.PUMP_PROGRAM)
+    assert one.next_url() == "wss://a"

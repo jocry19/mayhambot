@@ -313,9 +313,16 @@ class LogStream:
     RATE_LIMIT_SWITCH, RATE_LIMIT_WINDOW = 3, 600
     BUFFER_SEC = 15
 
+    SILENT_SWITCH = 3      # connections in a row that confirmed the subscription but delivered nothing
+
     def __init__(self, url, on_msg, max_subs=150, parser=None, name="RPC-Log-Datenstrom", stale_sec=None,
-                 subs_per_sec=4.0, mode="mints", program=None):
+                 subs_per_sec=4.0, mode="mints", program=None, fallbacks=()):
         self.url, self.on_msg, self.max_subs, self.stale_sec = url, on_msg, max_subs, stale_sec
+        # an RPC that confirms the subscription and then sends nothing (publicnode, 18.10. from 02:02 on: one
+        # reconnect a minute for hours) is left for the next URL; the list wraps around
+        self.urls = [url] + [u for u in fallbacks if u and u != url]
+        self.silent_run, self.switches = 0, 0
+        self._got_data = False
         self.subs_per_sec = subs_per_sec
         self.parser, self.name = parser or parse_notification, name
         self.auto = mode == "auto"
@@ -464,6 +471,15 @@ class LogStream:
             return min(60, self.stale_sec)
         return self.stale_sec if len(self.subs) >= 10 or self.max_subs <= 1 else None
 
+    def next_url(self):
+        """Move to the next URL after SILENT_SWITCH silent connections (with one URL: stay, but wait longer)."""
+        old = self.url
+        self.url = self.urls[(self.urls.index(self.url) + 1) % len(self.urls)] if self.url in self.urls else self.urls[0]
+        self.silent_run, self.switches = 0, self.switches + 1
+        log.warning("%s: %d Verbindungen ohne Daten auf %s, wechsle auf %s", self.name, self.SILENT_SWITCH,
+                    old.split("?")[0], self.url.split("?")[0])
+        return self.url
+
     async def run(self, stop):
         import time as _t
         import websockets
@@ -475,6 +491,7 @@ class LogStream:
                                               open_timeout=15) as ws:
                     self.connected, self.subs, self.pending = True, {}, {}
                     self._conn_since = _t.time()
+                    self._got_data = False
                     self._program_since = None
                     up_since = _t.monotonic()
                     self.reconnects += 1
@@ -493,6 +510,7 @@ class LogStream:
                             except asyncio.TimeoutError:
                                 if self.silence_limit():
                                     self.silent_reconnects += 1
+                                    self.silent_run = 0 if self._got_data else self.silent_run + 1
                                     log.warning("%s: %d s keine Daten, verbinde neu", self.name, self.silence_limit())
                                     break
                                 continue
@@ -513,6 +531,9 @@ class LogStream:
                                     if self.mode != "program":
                                         self.want.discard(acc)   # want_ts stays: the service sees it as not live
                                 continue
+                            if m.get("method") == "logsNotification":
+                                self._got_data = True
+                                self.silent_run = 0
                             self.deliver(m)
                             if stop.is_set():
                                 break
@@ -536,7 +557,10 @@ class LogStream:
                 else:
                     log.warning("%s getrennt (%s), neuer Versuch in %d s", self.name, e, backoff)
             self.connected = False
-            if up_since is not None and _t.monotonic() - up_since >= 60:
+            if self.silent_run >= self.SILENT_SWITCH:
+                self.next_url()
+                backoff = max(backoff, 30)
+            elif up_since is not None and _t.monotonic() - up_since >= 60:
                 backoff = 2   # only a connection that held for a minute resets the back-off
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60)
