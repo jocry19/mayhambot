@@ -17,6 +17,15 @@ from sniper.enrich import Budget, Enricher
 log = logging.getLogger("sniper")
 
 
+HELIUS_WS_CREDITS_PER_100KB = 2.0   # Helius billing for standard websockets (as copytrade/watch.py, 10/2026)
+
+
+def helius_ws_url(cfg):
+    """Helius standard websocket for stream 2, or "" (no key, or SNIPER_WS_HELIUS=0). Never logged with the key."""
+    key = os.getenv("HELIUS_API_KEY", "").strip()
+    return f"wss://mainnet.helius-rpc.com/?api-key={key}" if key and cfg.ws_helius else ""
+
+
 class Service:
     def __init__(self, cfg, db_path=None, record=None, verbose_decisions=False):
         self.cfg, self.db_path = cfg, db_path
@@ -42,11 +51,15 @@ class Service:
         self.logs.on_mode = self._save_mode
         # a second program-wide stream on another RPC: the first drops its socket up to once a minute (1002) and the
         # first seconds of a launch get lost in the gap; trades seen twice are removed by signature in the engine
-        self.logs2 = rpcws.LogStream(cfg.ws_url2, self._on_rpc_trade, 1, name="RPC-Log-Datenstrom 2", mode="program",
-                                     program=rpcws.PUMP_PROGRAM, stale_sec=cfg.stale_sec,
-                                     fallbacks=[u.strip() for u in cfg.ws_url2_fallbacks.split(",")
-                                                if u.strip() and u.strip() != cfg.ws_url]) \
-            if cfg.ws_url2 and cfg.ws_url2 != cfg.ws_url else None
+        self.helius_ws = helius_ws_url(cfg)
+        urls2 = [u for u in [self.helius_ws, cfg.ws_url2, *[u.strip() for u in cfg.ws_url2_fallbacks.split(",")]]
+                 if u and u != cfg.ws_url]
+        urls2 = list(dict.fromkeys(urls2))
+        self.logs2 = rpcws.LogStream(urls2[0], self._on_rpc_trade, 1, name="RPC-Log-Datenstrom 2", mode="program",
+                                     program=rpcws.PUMP_PROGRAM, stale_sec=cfg.stale_sec, fallbacks=urls2[1:]) \
+            if urls2 and (cfg.ws_url2 or self.helius_ws) else None
+        self.helius_bytes, self.helius_credits, self.helius_paused = 0, 0.0, ""
+        self._helius_day = (time.strftime("%Y-%m-%d"), 0.0)
         # bonk: LaunchLab events name the pool, not the mint; pools are derived from the mint (rpcws.bonk_pool)
         self.bonk_pools, self.bonk_mints = {}, {}          # pool -> mint, mint -> pool
         self.bonk_wallet_q = deque(maxlen=2000)            # (mint, signature, first try ts) awaiting their trader
@@ -423,6 +436,42 @@ class Service:
                 log.exception("%s failed", getattr(fn, "__name__", fn))
             await asyncio.sleep(sec)
 
+    def helius_meter(self):
+        """Book stream 2's Helius data on the shared credit ledger and leave Helius when the plan's month reaches
+        its reserve (or the optional day cap); come back once that clears (new month or day, more credits)."""
+        l2, url = self.logs2, self.helius_ws
+        if not l2 or not url:
+            return
+        d, self.helius_bytes = (l2.bytes - self.helius_bytes if l2.url == url else 0), l2.bytes
+        cost = d / 1e5 * HELIUS_WS_CREDITS_PER_100KB
+        day = time.strftime("%Y-%m-%d")
+        if self._helius_day[0] != day:
+            self._helius_day = (day, 0.0)
+        self._helius_day = (day, self._helius_day[1] + cost)
+        self.helius_credits += cost
+        why = ""
+        try:
+            from core import http as core_http
+            if cost > 0:
+                core_http._charge(cost, force=True)
+            st = core_http.credits_status()
+            reserve = float(os.getenv("HELIUS_CREDITS_RESERVE_PCT") or 10) / 100
+            if st.get("limit") and st.get("used", 0) >= (1 - reserve) * st["limit"]:
+                why = f"Helius-Monat bei {st['used']:.0f} von {st['limit']:.0f} Credits (Reserve erreicht)"
+        except Exception:  # noqa: BLE001  (no core ledger: only the day cap applies)
+            pass
+        if not why and self.cfg.ws_helius_credits_day > 0 and self._helius_day[1] >= self.cfg.ws_helius_credits_day:
+            why = f"Tagesgrenze {self.cfg.ws_helius_credits_day:.0f} Credits erreicht"
+        if why and not self.helius_paused:
+            self.helius_paused = why
+            l2.skip.add(url)
+            if l2.url == url:
+                l2.leave(why)
+        elif not why and self.helius_paused:
+            self.helius_paused = ""
+            l2.skip.discard(url)
+            log.info("Strom 2: Helius wieder frei")
+
     def curve_live_round(self):
         """Every few seconds: latest curve state of the launches that traded, for other processes (copytrade)."""
         now = time.time()
@@ -519,7 +568,9 @@ class Service:
                         "second": ({"url": self.logs2.url.split("?")[0], "connected": self.logs2.connected,
                                     "silent_reconnects": self.logs2.silent_reconnects, "url_switches": self.logs2.switches,
                                     "program": self.logs2.program_complete_since() is not None,
-                                    "server_drops": self.logs2.server_drops, "delivered": self.logs2.delivered}
+                                    "server_drops": self.logs2.server_drops, "delivered": self.logs2.delivered,
+                                    "mb": round(self.logs2.bytes / 1e6, 1),
+                                    "helius_credits": round(self.helius_credits), "helius_paused": self.helius_paused}
                                    if self.logs2 else None),
                         "bonk": ({"connected": self.logs_bonk.connected,
                                   "program": self.logs_bonk.program_complete_since() is not None,
@@ -594,7 +645,8 @@ class Service:
         l2 = self.logs2
         cur = {"decoded": self.logs.decoded, "delivered": self.logs.delivered, "replayed": self.logs.replayed,
                "decoded2": l2.decoded if l2 else 0, "delivered2": l2.delivered if l2 else 0,
-               "drops2": l2.server_drops if l2 else 0, "dupes": c.get("dupes", 0), "trades": c.get("trades", 0),
+               "drops2": l2.server_drops if l2 else 0, "bytes2": l2.bytes if l2 else 0,
+               "bytes1": self.logs.bytes, "hcred": self.helius_credits, "dupes": c.get("dupes", 0), "trades": c.get("trades", 0),
                **{f"why_{k}": v for k, v in rpcws.REJECT_WHY.items()},
                "rej": rpcws.REJECTS["trade"], "drops": self.logs.server_drops, "silent": self.logs.silent_reconnects,
                "s1": c.get("stage1_pump", 0), "zero": c.get("stage1_zero", 0), "def": c.get("deferred", 0),
@@ -616,6 +668,10 @@ class Service:
                      "aus" if not l2 else ("verbunden" if l2.connected else "getrennt"),
                      l2.url.split("?")[0] if l2 else "-", l2.switches if l2 else 0, d["decoded2"] / mins,
                      d["delivered2"] / mins, d["drops2"], d["trades"], d["dupes"], why)
+            log.info("Datenvolumen: Strom 1 %.1f MB/min, Strom 2 %.1f MB/min | Helius %.0f Credits in %.0f min "
+                     "(hochgerechnet %.0f/Tag, gesamt %.0f)%s", d["bytes1"] / 1e6 / mins, d["bytes2"] / 1e6 / mins,
+                     d["hcred"], mins, d["hcred"] / mins * 1440, self.helius_credits,
+                     f", pausiert: {self.helius_paused}" if self.helius_paused else "")
         # do the rejected trades belong to our own launches (then they are why launches get decided without trades)?
         cut = time.time() - 300
         with e.lock:
@@ -651,6 +707,7 @@ class Service:
                  asyncio.create_task(self.every(300, self.sol_round)),
                  asyncio.create_task(self.every(10, self.heartbeat, 1)),
                  asyncio.create_task(self.every(3, self.curve_live_round, 3)),
+                 asyncio.create_task(self.every(10, self.helius_meter, 10)),
                  asyncio.create_task(self.every(self.cfg.dex_every_sec, self.dex_round, 10)),
                  asyncio.create_task(self.every(600, self.tiers_round, 600)),
                  asyncio.create_task(self.every(3600, self.prune_round, 120)),

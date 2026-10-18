@@ -240,3 +240,31 @@ def test_curve_live_round_trip_for_other_processes(tmp_path):
     assert c["complete"] is False and c["pool"] == st.pool
     assert store.curve_now(other, "M1", max_age_s=30, now=T0 + 60) is None
     assert store.curve_now(other, "XX") is None
+
+
+def test_stream_2_goes_to_helius_first_and_leaves_it_at_the_reserve(tmp_path, monkeypatch):
+    from core import http as core_http
+    from sniper import service
+    monkeypatch.setenv("HELIUS_API_KEY", "k123")
+    svc = service.Service(cfg(), db_path=str(tmp_path / "h.db"))
+    l2 = svc.logs2
+    assert l2.url.startswith("wss://mainnet.helius-rpc.com/") and svc.cfg.ws_url2 in l2.urls
+    booked, used = [], {"used": 0, "limit": 1000}
+    monkeypatch.setattr(core_http, "_charge", lambda c, force=False: booked.append((c, force)))
+    monkeypatch.setattr(core_http, "credits_status", lambda: dict(used))
+    l2.bytes = 250_000
+    svc.helius_meter()
+    assert booked == [(5.0, True)] and not svc.helius_paused and l2.url == svc.helius_ws
+    used["used"] = 950                                  # past the 10 % reserve: off Helius, onto the public RPC
+    svc.helius_meter()
+    assert svc.helius_paused and not l2.url.startswith("wss://mainnet.helius") and l2._kick
+    assert l2.next_url() != svc.helius_ws               # skipped while paused
+    used["used"] = 100
+    svc.helius_meter()
+    assert not svc.helius_paused and svc.helius_ws not in l2.skip
+    monkeypatch.setenv("HELIUS_API_KEY", "")
+    assert not service.Service(cfg(), db_path=str(tmp_path / "n.db")).logs2.url.startswith("wss://mainnet.helius")
+
+
+def test_stream_errors_never_carry_the_key():
+    assert "k123" not in rpcws._redact("server rejected WebSocket connection wss://x/?api-key=k123: HTTP 401")

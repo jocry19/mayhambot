@@ -304,6 +304,15 @@ def parse_launchlab(m):
     return out
 
 
+def _redact(text):
+    try:
+        from core.http import redact
+        return redact(text)
+    except Exception:  # noqa: BLE001
+        import re
+        return re.sub(r"((?:api[-_]?key|apikey|token)=)[^&\s'\"]+", r"\1***", text, flags=re.I)
+
+
 class LogStream:
     """One websocket, logsSubscribe per wanted account ("mints" mode) or a single subscription on a program
     ("program" mode, messages filtered locally to the wanted mints). The public RPC limits subscription
@@ -323,6 +332,9 @@ class LogStream:
         self.urls = [url] + [u for u in fallbacks if u and u != url]
         self.silent_run, self.switches = 0, 0
         self._got_data = False
+        self.skip = set()                      # URLs not to use right now (Helius over its credit cap)
+        self.bytes = 0                         # received payload, all connections (Helius bills 2 credits / 0.1 MB)
+        self._kick = False                     # set by the service: leave the current connection now
         self.subs_per_sec = subs_per_sec
         self.parser, self.name = parser or parse_notification, name
         self.auto = mode == "auto"
@@ -471,14 +483,22 @@ class LogStream:
             return min(60, self.stale_sec)
         return self.stale_sec if len(self.subs) >= 10 or self.max_subs <= 1 else None
 
-    def next_url(self):
-        """Move to the next URL after SILENT_SWITCH silent connections (with one URL: stay, but wait longer)."""
+    def next_url(self, why=None):
+        """Move to the next usable URL after SILENT_SWITCH silent connections (with one URL: stay, but wait longer).
+        URLs in `skip` are passed over unless nothing else is left."""
         old = self.url
-        self.url = self.urls[(self.urls.index(self.url) + 1) % len(self.urls)] if self.url in self.urls else self.urls[0]
+        i = self.urls.index(self.url) if self.url in self.urls else -1
+        order = [self.urls[(i + k) % len(self.urls)] for k in range(1, len(self.urls) + 1)]
+        self.url = next((u for u in order if u not in self.skip), order[0])
         self.silent_run, self.switches = 0, self.switches + 1
-        log.warning("%s: %d Verbindungen ohne Daten auf %s, wechsle auf %s", self.name, self.SILENT_SWITCH,
-                    old.split("?")[0], self.url.split("?")[0])
+        log.warning("%s: %s auf %s, wechsle auf %s", self.name,
+                    why or f"{self.SILENT_SWITCH} Verbindungen ohne Daten", old.split("?")[0], self.url.split("?")[0])
         return self.url
+
+    def leave(self, why):
+        """Switch away from the current URL now (the open connection ends at its next message)."""
+        self.next_url(why)
+        self._kick = True
 
     async def run(self, stop):
         import time as _t
@@ -492,6 +512,7 @@ class LogStream:
                     self.connected, self.subs, self.pending = True, {}, {}
                     self._conn_since = _t.time()
                     self._got_data = False
+                    self._kick = False
                     self._program_since = None
                     up_since = _t.monotonic()
                     self.reconnects += 1
@@ -515,6 +536,9 @@ class LogStream:
                                     break
                                 continue
                             self.msgs += 1
+                            self.bytes += len(raw)
+                            if self._kick:
+                                break
                             try:
                                 m = json.loads(raw)
                             except ValueError:
@@ -542,7 +566,7 @@ class LogStream:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
-                txt = str(e)
+                txt = _redact(str(e))    # handshake errors can carry the URL, and with it an api key
                 if "1002" in txt and up_since is not None and _t.monotonic() - up_since >= 30:
                     # the public RPC ends long, busy streams with a close frame carrying an invalid status code
                     # (websockets answers 1002); nothing on our side: reconnect quickly, the syncer resubscribes
@@ -555,9 +579,11 @@ class LogStream:
                     log.warning("%s: Rate-Limit beim RPC (%d Abos aktiv), neuer Versuch in %d s",
                                 self.name, len(self.subs), backoff)
                 else:
-                    log.warning("%s getrennt (%s), neuer Versuch in %d s", self.name, e, backoff)
+                    log.warning("%s getrennt (%s), neuer Versuch in %d s", self.name, txt, backoff)
             self.connected = False
-            if self.silent_run >= self.SILENT_SWITCH:
+            if self._kick:
+                self._kick, backoff = False, 0.5
+            elif self.silent_run >= self.SILENT_SWITCH:
                 self.next_url()
                 backoff = max(backoff, 30)
             elif up_since is not None and _t.monotonic() - up_since >= 60:

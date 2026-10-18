@@ -183,6 +183,8 @@ oder ≤ −50 % nach Dev-/Insider-Abverkauf. Pump-Launches mit kaputtem Basispr
 | `SNIPER_WS_URL` / `SNIPER_WS_MAX_SUBS` | wss://api.mainnet-beta.solana.com / 150 | RPC-Log-Datenstrom |
 | `SNIPER_WS_URL2` | wss://solana-rpc.publicnode.com | zweiter Programm-Datenstrom auf einem anderen RPC (füllt die Lücken der 1002-Trennungen; doppelte Trades fallen per Signatur weg); leer = aus |
 | `SNIPER_WS_URL2_FALLBACKS` | wss://solana.drpc.org | weitere RPCs für Strom 2, kommagetrennt: nach 3 Verbindungen, die das Abo bestätigen und dann nichts liefern, wechselt Strom 2 auf den nächsten (im Kreis) |
+| `SNIPER_WS_HELIUS` | 1 | Strom 2 zuerst über den Helius-Standard-Websocket, wenn `HELIUS_API_KEY` gesetzt ist (SNIPER_WS_URL2 und die Ersatz-RPCs folgen). Die Daten kosten 2 Credits je 0,1 MB, werden im gemeinsamen Credit-Buch gebucht und im 5-min-Bericht („Datenvolumen…“) hochgerechnet; erreicht der Helius-Monat seine Reserve (HELIUS_CREDITS_RESERVE_PCT), wechselt Strom 2 auf die öffentlichen RPCs |
+| `SNIPER_WS_HELIUS_CREDITS_DAY` | 0 | zusätzliche Tagesgrenze in Credits für Strom 2 auf Helius (0 = nur die Monatsreserve) |
 | `SNIPER_BONK_WS_URL` | (leer) | Programm-Datenstrom von Raydium LaunchLab (bonk) auf einem dritten RPC; leer = aus, bonk-Launches dann `no_stream`. Nicht derselbe RPC wie `SNIPER_WS_URL`/`SNIPER_WS_URL2`: ein zweites Programm-Abo dort legte Strom 2 lahm |
 | `SNIPER_BONK_RPC_URL` | https://solana-rpc.publicnode.com | RPC für die Trader der ersten bonk-Trades (`getTransaction`) |
 | `SNIPER_BONK_WALLETS_PER_LAUNCH` | 30 | so viele Trader je bonk-Launch vor der Entscheidung |
