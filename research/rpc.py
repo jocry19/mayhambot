@@ -52,10 +52,28 @@ def get_tx(sig):
     return call("getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 1}])
 
 
+_B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def is_pubkey(addr):
+    """True if addr is base58 that decodes to exactly 32 bytes (a length check alone lets truncated pastes through)."""
+    if not addr or not 32 <= len(addr) <= 44 or any(c not in _B58 for c in addr):
+        return False
+    n = 0
+    for c in addr:
+        n = n * 58 + _B58.index(c)
+    lead = len(addr) - len(addr.lstrip("1"))
+    return lead + (n.bit_length() + 7) // 8 == 32
+
+
 def wallet_trades(wallet, limit=None, enhanced=False):
     """Swaps of a wallet. enhanced=True uses the Helius Enhanced API (100 credits, up to 100 swaps) if the
     daily cap allows; otherwise getSignaturesForAddress + getTransaction (public RPC first).
     None = not fetched or incomplete (the caller retries the wallet later instead of marking it done)."""
+    if 32 <= len(wallet) <= 44 and not is_pubkey(wallet):  # truncated paste: RPC answers -32602 forever,
+        # [] marks it done instead of retrying every round
+        log.info("wallet history %s skipped: not a valid address", wallet[:6])
+        return []
     limit = limit or rsettings.wallet_tx_limit
     if enhanced and settings.helius_api_key and credits.can("enhanced"):
         try:

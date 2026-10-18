@@ -20,7 +20,8 @@ SEED_FILES = [ROOT / "research" / "seed_wallets.txt", ROOT / "data" / "seed_wall
 
 
 def _valid(a):
-    return 32 <= len(a) <= 44 and a.isalnum()
+    from research.rpc import is_pubkey
+    return is_pubkey(a)
 
 
 def from_files(conn):

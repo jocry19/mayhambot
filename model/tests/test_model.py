@@ -608,3 +608,13 @@ def test_hung_discovery_does_not_hold_back_the_retrain(monkeypatch, tmp_path):
         train.loop(discover=True, tick=0.01)
     hang.set()
     assert len(calls) == 3  # the retrain check kept ticking while discovery hung
+
+
+def test_truncated_address_is_skipped_not_retried(monkeypatch):
+    from research import rpc
+
+    assert rpc.is_pubkey("So11111111111111111111111111111111111111112")
+    assert not rpc.is_pubkey("3nC5HEoyffo8A3peLNX5BtvzQ6qKSgNE36oW3m9SNz2")  # 43 chars, 31 bytes
+    assert not rpc.is_pubkey("0OIl" * 9)
+    monkeypatch.setattr(rpc, "call", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no RPC call")))
+    assert rpc.wallet_trades("3nC5HEoyffo8A3peLNX5BtvzQ6qKSgNE36oW3m9SNz2") == []
