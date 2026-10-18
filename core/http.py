@@ -542,6 +542,19 @@ def _borrowable(led, svc):
     return max(0.0, min(lend * pct / 100 - borrowed, pace_left))
 
 
+def plan_pace():
+    """Whole Helius plan against the calendar: {used, on_pace (usable * day/days of month), ratio = used /
+    on_pace}. ratio > 1 = the month runs ahead of its plan. Order when that happens (18.10.): bulk consumers
+    step back first (sniper stream 2 to the public RPCs), whale detection (copytrade) and the rug check
+    (safety, brain) keep Helius."""
+    led = _ledger_read()
+    _, _, days_in_month, mday = _now_parts()
+    credits_month_total, reserve_pct, _ = _credit_cfg()
+    on_pace = credits_month_total * (1 - reserve_pct / 100) * mday / days_in_month
+    used = _status(led).get("used", 0.0)
+    return {"used": used, "on_pace": on_pace, "ratio": used / on_pace if on_pace else 0.0}
+
+
 _credit_warned = set()
 
 

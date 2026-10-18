@@ -153,6 +153,16 @@ def test_without_daily_limit_helius_is_never_refused_but_still_booked(monkeypatc
     assert http.rpc_url("getBalance", helius) == helius
 
 
+def test_plan_pace_compares_the_month_with_the_calendar(monkeypatch, tmp_path):
+    _credit_env(monkeypatch, tmp_path, "sniper", day=10, month_credits=31_000)   # no reserve: 1000/day on pace
+    monkeypatch.delenv("HELIUS_DAILY_LIMIT")
+    p = http.plan_pace()
+    assert abs(p["on_pace"] - 10000) < 1e-6 and p["ratio"] == 0
+    for _ in range(11):
+        http._charge(1000)
+    assert http.plan_pace()["ratio"] > 1
+
+
 def _lend_env(monkeypatch, tmp_path, service):
     """31,000 a month, no reserve, day 1 of 31: research 50 % = 500/day, signals 10 % = 100/day."""
     _credit_env(monkeypatch, tmp_path, service, day=1)
