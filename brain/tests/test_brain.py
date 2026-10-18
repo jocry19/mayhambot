@@ -1785,6 +1785,8 @@ def test_the_main_account_buys_only_a_kind_the_lab_says_carries(conn, s, tmp_pat
     d = types.SimpleNamespace(explore=False, enter=True, size_sol=0.1)
     assert t._gate("whale", MINT, mk.snaps[MINT], d).startswith("Hauptkonto pausiert")
     assert not (t._gate("pool", MINT, mk.snaps[MINT], d) or "").startswith("Hauptkonto pausiert")
+    mp = store.get(conn, "main_paused")
+    assert mp["paused"] and mp["since"] and mp["until_verdict"] == "traegt" and mp["released"] == []
     (tmp_path / "report.json").write_text(json.dumps({"results": [
         {"hyp": "abgekuehlt_h1", "verdict": "traegt", "brain_kind": "market"},
         {"hyp": "whale_top", "verdict": "kandidat"}, {"hyp": "label_copytrade_x", "verdict": "traegt",
@@ -1792,6 +1794,8 @@ def test_the_main_account_buys_only_a_kind_the_lab_says_carries(conn, s, tmp_pat
     t._lab = (-1e18, [])
     assert not (t._gate("market", MINT, mk.snaps[MINT], d) or "").startswith("Hauptkonto pausiert")
     assert t._gate("whale", MINT, mk.snaps[MINT], d).startswith("Hauptkonto pausiert")
+    assert store.get(conn, "main_paused") == {"paused": False, "since": None, "until_verdict": "traegt",
+                                              "released": ["market"], "reason": ""}
 
 
 def test_labels_take_the_venues_costs_and_follow_rows_for_a_day(conn, s):

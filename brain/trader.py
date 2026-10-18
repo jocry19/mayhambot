@@ -341,6 +341,8 @@ class Trader:
     # ------------------------------------------------------------------ deciding
     def scan(self) -> int:
         """Decide every new opportunity. Returns the number of positions opened."""
+        if self.s.main_trade != "on":
+            self._lab_carries("")  # keeps brain_state main_paused current even while nothing is wanted
         cands = self.candidates()
         if not cands and not self.pending:
             return 0
@@ -951,8 +953,20 @@ class Trader:
             except Exception:
                 res = []
             self._lab = (now, res)
+            self._mark_pause(now, sorted({k for _, k in res if k and k != "pool"}))  # pool: the learning account
         # the report names the kind a hypothesis stands for (brain_kind); older reports only in the name
         return [h for h, k in self._lab[1] if (k == kind if k else kind in h.lower())]
+
+    def _mark_pause(self, now: float, released: list) -> None:
+        """brain_state 'main_paused' for the dashboard: {"paused", "since", "until_verdict", "reason", "released"}.
+        paused while no pocket of the lab's report carries; since = when the pause began (kept across reads)."""
+        old = store.get(self.conn, "main_paused") or {}
+        paused = not released
+        since = (old.get("since") if old.get("paused") else None) or int(now) if paused else None
+        val = {"paused": paused, "since": since, "until_verdict": "traegt", "released": released,
+               "reason": "Hauptkonto pausiert: keine Tasche trägt laut Prüfstand" if paused else ""}
+        if val != old:
+            store.put(self.conn, "main_paused", val)
 
     def _name_copy(self, mint: str, symbol: str) -> str | None:
         """A coin named like another one that rugged or was dumped in the last hours: the same scam again (18.10.: two
