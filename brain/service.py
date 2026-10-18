@@ -59,6 +59,10 @@ class Service:
         n_open = c.execute("SELECT COUNT(*) FROM brain_positions WHERE status='open'").fetchone()[0]
         eq = self.trader.equity_snapshot()["equity_sol"]
         late, self.trader.too_late = self.trader.too_late, 0
+        lag, self.trader.late_lag = self.trader.late_lag, []
+        if lag:
+            tr, br = sorted(x for x, _ in lag), sorted(y for _, y in lag)
+            late = f"{late}; median lag tracker {tr[len(tr) // 2]:.0f} s, brain {br[len(br) // 2]:.0f} s"
         last_hour = journal.hour_factors(c, time.time(), 1)  # from brain_equity: survives restarts
         hf = f", hour factor x{last_hour[0][1]:.3f}" if last_hour else ""
         return (f"{n} opportunities ({late} whale buys arrived too late), {ent} bought, {held} wanted but blocked by a gate, {n_open} open, equity {eq:.3f} SOL{hf}, "

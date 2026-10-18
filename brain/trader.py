@@ -12,7 +12,7 @@ import logging
 import random
 import time
 
-from . import decide, exits, features, store
+from . import decide, exits, features, pockets, store
 from .plans import BY_NAME
 
 log = logging.getLogger("brain.trader")
@@ -54,6 +54,7 @@ class Trader:
         self.conn, self.s, self.model = conn, s, model
         self.xm = exit_model  # organic exits (exits.py); None = the plans' fixed exits only
         self.live = exits.Live()
+        self.pockets = pockets.Book(conn, lambda: self.clock())
         self._organic_at = (0.0, False)
         self._market_at = (-1e18, False)
         self._challenge_at = (-1e18, False)
@@ -67,6 +68,7 @@ class Trader:
         self.clock = clock
         self._safe = None  # the rug verdict of the opportunity being decided
         self.too_late = 0  # whale buys the tracker delivered after max_whale_delay_s
+        self.late_lag: list[tuple[float, float]] = []  # (tracker lag, brain lag) of those, seconds
         self.pending: dict[tuple[str, str], tuple] = {}  # (kind, ref) -> (row, entity, first seen): waiting for a pair
 
     # ------------------------------------------------------------------ wiring
@@ -111,8 +113,11 @@ class Trader:
                 if r["side"] == "buy" and (r["sol_amount"] or 0) >= self.s.min_whale_sol:
                     if now - (r["ts"] or 0) <= self.s.max_whale_delay_s:
                         out.append(("whale", r["sig"], r))
-                    else:  # the tracker saw it too late (RPC rate limits): counted in the hourly line
+                    else:  # too late: counted in the hourly line, split into tracker lag (chain -> ct_swaps) and ours
                         self.too_late += 1
+                        seen = r["seen_at"] if "seen_at" in r.keys() and r["seen_at"] else None
+                        if seen:
+                            self.late_lag.append((seen - (r["ts"] or seen), now - seen))
             if rows:
                 store.put(c, "cursor_whale", rows[-1]["rid"])
         if store.has(c, "signals"):
@@ -233,7 +238,10 @@ class Trader:
                     feats["safety"] = self._safe[0]
             except Exception as e:
                 log.debug("safety %s: %s", row["mint"][:6], e)
-        d = decide.choose(self.model, kind, feats, self.settings(now), self.rng, equity=self.equity())
+        pocket = self.pockets.match(kind, feats)
+        d = decide.choose(self.model, kind, feats, self.settings(now, pocket), self.rng, equity=self.equity())
+        if pocket:
+            raw["pocket"] = pocket
         block = None
         wanted = d.enter and not d.explore  # convinced before the hard gates: what the honest score judges
         if d.enter:
@@ -415,13 +423,17 @@ class Trader:
         self._challenge_at = (now, on)
         return on
 
-    def settings(self, now: float):
-        """The settings a decision runs with: the challenge's bigger stakes while it is on."""
-        if not self.challenge_on(now):
-            return self.s
+    def settings(self, now: float, pocket: str | None = None):
+        """The settings a decision runs with. Outside a released pocket Kelly sizes on the lower bound of the edge (an
+        unproven edge stakes the minimum); inside one on its mean, with the challenge's bigger stakes while it is on
+        (plan 18.10.: with a negative expected value bigger stakes only lose faster)."""
         import dataclasses
 
-        return dataclasses.replace(self.s, kelly_frac=self.s.challenge_kelly_frac,
+        if not pocket:
+            return dataclasses.replace(self.s, kelly_edge="lb")
+        if not self.challenge_on(now):
+            return dataclasses.replace(self.s, kelly_edge="mean")
+        return dataclasses.replace(self.s, kelly_edge="mean", kelly_frac=self.s.challenge_kelly_frac,
                                    max_stake=self.s.challenge_max_stake,
                                    explore_share=self.s.challenge_explore_share)
 
