@@ -108,7 +108,9 @@ class Fetcher:
     def _take(self, host, method=None):
         c = self.cfg
         helius = "helius" in host
-        if method in SCARCE_METHODS and not budget.take(
+        # the per-method bucket guards the public nodes only: Helius serves getTokenLargestAccounts within its
+        # normal budget, and holding it back there sent the overflow to the public nodes (strike score 62, 18.10.)
+        if method in SCARCE_METHODS and not helius and not budget.take(
                 f"{host}_{method}", c.largest_per_min, spacing=c.largest_spacing_sec,
                 wait=c.priority_wait_sec if self.priority else 0):
             return False

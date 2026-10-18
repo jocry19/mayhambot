@@ -384,16 +384,19 @@ def test_holder_snapshot_cached_and_largest_accounts_capped(monkeypatch):
     cfg = SafetySettings()
     cfg.helius_spacing_sec = cfg.public_spacing_sec = cfg.largest_spacing_sec = 0
     cfg.largest_per_min, cfg.public_rpc_url = 2, f"https://{pub}"
+    cfg.helius_per_min, cfg.helius_reserve = 3, 0
     monkeypatch.setattr(sources.http, "post_json", lambda url, payload, **kw: {"result": 1})
     f = sources.Fetcher(cfg, rpc_url=f"https://{hel}/?api-key=x", priority=False)
     try:
         got = []
-        for _ in range(5):
+        for _ in range(6):
             try:
                 got.append(f.rpc("getTokenLargestAccounts", [MINT]))
             except BudgetExceeded:
                 got.append(None)
-        assert got == [1, 1, 1, 1, None]   # 2 per endpoint and minute: public twice, then Helius twice
+        # Helius only by its normal budget (3), the public node by the method cap (2), then nothing
+        assert got == [1, 1, 1, 1, 1, None]
+        assert f.rpc_calls[hel] == 3 and f.rpc_calls[pub] == 2
     finally:
         _cleanup(hel, pub, f"{hel}_getTokenLargestAccounts", f"{pub}_getTokenLargestAccounts")
 
