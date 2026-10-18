@@ -976,14 +976,17 @@ def check_block0(ctx):
 
 
 def check_staged(ctx):
-    """Staged pump (no network): the coin reached a big market cap within minutes of its launch, or migrated off
-    the bonding curve that fast. Backup 2026-10-17: launches at >= 250 k$ market cap within 5 min (mostly borrowed
-    brand names: Coca-Cola, GTA6, Apple, SpaceX ...; liquidity only 12-15 % of the market cap) ended at <= 0.6 % of
-    their peak with ~1.9 k$ left in 15 of 16 cases, several after pumping to 1-4 M$ first; coins reaching 250 k$
-    slowly drained in 57 % (31/54). Migration within 1-5 min rugged 56-62 % (n=211) vs 36-43 % for slower
-    migrations and 12 % overall. The name itself adds nothing the speed does not already say, so it is not used.
-    A market-cap snapshot only counts with liquidity >= 20 k$ and >= 2 % of the market cap, and a high only counts
-    when SAFETY_STAGED_MIN_SNAPSHOTS such snapshots confirm it. Warning, no block."""
+    """Staged pump (no network), an exit signal more than an entry brake: the coin stood at a big market cap with
+    the thin liquidity of a fresh migrated pool (10-20 % of the market cap, below 1.5 M$) within
+    SAFETY_STAGED_WINDOW_SEC of its launch, or migrated off the bonding curve within 5 min. Mostly borrowed brand
+    names (Coca-Cola, GTA6, Apple, SpaceX ...); the name adds nothing the speed does not already say, so it is not used.
+    Backup 2026-10-18 01:37, coins confirmed at >= 250 k$ (3 snapshots within 15 min, each with liquidity >= 20 k$
+    and >= 2 % of the market cap), drained = liquidity <= 20 % or price <= 10 % of the confirmed high:
+      reached within 30 min (n=40): drained within 5 min 2/39, 15 min 7/37, 60 min 25/34 (74 %, 95 % lower bound
+      57 %), 4 h 32/33 (97 %, lower bound 85 %); within 5 min alone (n=16): 60 min 13/16 (lower bound 57 %).
+      reached later (n=40): 0/37 within 60 min, 7/33 within 4 h.
+    Coins at the same speed but with deep liquidity or > 1.5 M$ (old pairs, xStocks) drained 0 of 14. Migration
+    within 1-5 min rugged 56-62 % (n=211) vs 36-43 % for slower migrations and 12 % overall. Warning, no block."""
     r = CheckResult("staged", "Inszenierter Pump")
     c = ctx.cfg
     created = _created_ts(ctx)
@@ -1003,19 +1006,25 @@ def check_staged(ctx):
         mig = int(mig[0]) - created if mig and mig[0] else None
     except Exception:  # noqa: BLE001
         mig = None
-    fast = [x for x in rows if x[0] <= created + c.staged_window_sec]
-    r.data.update(created_ts=created, migrated_after_sec=mig, n_snapshots=len(rows))
-    if fast:
-        ts, mcap, liq = fast[0]
-        r.data.update(fast_mcap_usd=mcap, fast_after_sec=ts - created, liq_mcap=round(liq / mcap, 3))
-        txt = (f"{mcap / 1000:,.0f} k$ Market Cap schon {max(1, (ts - created) // 60)} min nach dem Start, "
-               f"Liquidität nur {100 * liq / mcap:.0f} % davon").replace(",", ".")
-        if len(rows) >= c.staged_min_snapshots:
-            r.add(50, txt + ": Muster eines inszenierten Pumps. Solche Coins fielen in unseren Daten in 15 von 16 "
-                            "Fällen auf Restliquidität.")
+    r.data.update(created_ts=created, migrated_after_sec=mig, n_snapshots=len(rows), pattern=False)
+    for i, (ts, mcap, liq) in enumerate(rows):
+        if ts > created + c.staged_window_sec:
+            break
+        if not (c.staged_band_lo <= liq / mcap <= c.staged_band_hi and mcap < c.staged_max_mcap):
+            continue
+        n = sum(1 for x in rows[i:] if x[0] <= ts + c.staged_confirm_sec)
+        mins = max(1, (ts - created) // 60)
+        txt = (f"{mcap / 1000:,.0f} k$ Market Cap schon {mins} min nach dem Start, Liquidität nur "
+               f"{100 * liq / mcap:.0f} % davon").replace(",", ".")
+        r.data.update(fast_mcap_usd=mcap, fast_after_sec=ts - created, liq_mcap=round(liq / mcap, 3), confirmations=n)
+        if n >= c.staged_min_snapshots:
+            r.data["pattern"] = True
+            r.add(50, txt + ": Muster eines inszenierten Pumps. Solche Coins waren in unseren Daten zu 74 % binnen "
+                            "einer Stunde und zu 97 % binnen 4 Stunden leer, meist 15 bis 60 min nach dem Hoch.")
         else:
             r.add(30, txt + " (noch nicht bestätigt): mögliches Pump-Muster.")
-    if mig is not None and 0 <= mig <= c.staged_window_sec:
+        break
+    if mig is not None and 0 <= mig <= 300:
         r.add(35, f"Schon {max(1, mig // 60)} min nach dem Start von der Bonding-Curve migriert: solche Coins "
                   "ruggten in unseren Daten zu rund 60 % (sonst 12 %).")
     if not r.reasons:
@@ -1024,7 +1033,6 @@ def check_staged(ctx):
         else:
             r.positives.append("Kein auffällig schneller Anstieg direkt nach dem Start.")
     return r.finish(cap=60)
-
 
 def check_exit(ctx):
     """Soft rug in progress, from the intel service's latest coin features (no network): insiders selling,

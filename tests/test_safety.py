@@ -757,6 +757,14 @@ def test_staged_pump_warns_on_fast_confirmed_mcap_and_fast_migration():
     a = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
     st = a.checks["staged"]
     assert st["status"] == "ok" and st["risk"] == 50 and st["data"]["fast_after_sec"] == 180 and not a.blocked
+    assert st["data"]["pattern"] is True
+    # same speed but deep liquidity (an old pair, a tokenised stock): not the pattern
+    c.execute("UPDATE token_prices SET liquidity_usd=300000")
+    c.commit()
+    st = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True).checks["staged"]
+    assert st["risk"] == 0 and st["data"]["pattern"] is False
+    c.execute("UPDATE token_prices SET liquidity_usd=52000")
+    c.commit()
     # one unconfirmed snapshot only: weaker; a snapshot with too little liquidity does not count at all
     c.execute("DELETE FROM token_prices WHERE ts > ?", (NOW - 3600 + 180,))
     c.execute("INSERT INTO token_prices VALUES (?,?,?,?,?)", (MINT, NOW - 3600 + 500, 0.0004, 400000, 3000))
