@@ -1138,3 +1138,27 @@ def test_strict_copy_follows_the_thompson_draw(env, monkeypatch):
     pid = st.on_whale_buy(chain.Swap("sigT2", W, int(time.time()) - 5, "buy", MINT, 1.0 / 3e-6, 1.0, 3e-6))
     p = conn.execute("SELECT mode, size_sol FROM ct_positions WHERE id=?", (pid,)).fetchone()
     assert p["mode"] == "paper" and p["size_sol"] == pytest.approx(control.preset(conn, "whale").size_sol * 1.5)
+
+
+def test_staged_pump_exits_once_the_high_is_past(env, monkeypatch):
+    import dataclasses
+
+    import safety
+
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    pid = st.on_whale_buy(whale_buy())
+    ok = safety.Assessment(MINT, int(time.time()), 10.0, "low", False, 1.0)
+    monkeypatch.setattr(safety, "assess", lambda mint, conn=None, deep=True, **k: ok)
+    p0 = conn.execute("SELECT * FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    state["snap"] = dataclasses.replace(state["snap"], price_sol=p0["entry_price_sol"] * 1.2)
+    st.update()  # no pattern: the position rides on
+    assert conn.execute("SELECT status FROM ct_positions WHERE id=?", (pid,)).fetchone()[0] == "open"
+    ok.checks = {"staged": {"data": {"pattern": True}}}
+    st._staged.clear()
+    st.update()  # pattern, at the high: still open
+    assert conn.execute("SELECT status FROM ct_positions WHERE id=?", (pid,)).fetchone()[0] == "open"
+    st._high_ts[pid] -= strategy.STAGED_AFTER_HIGH_S
+    st.update()  # 15 min past the high: out before the drain
+    p = conn.execute("SELECT status, exit_reason FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    assert tuple(p) == ("closed", "staged")

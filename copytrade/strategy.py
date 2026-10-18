@@ -39,8 +39,12 @@ LAUNCH_MAX_AGE_S = 60  # mode 3: a sniper decision older than this is not bought
 EXIT_NAMES = {"target": "Ziel erreicht", "inflow_peak": "Copy-Ansturm vorbei", "trail": "Trailing-Stop",
               "stop": "Stop-Loss", "time": "Zeit abgelaufen", "whale": "Wal verkauft", "no_market": "kein Markt",
               "smart_exit": "Smart Money steigt aus", "manual": "von dir verkauft", "rug": "Liquidität abgezogen",
-              "organic": "Zustand des Coins gekippt (Hirn)"}
+              "organic": "Zustand des Coins gekippt (Hirn)", "staged": "inszenierter Pump, Hoch vorbei"}
 UNCONFIRMED = "unbestätigt:"  # live.executor.UNCONFIRMED: a buy that may still land keeps its 'opening' row
+STAGED_TRAIL = 0.10  # staged pump (safety check 'staged', data.pattern): exit 10 % under the high ...
+STAGED_AFTER_HIGH_S = 15 * 60  # ... or 15 min after the last high: 74 % drained within 60 min, mostly 15-60 min after it
+STAGED_REFRESH_S = 300  # the pattern can only form within 45 min of the launch: re-read young coins every 5 min
+STAGED_YOUNG_H = 1.0
 RUG_LIQ_DROP = 0.8  # liquidity this far under its value at entry: the pool was pulled, exit at once
 PAPER_MODES = ("paper", "explore")  # simulated accounts: strict paper (the live rules) and exploration
 PAPER_TECH_MAX_OPEN = 100  # not a budget: open paper positions are re-priced every few seconds (DexScreener, 30 per call)
@@ -102,6 +106,8 @@ class Strategy:
         self.exs = executors
         self._missing: dict[int, int] = {}
         self._noroute: dict[int, float] = {}  # last 'no sell route' alarm per live position
+        self._staged: dict[str, tuple[float, bool]] = {}  # mint -> (checked at, staged pump pattern)
+        self._high_ts: dict[int, float] = {}  # position -> when its high was last raised (this process)
         self._pending: list[tuple[float, Swap]] = []  # whale buys waiting for the learned entry delay
         self._small = [0, 0.0, time.time()]  # whale buys too small for either account since the last summary
         control.init(conn)
@@ -847,6 +853,8 @@ class Strategy:
                 elif v and p["tokens"]:
                     price = v[0] / p["tokens"]
             high = max(p["high_price_sol"] or price, price)
+            if high > (p["high_price_sol"] or 0) or p["id"] not in self._high_ts:
+                self._high_ts[p["id"]] = now
             peak_buys = max(p["peak_buys_m5"] or 0, snap.buys_m5)
             self.conn.execute(
                 """UPDATE ct_positions SET high_price_sol=?, last_price_sol=?, last_price_usd=?, last_mcap_usd=?,
@@ -870,6 +878,9 @@ class Strategy:
                 reason = "rug"  # LP pulled: the screener price often stays at the pre-rug level, so no stop fires
             elif gain <= -p["stop_loss"]:
                 reason = "stop"
+            elif self._staged_pump(p["mint"], snap, now) and (
+                    price <= high * (1 - STAGED_TRAIL) or now - self._high_ts.get(p["id"], now) >= STAGED_AFTER_HIGH_S):
+                reason = "staged"
             elif organic:
                 # the brain decides instead of target / inflow / trail / smart exit; stop, rug and max hold stay
                 if (now - p["opened_at"]) / 60 >= p["max_hold_min"]:
@@ -898,6 +909,23 @@ class Strategy:
                 if org:
                     org.drop(p["id"])
         self.conn.commit()
+
+    def _staged_pump(self, mint: str, snap, now: float) -> bool:
+        """Safety's 'staged' check confirmed a staged pump (>= 250 k$ within 30 min of the launch on a pool of
+        10-20 % of the market cap): an exit feature, not an entry block. Read from the stored safety result, again
+        every STAGED_REFRESH_S while the coin is young enough for the pattern to still form; a found pattern stays."""
+        at, hit = self._staged.get(mint, (0.0, False))
+        if hit or (at and (now - at < STAGED_REFRESH_S or snap.age_hours > STAGED_YOUNG_H)):
+            return hit
+        try:
+            import safety  # type: ignore
+
+            a = safety.assess(mint, self.conn, deep=False)
+            hit = bool(((a.checks or {}).get("staged") or {}).get("data", {}).get("pattern"))
+        except Exception as e:
+            log.debug("staged check %s failed: %s", mint[:6], e)
+        self._staged[mint] = (now, hit)
+        return hit
 
     def _target_confirmed(self, p) -> bool:
         """Paper targets are judged on the screener's mid price; confirm with what a sell would bring (one Jupiter
