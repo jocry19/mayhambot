@@ -72,11 +72,16 @@ PUMP_TOKEN_OFFSET = 279_900_000.0   # virtual minus real token reserves of every
 LOW_START = {"trades": 0}           # accepted events of curves that start below 30 virtual SOL
 
 
+# curves that start far above 30 virtual SOL (18.10.: about 278, a start market cap near 260 SOL; rejected as
+# sol_high before, e.g. DtWSid...pump, trade price = v_sol / v_tok) have the standard token side as well
+CURVE_MAX_V_SOL = 5000.0
+
+
 def curve_ok(v_sol, v_tok, r_sol, r_tok):
     """A pump.fun curve with fewer than 30 virtual SOL (seen 10/2026 on about half of all launches: the token side
     is the standard one, virtual tokens = real tokens + 279.9e6, but the virtual SOL sit at 0 to 25). The event is
     self-consistent (its trade price equals v_sol / v_tok), so it is a real price, only a low one."""
-    return (0 < v_sol <= V_SOL_RANGE[1] and 0 <= r_sol <= v_sol and V_TOK_RANGE[0] <= v_tok <= V_TOK_RANGE[1]
+    return (0 < v_sol <= CURVE_MAX_V_SOL and 0 <= r_sol <= v_sol and V_TOK_RANGE[0] <= v_tok <= V_TOK_RANGE[1]
             and abs(v_tok - r_tok - PUMP_TOKEN_OFFSET) <= 1e6)
 
 

@@ -371,3 +371,17 @@ def test_coverage_tells_missed_from_untraded(tmp_path):
     eng.late_first.extend([(t, 40.0), (t, 900.0)])    # one traded 40 s after the decision, one only after 15 min
     lt = eng.coverage(T0)["late"]
     assert lt == {"zero": 3, "late_5m": 1, "never_5m": 2, "share_of_traded": 0.667}
+
+
+HIGH_START = ("vdt/007mYe6/fif5RRQ9e8wLnzqCv/5OPigT88eMe8EWUGA2tJ3A3xDh3hYAAAAA0sCA9kUBAAAA8/9O0K/ujOjIDlPbLnMBTftCWxzM"
+              "+5k8zagF6DknvHP6T9RqAAAAAO34yxNBAAAAkzVAQcmgAwDyvuFjAAAAAJOdLfU3ogIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+              "AAAAAABfAAAAAAAAABGfNwAAAAAAY7+VOaK3oNAaM4ZhuI2qK/lMEWHxadQylSiGEF1YY5weAAAAAAAAAI2QEQAAAAAAAAAAAAAAAAAA"
+              "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAHNlbGwBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+              "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQ4d4WAAAAAO34yxNBAAAA8r7hYwAAAAAAAAAAAAAAAAAAAAAAAAAA9dBsAAAAAAA=")
+
+
+def test_curve_starting_near_278_virtual_sol_is_accepted():
+    ev = rpcws.decode_trade(HIGH_START)      # real sell of 18.10. 06:50 (DtWSid...pump), sol_high before
+    m = rpcws.to_stream_msg(ev, "S")
+    assert m["txType"] == "sell" and m["vSolInBondingCurve"] == pytest.approx(279.505, abs=1e-3)
+    assert (m["solAmount"] / m["tokenAmount"]) / (m["marketCapSol"] / 1e9) == pytest.approx(1.0, abs=0.01)
