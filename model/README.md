@@ -172,3 +172,13 @@ copytrade calls `tier_of` itself.
 `score_token(mint, conn=conn, tiers=ctx["tiers"], shared=ctx["shared"])` for every coin (no full-table scans per
 coin). `score_many` does this itself. Models carry `feature_set` / `n_features`; a model from a different release
 raises `model.predict.ModelIncompatible` (a `ModelNotTrained`), so callers fall back instead of crashing.
+
+## Wallet features for the shared opportunity table
+
+`model.wallet_rows(addresses)` gives what the active model knows about each scored wallet (tiered or not):
+tier, tier_rank (3 ultra .. 0 none), score, components, n_tokens, evidence (1 - exp(-n/4)), win rate, net ROI,
+net PnL, cluster, flag (launch_bot / flipper / wash / one_hit). `model.wallet_features(addresses)` folds the
+wallets behind one opportunity into flat numbers (`WALLET_FEATURE_NAMES`, all prefixed `w_`): counts per tier,
+flagged and one-hit counts, best and mean score, and the top-scored wallet's evidence, net result and
+components. Tiers are inputs here, not gates; the decision model learns their weight. Block-0 launch wallets
+are flagged `launch_bot` (no tier) and appear as `w_n_flagged` with their score.

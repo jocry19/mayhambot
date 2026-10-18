@@ -7,7 +7,7 @@ from pathlib import Path
 
 from model import learn
 from model.config import msettings
-from model.tiers import tier_all
+from model.tiers import tier_all, uncopyable
 from research import backtest, data, report, wallet_stats
 from research.store import connect, ensure_schema, retry, save_report
 
@@ -75,7 +75,8 @@ def run_once(conn=None, now=None, write_files=True):
                      s["realized_pnl_usd"], s["total_pnl_usd"], s["median_entry_mcap"], s["median_min_to_2x"],
                      s["influence_followers"], s["influence_usd"], s["inflow_lift_usd"], s["consistency"],
                      s["rug_rate"], json.dumps(s["components"]), cl.get(w), s.get("exit_capture"),
-                     s.get("median_hold_min"), s.get("net_pnl_usd"), s.get("net_roi")))
+                     s.get("median_hold_min"), s.get("net_pnl_usd"), s.get("net_roi"), uncopyable(s),
+                     s.get("top_coin_share"), s.get("net_pnl_wo_best_usd"), s.get("median_excess_roi")))
     conn.commit()
 
     def swap():  # one short write transaction, retried if the live app holds the lock
@@ -83,7 +84,8 @@ def run_once(conn=None, now=None, write_files=True):
         conn.executemany("""INSERT INTO model_wallet_stats(address, version, ts, tier, score, n_tokens, win_rate, early_rate,
                roi, realized_pnl_usd, total_pnl_usd, median_entry_mcap, median_min_to_2x, influence_followers,
                influence_usd, inflow_lift_usd, consistency, rug_rate, components_json, cluster_id, exit_capture,
-               median_hold_min, net_pnl_usd, net_roi) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+               median_hold_min, net_pnl_usd, net_roi, flag, top_coin_share, net_pnl_wo_best_usd, median_excess_roi)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
         conn.executemany("INSERT OR REPLACE INTO model_tier_history VALUES (?,?,?,?)",
                          [(vid, w, t, sc) for w, (t, sc, _) in tiers.items() if t])
         conn.execute("UPDATE model_versions SET active = (id = ?)", (vid,))

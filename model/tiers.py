@@ -146,3 +146,63 @@ def tier_map(conn):
     return {r[0]: (r[1], r[2] or 0.0, r[3] or 0.0, r[4], r[5]) for r in conn.execute(
         """SELECT address, tier, score, influence_usd, cluster_id, exit_capture FROM model_wallet_stats
            WHERE tier IS NOT NULL""")}
+
+
+TIER_RANK = {"ultra": 3, "smart": 2, "good": 1}
+WALLET_FEATURE_NAMES = (["w_known", "w_n_ultra", "w_n_smart", "w_n_good", "w_n_flagged", "w_n_one_hit",
+                         "w_score_max", "w_score_mean", "w_tier_rank_max", "w_n_tokens_top", "w_evidence_top",
+                         "w_win_rate_top", "w_net_roi_top", "w_net_pnl_sum_usd", "w_excess_roi_top",
+                         "w_top_coin_share_top", "w_rug_rate_top", "w_n_clusters"]
+                        + [f"w_c_{c}_top" for c in COMPONENTS])
+
+
+def wallet_rows(addresses, conn=None):
+    """address -> flat dict of what the active model knows about the wallet (every scored wallet, tiered or not):
+    tier, tier_rank (3 ultra .. 0 none), score, components, n_tokens, evidence (0..1, how much the score can be
+    trusted: 1 - exp(-n/4)), net results, flag (launch_bot / flipper / wash / one_hit or None)."""
+    conn = _conn(conn)
+    addrs = list(dict.fromkeys(a for a in addresses if a))
+    out = {}
+    for i in range(0, len(addrs), 500):
+        part = addrs[i:i + 500]
+        q = f"SELECT * FROM model_wallet_stats WHERE address IN ({','.join('?' * len(part))})"
+        for r in conn.execute(q, part):
+            d = dict(r)
+            n = d.get("n_tokens") or 0
+            out[d["address"]] = dict(
+                tier=d["tier"], tier_rank=TIER_RANK.get(d["tier"], 0), score=d["score"] or 0.0, n_tokens=n,
+                evidence=1 - math.exp(-n / 4), win_rate=d["win_rate"], rug_rate=d["rug_rate"],
+                net_roi=d.get("net_roi"), net_pnl_usd=d.get("net_pnl_usd"), cluster_id=d.get("cluster_id"),
+                flag=d.get("flag"), top_coin_share=d.get("top_coin_share"),
+                median_excess_roi=d.get("median_excess_roi"), version=d["version"],
+                components=json.loads(d["components_json"] or "{}"))
+    return out
+
+
+def wallet_features(addresses, conn=None, rows=None):
+    """Features of the wallets behind one opportunity (the buyers of a coin, or the copied wallet), for the shared
+    opportunity table. Tiers are inputs here, not gates: untiered and flagged wallets count with their score.
+    Values are plain floats; unknown wallets give w_known 0 and None for the 'top' fields."""
+    rows = wallet_rows(addresses, conn) if rows is None else rows
+    known = [rows[a] for a in dict.fromkeys(addresses) if a in rows]
+    f = dict.fromkeys(WALLET_FEATURE_NAMES)
+    f.update(w_known=float(len(known)), w_n_ultra=0.0, w_n_smart=0.0, w_n_good=0.0, w_n_flagged=0.0,
+             w_n_one_hit=0.0, w_net_pnl_sum_usd=0.0, w_n_clusters=0.0)
+    if not known:
+        return f
+    for r in known:
+        if r["tier"] in TIER_RANK:
+            f[f"w_n_{r['tier']}"] += 1
+        f["w_n_flagged"] += bool(r["flag"])
+        f["w_n_one_hit"] += r["flag"] == "one_hit"
+        f["w_net_pnl_sum_usd"] += r["net_pnl_usd"] or 0.0
+    f["w_n_clusters"] = float(len({r["cluster_id"] for r in known if r["cluster_id"]}))
+    top = max(known, key=lambda r: r["score"])
+    f.update(w_score_max=top["score"], w_score_mean=sum(r["score"] for r in known) / len(known),
+             w_tier_rank_max=float(max(r["tier_rank"] for r in known)), w_n_tokens_top=float(top["n_tokens"]),
+             w_evidence_top=top["evidence"], w_win_rate_top=top["win_rate"], w_net_roi_top=top["net_roi"],
+             w_excess_roi_top=top["median_excess_roi"], w_top_coin_share_top=top["top_coin_share"],
+             w_rug_rate_top=top["rug_rate"])
+    for c in COMPONENTS:
+        f[f"w_c_{c}_top"] = top["components"].get(c)
+    return f

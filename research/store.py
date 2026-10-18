@@ -53,7 +53,9 @@ CREATE INDEX IF NOT EXISTS idx_mp_ts ON model_predictions(ts);
 
 
 ADDED_COLUMNS = {"model_wallet_stats": [("cluster_id", "TEXT"), ("exit_capture", "REAL"), ("median_hold_min", "REAL"),
-                                        ("net_pnl_usd", "REAL"), ("net_roi", "REAL")],
+                                        ("net_pnl_usd", "REAL"), ("net_roi", "REAL"),
+                                        ("flag", "TEXT"), ("top_coin_share", "REAL"), ("net_pnl_wo_best_usd", "REAL"),
+                                        ("median_excess_roi", "REAL")],
                  "research_tokens": [("candles_fetched_at", "INTEGER")],
                  "model_versions": [("feature_set", "TEXT")]}
 

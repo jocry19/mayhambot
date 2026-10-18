@@ -473,3 +473,21 @@ def test_backtest_reports_walk_forward_net_of_wallet_ranking(market):
     assert {"all", "net", "pumped", "prior"} <= set(wr)
     assert all(v["n"] > 0 and v["ci_low"] <= v["mean_net"] for v in wr.values())
     assert wr["net"]["mean_net"] >= wr["all"]["mean_net"]  # skilled wallets in the fixture: ranking must help
+
+
+def test_wallet_features_for_the_opportunity_table(market):
+    from model import WALLET_FEATURE_NAMES, wallet_features, wallet_rows
+    conn, truth, now, vid = market
+    allw = [r[0] for r in conn.execute("SELECT address FROM model_wallet_stats")]
+    rows = wallet_rows(allw + ["NOPE"], conn)
+    assert len(rows) == len(allw) and "NOPE" not in rows
+    assert any(r["tier"] is None for r in rows.values())  # untiered wallets are features too
+    ultra = [w for w, r in rows.items() if r["tier"] == "ultra"][:2]
+    f = wallet_features(ultra + ["NOPE"], conn)
+    assert set(f) == set(WALLET_FEATURE_NAMES)
+    assert f["w_known"] == 2 and f["w_n_ultra"] == 2 and f["w_tier_rank_max"] == 3
+    assert 0 < f["w_evidence_top"] <= 1 and f["w_c_win_top"] is not None
+    empty = wallet_features(["NOPE"], conn)
+    assert empty["w_known"] == 0 and empty["w_score_max"] is None
+    flagged = [w for w, r in rows.items() if r["flag"]]
+    assert all(rows[w]["tier"] is None for w in flagged)
