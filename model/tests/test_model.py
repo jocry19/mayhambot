@@ -480,6 +480,7 @@ def test_backtest_reports_walk_forward_net_of_wallet_ranking(market):
     for row in wh.values():
         assert {"all", "net", "excess", "pumped", "prior"} <= set(row)
         assert all(v["rank_corr"] is None or -1 <= v["rank_corr"] <= 1 for k, v in row.items() if k != "all")
+        assert "lift_at_fill" in row["net"] and row["all"]["mean_net_at_fill"] is not None
 
 
 def test_wallet_features_for_the_opportunity_table(market):

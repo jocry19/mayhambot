@@ -378,6 +378,7 @@ def render(d):
             parts = [f"{VARIANT_LABELS.get(k, k)}: oberstes Fünftel {_pct(v['mean_net_top'])} ({'+' if v['lift'] >= 0 else ''}"
                      f"{100 * v['lift']:.1f} Pkt. gegen alle), Rangkorrelation "
                      + ("–" if v["rank_corr"] is None else f"{v['rank_corr']:+.2f}")
+                     + ("" if v.get("lift_at_fill") is None else f", zum Kurs der Wallet selbst {100 * v['lift_at_fill']:+.1f} Pkt.")
                      for k, v in row.items() if k != "all"]
             L.append(f"Wallet-Score vorwärts {hn} (alle Käufe Ø {_pct(row['all']['mean_net'])}, n {row['all']['n']}): "
                      + " · ".join(parts) + "\n")

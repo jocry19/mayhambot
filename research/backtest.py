@@ -49,8 +49,10 @@ def _wallet_events(ds, stats_k, a, b, h_name, horizons, limit=4000, rng=None):
         lab = ev.labels_at(mint, ts, ds.pidx, hz).get(h_name)
         if lab is None:
             continue
+        lab0 = ev.labels_at(mint, ts, ds.pidx, hz, delay=0).get(h_name)  # at the wallet's own fill: is the edge in the delay?
         out.append(dict(ts=ts, sec=hz[0][1], comps=stats_k[w]["components"], n_tokens=stats_k[w]["n_tokens"],
-                        y=lab["pumped"], win=lab["win"], net=lab["net"], mint=mint))
+                        y=lab["pumped"], win=lab["win"], net=lab["net"], mint=mint,
+                        net0=lab0["net"] if lab0 else None))
     by = {}
     for we in out:
         by.setdefault(we["mint"], []).append(we["net"])
@@ -68,12 +70,17 @@ def _rank_forward(acc, wev, variants, pairs=None):
         return
     k = max(1, len(wev) // 5)
     acc.setdefault("all", []).extend(we["net"] for we in wev)
+    if pairs is not None:
+        pairs.setdefault("all@0", []).extend(we["net0"] for we in wev if we.get("net0") is not None)
     for name, w in variants.items():
-        scored = [(wallet_score(dict(components=we["comps"], n_tokens=we["n_tokens"]), w), we["net"]) for we in wev]
+        scored = [(wallet_score(dict(components=we["comps"], n_tokens=we["n_tokens"]), w), we["net"], we.get("net0"))
+                  for we in wev]
         top = sorted(scored, key=lambda x: -x[0])[:k]
-        acc.setdefault(name, []).extend(n for _, n in top)
+        acc.setdefault(name, []).extend(n for _, n, _ in top)
         if pairs is not None:  # every buy with its score: rank correlation score vs net, walk-forward
-            pairs.setdefault(name, []).extend(scored)
+            pairs.setdefault(name, []).extend((sc, n) for sc, n, _ in scored)
+            # the same top fifth bought at the wallet's own fill instead of 60 s later
+            pairs.setdefault(name + "@0", []).extend(n0 for _, _, n0 in top if n0 is not None)
 
 
 def _coin_events(ds, tmap, a, b, ms):
@@ -286,12 +293,16 @@ def metrics(res, ms):
         if not allnets:
             continue
         base = sum(allnets) / len(allnets)
-        row = dict(all=dict(n=len(allnets), mean_net=base))
+        a0 = d["pairs"].get("all@0") or []
+        row = dict(all=dict(n=len(allnets), mean_net=base, mean_net_at_fill=sum(a0) / len(a0) if a0 else None))
         for name, nets in d["top"].items():
             if name == "all" or not nets:
                 continue
             pr = d["pairs"].get(name) or []
             row[name] = dict(n=len(nets), mean_net_top=sum(nets) / len(nets), lift=sum(nets) / len(nets) - base,
                              rank_corr=stats.spearman([a for a, _ in pr], [b for _, b in pr]))
+            t0, a0 = d["pairs"].get(name + "@0") or [], d["pairs"].get("all@0") or []
+            if t0 and a0:
+                row[name]["lift_at_fill"] = sum(t0) / len(t0) - sum(a0) / len(a0)
         out["wallet_rank_h"][hn] = row
     return out

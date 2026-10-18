@@ -210,7 +210,7 @@ def retrain_if_due(conn, every, last_ok):
             marker.unlink(missing_ok=True)
     if vid:
         log.info("retrain finished in %.0f s, model v%d, champion %s", time.time() - t0, vid, _champions(conn, vid))
-        last_ok = time.time()
+        last_ok = last_success(conn) or time.time()  # the run's start time, as a restart reads it from the DB
         log.info("next retrain at %s", _utc(last_ok + every))
     return last_ok
 
