@@ -28,7 +28,7 @@ log = logging.getLogger("brain.learner")
 
 RETRY_S = 12 * 3600  # 18.10.: two days let the oldest unreplayable rows block every newer one
 CACHE_GRACE_S = 30 * 60
-EVAL_WINDOW = 3000  # unevaluated rows looked at per round, oldest first
+EVAL_WINDOW = 1500  # unevaluated rows looked at per round, oldest first (the loop waits for every learning round)
 REAL_WEIGHT = 2.0
 PRIOR_DELAY_S = 60  # copytrade's grid delay used for prior whale replays: the brain enters ~30-90 s after the whale
 SIGNAL_CT_MAX_DELAY_S = 30  # copytrade replays signals 15 s after the signal; a later brain decision replays itself
@@ -443,7 +443,7 @@ def evaluate(conn, model, s, candles_fn=None, now: float | None = None, limit: i
     return n + n_pool
 
 
-def evaluate_pool(conn, now: float, limit: int = 5000) -> int:
+def evaluate_pool(conn, now: float, limit: int = 1000) -> int:
     """The brain's pooled decisions judged by their opportunity's labels (labels.py: every plan's net after the
     row's costs on the hour after the report): realized_plan/base/best and the write-back to the shared row. The pool
     model learns the labels in learn_labels, not here again. A row whose opportunity got no label in 3 h is closed
@@ -511,7 +511,7 @@ LABEL_DEDUP_S = 6 * 3600  # one label per source and coin in this window
 LABEL_WEIGHT = 0.5  # an hour on sampled prices: less than a minute-candle replay (1.0) or a real fill (2.0)
 
 
-def learn_labels(conn, pool, s, limit: int = 3000) -> int:
+def learn_labels(conn, pool, s, limit: int = 1000) -> int:
     """The pool model learns every labelled opportunity (labels.py): each plan's net on the hour after the report.
     The features are the ones the brain decided on where it decided, else what the source reported."""
     if pool is None or not store.has(conn, "opportunities"):
@@ -764,16 +764,27 @@ def exit_skill(conn, lo: float, hi: float | None = None) -> dict | None:
     the best top-tenth mean in the first half is then judged on the second half only (out of sample): its mean and
     median there, and the same rule over all rows of the second half. None while there are too few rows."""
     try:
-        rows = conn.execute("SELECT source, mint, ts, pred_mean, label_outcomes, label_rules FROM opportunities WHERE "
+        rows = conn.execute("SELECT source, mint, ts, pred_mean, label_outcomes, label_rules, label_n FROM opportunities "
+                            "WHERE "
                             "label_at>=? AND label_at<? AND pred_mean IS NOT NULL AND label_rules IS NOT NULL "
                             "ORDER BY ts, id", (int(lo), int(hi if hi is not None else 2 ** 40))).fetchall()
     except Exception:
         return None
     seen, data = set(), []
-    for src, mint, ts, p, outs, rules in rows:
+    same = thin = same_thin = 0  # rows whose rules all agree (a flat path or too few points to tell them apart)
+    for src, mint, ts, p, outs, rules, npts in rows:
         if (src, mint) in seen:
             continue
         seen.add((src, mint))
+        try:
+            rv = {round(float(v), 4) for v in json.loads(rules or "{}").values()}
+        except (TypeError, ValueError, AttributeError):
+            rv = set()
+        few = (npts or 0) < 4
+        thin += few
+        if len(rv) == 1:
+            same += 1
+            same_thin += few
         nets = {}
         for blob in (outs, rules):
             try:
@@ -784,8 +795,10 @@ def exit_skill(conn, lo: float, hi: float | None = None) -> dict | None:
         if nets:
             data.append((float(p), nets))
     n = len(data)
+    k = max(1, len(seen))
+    agree = {"same": round(same / k, 3), "thin": round(thin / k, 3), "same_thin": round(same_thin / max(1, same), 3)}
     if n < 100:
-        return {"n": n}
+        return {"n": n, **agree}
     halves = data[: n // 2], data[n // 2:]
 
     def top(rows_):
@@ -800,8 +813,8 @@ def exit_skill(conn, lo: float, hi: float | None = None) -> dict | None:
     names = {k for _, nets in data for k in nets}
     scored = [(mean(t1, k)[0], k) for k in names if mean(t1, k)]
     if not scored:
-        return {"n": n}
+        return {"n": n, **agree}
     best = max(scored)[1]
     oos, every = mean(t2, best), mean(halves[1], best)
     return {"n": n, "rule": best, "in_sample": round(max(scored)[0], 4), "oos_mean": round(oos[0], 4),
-            "oos_median": round(oos[1], 4), "oos_n": oos[2], "all_mean": round(every[0], 4) if every else None}
+            "oos_median": round(oos[1], 4), "oos_n": oos[2], "all_mean": round(every[0], 4) if every else None, **agree}

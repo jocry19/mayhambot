@@ -162,7 +162,9 @@ class Service:
             # the exit judged out of sample over the last 6 h: the top tenth's best rule of the first half, measured
             # on the second; a median above 0 here for hours is the first edge (plan 'Hundertmal', lever 3)
             out += (f", exit 6h best {ex['rule']} (in-sample {ex['in_sample']:+.1%}) top tenth out-of-sample mean "
-                    f"{ex['oos_mean']:+.1%} median {ex['oos_median']:+.1%} n {ex['oos_n']}, all {ex['all_mean']:+.1%}")
+                    f"{ex['oos_mean']:+.1%} median {ex['oos_median']:+.1%} n {ex['oos_n']}, all {ex['all_mean'] or 0:+.1%}"
+                    f"; rules agree {ex['same']:.0%} (of those under 4 points {ex['same_thin']:.0%}, rows under 4 "
+                    f"points {ex['thin']:.0%})")
             hist = (store.get(self.conn, "exit_skill_hist") or [])[-23:] + [[int(since), ex]]
             store.put(self.conn, "exit_skill_hist", hist)
         return out
