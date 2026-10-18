@@ -128,10 +128,10 @@ HOST_GROUP = {"api.helius.xyz": "helius", "mainnet.helius-rpc.com": "helius", "b
 # Calls per minute per service and group, used when the process knows its service name (MAYHAM_SERVICE,
 # set by mayham.py, or set_service()). Override with <GROUP>_BUDGET_<SERVICE>, e.g. HELIUS_BUDGET_SAFETY=90.
 # Helius free plan = 10 req/s = 600/min; these add up to 570/min, and the shared interval smooths peaks.
-# 18.10. by measured need: signals 120 (backfill waited 418 s in 10 min at 60), research 60 (a few calls a day),
-# brain 90 (learning account: several hundred rug checks an hour, ~4 calls each).
+# 18.10. by measured need: signals 120 (backfill waited 418 s in 10 min at 60), research 30 (a few calls a day),
+# copytrade 180 (whale reads Helius-first, peaks over 120 spilled to mainnet-beta 429s), brain 60 (measured 6-10).
 DEFAULT_BUDGETS = {
-    "helius": {"signals": 120, "research": 60, "copytrade": 120, "safety": 60, "sniper": 120, "brain": 90},
+    "helius": {"signals": 120, "research": 30, "copytrade": 180, "safety": 60, "sniper": 120, "brain": 60},
 }
 USAGE_LOG_EVERY = 600
 
