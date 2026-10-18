@@ -46,6 +46,7 @@ class SniperSettings:
     ws_helius: bool = field(default_factory=lambda: _b("SNIPER_WS_HELIUS", True))
     # optional extra cap: Helius credits per day for the stream (0 = only the plan reserve)
     ws_helius_credits_day: float = field(default_factory=lambda: _f("SNIPER_WS_HELIUS_CREDITS_DAY", 0))
+    ws_helius_pace: bool = field(default_factory=lambda: _b("SNIPER_WS_HELIUS_PACE", True))
     # bonk (Raydium LaunchLab): one program-wide stream of its trade events (price, side, size, fee; no trader) and
     # the trader of the first trades of each launch from getTransaction on bonk_rpc_url. "" = no bonk stream
     # off by default: a second program subscription on publicnode starved stream 2 there (18.10.: 60 s silence and

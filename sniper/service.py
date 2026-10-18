@@ -468,7 +468,7 @@ class Service:
                 core_http._charge(cost, force=True)
             # ahead of the calendar (ratio > 1): stream 2 steps back first, so whale detection and the rug check keep
             # Helius to the month's end; back on Helius below 0.95 (hysteresis)
-            pace = core_http.plan_pace() if hasattr(core_http, "plan_pace") else None
+            pace = core_http.plan_pace() if self.cfg.ws_helius_pace and hasattr(core_http, "plan_pace") else None
             if pace and pace.get("ratio", 0) > (0.95 if self.helius_paused else 1.0):
                 why = (f"Helius-Monat vor dem Kalender ({pace['used']:.0f} Credits, Plan bis heute "
                        f"{pace['on_pace']:.0f}, {pace['ratio']:.2f})")
@@ -566,8 +566,10 @@ class Service:
                                     block_buy_sol=round(sum(r["sol"] for r in rows), 3))
                 self.block_reads += 1
                 if rows:
-                    log.info("Launch-Block %s %s: %d Käufer, %.1f SOL (sofort migriert)", st.symbol, st.mint[:6],
-                             len(rows), sum(r["sol"] for r in rows))
+                    top = max(rows, key=lambda r: r["sol"])
+                    log.info("Launch-Block %s %s: %d Käufer, %.1f SOL (sofort migriert; größter %s %.1f SOL, Tx %s)",
+                             st.symbol, st.mint[:6], len(rows), sum(r["sol"] for r in rows), top["wallet"],
+                             top["sol"], top.get("sig") or "?")
         finally:
             conn.close()
 

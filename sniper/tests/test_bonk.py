@@ -323,6 +323,14 @@ def test_stream_2_goes_to_helius_first_and_leaves_it_at_the_reserve(tmp_path, mo
     pace["ratio"] = 0.9
     svc.helius_meter()
     assert not svc.helius_paused
+    pace["ratio"] = 3.0                                  # pace switched off by operations: only reserve and day cap
+    svc.cfg.ws_helius_pace = False
+    svc.helius_meter()
+    assert not svc.helius_paused
+    svc.cfg.ws_helius_credits_day = 1.0                 # day budget: off Helius once today's credits are spent
+    l2.bytes += 100_000
+    svc.helius_meter()
+    assert "Tagesgrenze" in svc.helius_paused and not l2.url.startswith("wss://mainnet.helius")
     monkeypatch.setenv("HELIUS_API_KEY", "")
     assert not service.Service(cfg(), db_path=str(tmp_path / "n.db")).logs2.url.startswith("wss://mainnet.helius")
 
@@ -497,7 +505,7 @@ def test_launch_block_counts_spent_sol_not_wrapped_sol():
     # wraps 5000 SOL, spends 1 SOL of it on the AMM, keeps 4999 in its WSOL account
     keep = {"meta": {"err": None, "preBalances": [5001e9, 0], "postBalances": [1e9, 0],
                      "preTokenBalances": tb([(W, "BIG", 0.0), ("M", "POOL", 100e6)]),
-                     "postTokenBalances": tb([(W, "BIG", 4999.0), ("M", "POOL", 99e6), ("M", "BIG", 1e6)])},
+                     "postTokenBalances": tb([(W, "BIG", 4999.0), ("M", "POOL", 99e6), ("M", "BIG", 1e6), (W, "POOL", 1.0)])},
             "transaction": {"message": {"accountKeys": [{"pubkey": "BIG"}, {"pubkey": "POOL"}]}}}
     # wrapped earlier: pays 150 SOL in WSOL only, native lamports just the fee
     wrapped = {"meta": {"err": None, "preBalances": [1e9], "postBalances": [0.99999e9],
@@ -505,3 +513,16 @@ def test_launch_block_counts_spent_sol_not_wrapped_sol():
                "transaction": {"message": {"accountKeys": [{"pubkey": "OLD"}]}}}
     assert [(w, round(sol, 3)) for w, _t, sol in launchblock.tx_buyers(keep, "M")] == [("BIG", 1.0)]
     assert [(w, round(sol, 2)) for w, _t, sol in launchblock.tx_buyers(wrapped, "M")] == [("OLD", 150.0)]
+
+
+def test_launch_block_caps_the_spend_at_what_the_pool_received():
+    from sniper import launchblock
+    W = launchblock.WSOL
+    tb = lambda xs: [{"mint": m, "owner": o, "accountIndex": i, "uiTokenAmount": {"uiAmount": a}}  # noqa: E731
+                     for i, (m, o, a) in enumerate(xs)]
+    # 166 SOL leave the buyer, but the pool's WSOL vault gains 0.9: the rest went to a side account (SIDE)
+    tx = {"meta": {"err": None, "preBalances": [170e9, 0, 0], "postBalances": [4e9, 0, 165.1e9],
+                   "preTokenBalances": tb([("M", "POOL", 100e6), (W, "POOL", 85.0)]),
+                   "postTokenBalances": tb([("M", "POOL", 99e6), (W, "POOL", 85.9), ("M", "BUY", 1e6)])},
+          "transaction": {"message": {"accountKeys": [{"pubkey": "BUY"}, {"pubkey": "POOL"}, {"pubkey": "SIDE"}]}}}
+    assert [(w, round(sol, 2)) for w, _t, sol in launchblock.tx_buyers(tx, "M")] == [("BUY", 0.9)]

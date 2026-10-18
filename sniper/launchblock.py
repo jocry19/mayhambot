@@ -28,8 +28,10 @@ def _owner_deltas(meta, mint):
 
 
 def tx_buyers(tx, mint, exclude=()):
-    """[(wallet, tokens, sol)] of one jsonParsed transaction: owners whose balance of `mint` rose and whose own
-    account paid at least MIN_SOL for it."""
+    """[(wallet, tokens, sol)] of one jsonParsed transaction: owners whose balance of `mint` rose and who paid at
+    least MIN_SOL for it. What they paid is capped at what the seller side received: the owners whose balance of
+    `mint` fell (the curve or the AMM pool) gained that SOL natively or as WSOL. SOL a buyer moved anywhere else in
+    the same transaction (into its own WSOL or a side account) is no purchase."""
     meta = (tx or {}).get("meta") or {}
     if meta.get("err"):
         return []
@@ -37,18 +39,25 @@ def tx_buyers(tx, mint, exclude=()):
             for k in (((tx.get("transaction") or {}).get("message") or {}).get("accountKeys") or [])]
     pre, post = meta.get("preBalances") or [], meta.get("postBalances") or []
     lam = {k: (pre[i] - post[i]) / 1e9 for i, k in enumerate(keys) if i < len(pre) and i < len(post)}
+    wsol = _owner_deltas(meta, WSOL)
+    spent = dict(lam)
     # the SOL actually spent is native plus wrapped SOL: a buyer that wraps 5000 SOL and keeps the unspent rest in
     # its WSOL account loses 5000 native lamports but spends 1 SOL; one that wrapped earlier pays only in WSOL
-    for w, d in _owner_deltas(meta, WSOL).items():
-        lam[w] = lam.get(w, 0.0) - d
-    out = []
-    for owner, d in _owner_deltas(meta, mint).items():
-        # a buyer pays SOL from its own account; the curve, the pool vaults and the migration gain tokens without
-        # paying (they receive SOL), so they are left out
-        sol = lam.get(owner, 0.0)
-        if d > 0 and owner and owner not in exclude and sol >= MIN_SOL:
-            out.append((owner, d, sol))
-    return out
+    for w, d in wsol.items():
+        spent[w] = spent.get(w, 0.0) - d
+    deltas = _owner_deltas(meta, mint)
+    sellers = [o for o, d in deltas.items() if d < 0]
+    # SOL into the seller side: its WSOL vault (by owner) plus native lamports of the seller accounts themselves
+    pool_in = sum(max(0.0, wsol.get(o, 0.0)) + max(0.0, -lam.get(o, 0.0)) for o in sellers)
+    buys = [(o, d, spent.get(o, 0.0)) for o, d in deltas.items()
+            if d > 0 and o and o not in exclude and o not in sellers]
+    # a buyer pays SOL from its own account; the curve, the pool vaults and the migration gain tokens without
+    # paying (they receive SOL), so they are left out
+    buys = [b for b in buys if b[2] >= MIN_SOL]
+    if sellers and buys:
+        tot = sum(b[1] for b in buys) or 1.0
+        buys = [(o, d, min(sol, pool_in * d / tot)) for o, d, sol in buys]
+    return [b for b in buys if b[2] >= MIN_SOL]
 
 
 def block_buyers(rpc, mint, create_slot=None, slots=SLOTS, max_tx=MAX_TX, exclude=()):
@@ -72,7 +81,7 @@ def block_buyers(rpc, mint, create_slot=None, slots=SLOTS, max_tx=MAX_TX, exclud
         tx = rpc("getTransaction", [s["signature"], {"encoding": "jsonParsed", "maxSupportedTransactionVersion": TX_VERSION}])
         for w, tokens, sol in tx_buyers(tx, mint, exclude):
             r = rows.setdefault(w, {"wallet": w, "role": "launch_block", "slot": s["slot"], "ts": s.get("blockTime"),
-                                    "tokens": 0.0, "sol": 0.0})
+                                    "tokens": 0.0, "sol": 0.0, "sig": s["signature"]})
             r["tokens"] += tokens
             r["sol"] += sol
     return list(rows.values())
