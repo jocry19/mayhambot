@@ -99,3 +99,16 @@ def test_backfill_leaves_helius_reserve(monkeypatch):
     assert not run.helius_ok()
     monkeypatch.setattr(http, "credits_left_today", lambda service=None: None)
     assert run.helius_ok()
+
+
+def test_snapshots_thinned_except_followed(tmp_path, monkeypatch):
+    from core import db
+    from core.models import Token
+    conn = db.connect(str(tmp_path / "p.db"))
+    toks = [Token(mint=m, symbol=m, price_usd=1.0, liquidity_usd=1e4, pool_address="x", dex="d") for m in ("A", "B")]
+    db.upsert_tokens(conn, toks, tracked=False)
+    conn.execute("UPDATE token_prices SET ts=ts-60")
+    db.upsert_tokens(conn, toks, tracked=False, snap_every=300, dense={"A"})
+    n = dict(conn.execute("SELECT mint, COUNT(*) FROM token_prices GROUP BY mint").fetchall())
+    assert n == {"A": 2, "B": 1}
+    assert conn.execute("SELECT COUNT(*) FROM tokens").fetchone()[0] == 2

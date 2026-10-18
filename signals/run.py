@@ -23,7 +23,7 @@ def refresh_watchlist(conn, cycle):
     if cycle % settings.discover_every_cycles == 0:
         found = market.discover_tokens(limit=60, min_liquidity=settings.min_liquidity_usd,
                                        max_mcap=settings.max_mcap_usd)
-        db.upsert_tokens(conn, found, tracked=True)
+        db.retry_locked(conn, lambda: db.upsert_tokens(conn, found, tracked=True))
         log.info("discovery: %d tokens", len(found))
     # tokens smart wallets bought in the last 2h become watched too
     hot = [r[0] for r in conn.execute(
@@ -34,12 +34,15 @@ def refresh_watchlist(conn, cycle):
                                        (int(time.time()) - plan.FOLLOW_HOURS * 3600,)) if r[0] not in hot]
     tracked = [r[0] for r in conn.execute("SELECT mint FROM tokens WHERE tracked=1")]
     infos = market.token_info(list(dict.fromkeys(tracked + hot)))
-    db.upsert_tokens(conn, [t for t in infos if t.mint in set(hot)], tracked=True)
-    db.upsert_tokens(conn, [t for t in infos if t.mint not in set(hot)], tracked=None)
+    # 18.10.: cycles 14-19 failed on "database is locked" here (TokenRefresher and research write tokens too)
+    db.retry_locked(conn, lambda: db.upsert_tokens(conn, [t for t in infos if t.mint in set(hot)], tracked=True,
+                                                   snap_every=SNAP_EVERY_S, dense=followed_mints(conn)))
+    db.retry_locked(conn, lambda: db.upsert_tokens(conn, [t for t in infos if t.mint not in set(hot)], tracked=None,
+                                                   snap_every=SNAP_EVERY_S, dense=followed_mints(conn)))
     # drop dead tokens from the watchlist
-    conn.execute("UPDATE tokens SET tracked=0 WHERE tracked=1 AND (liquidity_usd < ? OR last_updated < ?)",
-                 (settings.min_liquidity_usd / 4, int(time.time()) - 6 * 3600))
-    conn.commit()
+    db.retry_locked(conn, lambda: (conn.execute(
+        "UPDATE tokens SET tracked=0 WHERE tracked=1 AND (liquidity_usd < ? OR last_updated < ?)",
+        (settings.min_liquidity_usd / 4, int(time.time()) - 6 * 3600)), conn.commit()))
     # priority: smart buyers right now, then recent score, then hour volume. Ranking by score alone kept the same
     # ~25 coins in the list for hours (each cycle re-scores them), so fresh smart buys never got trade fetches.
     now = int(time.time())
@@ -202,6 +205,22 @@ class Backfiller:
             time.sleep(max(5, self.every - (time.time() - t0)))
 
 
+# token_prices: with SNAP_EVERY_S > 0 every minute only for coins whose outcome signals measures (calls, shadow rows:
+# 4 h), the rest every SNAP_EVERY_S (18.10.: ~930k rows/day). 0 = every refresh, as before: intel/, safety/ and market/
+# read these series too, so the default stays until their needed resolution is agreed.
+SNAP_EVERY_S = int(os.getenv("TOKEN_SNAPSHOT_SECONDS", 0))
+
+
+def followed_mints(conn, now=None):
+    now = now or int(time.time())
+    out = {r[0] for r in conn.execute("SELECT DISTINCT mint FROM signals WHERE ts > ?", (now - plan.FOLLOW_HOURS * 3600,))}
+    try:
+        out |= {r[0] for r in conn.execute("SELECT DISTINCT mint FROM signal_shadow WHERE ts > ?", (now - 4 * 3600,))}
+    except Exception:  # noqa: BLE001 - table absent in old DBs
+        pass
+    return out
+
+
 TOKEN_REFRESH_S = int(os.getenv("TOKEN_REFRESH_SECONDS", 60))
 TOKEN_REFRESH_MAX = 900  # mints per round: 30 per DexScreener request, 30 requests of the 300/min pair limit
 
@@ -215,7 +234,8 @@ def refresh_tokens(conn, now=None):
                                          (now - plan.FOLLOW_HOURS * 3600,))]
     mints = list(dict.fromkeys(mints))[:TOKEN_REFRESH_MAX]
     infos = market.token_info(mints)
-    db.retry_locked(conn, lambda: db.upsert_tokens(conn, infos, tracked=False))
+    dense = followed_mints(conn, now)
+    db.retry_locked(conn, lambda: db.upsert_tokens(conn, infos, tracked=False, snap_every=SNAP_EVERY_S, dense=dense))
     # a row stamped ahead of the clock (17.10.: one 52 min in the future, writer unknown) would pass every freshness
     # filter as "just updated" until then: pulled back to now, logged so the writer can be found
     ahead = conn.execute("SELECT mint, last_updated FROM tokens WHERE last_updated > ?", (now + 120,)).fetchall()

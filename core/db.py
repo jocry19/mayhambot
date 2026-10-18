@@ -245,9 +245,11 @@ def insert_trades(conn, trades) -> int:
     return added
 
 
-def upsert_tokens(conn, tokens, tracked=None):
-    """tracked=None/True marks tokens as watched; False only stores price data (never un-watches)."""
+def upsert_tokens(conn, tokens, tracked=None, snap_every=0, dense=()):
+    """tracked=None/True marks tokens as watched; False only stores price data (never un-watches).
+    snap_every: a token_prices snapshot only if the mint's last one is at least this old (mints in `dense` always)."""
     now = int(time.time())
+    dense = set(dense)
     for t in tokens:
         conn.execute(
             """INSERT INTO tokens(mint, symbol, name, pool_address, dex, price_usd, mcap_usd, liquidity_usd,
@@ -271,6 +273,9 @@ def upsert_tokens(conn, tokens, tracked=None):
              t.pair_created_at, t.price_change_m5, t.price_change_h1, t.price_change_h24, t.volume_h1,
              t.txns_m5, t.txns_h1, now, now, 1 if tracked is None else int(tracked), 1 if tracked is None else int(tracked)),
         )
+        if t.price_usd and snap_every and t.mint not in dense and conn.execute(
+                "SELECT 1 FROM token_prices WHERE mint=? AND ts>?", (t.mint, now - snap_every)).fetchone():
+            continue
         if t.price_usd:
             conn.execute("INSERT OR REPLACE INTO token_prices (mint, ts, price_usd, mcap_usd, liquidity_usd) VALUES (?,?,?,?,?)",
                          (t.mint, now, t.price_usd, t.mcap_usd, t.liquidity_usd))
