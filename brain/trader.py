@@ -77,14 +77,14 @@ CURVE_MARK_AGE_S = 120  # a curve price stays the price until the next trade; ol
 
 
 def _with_price(snap, px: float):
-    """The snapshot with another price (the live curve's), price_usd scaled along."""
+    """The snapshot with another price (the live curve's), price_usd and the curve depth scaled along."""
     k = px / snap.price_sol if snap.price_sol else 1.0
-    if dataclasses.is_dataclass(snap):
-        return dataclasses.replace(snap, price_sol=px, price_usd=(snap.price_usd or 0.0) * k)
     out = copy.copy(snap)
     out.price_sol = px
     if getattr(out, "price_usd", None):
         out.price_usd *= k
+    if getattr(out, "curve_liq_usd", None):
+        out.curve_liq_usd *= k ** 0.5  # constant product: the curve's depth goes with the square root of its price
     return out
 
 
