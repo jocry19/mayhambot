@@ -69,6 +69,7 @@ SMALL_SUMMARY_S = 600
 # a coin the rug check blocked is not checked again for this long (whale path): 10/18 one block-0 bot bought GHOSTI
 # 437 times in a day and every buy ran the check again (412 identical blocks), on the rug thread's RPC budget
 SAFETY_BLOCK_TTL_S = 1800
+SWAPS_SNAP_MAX_AGE_S = 60  # copytrade.prices: newest swap of the coin at most this old
 # pump.fun bonding-curve coins: exploration stops copying them too (block-0 aside, its test needs launch coins).
 # Exploration 10/16-18: 22 curve copies -18.7 % mean, 9 % winners, -4.1 of the -6.2 summed; pumpswap 40 copies
 # -3.8 %, 33 % winners. Same direction as the research 10/17 (n 418, -17 % vs -6.5 % after migration)
@@ -1042,7 +1043,9 @@ class Strategy:
             if self._sconn is None:
                 self._sconn = sstore.connect(self.s.db_path)
             c = sstore.curve_now(self._sconn, mint, CURVE_SNAP_MAX_AGE_S)
-            if not c or c["complete"]:
+            if not c:
+                return self._swaps_snapshot(mint)
+            if c["complete"]:
                 return None
             r = self._sconn.execute("SELECT created_ts, symbol FROM sniper_launches WHERE mint=?", (mint,)).fetchone()
             solusd = market.sol_usd(self.s)
@@ -1053,6 +1056,31 @@ class Strategy:
                 int(created), time.time(), curve_liq_usd=2 * (c["v_sol"] or 0) * solusd)
         except Exception as e:
             log.debug("curve snapshot %s failed: %s", mint[:6], e)
+            return None
+
+    def _swaps_snapshot(self, mint: str):
+        """Third price source: the median of the swaps of this coin the bot read in the last SWAPS_SNAP_MAX_AGE_S
+        (copytrade.prices, no RPC call), for coins neither DexScreener nor the sniper has. Depth only for a pump.fun
+        mint the sniper has not seen migrate (curve depth from the price); otherwise 0, so the liquidity gate keeps
+        such coins out and the price only marks positions already open."""
+        try:
+            from .prices import last_price
+
+            lp = last_price(self.conn, mint, SWAPS_SNAP_MAX_AGE_S)
+            if not lp or lp["median_sol"] <= 0:
+                return None
+            migrated = self._sconn.execute("SELECT migrated FROM sniper_launches WHERE mint=?", (mint,)).fetchone() \
+                if self._sconn is not None else None
+            curve = mint.endswith("pump") and not (migrated and migrated[0])
+            solusd = market.sol_usd(self.s)
+            px = lp["median_sol"]
+            # created: the first swap the bot saw of it (a lower bound on the age; unknown age would read as too old)
+            first = self.conn.execute("SELECT MIN(ts) FROM ct_swaps WHERE mint=?", (mint,)).fetchone()[0] or lp["ts"]
+            return market.PairSnapshot(
+                mint, "?", "", CURVE_DEX if curve else "swaps", px * solusd, px, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0,
+                int(first * 1000), time.time(), curve_liq_usd=market.curve_liquidity_usd(CURVE_DEX, px, solusd) if curve else 0.0)
+        except Exception as e:
+            log.debug("swaps snapshot %s failed: %s", mint[:6], e)
             return None
 
     def _staged_pump(self, mint: str, snap, now: float) -> bool:

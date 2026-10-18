@@ -1281,3 +1281,25 @@ def test_a_rug_blocked_coin_is_not_checked_again_on_every_repeat_buy(env, monkey
     assert len(calls) == 1
     safety.allow(conn, MINT, "geprüft")  # your manual allow still wins at once
     assert st.on_whale_buy(chain.Swap("sigR9", W, int(time.time()) - 5, "buy", MINT, 1e6, 1.0, 3e-6))
+
+
+def test_a_coin_only_the_swaps_know_is_priced_from_them(env, monkeypatch):
+    from copytrade import tracker
+
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, thompson=False), ex)
+    monkeypatch.setattr(market, "snapshot", lambda m, s=None: None)  # DexScreener: no pair, sniper: no curve state
+    pump = "Pump1111111111111111111111111111111111pump"
+    monkeypatch.setattr(tracker, "BLOCK0", {W})  # block-0 copies may buy curve coins
+    swap = chain.Swap("sigP", W, int(time.time()) - 3, "buy", pump, 1.0 / 3e-6, 1.0, 3e-6)
+    assert st.on_whale_buy(swap) is None  # no swap of the coin stored yet: no price
+    now = int(time.time())
+    conn.executemany("INSERT INTO ct_swaps(sig, wallet, mint, side, ts, token_amount, sol_amount, price_sol) "
+                     "VALUES (?,?,?,?,?,?,?,?)", [(f"s{i}", "X" * 44, pump, "buy", now - 10 + i, 1e5, 0.3, 3e-6 * (1 + i / 100))
+                                                  for i in range(3)])
+    snap = st._swaps_snapshot(pump)
+    assert snap and snap.dex_id == strategy.CURVE_DEX and snap.price_sol == pytest.approx(3.03e-6)
+    assert snap.depth_usd > 0 and snap.age_hours < 1
+    pid = st.on_whale_buy(chain.Swap("sigP2", W, int(time.time()) - 3, "buy", pump, 1.0 / 3e-6, 1.0, 3e-6))
+    assert conn.execute("SELECT mode FROM ct_positions WHERE id=?", (pid,)).fetchone()["mode"] == "explore"
+    assert st._swaps_snapshot("Other111111111111111111111111111111111111") is None
