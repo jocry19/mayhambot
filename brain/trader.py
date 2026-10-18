@@ -7,6 +7,7 @@ Paper only: fills come from copytrade's PaperExecutor (real Jupiter quotes, meas
 """
 from __future__ import annotations
 
+import collections
 import copy
 import dataclasses
 import json
@@ -21,6 +22,8 @@ from .plans import BY_NAME, PLANS
 log = logging.getLogger("brain.trader")
 
 DEDUP_S = 6 * 3600  # one opportunity per (whale entity or kind, coin) in this window: repeat buys are no new idea
+POOL_DRAWS = 3000  # the learning account's draws its quantile is taken over
+POOL_DRAWS_MIN = 200
 RUG_BAN_S = 24 * 3600
 REENTRY_S = 6 * 3600  # no second brain position in a coin within this window: a coin we just lost on is no new idea
 TRAIL_MIN_HOLD_S = 60  # the trail arms after a minute: the first quotes after a buy are noise, not a run
@@ -153,8 +156,15 @@ class Trader:
         self.clock = clock
         self._safe = None  # the rug verdict of the opportunity being decided
         self.too_late = 0  # whale buys the tracker delivered after max_whale_delay_s
+        self.supp = {"read": set(), "old": set(), "own": set()}  # supplemented row ids this hour (hour line)
         self.late_lag: list[tuple[float, float]] = []  # (tracker lag, brain lag) of those, seconds
         self.pending: dict[tuple[str, str], tuple] = {}  # (kind, ref) -> (row, entity, first seen): waiting for a pair
+        self.pool_draws: collections.deque = collections.deque(maxlen=POOL_DRAWS)  # recent learning-account draws
+        try:
+            self.pool_draws.extend(r[0] for r in reversed(conn.execute(
+                "SELECT draw FROM opportunities WHERE draw IS NOT NULL ORDER BY id DESC LIMIT ?", (POOL_DRAWS,)).fetchall()))
+        except Exception:  # no opportunities table yet
+            pass
 
     # ------------------------------------------------------------------ wiring
     def snapshots(self, mints) -> dict:
@@ -281,8 +291,12 @@ class Trader:
             except Exception:  # the column comes with the first supplement or the next start
                 rows = []
             for r in rows:
-                if (r["source"] not in OWN_SOURCES and not r["position_id"]
-                        and now - (r["supplemented_at"] or 0) <= self.s.max_pool_age_s):
+                self.supp["read"].add(r["id"])
+                if r["source"] in OWN_SOURCES or r["position_id"]:
+                    self.supp["own"].add(r["id"])
+                elif now - (r["supplemented_at"] or 0) > self.s.max_pool_age_s:
+                    self.supp["old"].add(r["id"])
+                else:
                     out.append(("pool", f"opp{r['id']}+", r))
             if rows:
                 store.put(c, "cursor_pool_supp", rows[-1]["supplemented_at"])
@@ -384,11 +398,12 @@ class Trader:
                 # thread 18.10.)
                 if not d.enter:
                     d.enter, d.explore, d.size_sol, d.why_not = True, True, self.s.learn_size_sol, ""
-            elif d.enter and self.rng.random() >= self.s.pool_sample:
-                # the learning account is a sample now (plan 05:07): its trades measure execution and slippage, the
-                # pool model learns the opportunities themselves from their replays
-                d.enter, d.why_not = False, f"Lernkonto-Stichprobe: nur {self.s.pool_sample:.0%} der Ziehungen"
+            elif d.enter and not self._top_draw(d.sample):
+                # the learning account buys the best draws, not a random sample (09:00: the labels rank the pool
+                # model's mean, sniper +0.115): its trades measure execution, the labels teach the rest
+                d.enter, d.why_not = False, f"Lernkonto-Stichprobe: Ziehung nicht unter den besten {self.s.pool_sample:.0%}"
                 raw["gate"] = "Lernkonto-Stichprobe"
+            self.pool_draws.append(d.sample)
             if d.enter and self.s.pool_trade == "shadow":
                 d.enter, d.why_not = False, "Lernkonto pausiert (nur Vorhersage, Labels lernen weiter)"
                 raw["gate"] = "Lernkonto pausiert"
@@ -421,6 +436,19 @@ class Trader:
         if kind == "pool" and cur.rowcount:
             self._write_back(row["id"], d, block, pid)
         return pid
+
+    def _top_draw(self, draw: float) -> bool:
+        """Is this draw among the best pool_sample share of the recent ones? Until enough draws are known: a coin flip
+        with that share."""
+        share = self.s.pool_sample
+        if share >= 1:
+            return True
+        if share <= 0:
+            return False
+        if len(self.pool_draws) < POOL_DRAWS_MIN:
+            return self.rng.random() < share
+        ranked = sorted(self.pool_draws)
+        return draw >= ranked[min(len(ranked) - 1, int(len(ranked) * (1 - share)))]
 
     def _write_back(self, oid: int, d, block, pid) -> None:
         """The brain's view on a pooled opportunity, in its own row: prediction, draw, decision, stake."""

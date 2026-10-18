@@ -463,6 +463,7 @@ def _pool_outcome(conn, o, ya: dict, merged: list, cost: float, pi, now: float) 
                                           json.dumps({NAMES[i]: round(v, 5) for i, v in ya.items()}), oid))
 
 
+LABEL_DEDUP_S = 6 * 3600  # one label per source and coin in this window
 LABEL_WEIGHT = 0.5  # an hour on sampled prices: less than a minute-candle replay (1.0) or a real fill (2.0)
 
 
@@ -473,7 +474,7 @@ def learn_labels(conn, pool, s, limit: int = 3000) -> int:
         return 0
     cur = store.get(conn, "label_learn_cursor") or [0, 0]
     try:
-        rows = conn.execute("SELECT id, source, features, label_at, label_outcomes FROM opportunities WHERE "
+        rows = conn.execute("SELECT id, source, mint, ts, features, label_at, label_outcomes FROM opportunities WHERE "
                             "label_at IS NOT NULL AND (label_at>? OR (label_at=? AND id>?)) ORDER BY label_at, id "
                             "LIMIT ?", (cur[0], cur[0], cur[1], limit)).fetchall()
     except Exception:  # columns not there yet (a reader's connection)
@@ -490,6 +491,10 @@ def learn_labels(conn, pool, s, limit: int = 3000) -> int:
         ys = {NAMES.index(k): v for k, v in outs.items() if k in NAMES and v is not None}
         if not ys:
             continue
+        if conn.execute("SELECT 1 FROM opportunities WHERE mint=? AND ts>=? AND ts<=? AND source=? AND id<? "
+                        "AND label_at IS NOT NULL LIMIT 1",
+                        (r["mint"], (r["ts"] or 0) - LABEL_DEDUP_S, r["ts"] or 0, r["source"], r["id"])).fetchone():
+            continue  # the same coin from the same source again (copytrade/strategy: many whales, one path): learned once
         o = conn.execute("SELECT features FROM brain_opps WHERE kind='pool' AND ref=?", (f"opp{r['id']}",)).fetchone()
         try:
             feats = json.loads(o[0]) if o else features.pool_reported(r)
