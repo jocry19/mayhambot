@@ -25,6 +25,7 @@ def s(tmp_path, monkeypatch):
     monkeypatch.setenv("MAYHAM_DB_PATH", str(tmp_path / "t.db"))
     st = config.Settings()
     st.telegram = "off"
+    st.pool_sample = 1.0  # the learning-account tests buy every positive draw; the sample has its own test
     return st
 
 
@@ -78,6 +79,7 @@ def trained(kind="whale", good=("tier=ultra",), n=300, mean=0.2):
 def make_trader(conn, s, model, market, **kw):
     kw.setdefault("safety_check", ok_safety)
     kw.setdefault("staged_check", lambda conn, mint: False)
+    kw.setdefault("curve_now", lambda conn, mint, now: None)
     return Trader(conn, s, model, snapshots=market, executor=Paper(), rng=random.Random(7), **kw)
 
 
@@ -760,7 +762,7 @@ def test_diary_shows_the_daily_multiplier(conn, s):
     d0 = store.day_start(time.time())
     now = d0 + 7200
     for ts, eq in ((d0 - 86400 + 60, 5.0), (d0 - 120, 4.5), (d0 + 60, 4.5), (d0 + 3600, 9.0)):
-        conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (int(ts), eq, 0, eq))
+        conn.execute("INSERT OR REPLACE INTO brain_equity(ts, balance_sol, open_value_sol, equity_sol) VALUES (?,?,?,?)", (int(ts), eq, 0, eq))
     m = journal.multipliers(conn, now)
     assert [x for _, x in m] == [0.9, 2.0]
     assert "Tagesfaktor" in journal.write(conn, Brain(len(PLANS)), s, now) and "×2.00" in journal.write(conn, Brain(len(PLANS)), s, now)
@@ -882,7 +884,7 @@ def test_convinced_buys_stake_a_kelly_share_of_the_account(s):
 def test_diary_shows_the_hour_factor(conn, s):
     h0 = int(time.time()) // 3600 * 3600 - 7200
     for ts, eq in ((h0 + 60, 5.0), (h0 + 3500, 10.0), (h0 + 3660, 10.0), (h0 + 7100, 11.0)):
-        conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (ts, eq, 0, eq))
+        conn.execute("INSERT OR REPLACE INTO brain_equity(ts, balance_sol, open_value_sol, equity_sol) VALUES (?,?,?,?)", (ts, eq, 0, eq))
     assert [x for _, x in journal.hour_factors(conn, h0 + 7300)] == [2.0, 1.1]
     assert "×2 erreicht in 1 von 2 Stunden" in journal.write(conn, Brain(len(PLANS)), s, h0 + 7300)
 
@@ -907,8 +909,8 @@ def test_challenge_explores_side_sources_with_account_stakes_and_pauses_after_lo
     # three losing hours: the challenge pauses and the side source is only watched again
     h0 = int(time.time()) // 3600 * 3600
     for k, eq in ((3, 5.0), (2, 4.5), (1, 4.0)):
-        conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (h0 - k * 3600 + 10, eq, 0, eq))
-        conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (h0 - k * 3600 + 3500, eq * 0.9, 0, eq * 0.9))
+        conn.execute("INSERT OR REPLACE INTO brain_equity(ts, balance_sol, open_value_sol, equity_sol) VALUES (?,?,?,?)", (h0 - k * 3600 + 10, eq, 0, eq))
+        conn.execute("INSERT OR REPLACE INTO brain_equity(ts, balance_sol, open_value_sol, equity_sol) VALUES (?,?,?,?)", (h0 - k * 3600 + 3500, eq * 0.9, 0, eq * 0.9))
     t._challenge_at = (-1e18, False)
     assert not t.challenge_on(time.time())
     assert t.settings(time.time(), 0.99).max_stake == s.max_stake  # paused: even a trusted pattern stakes normally
@@ -918,8 +920,8 @@ def test_challenge_explores_side_sources_with_account_stakes_and_pauses_after_lo
 def test_heartbeat_reads_the_hour_factor_from_the_db(conn, s):
     svc = Service(s, conn, snapshots=Market(), executor=Paper(), safety_check=ok_safety, notify=lambda t: None)
     h0 = int(time.time()) // 3600 * 3600 - 3600
-    conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (h0 + 10, 5.0, 0, 5.0))
-    conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (h0 + 3500, 6.0, 0, 6.0))
+    conn.execute("INSERT OR REPLACE INTO brain_equity(ts, balance_sol, open_value_sol, equity_sol) VALUES (?,?,?,?)", (h0 + 10, 5.0, 0, 5.0))
+    conn.execute("INSERT OR REPLACE INTO brain_equity(ts, balance_sol, open_value_sol, equity_sol) VALUES (?,?,?,?)", (h0 + 3500, 6.0, 0, 6.0))
     assert "hour factor x1.200" in svc.heartbeat(h0)
 
 
@@ -1228,3 +1230,94 @@ def test_a_real_call_always_gets_a_learning_buy(conn, s):
     p = conn.execute("SELECT * FROM brain_positions").fetchone()
     assert p["kind"] == "pool" and p["size_sol"] == pytest.approx(s.learn_size_sol, rel=0.2)
     assert conn.execute("SELECT decision FROM opportunities").fetchone()[0] == "learn"
+
+
+def _pool_trader(conn, s, mk, src="sniper", **kw):
+    from brain.pool import Pool
+    pm = Pool(len(PLANS))
+    for _ in range(50):  # the pool learned that this source pays
+        pm.update(tokens("pool", {"src": src}), {i: 0.3 for i in range(len(PLANS))})
+    t = make_trader(conn, s, trained(), mk, pool_model=pm, **kw)
+    t.scan()
+    return t, pm
+
+
+def test_curve_coins_are_marked_and_exited_at_the_live_curve_price(conn, s):
+    from brain import opportunities as O
+    mk = Market()
+    mk.snaps[MINT] = snap(liq=0, dex="pumpfun", price=2e-6)  # DexScreener lags: still shows the old high
+    curve = {"price_sol": 1e-6, "complete": False}
+    t, _ = _pool_trader(conn, s, mk, curve_now=lambda c, m, now: dict(curve) if m == MINT else None)
+    O.report(conn, "sniper", "C1", MINT, time.time(), {"buyers": 12})
+    assert t.scan() == 1
+    p = conn.execute("SELECT * FROM brain_positions").fetchone()
+    assert json.loads(p["meta"])["ref_price"] == pytest.approx(1e-6)  # the curve price, like the fill
+    assert t.manage() == 0
+    curve["price_sol"] = 0.5e-6  # the curve crashed; DexScreener has not noticed, no new price round needed
+    assert t.manage_curves() == 1
+    p = conn.execute("SELECT * FROM brain_positions").fetchone()
+    assert p["exit_reason"] == "stop" and p["pnl_pct"] < -0.4
+    curve["complete"] = True  # migrated: the curve price is no market any more
+    assert t.mark({MINT: mk.snaps[MINT]})[MINT].price_sol == 2e-6
+
+
+def test_the_learning_account_is_booked_apart_and_writes_its_real_result_back(conn, s):
+    from brain import journal, opportunities as O
+    # a pool trade from before the split, still in the brain's own balance
+    conn.execute("INSERT INTO brain_positions(kind, mint, status, opened_at, closed_at, size_sol, proceeds_sol, pnl_sol, "
+                 "pnl_pct, tokens, last_price_sol, entry_price_sol) VALUES ('pool','old','closed',1,2,0.03,0.01,-0.02,"
+                 "-0.67,0,0,1)")
+    store.adjust_balance(conn, -0.02, s.start_balance_sol)
+    h0 = int(time.time()) // 3600 * 3600 - 3600
+    conn.execute("INSERT INTO brain_equity(ts, balance_sol, open_value_sol, equity_sol) VALUES (?,?,?,?)",
+                 (h0 + 60, 4.98, 0, 4.98))
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    t, pm = _pool_trader(conn, s, mk, clock=lambda: h0 + 1800)
+    assert store.balance(conn, s.start_balance_sol) == pytest.approx(s.start_balance_sol)
+    assert store.balance(conn, 0.0, store.LEARN) == pytest.approx(-0.02)
+    assert t.equity_snapshot()["learn_equity_sol"] == pytest.approx(-0.02)
+    assert journal.hour_factors(conn, h0 + 3600, 1)[0][1] == pytest.approx(1.0)  # a transfer, not a gain
+    O.report(conn, "sniper", "R1", MINT, h0 + 1800, {"buyers": 12})
+    assert t.scan() == 1
+    eq = t.equity_snapshot()
+    assert eq["equity_sol"] == pytest.approx(s.start_balance_sol)  # the learning buy is not in the brain's equity
+    p = conn.execute("SELECT * FROM brain_positions WHERE status='open'").fetchone()
+    assert eq["learn_balance_sol"] == pytest.approx(-0.02 - p["size_sol"])
+    n0 = pm.n
+    learn = []
+    t.on_close = lambda pos: learn.append(learner.learn_trade(conn, t.model, s, pos, pool=pm))
+    assert t.close(p, mk.snaps[MINT], "organic")
+    row = conn.execute("SELECT * FROM opportunities WHERE ref='R1'").fetchone()
+    pos = conn.execute("SELECT * FROM brain_positions WHERE id=?", (p["id"],)).fetchone()
+    assert row["exit_plan"] == "real" and row["outcome_net"] == pytest.approx(pos["pnl_pct"], abs=1e-4)
+    assert row["evaluated_at"] and row["rug"] == 0
+    assert learn == [True] and pm.n > n0  # the pool learns from the real fill, organic exit or not
+    assert store.balance(conn, s.start_balance_sol) == pytest.approx(s.start_balance_sol)
+
+
+def test_the_learning_account_samples_its_draws_but_takes_every_band_candidate(conn, s):
+    from brain import opportunities as O
+    s.pool_sample = 0.0
+    mk = Market()
+    t, _ = _pool_trader(conn, s, mk, src="signals")
+    now = time.time()
+    for i, band in enumerate((False, True)):
+        m = f"Band{i:040d}"[:44]
+        mk.snaps[m] = snap(mint=m)
+        O.report(conn, "signals", f"s{i}", m, now, {"signals.band": band})
+    assert t.scan() == 1
+    assert conn.execute("SELECT ref FROM opportunities WHERE position_id IS NOT NULL").fetchone()[0] == "s1"
+    assert "Stichprobe" in conn.execute("SELECT note FROM brain_opps WHERE decision='skip'").fetchone()[0]
+
+
+def test_the_hour_line_comes_once_an_hour_even_when_the_loop_fails(conn, s, caplog):
+    from brain.service import Service
+    sv = Service(s, conn, snapshots=Market(), executor=Paper(), safety_check=ok_safety,
+                 staged_check=lambda c, m: False, curve_now=lambda c, m, n: None)
+    caplog.set_level("INFO", logger="brain")
+    now = time.time()
+    assert sv.hour_line(now) and not sv.hour_line(now + 1)
+    assert sv.hour_line(now + 3600)
+    assert sum("brain hour:" in r.message for r in caplog.records) == 2
+    assert "learning account equity" in [r.message for r in caplog.records if "brain hour:" in r.message][-1]

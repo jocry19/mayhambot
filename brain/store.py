@@ -67,6 +67,7 @@ def connect(db_path: str | None = None) -> sqlite3.Connection:
 
 def init(conn) -> None:
     conn.executescript(SCHEMA)
+    _add_columns(conn, "brain_equity", EQUITY_COLS)
     from . import opportunities
 
     opportunities.ensure(conn)
@@ -90,17 +91,71 @@ def put(conn, key: str, value) -> None:
     conn.execute("INSERT OR REPLACE INTO brain_state VALUES (?,?)", (key, json.dumps(value)))
 
 
-def balance(conn, start: float) -> float:
-    v = get(conn, "balance_sol")
+PERFORM, LEARN = "balance_sol", "learn_balance_sol"  # the brain's own account; the learning account (pool, from 0)
+
+
+def account(kind: str) -> str:
+    """Which cash account a position of this kind books to: the pooled opportunities are the learning account."""
+    return LEARN if kind == "pool" else PERFORM
+
+
+def balance(conn, start: float, key: str = PERFORM) -> float:
+    v = get(conn, key)
     if v is None:
-        put(conn, "balance_sol", start)
+        put(conn, key, start)
         return float(start)
     return float(v)
 
 
-def adjust_balance(conn, delta: float, start: float) -> None:
+def adjust_balance(conn, delta: float, start: float, key: str = PERFORM) -> None:
+    balance(conn, start, key)
+    conn.execute("UPDATE brain_state SET value = CAST(value AS REAL) + ? WHERE key=?", (delta, key))
+
+
+EQUITY_COLS = (("learn_balance_sol", "REAL"), ("learn_open_sol", "REAL"), ("learn_equity_sol", "REAL"))
+
+
+def _add_columns(conn, table: str, cols) -> None:
+    have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    for name, typ in cols:
+        if name not in have:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
+            except sqlite3.OperationalError:  # a read-only reader (dashboard): the service adds them
+                return
+
+
+def split_learning(conn, start: float, now: float) -> float | None:
+    """Once: what the pooled learning buys did to the brain's own balance before the accounts were split moves to the
+    learning account (cash out minus cash in of every pool position so far). Returns the SOL moved, None if done
+    already. The move is recorded in brain_state["equity_transfers"] so hour factors do not read it as a gain."""
+    if get(conn, "learn_split") is not None:
+        return None
+    rows = conn.execute("SELECT status, size_sol, proceeds_sol, meta, tokens, last_price_sol FROM brain_positions "
+                        "WHERE kind='pool'").fetchall()
+    flow = held = 0.0
+    for st, size, proceeds, meta, tokens, px in rows:
+        flow -= size or 0.0
+        if st == "closed":
+            flow += proceeds or 0.0
+        else:
+            held += (tokens or 0.0) * (px or 0.0)
+            try:
+                flow += (json.loads(meta or "{}") or {}).get("partial_sol", 0.0) or 0.0
+            except (TypeError, ValueError):
+                pass
     balance(conn, start)
-    conn.execute("UPDATE brain_state SET value = CAST(value AS REAL) + ? WHERE key='balance_sol'", (delta,))
+    balance(conn, 0.0, LEARN)
+    if flow:
+        adjust_balance(conn, -flow, start)
+        adjust_balance(conn, flow, 0.0, LEARN)
+    if flow or held:  # the brain's equity changes by the cash moved less the open learning positions it no longer holds
+        tr = get(conn, "equity_transfers") or []
+        tr.append([int(now) // 60 * 60, round(-flow - held, 9)])  # on the minute, like brain_equity
+        put(conn, "equity_transfers", tr[-50:])
+    put(conn, "learn_split", {"at": int(now), "moved_sol": round(flow, 9), "open_value_sol": round(held, 9),
+                              "positions": len(rows)})
+    return flow
 
 
 def day_start(now: float | None = None) -> int:

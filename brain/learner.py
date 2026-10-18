@@ -453,25 +453,49 @@ def _pool_outcome(conn, o, ya: dict, merged: list, cost: float, pi, now: float) 
         return
     gross = merged[NAMES.index(plan)]
     rug = int(min(g for g in merged if g is not None) <= -0.9)
+    cur = conn.execute("SELECT exit_plan FROM opportunities WHERE id=?", (oid,)).fetchone()
+    if cur and cur[0] == "real":  # the position's real fill is already there: add only the replays beside it
+        conn.execute("UPDATE opportunities SET outcomes=?, rug=MAX(COALESCE(rug,0), ?) WHERE id=?",
+                     (json.dumps({NAMES[i]: round(v, 5) for i, v in ya.items()}), rug, oid))
+        return
     conn.execute("UPDATE opportunities SET evaluated_at=?, exit_plan=?, outcome_net=?, outcome_gross=?, cost=?, rug=?, "
                  "outcomes=? WHERE id=?", (int(now), plan, round(net, 5), gross, round(cost, 5), rug,
                                           json.dumps({NAMES[i]: round(v, 5) for i, v in ya.items()}), oid))
 
 
+def _real_outcome(conn, o, pos) -> None:
+    """A pooled opportunity the learning account bought: its real result after costs goes into the shared row at
+    once (exit_plan 'real'), instead of waiting ~4 h for the final replay. The paper fill after a rug is the quote
+    on the drained pool, so it already is the honest value."""
+    try:
+        oid = int(json.loads(o["raw"] or "{}").get("opp") or 0)
+    except (TypeError, ValueError):
+        oid = 0
+    if not oid:
+        return
+    conn.execute("UPDATE opportunities SET evaluated_at=?, exit_plan='real', outcome_net=?, rug=? WHERE id=?",
+                 (int(pos["closed_at"] or time.time()), round(pos["pnl_pct"], 5), int(pos["exit_reason"] == "rug"),
+                  oid))
+
+
 def learn_trade(conn, model, s, pos, pool=None) -> bool:
-    """A closed position teaches its plan at once with the real fill (double weight)."""
+    """A closed position teaches its plan at once with the real fill (double weight). A learning-account position
+    (pool) teaches the pool model with it whatever the exit was: what the learning account has to learn is whether
+    such a buy pays as it is really traded."""
     o = conn.execute("SELECT * FROM brain_opps WHERE id=?", (pos["opp_id"],)).fetchone()
     if not o or o["learned_real"] or pos["pnl_pct"] is None or pos["plan"] not in NAMES:
         return False
-    try:
-        if json.loads(pos["meta"] or "{}").get("exit_mode") == "organic":
-            return False  # the organic exit's result is not the plan's: the plan learns from its replay
-    except (TypeError, ValueError):
-        pass
     if o["kind"] == "pool":
+        _real_outcome(conn, o, pos)
         if pool is None:
             return False
         model = pool
+    else:
+        try:
+            if json.loads(pos["meta"] or "{}").get("exit_mode") == "organic":
+                return False  # the organic exit's result is not the plan's: the plan learns from its replay
+        except (TypeError, ValueError):
+            pass
     model.forget()
     model.update(_toks(o["kind"], o["features"]), {NAMES.index(pos["plan"]): pos["pnl_pct"]}, REAL_WEIGHT)
     conn.execute("UPDATE brain_opps SET learned_real=1 WHERE id=?", (o["id"],))

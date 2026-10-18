@@ -62,8 +62,12 @@ class Service:
         n, ent, held = c.execute("SELECT COUNT(*), COALESCE(SUM(decision='enter'),0), "
                                  "COALESCE(SUM(decision='skip' AND (wanted=1 OR explore=1)),0) FROM brain_opps WHERE ts>=?",
                                  (int(since),)).fetchone()
-        n_open = c.execute("SELECT COUNT(*) FROM brain_positions WHERE status='open'").fetchone()[0]
-        eq = self.trader.equity_snapshot()["equity_sol"]
+        n_open, l_open = c.execute("SELECT COALESCE(SUM(kind!='pool'),0), COALESCE(SUM(kind='pool'),0) "
+                                   "FROM brain_positions WHERE status='open'").fetchone()
+        snap = self.trader.equity_snapshot()
+        eq = snap["equity_sol"]
+        l_pnl, l_n = c.execute("SELECT COALESCE(SUM(pnl_sol),0), COUNT(*) FROM brain_positions WHERE kind='pool' AND "
+                               "status='closed' AND closed_at>=?", (int(since),)).fetchone()
         late, self.trader.too_late = self.trader.too_late, 0
         lag, self.trader.late_lag = self.trader.late_lag, []
         if lag:
@@ -72,6 +76,7 @@ class Service:
         last_hour = journal.hour_factors(c, time.time(), 1)  # from brain_equity: survives restarts
         hf = f", hour factor x{last_hour[0][1]:.3f}" if last_hour else ""
         return (f"{n} opportunities ({late} whale buys arrived too late), {ent} bought, {held} wanted but blocked by a gate, {n_open} open, equity {eq:.3f} SOL{hf}, "
+                f"learning account equity {snap['learn_equity_sol']:+.3f} SOL ({l_open} open, {l_n} closed {l_pnl:+.3f} SOL this hour), "
                 f"model {self.model.d - 1} tokens / {self.model.n:.0f} outcomes, exit model {self.xm.n:.0f} minutes "
                 f"(organic exits {'on' if self.trader.organic_on(time.time()) else 'off'}, "
                 f"replays {exits.verdict(c)['n']}), pool model {self.pm.d - 1} tokens / {self.pm.n:.0f} outcomes, "
@@ -87,6 +92,21 @@ class Service:
         # reported / decided / bought: reported but undecided = too old when read (BRAIN_MAX_POOL_AGE_S), the brain's
         # own sources, or the same coin from the same source within 6 h
         return "pooled reported/decided/bought " + (", ".join(f"{r[0]} {r[1]}/{r[2]}/{r[3]}" for r in rows) or "none")
+
+    def hour_line(self, now: float) -> bool:
+        """The "brain hour:" line, first thing in the loop and on its own: on the clock hour, kept in the DB (deploys
+        restart the service often, a timer from the start never reached a full hour), and an error in a later step
+        or a long learning round no longer swallows it (no line at 05:00 on 18.10.)."""
+        hour = int(now) // HEARTBEAT_S
+        try:
+            if hour == store.get(self.conn, "heartbeat_hour"):
+                return False
+            store.put(self.conn, "heartbeat_hour", hour)
+            log.info("brain hour: %s", self.heartbeat(hour * HEARTBEAT_S - HEARTBEAT_S))
+            return True
+        except Exception as e:
+            log.exception("brain hour line: %s", e)
+            return False
 
     def save(self) -> None:
         if self.dirty:
@@ -107,6 +127,7 @@ class Service:
         if not self.s.model_path.exists():
             log.info("no saved model yet (%s): starting from the prior and learning from copytrade's replays; "
                      "the service keeps running", self.s.model_path)
+        self.hour_line(time.time())  # before the warm start, which can take minutes
         try:
             r = self.learn()
             log.info("prior knowledge: %d replays learned", r["prior"])
@@ -116,11 +137,14 @@ class Service:
         last = {"price": 0.0, "learn": time.time(), "save": time.time(), "eq": 0.0, "diary": 0.0}
         while not stop.is_set():
             now = time.time()
+            self.hour_line(now)
             try:
                 self.trader.scan()
                 if now - last["price"] >= self.s.price_every_s:
                     last["price"] = now
                     self.trader.manage()
+                else:
+                    self.trader.manage_curves()
                 if now - last["eq"] >= EQUITY_EVERY_S:
                     last["eq"] = now
                     self.trader.equity_snapshot()
@@ -134,12 +158,6 @@ class Service:
                     self.save()  # the diary reads the model; make sure what it says is on disk too
                     if journal.daily(self.conn, self.model, self.s):
                         log.info("diary written")
-                hour = int(now) // HEARTBEAT_S
-                if hour != store.get(self.conn, "heartbeat_hour"):
-                    # on the clock hour, kept in the DB: deploys restart the service often, a timer from the start
-                    # never reached a full hour (no line, no hour factor from 21:38 to 01:00 on 17.10.)
-                    store.put(self.conn, "heartbeat_hour", hour)
-                    log.info("brain hour: %s", self.heartbeat(hour * HEARTBEAT_S - HEARTBEAT_S))
                 if now - last["save"] >= SAVE_EVERY_S:
                     last["save"] = now
                     self.save()

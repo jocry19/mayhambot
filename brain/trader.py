@@ -7,6 +7,8 @@ Paper only: fills come from copytrade's PaperExecutor (real Jupiter quotes, meas
 """
 from __future__ import annotations
 
+import copy
+import dataclasses
 import json
 import logging
 import random
@@ -57,12 +59,43 @@ def _default_staged(conn, mint) -> bool:
     return bool(((a.checks or {}).get("staged") or {}).get("data", {}).get("pattern"))
 
 
+def _default_curve(conn, mint, now):
+    from sniper import store as sn_store  # type: ignore
+
+    return sn_store.curve_now(conn, mint, CURVE_MARK_AGE_S, now=now)
+
+
 def _default_safety(conn, mint):
     """(level, blocked, checked, reasons): the stored rug verdict while fresh, else the quick check (~4 RPC calls)."""
     import safety  # type: ignore
 
     a = safety.assess(mint, conn, deep=False)
     return a.level, bool(a.blocked), a.level != "unchecked", [r.get("text") for r in (a.reasons or [])[:2]]
+
+
+CURVE_MARK_AGE_S = 120  # a curve price stays the price until the next trade; older than this the sniper stopped watching
+
+
+def _with_price(snap, px: float):
+    """The snapshot with another price (the live curve's), price_usd scaled along."""
+    k = px / snap.price_sol if snap.price_sol else 1.0
+    if dataclasses.is_dataclass(snap):
+        return dataclasses.replace(snap, price_sol=px, price_usd=(snap.price_usd or 0.0) * k)
+    out = copy.copy(snap)
+    out.price_sol = px
+    if getattr(out, "price_usd", None):
+        out.price_usd *= k
+    return out
+
+
+def _always_learn(row) -> bool:
+    """A signals call or band candidate: always a learning buy (they are rare and the model must measure them)."""
+    if row["source_action"] == "alerted":
+        return True
+    try:
+        return json.loads(row["features"] or "{}").get("signals.band") in (True, 1, "yes")
+    except (TypeError, ValueError):
+        return False
 
 
 OWN_SOURCES = ("whale", "launch", "market")  # the brain reads these itself (ct_swaps, sniper, signal_shadow)
@@ -77,7 +110,7 @@ def opportunities_model(pm) -> str:
 class Trader:
     def __init__(self, conn, s, model, *, snapshots=None, executor=None, safety_check=None, notify=None,
                  on_close=None, rng: random.Random | None = None, clock=time.time, exit_model=None, pool_model=None,
-                 staged_check=None):
+                 staged_check=None, curve_now=None):
         self.conn, self.s, self.model = conn, s, model
         self.pm = pool_model if pool_model is not None else Pool(len(PLANS))
         self.xm = exit_model  # organic exits (exits.py); None = the plans' fixed exits only
@@ -92,6 +125,15 @@ class Trader:
         self.safety_check = safety_check or _default_safety
         self.staged_check = staged_check or _default_staged
         self._staged: dict[str, tuple[float, bool]] = {}
+        self.curve_now = curve_now or _default_curve
+        self._snaps: dict = {}  # the last market snapshot per open mint, for the curve exits between two price rounds
+        try:  # once, before the first trade on the split accounts
+            moved = store.split_learning(conn, s.start_balance_sol, clock())
+            if moved:
+                log.info("learning account split off: %+.4f SOL of past pool trades moved out of the brain's balance",
+                         moved)
+        except Exception as e:
+            log.warning("learning account split failed: %s", e)
         self.notify = notify or (lambda text: None)
         self.on_close = on_close or (lambda pos: None)
         self.rng = rng or random.Random()
@@ -108,6 +150,23 @@ class Trader:
 
             return market.snapshots(mints)
         return self._snapshots(mints)
+
+    def mark(self, snaps: dict) -> dict:
+        """Coins still on a bonding curve: the sniper's live curve price instead of DexScreener's, which runs 30-90 s
+        behind on curves. Exits and the reference price at the buy then use the price the paper fill also meets."""
+        now = self.clock()
+        out = dict(snaps)
+        for mint, snap in snaps.items():
+            if snap is None or not snap.price_sol:
+                continue
+            try:
+                cv = self.curve_now(self.conn, mint, now)
+            except Exception as e:
+                log.debug("curve %s: %s", mint[:6], e)
+                cv = None
+            if cv and not cv.get("complete") and cv.get("price_sol"):
+                out[mint] = _with_price(snap, float(cv["price_sol"]))
+        return out
 
     @property
     def executor(self):
@@ -248,7 +307,7 @@ class Trader:
         if not fresh:
             return 0
         try:
-            snaps = self.snapshots([r["mint"] for _, _, r, _ in fresh])
+            snaps = self.mark(self.snapshots([r["mint"] for _, _, r, _ in fresh]))
         except Exception as e:
             log.warning("snapshots failed: %s", e)
             snaps = {}
@@ -284,15 +343,20 @@ class Trader:
         st = self.settings(now, trust, self.pockets.sharpness(kind))
         model = self.model
         if kind == "pool":  # the learning account: whatever the draw lets through, at a small stake
-            import dataclasses
-
             model = self.pm
             st = dataclasses.replace(st, min_size_sol=self.s.learn_size_sol, explore_share=0.0, no_explore="")
         d = decide.choose(model, kind, feats, st, self.rng, equity=self.equity())
-        if kind == "pool" and not d.enter and row["source_action"] == "alerted":
-            # a real call (1-3 a day): the learning account always takes it at the learning stake, so the pattern
-            # gets cases of its own; the hard gates (rug, liquidity) still decide (signals thread 18.10.)
-            d.enter, d.explore, d.size_sol, d.why_not = True, True, self.s.learn_size_sol, ""
+        if kind == "pool":
+            if _always_learn(row):
+                # a real call (1-3 a day) or a band candidate: the learning account always takes it at the learning
+                # stake, so the class gets cases of its own; the hard gates (rug, liquidity) still decide (signals
+                # thread 18.10.)
+                if not d.enter:
+                    d.enter, d.explore, d.size_sol, d.why_not = True, True, self.s.learn_size_sol, ""
+            elif d.enter and self.rng.random() >= self.s.pool_sample:
+                # the learning account is a sample now (plan 05:07): its trades measure execution and slippage, the
+                # pool model learns the opportunities themselves from their replays
+                d.enter, d.why_not = False, f"Lernkonto-Stichprobe: nur {self.s.pool_sample:.0%} der Ziehungen"
         if pocket:
             raw["pocket"], raw["trust"] = pocket, trust
         block = None
@@ -426,7 +490,7 @@ class Trader:
              _depth(snap), snap.price_sol, snap.price_sol, now, snap.buys_m5, note,
              json.dumps({"fill_source": fill.source, "impact": fill.price_impact, "ref_price": snap.price_sol})))
         pid = cur.lastrowid
-        store.adjust_balance(c, -fill.sol, self.s.start_balance_sol)
+        self._book(kind, -fill.sol)
         c.execute("UPDATE brain_opps SET position_id=? WHERE id=?", (pid, opp_id))
         log.info("BUY %s %s %.2f SOL plan=%s", kind, symbol or row["mint"][:6], fill.sol, p.name)
         self.notify(f"🧠 Kauf {symbol or row['mint'][:6]} ({kind})\n{note}")
@@ -443,6 +507,23 @@ class Trader:
         except Exception as e:
             log.warning("snapshots failed: %s", e)
             return 0
+        self._snaps = {m: v for m, v in snaps.items() if v is not None}
+        return self._manage(rows, self.mark(snaps))
+
+    def manage_curves(self) -> int:
+        """Between two price rounds: the open positions on a bonding curve, at the live curve price (a database read,
+        no HTTP), so a curve coin's stop or trail fires within seconds of the trade that crossed it."""
+        rows = [r for r in self.conn.execute("SELECT * FROM brain_positions WHERE status='open'").fetchall()
+                if r["mint"] in self._snaps]
+        if not rows:
+            return 0
+        base = {r["mint"]: self._snaps[r["mint"]] for r in rows}
+        marked = self.mark(base)
+        live = [r for r in rows if marked[r["mint"]] is not base[r["mint"]]]
+        return self._manage(live, marked) if live else 0
+
+    def _manage(self, rows, snaps) -> int:
+        c = self.conn
         now = self.clock()
         organic = self.organic_on(now)
         n = 0
@@ -631,7 +712,7 @@ class Trader:
                                  (p["tokens"] - part, json.dumps(meta), p["id"])).rowcount
         if not done:
             return False
-        store.adjust_balance(self.conn, fill.sol, self.s.start_balance_sol)
+        self._book(p["kind"], fill.sol)
         up = fill.sol / (p["size_sol"] * 0.5) - 1 if p["size_sol"] else 0.0
         log.info("HALF %s %s %+.1f%%", p["kind"], p["symbol"] or p["mint"][:6], up * 100)
         self.notify(f"🧠 Teilverkauf {p['symbol'] or p['mint'][:6]}: Hälfte zu {up:+.1%}, der Rest läuft weiter")
@@ -691,7 +772,7 @@ class Trader:
                          (now, fill.price_sol, proceeds, pnl, pct, reason, p["id"])).rowcount
         if not done:
             return False
-        store.adjust_balance(c, fill.sol, self.s.start_balance_sol)
+        self._book(p["kind"], fill.sol)
         held = (now - p["opened_at"]) / 60
         log.info("SELL %s %s %+.1f%% (%s)", p["kind"], p["symbol"] or p["mint"][:6], pct * 100, reason)
         self.notify(f"🧠 Verkauf {p['symbol'] or p['mint'][:6]}: {pct:+.1%} ({pnl:+.3f} SOL) nach {held:.0f} min, "
@@ -703,21 +784,33 @@ class Trader:
             log.exception("learning from trade %s failed: %s", p["id"], e)
         return True
 
+    def _book(self, kind: str, delta: float) -> None:
+        key = store.account(kind)
+        store.adjust_balance(self.conn, delta, self.s.start_balance_sol if key == store.PERFORM else 0.0, key)
+
+    def _open_value(self, learn: bool) -> float:
+        return sum((r[0] or 0) * (r[1] or 0) for r in self.conn.execute(
+            "SELECT tokens, last_price_sol FROM brain_positions WHERE status='open' AND (kind='pool')=?",
+            (int(learn),)).fetchall())
+
     def equity(self) -> float:
-        """Account value now: cash plus open positions at their last price."""
-        c = self.conn
-        val = sum((r[0] or 0) * (r[1] or 0) for r in c.execute(
-            "SELECT tokens, last_price_sol FROM brain_positions WHERE status='open'").fetchall())
-        return store.balance(c, self.s.start_balance_sol) + val
+        """The brain's own account now (the learning account apart): cash plus open positions at their last price."""
+        return store.balance(self.conn, self.s.start_balance_sol) + self._open_value(False)
 
     def equity_snapshot(self) -> dict:
+        """One row a minute in brain_equity: the brain's own account in the first columns (what the hour factors and
+        the challenge read), the learning account beside it (starts at 0, so its equity is its result so far)."""
         c = self.conn
         bal = store.balance(c, self.s.start_balance_sol)
-        val = sum((r[0] or 0) * (r[1] or 0) for r in c.execute(
-            "SELECT tokens, last_price_sol FROM brain_positions WHERE status='open'").fetchall())
+        val = self._open_value(False)
+        lbal = store.balance(c, 0.0, store.LEARN)
+        lval = self._open_value(True)
         ts = int(self.clock()) // 60 * 60
-        c.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (ts, bal, val, bal + val))
-        return {"balance_sol": bal, "open_value_sol": val, "equity_sol": bal + val}
+        c.execute("INSERT OR REPLACE INTO brain_equity(ts, balance_sol, open_value_sol, equity_sol, learn_balance_sol, "
+                  "learn_open_sol, learn_equity_sol) VALUES (?,?,?,?,?,?,?)",
+                  (ts, bal, val, bal + val, lbal, lval, lbal + lval))
+        return {"balance_sol": bal, "open_value_sol": val, "equity_sol": bal + val,
+                "learn_balance_sol": lbal, "learn_open_sol": lval, "learn_equity_sol": lbal + lval}
 
 
 def _meta(p) -> dict:

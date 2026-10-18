@@ -47,18 +47,28 @@ def _p(x) -> str:
 GOAL_MULT = (2, 4)  # the user's goal (10/2026): the paper account x2 to x4 every day, consistently
 
 
+def _factor(conn, lo: int, hi: int) -> float | None:
+    """Equity at the end of [lo, hi) / equity at its start, less money moved between the accounts in between (the
+    one-time split of the learning account is a transfer, not a gain)."""
+    a = conn.execute("SELECT ts, equity_sol FROM brain_equity WHERE ts>=? AND ts<? ORDER BY ts LIMIT 1",
+                     (lo, hi)).fetchone()
+    b = conn.execute("SELECT ts, equity_sol FROM brain_equity WHERE ts>=? AND ts<? ORDER BY ts DESC LIMIT 1",
+                     (lo, hi)).fetchone()
+    if not (a and b and a[1]):
+        return None
+    moved = sum(x for t, x in store.get(conn, "equity_transfers") or [] if a[0] < t <= b[0])
+    return round((b[1] - moved) / a[1], 4)
+
+
 def multipliers(conn, now: float, days: int = 14) -> list:
     """[(UTC day, equity at its end / equity at its start)] for the last days, today so far last."""
     out = []
     t_end = store.day_start(now) + 86400
     for k in range(days - 1, -1, -1):
         lo, hi = t_end - (k + 1) * 86400, t_end - k * 86400
-        a = conn.execute("SELECT equity_sol FROM brain_equity WHERE ts>=? AND ts<? ORDER BY ts LIMIT 1",
-                         (lo, hi)).fetchone()
-        b = conn.execute("SELECT equity_sol FROM brain_equity WHERE ts>=? AND ts<? ORDER BY ts DESC LIMIT 1",
-                         (lo, hi)).fetchone()
-        if a and b and a[0]:
-            out.append((time.strftime("%Y-%m-%d", time.gmtime(lo)), round(b[0] / a[0], 4)))
+        f = _factor(conn, lo, hi)
+        if f is not None:
+            out.append((time.strftime("%Y-%m-%d", time.gmtime(lo)), f))
     return out
 
 
@@ -69,12 +79,9 @@ def hour_factors(conn, now: float, hours: int = 24) -> list:
     end = int(now) // 3600 * 3600
     for k in range(hours, 0, -1):
         lo, hi = end - k * 3600, end - (k - 1) * 3600
-        a = conn.execute("SELECT equity_sol FROM brain_equity WHERE ts>=? AND ts<? ORDER BY ts LIMIT 1",
-                         (lo, hi)).fetchone()
-        b = conn.execute("SELECT equity_sol FROM brain_equity WHERE ts>=? AND ts<? ORDER BY ts DESC LIMIT 1",
-                         (lo, hi)).fetchone()
-        if a and b and a[0]:
-            out.append((lo, round(b[0] / a[0], 4)))
+        f = _factor(conn, lo, hi)
+        if f is not None:
+            out.append((lo, f))
     return out
 
 
