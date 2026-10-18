@@ -1179,9 +1179,72 @@ def test_transaction_and_signature_reads_go_to_helius_first_within_a_share(monke
     main["fail"] = True
     assert rpc.read("getTransaction", []) == "pub"  # Helius error: public fallback
     main["fail"] = False
+    rpc._mf_off_until = 0.0
     monkeypatch.setattr(chain.Rpc, "MAIN_FIRST_PER_MIN", 3)
     calls.clear()
     assert rpc.read("getTransaction", []) == "pub" and calls == ["public"]  # share of the minute used up
     rpc.main_first = lambda: False
     rpc._mf.clear()
     assert rpc.read("getTransaction", []) == "pub"
+    # a refused key (credits used up, 429/401/403) is left alone for a while: public only, no try per read
+    monkeypatch.setattr(chain.Rpc, "MAIN_FIRST_PER_MIN", 160)
+    rpc._mf_off_until = 0.0
+    rpc.main_first = lambda: True
+    main["fail"] = True
+    calls.clear()
+    assert rpc.read("getTransaction", []) == "pub" and rpc.read("getTransaction", []) == "pub"
+    assert calls == ["main", "public", "public"]
+    rpc._mf_off_until = 0.0
+
+    def exhausted(self, m, p, priority="live"):
+        calls.append("main")
+        raise chain.CreditsExhausted("used up")
+
+    monkeypatch.setattr(chain.Rpc, "call", exhausted)
+    calls.clear()
+    assert rpc.read("getSignaturesForAddress", []) == "pub" and rpc.read("getTransaction", []) == "pub"
+    assert calls == ["main", "public", "public"] and rpc._mf_off_until > time.time() + 200
+
+
+def test_old_poll_finds_stay_out_of_the_lag_and_the_detection_table(env):
+    s, conn, ex, state = env
+    tracker.LAG.clear()
+    tracker.BACKFILL.clear()
+    w = "Wold" + "x" * 40
+    store.add_wallets(conn, [w], "auto")
+    now = int(time.time())
+
+    class R:
+        def poll_signatures(self, wallet, limit=50, **kw):  # newest first
+            return [{"signature": "new1", "blockTime": now - 5}, {"signature": "old1", "blockTime": now - 4000}]
+
+        def transaction(self, sig, priority="bulk"):
+            return sig
+
+    old_extract = chain.extract_swap
+    chain.extract_swap = lambda tx, wallet, solusd=0.0: chain.Swap(
+        tx, wallet, now - (5 if tx == "new1" else 4000), "buy", "m", 1.0, 0.01, 0.01)
+    try:
+        row = conn.execute("SELECT * FROM ct_wallets WHERE address=?", (w,)).fetchone()
+        conn.execute("UPDATE ct_wallets SET last_sig='before' WHERE address=?", (w,))
+        row = conn.execute("SELECT * FROM ct_wallets WHERE address=?", (w,)).fetchone()
+        got = tracker.poll(conn, s, R(), row)
+    finally:
+        chain.extract_swap = old_extract
+    assert {sw.signature for sw in got} == {"new1", "old1"}  # both still reach the strategy and ct_swaps
+    assert [r[0] for r in conn.execute("SELECT sig FROM ct_detect")] == ["new1"]
+    assert sum(tracker.BACKFILL.values()) == 1
+    tracker.LAG.clear()
+    tracker.BACKFILL.clear()
+
+
+def test_volume_bots_are_never_block0_and_switched_off(env):
+    s, conn, ex, state = env
+    bot = "9ZYMMXvVPSfq6JdUjXBv9yCo1J1XbphPQMbWS5oDThJ"
+    full = "52bZXsA9XHvWP5JYgmt1r8GQJ5bse3FK5ALf6j3pVu4e"
+    assert bot not in Settings().block0_wallets and bot in Settings().volume_bots
+    store.add_wallets(conn, [bot], "block0", label="block0")
+    s.block0_wallets, s.volume_bots = [full, bot], [bot]
+    assert tracker.load_block0(conn, s) == [full] and tracker.BLOCK0 == {full}
+    assert tuple(conn.execute("SELECT active, label FROM ct_wallets WHERE address=?", (bot,)).fetchone()) == (0, "volume bot")
+    tracker.BLOCK0.clear()

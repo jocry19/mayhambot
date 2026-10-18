@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import re
 import struct
 import time
 from collections import Counter, deque
@@ -74,6 +75,7 @@ class Rpc:
         self.main_first = None
         self._mf: deque = deque()
         self.main_first_n = 0
+        self._mf_off_until = 0.0  # Helius refused (credits used up, 429/401/403): public only until then
 
     @property
     def poll_fallbacks(self) -> int:
@@ -111,6 +113,8 @@ class Rpc:
         if method not in self.MAIN_FIRST or not self.public or self.main_first is None:
             return False
         now = time.time()
+        if now < self._mf_off_until:
+            return False
         while self._mf and self._mf[0] < now - 60:
             self._mf.popleft()
         try:
@@ -132,9 +136,12 @@ class Rpc:
                 self.main_first_n += 1
                 return r
             except CreditsExhausted:
-                pass
+                self._mf_off_until = time.time() + 300  # no hammering a refused key with every read
             except Exception as e:
-                log.debug("main rpc %s failed, using public: %s", method, e)
+                if any(c in str(e) for c in ("429", "401", "403")):
+                    self._mf_off_until = time.time() + 60
+                log.debug("main rpc %s failed, using public: %s", method,
+                          re.sub(r"(api-key=)[^&\s'\"]+", r"\1***", str(e)))
             return self.public.call(method, params, priority)
         if self.public:
             try:

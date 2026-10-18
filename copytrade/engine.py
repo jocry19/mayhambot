@@ -129,8 +129,10 @@ class Engine:
                   f"{self.rpc.main_first_n} reads Helius-first), fallbacks "
                   f"{self.rpc.fallbacks}, public bulk failures {self.rpc.bulk_failures}"
                 + f"; opportunities to the brain {opportunity.SKIPPED['sent']} "
-                  f"({opportunity.SKIPPED['stale']} older than {opportunity.STALE_S} s not sent)")
+                  f"({opportunity.SKIPPED['stale']} older than {opportunity.STALE_S} s not sent)"
+                + f"; poll backlog older than {tracker.BACKFILL_S} s kept out of the lag {sum(tracker.BACKFILL.values())}")
         opportunity.SKIPPED.update(sent=0, stale=0)
+        tracker.BACKFILL.clear()
         tracker.DETECTED.update(wslog=0, ws=0, poll=0, gap=0)
         tracker.MAIN_READS["early"] = 0
         self.rpc.fallbacks = self.rpc.bulk_failures = self.rpc.main_first_n = 0

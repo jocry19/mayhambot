@@ -66,6 +66,11 @@ class Settings:
     # (exploration only, like block-0): the research model's 'good' tier and discovered big buyers beyond the copy
     # room, up to CT_MAX_ACTIVE_WALLETS active wallets in all; polling stays with the best CT_MAX_TRACKED_WALLETS
     watch_good_limit: int = field(default_factory=lambda: _i("CT_WATCH_GOOD_LIMIT", 150))
+    # the learning universe's own slots, beside the copy wallets' CT_MAX_ACTIVE_WALLETS
+    watch_slots: int = field(default_factory=lambda: _i("CT_WATCH_SLOTS", 60))
+    # volume bots: never block-0, never watched (9ZYMMX, 18.10.: 851 buys of 3 coins, 90 % of the inflow)
+    volume_bots: list[str] = field(default_factory=lambda: [w.strip() for w in os.getenv(
+        "CT_VOLUME_BOTS", "9ZYMMXvVPSfq6JdUjXBv9yCo1J1XbphPQMbWS5oDThJ").split(",") if w.strip()])
     max_active_wallets: int = field(default_factory=lambda: _i("CT_MAX_ACTIVE_WALLETS", 300))
     max_tracked_wallets: int = field(default_factory=lambda: _i("CT_MAX_TRACKED_WALLETS", 40))
     wallet_poll_seconds: float = field(default_factory=lambda: _f("CT_WALLET_POLL_SECONDS", 8))
@@ -103,7 +108,7 @@ class Settings:
     block0_wallets: list[str] = field(default_factory=lambda: [w.strip() for w in os.getenv(
         "CT_BLOCK0_WALLETS", "52bZXsA9XHvWP5JYgmt1r8GQJ5bse3FK5ALf6j3pVu4e,5kGadrQbtuyi5KHDM69oVuFsUwsw98xopsRsRF3QnuFR,"
         "3dy8rcMdXBRQP2GLf2LgMhy9L9a2mEbsjQNv8EZ9gBWe,2XMRHnX9u1jYW8EardqAgtDPgrz89xLBTnDc35wV8LSS,"
-        "9ZYMMXvVPSfq6JdUjXBv9yCo1J1XbphPQMbWS5oDThJ,7nZn5LKSzqh39Xx62ju6x8DCJ9ZaJHR3h254bTiJWiuF,"
+        "7nZn5LKSzqh39Xx62ju6x8DCJ9ZaJHR3h254bTiJWiuF,"
         "Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA,AopdiFdCvoP84YYGzfnLcmtehtiWKet3fzxTZbq9Qtke").split(",") if w.strip()])
     discover_every_s: float = field(default_factory=lambda: _f("CT_DISCOVER_EVERY_SECONDS", 1800))
     poll_warm_seconds: float = field(default_factory=lambda: _f("CT_POLL_WARM_SECONDS", 60))

@@ -62,6 +62,10 @@ def _claim(conn, sig: str, wallet: str) -> bool:
     return _mark(sig)
 
 
+BACKFILL_S = 600  # poll finds older than this are a late cursor's backlog (brain saw a 25649 s tracker lag, 18.10.)
+BACKFILL: collections.Counter = collections.Counter()
+
+
 def record_detection(conn, sw: chain.Swap, source: str, notified_at: float | None = None,
                      sol_usd: float = 0.0) -> float:
     """Store how late we saw a swap (block time -> recognised), per source, with its value at that moment (USD
@@ -165,6 +169,7 @@ def load_block0(conn, s: Settings) -> list[str]:
     if any(p not in _BLOCK0_FOUND and not (len(p) >= 32 and "…" not in p) for p in s.block0_wallets) \
             and time.time() - _BLOCK0_TRIED["at"] >= 3600:
         _BLOCK0_TRIED["at"] = time.time()
+    out = [a for a in out if a not in s.volume_bots]
     if out:
         store.add_wallets(conn, out, "block0", label="block0")
         conn.executemany("UPDATE ct_wallets SET source='block0', active=1 WHERE address=? AND source!='manual'",
@@ -172,6 +177,10 @@ def load_block0(conn, s: Settings) -> list[str]:
         conn.commit()
     if missing:
         log.info("block-0 wallets not resolved yet: %s", ", ".join(missing))
+    if s.volume_bots:  # one wallet pumping volume into its own few coins (9ZYMMX: 851 buys, 3 coins, 18.10.)
+        conn.executemany("UPDATE ct_wallets SET active=0, label='volume bot' WHERE address=? AND source!='manual'",
+                         [(a,) for a in s.volume_bots])
+        conn.commit()
     BLOCK0.clear()
     BLOCK0.update(out)
     return out
@@ -216,11 +225,12 @@ def watch_candidates(conn, n: int, now: float | None = None, seed: str | None = 
 
 
 def load_watch(conn, s: Settings) -> int:
-    """The learning universe: research-picked wallets (watch_candidates) as source 'watch_model' within
-    CT_MAX_ACTIVE_WALLETS (the research 'good' tier when the model's stats are missing); fills WATCH with every
-    active watch_* wallet."""
+    """The learning universe: research-picked wallets (watch_candidates) as source 'watch_model' in their own
+    CT_WATCH_SLOTS (the copy wallets fill CT_MAX_ACTIVE_WALLETS and left it at 3+3 on 18.10.; the research 'good'
+    tier when the model's stats are missing); fills WATCH with every active watch_* wallet."""
     added = 0
-    room = max(0, s.max_active_wallets - len(active_wallets(conn)))
+    have = conn.execute("SELECT COUNT(*) FROM ct_wallets WHERE active=1 AND source LIKE 'watch%'").fetchone()[0]
+    room = max(0, s.watch_slots - have)
     if room and s.watch_good_limit > 0:
         n = min(room, s.watch_good_limit)
         try:
@@ -487,6 +497,9 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk",
         if covered:
             GAPS.extend((time.time(), sw.wallet) for sw in out)
         for sw in out:
+            if sw.block_time and time.time() - sw.block_time > BACKFILL_S:
+                BACKFILL[src] += 1  # an old cursor's backlog, not a detection: kept out of the lag stats
+                continue
             try:
                 record_detection(conn, sw, src, sol_usd=solusd)
             except Exception as e:

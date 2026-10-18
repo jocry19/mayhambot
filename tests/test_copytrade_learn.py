@@ -415,8 +415,11 @@ def test_good_wallets_join_the_learning_universe_watched_not_copied(env):
     src = dict(conn.execute("SELECT address, source FROM ct_wallets").fetchall())
     assert src == {W: "model_ultra", W2: "watch_good"} and tracker.WATCH == {W2}
     assert W2 in tracker.ws_wallets(conn, s)  # watched live like everyone else
-    # no room left: nothing more is added
-    s2 = dataclasses.replace(s, max_active_wallets=2)
+    # its own slots full: nothing more is added; a full copy cap does not block it
+    s2 = dataclasses.replace(s, watch_slots=1)
+    _wallet_row(conn, "G3" * 22, "good", score=40)
+    assert tracker.load_watch(conn, s2) == 0
+    s3 = dataclasses.replace(s, max_active_wallets=1, watch_slots=5)
     _wallet_row(conn, "G3" * 22, "good", score=40)
     assert tracker.load_watch(conn, s2) == 0
     tracker.WATCH.clear()
