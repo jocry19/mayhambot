@@ -157,3 +157,17 @@ def test_coverage_counts_decisions_and_migrations(tmp_path):
     eng.cover["migrate"].append((T0, True))
     c = eng.coverage(T0 + 10)
     assert c["decide"] == {"n": 3, "share": 0.333} and c["migrate"] == {"n": 1, "share": 1.0}
+
+
+def test_db_coverage(tmp_path):
+    from sniper import analytics, store
+    conn = store.connect(str(tmp_path / "d.db"))
+    rows = [("A", "pump", 5, 1), ("B", "pump", 0, 0), ("C", "bonk", 0, 0), ("D", "pump", 3, 0)]
+    for mint, pool, n, mig in rows:
+        store.save_launch(conn, {"mint": mint, "pool": pool, "source": "pumpportal", "decided_ts": int(T0),
+                                 "n_trades": n, "migrated": mig, "migrated_ts": int(T0 + 600) if mig else None})
+    store.save_launch(conn, {"mint": "G", "pool": "raydium", "source": "geckoterminal", "decided_ts": int(T0)})
+    c = analytics.coverage(conn, hours=1, now=T0 + 900)
+    assert c["launches"] == 4 and c["launch_rate"] == 0.5 and c["migrations"] == 1 and c["migration_rate"] == 1.0
+    assert c["by_pool"]["pump"]["launch_rate"] == 0.667 and c["by_pool"]["bonk"]["launches"] == 1
+    assert sum(h["launches"] for h in c["hourly"]) == 4 and c["target"] == 0.9

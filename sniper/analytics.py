@@ -210,3 +210,48 @@ def wallet_history(conn, wallet):
     return [dict(r) for r in conn.execute(
         """SELECT w.*, l.symbol, l.decided_ts, l.ret_60m, l.max_ret_60m, l.rugged FROM sniper_launch_wallets w
            LEFT JOIN sniper_launches l ON l.mint = w.mint WHERE w.wallet=? ORDER BY l.decided_ts DESC""", (wallet,))]
+
+
+def coverage(conn, hours=24, now=None, target=0.9):
+    """Stream coverage from the DB (plan 18.10., goal 90 %): launches with at least one trade at the decision and
+    migrations of launches whose trades we saw, total, per pool and per hour (decided_ts / migrated_ts).
+    GeckoTerminal pools never have trades and are left out."""
+    now = int(now or time.time())
+    since = now - int(hours * 3600)
+    out = {"launches": 0, "launches_with_trade": 0, "launch_rate": None, "migrations": 0,
+           "migrations_with_trade": 0, "migration_rate": None, "target": target, "by_pool": {}, "hourly": []}
+    if not _has(conn):
+        return out
+    rate = lambda k, n: round(k / n, 3) if n else None  # noqa: E731
+    hourly = {}
+    rows = conn.execute(
+        "SELECT COALESCE(pool, 'pump'), decided_ts, migrated, migrated_ts, COALESCE(n_trades, 0) > 0 "
+        "FROM sniper_launches WHERE source = 'pumpportal' AND (decided_ts >= ? OR migrated_ts >= ?)",
+        (since, since)).fetchall()
+    for pool, dts, mig, mts, ok in rows:
+        bp = out["by_pool"].setdefault(pool, {"launches": 0, "launches_with_trade": 0, "migrations": 0,
+                                              "migrations_with_trade": 0})
+        if dts and dts >= since:
+            h = hourly.setdefault(dts - dts % 3600, [0, 0, 0, 0])
+            out["launches"] += 1
+            out["launches_with_trade"] += ok
+            bp["launches"] += 1
+            bp["launches_with_trade"] += ok
+            h[0] += 1
+            h[1] += ok
+        if mig and mts and mts >= since:
+            h = hourly.setdefault(mts - mts % 3600, [0, 0, 0, 0])
+            out["migrations"] += 1
+            out["migrations_with_trade"] += ok
+            bp["migrations"] += 1
+            bp["migrations_with_trade"] += ok
+            h[2] += 1
+            h[3] += ok
+    out["launch_rate"] = rate(out["launches_with_trade"], out["launches"])
+    out["migration_rate"] = rate(out["migrations_with_trade"], out["migrations"])
+    for bp in out["by_pool"].values():
+        bp["launch_rate"] = rate(bp["launches_with_trade"], bp["launches"])
+        bp["migration_rate"] = rate(bp["migrations_with_trade"], bp["migrations"])
+    out["hourly"] = [{"ts": ts, "launches": v[0], "launch_rate": rate(v[1], v[0]), "migrations": v[2],
+                      "migration_rate": rate(v[3], v[2])} for ts, v in sorted(hourly.items())]
+    return out
