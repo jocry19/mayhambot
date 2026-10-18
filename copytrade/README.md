@@ -214,6 +214,10 @@ Kosten keine der 1296 Varianten im Plus. Daher:
   Presets ablehnen, ab `CT_EXPLORE_MIN_LIQ_USD` (5000 $) Liquidität; Rug-Prüfung, Market-Cap-Grenze und "seit dem
   Signal schon +50 %" gelten weiter. Ausstiege wie beim strengen Konto (Ziel +50 %, Trailing ab +20 % mit 12 %
   Rückgang, Stop −20 %), bis learn.py auf genug nachgespielten Signalen eine andere Regel walk-forward bestätigt.
+- `CT_THOMPSON=true` (Standard): das strenge Konto entscheidet Wal-Kopien ab `CT_EXPLORE_MIN_SOL` per Thompson-Sampling
+  (`learn.thompson`): Erwartung je Wallet = Bevölkerungs-Schnitt nach Kosten (zählt wie 6 eigene Käufe) plus die eigenen
+  Replays, eine Ziehung entscheidet, die Größe folgt der Ziehung (0,25× bis 1,5×). Unbekannte Wallets werden klein
+  ausprobiert, bewiesene Verlierer selten, Gewinner fast immer. `CT_THOMPSON=false` stellt die Ja/Nein-Schwellen unten wieder her.
 - `CT_REQUIRE_EDGE=true`: ein bewerteter Wal (oder sein Cluster) wird nur kopiert, wenn seine früheren Käufe mit den
   aktuellen Ausstiegen nach kalibrierten Kosten im Plus lagen (`learn.wallet_edge`, mindestens `CT_EDGE_MIN_N`=8).
 - `CT_MAX_WASH_SHARE=0.30`: kein Kauf, wenn der Rug-Schutz (Prüfung „wash“) mehr Hin-und-her-Volumen misst.

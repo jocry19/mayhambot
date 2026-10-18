@@ -243,7 +243,8 @@ class Strategy:
         if m == "off":
             return None
         expl = m == "auto" and self._explore_ok(swap)
-        if swap.sol_amount < s.min_whale_buy_sol and not expl:
+        strict_min = min(s.min_whale_buy_sol, s.explore_min_sol) if s.thompson else s.min_whale_buy_sol
+        if swap.sol_amount < strict_min and not expl:
             return self._count_small(swap)
         age = time.time() - swap.block_time
         lp = learn.params_for(self.conn, "whale", swap.wallet)
@@ -263,8 +264,17 @@ class Strategy:
             return self._skip("whale", swap.mint, f"Launch-/Dev-Bot ({kb} von {nb} Käufen in den ersten "
                               f"{LAUNCH_BOT_S} s eines Coins), nicht kopierbar", wallet=swap.wallet)
         rank = ranking.wallet_rank(self.conn, swap.wallet)
-        size, explore, edge, why, wdata = p.size_sol, False, None, None, {}
-        if rank is None or rank["samples"] < s.min_wallet_samples:
+        size, explore, edge, why, wdata, draw = p.size_sol, False, None, None, {}, None
+        if s.thompson:
+            edge = learn.wallet_edge(self.conn, swap.wallet)
+            draw = learn.thompson(self.conn, edge, swap.signature)
+            wdata = {"edge": edge, "thompson": draw}
+            if draw["draw"] <= 0:
+                why = (f"gezogener Vorteil {draw['draw']:+.1%} (Erwartung {draw['mean']:+.1%} ± {draw['sd']:.1%} aus "
+                       f"{edge['n']} Käufen, Chance {draw['p_pos']:.0%}; nur mitgemessen)")
+            else:
+                size *= draw["size_factor"]
+        elif rank is None or rank["samples"] < s.min_wallet_samples:
             if s.explore_unranked and ex.mode == "paper":
                 explore, size = True, size * 0.5
             else:
@@ -279,7 +289,7 @@ class Strategy:
                 wdata = {"edge": edge}
             else:
                 size *= edge["size_factor"]  # conviction: more size for a clearer edge, never above 1.5x
-        if not why and swap.sol_amount < s.min_whale_buy_sol:
+        if not why and swap.sol_amount < strict_min:
             why = f"Wal-Kauf zu klein ({swap.sol_amount:.2f} SOL)"
         if block0:  # exploration only: the plan's test is >= +5 % net over 100 copies before anything stricter
             why = why or "Block-0-Gruppe (nur Erkundung)"
@@ -372,10 +382,12 @@ class Strategy:
                 "model_score": winfo.get("model_score"), "cluster": ent if ent != swap.wallet else None,
                 "exit_capture": winfo.get("exit_capture"), "capture": feats["capture"],
                 "param_version": exits["version"], "safety": safe, "edge": edge, "intel": iraw,
-                "thesis": learn.thesis(iraw), "group": "block0" if block0 else None}
+                "thesis": learn.thesis(iraw), "group": "block0" if block0 else None, "thompson": draw}
         reason = (f"Wal {swap.wallet[:6]}… kaufte {swap.sol_amount:.3g} SOL"
                   + (f", Wal-Score {info['wallet_score']}" if rank else ", unbewertet")
-                  + (f", Vorteil Ø {edge['mean']:+.1%} aus {edge['n']} Käufen, Größe ×{edge['size_factor']:.2f}"
+                  + (f", gezogener Vorteil {draw['draw']:+.1%} (Erwartung {draw['mean']:+.1%} ± {draw['sd']:.1%}),"
+                     f" Größe ×{draw['size_factor']:.2f}" if draw else
+                     f", Vorteil Ø {edge['mean']:+.1%} aus {edge['n']} Käufen, Größe ×{edge['size_factor']:.2f}"
                      if edge else "")
                   + (f"; {info['thesis']}" if info["thesis"] else "")
                   + (f"; Kurs 5 min schon {run5:+.0%}, Größe ×{RUN5_SIZE:g}" if chased else ""))

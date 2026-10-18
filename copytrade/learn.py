@@ -518,6 +518,64 @@ def wallet_edge(conn, wallet: str) -> dict:
     return out
 
 
+THOMPSON_PRIOR_N = 6.0  # the population's average counts like this many own buys of a wallet
+THOMPSON_SD_MIN = 0.05
+_POP_CACHE: dict = {}
+POP_CACHE_S = 600
+
+
+def population_edge(conn) -> dict:
+    """Mean and spread of what copying any tracked whale made after costs (same replays and variant logic as
+    wallet_edge, all wallets together, time-decayed): the prior every single wallet starts from. Cached 10 min."""
+    hit = _POP_CACHE.get(id(conn))
+    if hit and time.time() - hit[0] < POP_CACHE_S:
+        return hit[1]
+    variants = sim.GRID
+    idx = sim.nearest(current_params(conn, "whale", None), variants)
+    vals, wts, now, seen = [], [], time.time(), set()
+    for r in conn.execute("SELECT gains, ts, wallet, mint FROM ct_evals WHERE strategy='whale' AND grid_version=? "
+                          "AND gains!='[]' AND kind IN ('whale_buy','trade') ORDER BY kind='trade'",
+                          (sim.GRID_VERSION,)):
+        key = (r[2], r[3], int(r[1]))
+        if key in seen:
+            continue
+        seen.add(key)
+        g = json.loads(r[0])
+        if len(g) == len(variants) and g[idx] is not None:
+            vals.append(max(GAIN_CLIP[0], min(GAIN_CLIP[1], g[idx])))
+            wts.append(decay(r[1], now))
+    cost = extra_cost(conn, "whale")
+    sw = sum(wts)
+    if not vals or sw <= 0:
+        out = {"n": 0, "mean": -cost, "sd": 0.3}  # nothing measured yet: costs only, a wide spread
+    else:
+        mean = sum(w * v for w, v in zip(wts, vals)) / sw
+        var = sum(w * (v - mean) ** 2 for w, v in zip(wts, vals)) / sw
+        out = {"n": len(vals), "mean": mean - cost, "sd": max(THOMPSON_SD_MIN, var ** 0.5)}
+    _POP_CACHE[id(conn)] = (time.time(), out)
+    return out
+
+
+def thompson(conn, edge: dict, seed: str) -> dict:
+    """Thompson sampling instead of a yes/no gate: the wallet's edge per copy is a belief (population prior plus
+    its own decayed replays, normal), one draw from it decides. Unknown wallets get drawn positive often enough to
+    be tried, proven losers rarely, proven winners nearly always, and every closed copy narrows the belief.
+    Size follows the draw (EDGE_SIZE_UNIT = 1x, 0.25x..1.5x). The seed (the whale's signature) makes the draw the
+    same in every process that sees this buy. -> {"draw", "mean", "sd", "p_pos", "size_factor", "prior"}"""
+    import math
+    import random
+
+    pop = population_edge(conn)
+    n = float(edge.get("n_eff") or 0.0)
+    k = THOMPSON_PRIOR_N
+    mean = (k * pop["mean"] + n * edge.get("mean", 0.0)) / (k + n)
+    sd = pop["sd"] / math.sqrt(k + n)
+    draw = random.Random(seed).gauss(mean, sd)
+    p_pos = 0.5 * (1 + math.erf(mean / (sd * math.sqrt(2))))
+    return {"draw": draw, "mean": mean, "sd": sd, "p_pos": p_pos, "prior": pop["mean"],
+            "size_factor": max(0.25, min(1.5, draw / EDGE_SIZE_UNIT)) if draw > 0 else 0.0}
+
+
 def rollback(conn) -> list[int]:
     """Deactivate learned versions whose own trades fall clearly short of what the test promised."""
     out = []

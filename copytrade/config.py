@@ -137,6 +137,9 @@ class Settings:
     explore_tiers: str = field(default_factory=lambda: os.getenv("CT_EXPLORE_TIERS", "ultra,smart"))
     # copy a ranked whale only if its past buys (ct_evals, our current exits, calibrated costs) made money
     require_edge: bool = field(default_factory=lambda: _b("CT_REQUIRE_EDGE", True))
+    # strict whale copies decided by a draw from each wallet's edge belief (learn.thompson) instead of the
+    # samples/score/edge gates, from the exploration minimum on; CT_THOMPSON=false brings the gates back
+    thompson: bool = field(default_factory=lambda: _b("CT_THOMPSON", True))
     edge_min_n: int = field(default_factory=lambda: _i("CT_EDGE_MIN_N", 8))
     max_price_run_since_whale: float = field(default_factory=lambda: _f("CT_MAX_RUN_SINCE_WHALE", 0.15))
 
