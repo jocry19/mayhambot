@@ -1694,3 +1694,44 @@ def test_a_kind_whose_trades_lost_explores_no_more(conn, s):
     d.explore = False
     t._records.clear()
     assert not (t._gate("whale", MINT, mk.snaps[MINT], d) or "").startswith("Bewährung")
+
+
+def test_labels_carry_exit_rules_and_the_best_rule_is_judged_out_of_sample(conn, s):
+    from brain import labels, opportunities as O
+    t0 = 1_700_000_000
+    pts = [[t0 + 60 * i, 1e-6 * (1 + 0.1 * min(i, 10)) * 0.95 ** max(0, i - 40)] for i in range(61)]
+    lab = labels.label(pts, 0.05)
+    rules = json.loads(lab["label_rules"])
+    assert rules["trail30@0.5"] > 0.3 > rules["hold60"]  # the trail kept most of the +100 %, holding gave half back
+    now = time.time()
+    for i in range(200):
+        O.report(conn, "sniper", f"x{i}", f"Exit{i:040d}"[:44], now + i, {"buyers": i})
+        good = i % 10 == 9
+        conn.execute("UPDATE opportunities SET label_at=?, pred_mean=?, label_outcomes='{}', label_rules=? WHERE "
+                     "ref=?", (int(now), 0.1 if good else 0.0,
+                               json.dumps({"hold60": -0.05, "trail30@0.2": 0.2 if good else -0.1}), f"x{i}"))
+    ex = learner.exit_skill(conn, now - 10)
+    assert ex["rule"] == "trail30@0.2" and ex["oos_mean"] == pytest.approx(0.2) and ex["oos_n"] == 10
+    from brain.service import Service
+    sv = Service(s, conn, snapshots=Market(), executor=Paper(), safety_check=ok_safety,
+                 staged_check=lambda c, m: False, curve_now=lambda c, m, n: None)
+    assert "exit 6h best trail30@0.2" in sv._labelled(now - 10)
+    assert sv._main_buys(now - 10) == "main bought/closed/net none"
+
+
+def test_a_young_name_copy_of_a_rugged_launch_is_not_bought(conn, s):
+    import types
+    mk = Market()
+    young = snap(symbol="GLOW")
+    young.pair_created_ms = int(time.time() * 1000) - 600_000
+    old = snap(symbol="GLOW", mint="Old" + MINT[3:])
+    old.pair_created_ms = int((time.time() - 86400) * 1000)
+    t = make_trader(conn, s, trained(), mk)
+    d = types.SimpleNamespace(explore=False, enter=True, size_sol=0.1)
+    assert not (t._gate("whale", MINT, young, d) or "").startswith("Namenskopie")
+    conn.execute("CREATE TABLE IF NOT EXISTS sniper_launches (mint TEXT PRIMARY KEY, symbol TEXT, created_ts INTEGER, "
+                 "rugged INTEGER, known_bad INTEGER, dev_sold_pct REAL)")
+    conn.execute("INSERT INTO sniper_launches(mint, symbol, created_ts, rugged) VALUES ('Scam1', 'Glow', ?, 1)",
+                 (int(time.time()) - 3600,))
+    assert t._gate("whale", MINT, young, d).startswith("Namenskopie")
+    assert not (t._gate("whale", old.mint, old, d) or "").startswith("Namenskopie")  # the day-old original

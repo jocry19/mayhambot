@@ -32,7 +32,22 @@ CAP = 10.0  # +1000 %: beyond it a label is a price glitch more often than a coi
 RUG = 0.1  # the low under 10 % of the entry: rugged, counted as -100 %
 COLS = (("label_at", "INTEGER"), ("label_horizon_min", "REAL"), ("label_n", "INTEGER"), ("label_entry_sol", "REAL"),
         ("label_max15", "REAL"), ("label_max60", "REAL"), ("label_ret60", "REAL"), ("label_min60", "REAL"),
-        ("label_rug", "INTEGER"), ("label_outcomes", "TEXT"))
+        ("label_rug", "INTEGER"), ("label_outcomes", "TEXT"), ("label_rules", "TEXT"))
+
+
+def _rules() -> dict:
+    """Exit rules beyond the plans, each run on every labelled path (plan 'Hundertmal', midday 18.10.: the exit is
+    the lever, mean best-in-60-min +20 % against held -6 %). Stop 50 % stands in for the rug exit."""
+    from copytrade import sim
+
+    out = {"hold60": sim.Variant(0, 1e9, 1.0, 0.0, 0.0, 60, 0)}
+    for a in (0.2, 0.5, 1.0):
+        out[f"trail30@{a:g}"] = sim.Variant(0, 1e9, 0.5, a, 0.3, 60, 0)
+        out[f"trail20@{a:g}"] = sim.Variant(0, 1e9, 0.3, a, 0.2, 60, 0)
+    out["tp50sl20"] = sim.Variant(0, 0.5, 0.2, 0.0, 0.0, 60, 0)
+    out["tp100sl30"] = sim.Variant(0, 1.0, 0.3, 0.0, 0.0, 60, 0)
+    out["tp30sl15"] = sim.Variant(0, 0.3, 0.15, 0.0, 0.0, 30, 0)
+    return out
 
 
 def cost(s) -> float:
@@ -73,11 +88,16 @@ def label(pts: list, c: float) -> dict | None:
         r = sim.simulate(cs, t0, p.variant(0), cost=c)
         if r is not None:
             outs[p.name] = round(min(CAP, r[0]), 5)
+    rules = {}
+    for name, v in _rules().items():
+        r = sim.simulate(cs, t0, v, cost=c)
+        if r is not None:
+            rules[name] = -1.0 if rug and name == "hold60" else round(min(CAP, r[0]), 5)
     return {"label_horizon_min": round((pts[-1][0] - t0) / 60, 1), "label_n": len(pts), "label_entry_sol": p0,
             "label_max15": round(min(CAP, max(in15) / p0 - 1 - c), 5),
             "label_max60": round(min(CAP, max(px for _, px in pts) / p0 - 1 - c), 5),
             "label_ret60": round(ret, 5), "label_min60": round(lo / p0 - 1 - c, 5), "label_rug": int(rug),
-            "label_outcomes": json.dumps(outs)}
+            "label_outcomes": json.dumps(outs), "label_rules": json.dumps(rules)}
 
 
 def _default_curve(conn, mint, now):
