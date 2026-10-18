@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -281,6 +282,12 @@ def test_sniper_page(demo, empty, capsys):
     c = _client(empty)
     assert c.get("/api/sniper").json()["available"] is False
     assert c.get("/api/overview").json()["sniper"] is None
+    # the module-scoped demo was built a while ago; the page counts a heartbeat older than 30 s as stale (no live
+    # figures), so stamp it fresh as the running service would (slow machines took > 30 s to get here)
+    conn = sqlite3.connect(demo)
+    conn.execute("UPDATE sniper_state SET value=json_set(value, '$.ts', ?) WHERE key='service_status'", (int(time.time()),))
+    conn.commit()
+    conn.close()
     c = _client(demo)
     d = c.get("/api/sniper?hours=24").json()
     assert d["available"] and d["launches"] and d["positions"] and d["balance_curve"]
