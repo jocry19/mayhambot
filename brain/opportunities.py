@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS opportunities (
     model TEXT, pred_mean REAL, pred_sd REAL, pred_q10 REAL, draw REAL,
     decision TEXT, account TEXT, size_sol REAL, decided_at INTEGER, position_id INTEGER,
     evaluated_at INTEGER, exit_plan TEXT, outcome_net REAL, outcome_gross REAL, cost REAL, rug INTEGER,
-    outcomes TEXT,
+    outcomes TEXT, supplemented_at INTEGER,
     UNIQUE (source, ref)
 );
 CREATE INDEX IF NOT EXISTS idx_opportunities_ts ON opportunities(ts);
@@ -95,6 +95,34 @@ def report(conn, source: str, ref: str, mint: str, ts: float, features: dict | N
         (source, str(ref), mint, symbol or "", int(ts), int(src_ts) if src_ts else None, int(time.time()),
          price_sol, price_usd, mcap_usd, liq_usd, json.dumps(_clean(features)), source_score, source_action, source_reason))
     return cur.rowcount > 0
+
+
+def _supplement_column(conn) -> None:
+    if "supplemented_at" not in {r[1] for r in conn.execute("PRAGMA table_info(opportunities)")}:
+        try:
+            conn.execute("ALTER TABLE opportunities ADD COLUMN supplemented_at INTEGER")
+        except Exception:  # another process added it a moment ago
+            pass
+
+
+def supplement(conn, source: str, ref: str, features: dict | None, ts: float | None = None) -> bool:
+    """Later features for an opportunity already reported (same source and ref), e.g. a deep check that finishes
+    minutes after the first look: merged into its features (same naming rules as report), supplemented_at = ts (unix
+    s, default now). The brain decides such a row once more with what it knows then; labels and replays keep the
+    first report's moment. Returns True if the row exists."""
+    ensure(conn)
+    _supplement_column(conn)
+    row = conn.execute("SELECT id, features FROM opportunities WHERE source=? AND ref=?", (source, str(ref))).fetchone()
+    if row is None:
+        return False
+    try:
+        merged = json.loads(row[1] or "{}")
+    except (TypeError, ValueError):
+        merged = {}
+    merged.update(_clean(features))
+    conn.execute("UPDATE opportunities SET features=?, supplemented_at=? WHERE id=?",
+                 (json.dumps(merged), int(ts or time.time()), row[0]))
+    return True
 
 
 def source_result(conn, source: str, ref: str, net: float, horizon_min: float | None = None) -> None:

@@ -71,7 +71,7 @@ def init(conn) -> None:
     from . import labels, opportunities
 
     opportunities.ensure(conn)
-    _add_columns(conn, "opportunities", labels.COLS)
+    _add_columns(conn, "opportunities", labels.COLS + (("supplemented_at", "INTEGER"),))
     try:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_opportunities_label ON opportunities(label_at, id)")
     except sqlite3.OperationalError:
