@@ -420,6 +420,13 @@ class Trader:
             if d.enter and self.s.pool_trade == "shadow":
                 d.enter, d.why_not = False, "Lernkonto pausiert (nur Vorhersage, Labels lernen weiter)"
                 raw["gate"] = "Lernkonto pausiert"
+        elif d.enter:
+            # hard cap per trade (18.10. 14:52: two convinced market buys of 0.88 and 0.90 SOL, a quarter of the
+            # account each, both stopped out): no source has a measured edge yet, conviction alone moves no more
+            cap = max(self.s.min_size_sol, self.s.hard_stake * self.equity())
+            if d.size_sol > cap:
+                raw["capped_from"] = d.size_sol
+                d.size_sol = round(cap, 3)
         if pocket:
             raw["pocket"], raw["trust"] = pocket, trust
         block = None
@@ -475,12 +482,13 @@ class Trader:
 
     def _gate(self, kind: str, mint: str, snap, d, row=None, raw=None) -> str | None:
         """Hard limits the model never overrides: a market to trade, the rug check, risk limits."""
-        if kind != "pool" and d.explore:
+        if kind != "pool":
             rec = self._record(kind)
             if rec:
-                # exploring costs the brain's own money only while the kind's real trades pay (18.10. midday: whale
-                # -10 % a trade over 92, stops -23 %): a kind whose last trades lost buys only what it is convinced of
-                return f"Bewährung: {kind} zuletzt {rec[0]:+.1%} je Trade über {rec[1]}, nur überzeugte Käufe"
+                # the brain's own money only goes where the kind's real trades pay (18.10. midday: whale -10 % a trade
+                # over 92, stops -23 %; 14:52 two convinced market buys lost 0.35 SOL in five minutes): a kind whose
+                # last trades lost buys nothing with the main account; the learning account and the replays go on
+                return f"Bewährung: {kind} zuletzt {rec[0]:+.1%} je Trade über {rec[1]}, kein Hauptkonto-Einsatz"
         if kind == "market" and not self.market_live():
             if not self.challenge_on(self.clock()):
                 return "Nebenquelle: erst beobachten, bis sie im Nachspielen vorne liegt"

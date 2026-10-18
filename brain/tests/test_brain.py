@@ -1680,7 +1680,7 @@ def test_a_curve_coin_without_a_jupiter_route_is_sold_on_the_curve(conn, s):
     assert p["status"] == "closed" and -0.06 < p["pnl_pct"] < -0.03, p["pnl_pct"]
 
 
-def test_a_kind_whose_trades_lost_explores_no_more(conn, s):
+def test_a_kind_whose_trades_lost_buys_nothing_with_the_main_account(conn, s):
     import types
     mk = Market()
     mk.snaps[MINT] = snap()
@@ -1691,9 +1691,9 @@ def test_a_kind_whose_trades_lost_explores_no_more(conn, s):
                      "VALUES ('whale', ?, 'closed', 1, ?, 0.1, -0.1)", (f"m{i}", 2 + i))
     assert t._gate("whale", MINT, mk.snaps[MINT], d).startswith("Bewährung: whale zuletzt -10.0%")
     assert not (t._gate("market", MINT, mk.snaps[MINT], d) or "").startswith("Bewährung")
-    d.explore = False
+    d.explore = False  # convinced: no main-account stake either (14:52: 0.88 and 0.90 SOL convinced, both stopped)
     t._records.clear()
-    assert not (t._gate("whale", MINT, mk.snaps[MINT], d) or "").startswith("Bewährung")
+    assert t._gate("whale", MINT, mk.snaps[MINT], d).startswith("Bewährung")
 
 
 def test_labels_carry_exit_rules_and_the_best_rule_is_judged_out_of_sample(conn, s):
@@ -1735,3 +1735,24 @@ def test_a_young_name_copy_of_a_rugged_launch_is_not_bought(conn, s):
                  (int(time.time()) - 3600,))
     assert t._gate("whale", MINT, young, d).startswith("Namenskopie")
     assert not (t._gate("whale", old.mint, old, d) or "").startswith("Namenskopie")  # the day-old original
+
+
+def test_no_main_account_trade_takes_more_than_the_hard_stake(conn, s, monkeypatch):
+    from brain import decide
+    real = decide.choose
+
+    def convinced_big(*a, **kw):  # 14:52: a convinced buy sized at a quarter of the account
+        d = real(*a, **kw)
+        d.enter, d.explore, d.size_sol = True, False, 0.9
+        return d
+    monkeypatch.setattr(decide, "choose", convinced_big)
+    set_tier(conn, WHALE, "ultra")
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    t = make_trader(conn, s, trained(), mk)
+    t.scan()
+    add_whale_buy(conn, "big")
+    t.scan()
+    o = conn.execute("SELECT decision, size_sol, raw FROM brain_opps WHERE ref='big'").fetchone()
+    assert o["decision"] == "enter" and o["size_sol"] == pytest.approx(max(s.min_size_sol, s.hard_stake * 5.0), abs=2e-3)
+    assert json.loads(o["raw"])["capped_from"] == 0.9

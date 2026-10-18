@@ -32,6 +32,7 @@ class Settings:
     # most this share of the account in one trade; so the stake grows with the account
     kelly_frac: float = field(default_factory=lambda: _f("BRAIN_KELLY_FRAC", 0.25))
     max_stake: float = field(default_factory=lambda: _f("BRAIN_MAX_STAKE", 0.2))
+    hard_stake: float = field(default_factory=lambda: _f("BRAIN_HARD_STAKE", 0.03))  # most of the account one trade takes
     unproven_stake: float = field(default_factory=lambda: _f("BRAIN_UNPROVEN_STAKE", 0.03))  # see Trader.settings
     # the user's challenge (10/2026: x2 every hour, "komme was wolle"): bigger stakes, small exploration buys from the
     # side sources right away; switches itself off for 6 h when the last 3 hours lost more than challenge_stop
