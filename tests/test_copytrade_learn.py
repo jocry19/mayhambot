@@ -403,3 +403,20 @@ def test_prune_keeps_trades_longer_than_skips():
     assert learn.prune(conn, now) == 2
     assert [r[0] for r in conn.execute("SELECT kind FROM ct_events")] == ["buy"]
     assert learn.prune(conn, now + 60) == 0  # at most hourly
+
+
+def test_good_wallets_join_the_learning_universe_watched_not_copied(env):
+    from copytrade import store, tracker
+    s, conn, ex, state = env
+    _wallet_row(conn, W, "ultra", score=91)
+    _wallet_row(conn, W2, "good", score=50)
+    tracker.load_core_smart(conn)
+    assert tracker.load_watch(conn, s) == 1
+    src = dict(conn.execute("SELECT address, source FROM ct_wallets").fetchall())
+    assert src == {W: "model_ultra", W2: "watch_good"} and tracker.WATCH == {W2}
+    assert W2 in tracker.ws_wallets(conn, s)  # watched live like everyone else
+    # no room left: nothing more is added
+    s2 = dataclasses.replace(s, max_active_wallets=2)
+    _wallet_row(conn, "G3" * 22, "good", score=40)
+    assert tracker.load_watch(conn, s2) == 0
+    tracker.WATCH.clear()

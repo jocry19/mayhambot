@@ -62,6 +62,11 @@ class Settings:
     watch_wallets: list[str] = field(
         default_factory=lambda: [w.strip() for w in os.getenv("CT_WATCH_WALLETS", "").split(",") if w.strip()]
     )
+    # the learning universe (18.10.): wallets watched live and reported to the brain without being copied strictly
+    # (exploration only, like block-0): the research model's 'good' tier and discovered big buyers beyond the copy
+    # room, up to CT_MAX_ACTIVE_WALLETS active wallets in all; polling stays with the best CT_MAX_TRACKED_WALLETS
+    watch_good_limit: int = field(default_factory=lambda: _i("CT_WATCH_GOOD_LIMIT", 150))
+    max_active_wallets: int = field(default_factory=lambda: _i("CT_MAX_ACTIVE_WALLETS", 300))
     max_tracked_wallets: int = field(default_factory=lambda: _i("CT_MAX_TRACKED_WALLETS", 40))
     wallet_poll_seconds: float = field(default_factory=lambda: _f("CT_WALLET_POLL_SECONDS", 8))
     # quiet wallets are polled less often (each poll = 1 RPC credit): last swap < 6 h -> every
@@ -81,7 +86,7 @@ class Settings:
         return "off" if not self.ws_urls or self.ws_urls[0] == "off" else self.ws_urls[0]
 
     # every active wallet up to this many gets a subscription (manual, Ultra/Smart, ranked first)
-    ws_max_wallets: int = field(default_factory=lambda: _i("CT_WS_MAX_WALLETS", 150))
+    ws_max_wallets: int = field(default_factory=lambda: _i("CT_WS_MAX_WALLETS", 300))
     # independent websocket connections on different endpoints watching the same wallets (one drop is no gap)
     ws_parallel: int = field(default_factory=lambda: _i("CT_WS_PARALLEL", 2))
     ws_fetchers: int = field(default_factory=lambda: _i("CT_WS_FETCHERS", 4))  # parallel transaction reads
@@ -91,7 +96,7 @@ class Settings:
     # one more wallet stream on Helius (HELIUS_API_KEY set): the public nodes drop notifications or cap at 100
     # subscriptions; Helius bills 2 credits per 0.1 MB streamed and pauses below the same reserve
     ws_helius: bool = field(default_factory=lambda: _b("CT_WS_HELIUS", True))
-    ws_helius_max: int = field(default_factory=lambda: _i("CT_WS_HELIUS_MAX", 150))
+    ws_helius_max: int = field(default_factory=lambda: _i("CT_WS_HELIUS_MAX", 300))
     # the "block 0" group (Erkenntnisse 17.10., 1d): tiny buys in a coin's very first moment, together within 5 s.
     # Watched live and kept active (never pruned as bots); "prefix…suffix" or a bare prefix is resolved against the
     # wallets the bot has seen (unique match only), full addresses are taken as they are

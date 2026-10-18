@@ -177,6 +177,28 @@ def load_block0(conn, s: Settings) -> list[str]:
     return out
 
 
+WATCH: set[str] = set()  # watched for learning only (sources watch_*): exploration copies, never strict ones
+
+
+def load_watch(conn, s: Settings) -> int:
+    """The learning universe: the research model's 'good' wallets (best model_score first) as source 'watch_good',
+    within CT_MAX_ACTIVE_WALLETS; fills WATCH with every active watch_* wallet."""
+    added = 0
+    room = max(0, s.max_active_wallets - len(active_wallets(conn)))
+    if room and s.watch_good_limit > 0:
+        try:
+            rows = conn.execute("SELECT address FROM wallets WHERE tier='good' ORDER BY COALESCE(model_score, 0) DESC "
+                                "LIMIT ?", (min(room, s.watch_good_limit),)).fetchall()
+            added = store.add_wallets(conn, [r[0] for r in rows], "watch_good")
+        except Exception as e:  # core's wallets table missing
+            log.debug("good wallets unavailable: %s", e)
+    WATCH.clear()
+    WATCH.update(r[0] for r in conn.execute("SELECT address FROM ct_wallets WHERE active=1 AND source LIKE 'watch%'"))
+    if added:
+        log.info("learning universe: %d 'good' wallets added, %d watched only", added, len(WATCH))
+    return added
+
+
 def load_core_smart(conn, limit: int = 30) -> int:
     """Ultra/smart wallets: core's `wallets.tier` (the one truth, synced from the research model), else
     model.wallet_tiers, else core's smart wallets."""
@@ -231,11 +253,18 @@ def discover(conn, s: Settings, rpc: chain.Rpc, tokens: int = 6, txs_per_token: 
                 found[b.wallet] = max(found.get(b.wallet, 0), b.sol_amount)
     known = {r[0] for r in conn.execute("SELECT address FROM ct_wallets")}
     new = [w for w, _ in sorted(found.items(), key=lambda kv: -kv[1]) if w not in known]
-    room = max(0, s.max_tracked_wallets - len(active_wallets(conn)))
-    added = store.add_wallets(conn, new[: max(room, 3)], "auto")
-    if added:
-        store.event(conn, "discover", f"{added} neue Wal-Wallets aus {len(hot)} heißen Coins", data=new[:added])
-    return added
+    n_active = len(active_wallets(conn))
+    room = max(0, s.max_tracked_wallets - n_active)
+    take = max(room, 3)
+    added = store.add_wallets(conn, new[:take], "auto")
+    # the rest are watched for learning (more different buys and labels for the brain), not copied strictly
+    rest = new[take:][: max(0, s.max_active_wallets - n_active - added)]
+    watched = store.add_wallets(conn, rest, "watch") if rest else 0
+    WATCH.update(rest[:watched])
+    if added or watched:
+        store.event(conn, "discover", f"{added} neue Wal-Wallets, {watched} nur beobachtet, aus {len(hot)} heißen Coins",
+                    data=new[:added + watched])
+    return added + watched
 
 
 def active_wallets(conn) -> list:

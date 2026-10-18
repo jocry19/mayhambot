@@ -1121,6 +1121,15 @@ def test_block0_group_is_explored_at_any_size_and_tagged(env, monkeypatch):
     assert rows[0][2] == pytest.approx(s.explore_size_sol * strategy.BLOCK0_SIZE)
 
 
+def test_learning_universe_wallets_are_explored_never_copied_strictly(env, monkeypatch):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, thompson=False, explore_unranked=True), ex)
+    monkeypatch.setattr(tracker, "WATCH", {W})
+    st.on_whale_buy(whale_buy())
+    assert {r[0] for r in conn.execute("SELECT mode FROM ct_positions")} <= {"explore"}
+    assert conn.execute("SELECT 1 FROM ct_events WHERE message LIKE '%Lern-Universum%'").fetchone()
+
+
 def test_ledger_fix_runs_once_and_keeps_the_old_value(env):
     s, conn, ex, state = env
     ex.balance(conn)

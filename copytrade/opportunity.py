@@ -30,8 +30,8 @@ def features(conn, sw, source: str, lag_s: float | None, notified_at: float | No
         src = (conn.execute("SELECT source FROM ct_wallets WHERE address=?", (sw.wallet,)).fetchone() or [None])[0]
     except Exception:
         src = None
-    group = "block0" if sw.wallet in tracker.BLOCK0 else ("manual" if src == "manual" else
-                                                           (info.get("tier") or "none"))
+    group = ("block0" if sw.wallet in tracker.BLOCK0 else "manual" if src == "manual" else
+             "watch" if sw.wallet in tracker.WATCH else (info.get("tier") or "none"))
     now = time.time()
     return {
         "source": "copytrade", "kind": f"whale_{sw.side}", "mint": sw.mint, "wallet": sw.wallet,

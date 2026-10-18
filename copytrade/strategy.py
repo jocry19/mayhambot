@@ -376,6 +376,8 @@ class Strategy:
             why = f"Wal-Kauf zu klein ({swap.sol_amount:.2f} SOL)"
         if block0:  # exploration only: the plan's test is >= +5 % net over 100 copies before anything stricter
             why = why or "Block-0-Gruppe (nur Erkundung)"
+        elif swap.wallet in tracker.WATCH:  # the learning universe (18.10.): measured and explored, never strict
+            why = why or "Lern-Universum (nur Erkundung)"
         # accounts that take this buy: the strict one when every wallet gate passed, exploration when eligible
         accounts = ([] if why else ["paper"]) + (["explore"] if expl else [])
         if not accounts:

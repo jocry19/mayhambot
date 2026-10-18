@@ -34,6 +34,10 @@ class Engine:
         tracker.load_manual(c, s)
         tracker.load_core_smart(c)
         try:
+            tracker.load_watch(c, s)
+        except Exception as e:
+            log.warning("learning universe failed: %s", e)
+        try:
             tracker.load_block0(c, s)
         except Exception as e:
             log.warning("block-0 wallets failed: %s", e)
