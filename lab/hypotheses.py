@@ -15,7 +15,7 @@ RUG = 0.1
 CAP = 10.0
 GRID_S = 300  # one decision point per coin every 5 min
 ENTRY_DELAY_S = 60  # entry at the first snapshot at least a minute after the decision point
-ENTRY_TOL_S = 240
+ENTRY_TOL_S = 360  # unfollowed coins get a snapshot every 5 min since 78f5bef (TOKEN_SNAPSHOT_SECONDS 300)
 COLS = ["hyp", "mint", "t", "dex", "liq", "kind", "gross"]
 
 
@@ -61,7 +61,7 @@ def panel(conn, since: int, prices: pd.DataFrame | None = None) -> pd.DataFrame:
         if not len(grid):
             continue
         i = np.searchsorted(ts, grid, side="right") - 1
-        ok = grid - ts[i] <= 120
+        ok = grid - ts[i] <= 300  # the last snapshot before the decision point, at most one 5-min step old
         i5 = np.searchsorted(ts, grid - 300, side="right") - 1
         i60 = np.searchsorted(ts, grid - 3600, side="right") - 1
         je = np.searchsorted(ts, grid + ENTRY_DELAY_S)
