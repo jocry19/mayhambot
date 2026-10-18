@@ -170,8 +170,9 @@ def build(conn, version_id, bt, tiers_now, weights, weight_info, models, prev=No
                 tier_counts=counts, weights=weights, weight_info=weight_info,
                 tier_profiles={}, tier_forward=m.get("tier_forward", {}),
                 combos=combos(evs, main), univariate=univariate(evs, main),
-                backtest={k: v for k, v in m.items() if k not in ("tier_forward", "selection", "exits", "wallet_rank")},
+                backtest={k: v for k, v in m.items() if k not in ("tier_forward", "selection", "exits", "wallet_rank", "wallet_rank_h")},
                 exits=m.get("exits") or {}, wallet_rank=m.get("wallet_rank") or {},
+                wallet_rank_h=m.get("wallet_rank_h") or {},
                 models={h: {"kind": mm.get("kind"), "algo": (mm.get("cfg") or {}).get("algo", mm.get("kind")),
                             "drop": (mm.get("cfg") or {}).get("drop"), "n": mm.get("n"), "pos": mm.get("pos"),
                             "weights": sorted(({"feature": f, "label": FEATURE_LABELS[f], "weight": c}
@@ -373,6 +374,13 @@ def render(d):
             L.append("Wallet-Rangfolge vorwärts (oberstes Fünftel der Wallets nach Score, nächster Kauf, netto): " + " · ".join(
                 f"{names.get(k, k)} Ø {_pct(v['mean_net'])} (Untergrenze {_pct(v['ci_low'])}, Median {_pct(v['median_net'])}, n {v['n']})"
                 for k, v in wr.items()) + "\n")
+        for hn, row in (d.get("wallet_rank_h") or {}).items():
+            parts = [f"{VARIANT_LABELS.get(k, k)}: oberstes Fünftel {_pct(v['mean_net_top'])} ({'+' if v['lift'] >= 0 else ''}"
+                     f"{100 * v['lift']:.1f} Pkt. gegen alle), Rangkorrelation "
+                     + ("–" if v["rank_corr"] is None else f"{v['rank_corr']:+.2f}")
+                     for k, v in row.items() if k != "all"]
+            L.append(f"Wallet-Score vorwärts {hn} (alle Käufe Ø {_pct(row['all']['mean_net'])}, n {row['all']['n']}): "
+                     + " · ".join(parts) + "\n")
         ex = d.get("exits") or {}
         if ex.get("top"):
             def rule(r):

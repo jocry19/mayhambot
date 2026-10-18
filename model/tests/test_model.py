@@ -473,6 +473,11 @@ def test_backtest_reports_walk_forward_net_of_wallet_ranking(market):
     assert {"all", "net", "excess", "pumped", "prior"} <= set(wr)
     assert all(v["n"] > 0 and v["ci_low"] <= v["mean_net"] for v in wr.values())
     assert wr["net"]["mean_net"] >= wr["all"]["mean_net"]  # skilled wallets in the fixture: ranking must help
+    wh = m["wallet_rank_h"]
+    assert {"1h", "6h"} <= set(wh)
+    for row in wh.values():
+        assert {"all", "net", "excess", "pumped", "prior"} <= set(row)
+        assert all(v["rank_corr"] is None or -1 <= v["rank_corr"] <= 1 for k, v in row.items() if k != "all")
 
 
 def test_wallet_features_for_the_opportunity_table(market):

@@ -60,7 +60,7 @@ def _wallet_events(ds, stats_k, a, b, h_name, horizons, limit=4000, rng=None):
     return out
 
 
-def _rank_forward(acc, wev, variants):
+def _rank_forward(acc, wev, variants, pairs=None):
     """Walk-forward check of the wallet weights: for the next window's wallet buys, the net result after costs
     of the top fifth of wallets by score under each weight variant (learned on profit after costs, learned on
     'pumped' without a cap as before, fixed prior)."""
@@ -69,8 +69,11 @@ def _rank_forward(acc, wev, variants):
     k = max(1, len(wev) // 5)
     acc.setdefault("all", []).extend(we["net"] for we in wev)
     for name, w in variants.items():
-        top = sorted(wev, key=lambda we: -wallet_score(dict(components=we["comps"], n_tokens=we["n_tokens"]), w))[:k]
-        acc.setdefault(name, []).extend(we["net"] for we in top)
+        scored = [(wallet_score(dict(components=we["comps"], n_tokens=we["n_tokens"]), w), we["net"]) for we in wev]
+        top = sorted(scored, key=lambda x: -x[0])[:k]
+        acc.setdefault(name, []).extend(n for _, n in top)
+        if pairs is not None:  # every buy with its score: rank correlation score vs net, walk-forward
+            pairs.setdefault(name, []).extend(scored)
 
 
 def _coin_events(ds, tmap, a, b, ms):
@@ -103,7 +106,7 @@ def _coin_events(ds, tmap, a, b, ms):
 def run(ds, ms=msettings, max_points=24):
     cps = checkpoints(ds.ts_list, max_points)
     res = dict(checkpoints=cps, events=[], wallet_events=[], preds={h[0]: [] for h in ms.horizons},
-               weights=[], tier_counts=[], tier_forward={}, wallet_rank={})
+               weights=[], tier_counts=[], tier_forward={}, wallet_rank={}, wallet_rank_h={})
     if not cps:
         log.info("not enough history for a walk-forward backtest (%.1f h)", (ds.end - ds.start) / 3600)
         return res
@@ -129,6 +132,10 @@ def run(ds, ms=msettings, max_points=24):
         wev = _wallet_events(ds, st, c, nxt, h_wallet, ms.horizons)
         res["wallet_events"].extend(wev)
         _rank_forward(res["wallet_rank"], wev, variants)
+        for hn in [h[0] for h in ms.horizons if h[0] in ("1h", "6h")]:
+            d = res["wallet_rank_h"].setdefault(hn, dict(top={}, pairs={}))
+            evh = wev if hn == h_wallet else _wallet_events(ds, st, c, nxt, hn, ms.horizons)
+            _rank_forward(d["top"], evh, variants, d["pairs"])
         for x in wallet_stats.first_buys(ds, c, nxt):
             tier = (tmap.get(x[0]) or (None,))[0] or "none"
             if x[0] not in st or x[2] < getattr(ds, "hindsight", {}).get(x[1], 0):
@@ -273,4 +280,18 @@ def metrics(res, ms):
         wr[name] = dict(n=len(nets), mean_net=mu, ci_low=mu - 1.96 * sd / len(nets) ** 0.5,
                         median_net=stats.median(nets), win_rate=sum(1 for x in nets if x > 0) / len(nets))
     out["wallet_rank"] = wr
+    out["wallet_rank_h"] = {}
+    for hn, d in res.get("wallet_rank_h", {}).items():
+        allnets = d["top"].get("all") or []
+        if not allnets:
+            continue
+        base = sum(allnets) / len(allnets)
+        row = dict(all=dict(n=len(allnets), mean_net=base))
+        for name, nets in d["top"].items():
+            if name == "all" or not nets:
+                continue
+            pr = d["pairs"].get(name) or []
+            row[name] = dict(n=len(nets), mean_net_top=sum(nets) / len(nets), lift=sum(nets) / len(nets) - base,
+                             rank_corr=stats.spearman([a for a, _ in pr], [b for _, b in pr]))
+        out["wallet_rank_h"][hn] = row
     return out
