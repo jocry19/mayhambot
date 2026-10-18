@@ -323,7 +323,8 @@ class Engine:
                    mcap_decide_sol=st.base_mcap_sol, mcap_decide_usd=(st.base_mcap_sol or 0) * sol_usd or None,
                    sol_usd=sol_usd or None, reasons_json=store.j(a.reasons[:8]), positives_json=store.j(a.positives[:6]),
                    migrated=int(st.migrated), rug_p=F.get("rug_p"), block0_wallets=F.get("block0_wallets"),
-                   fee_pct=st.fee_pct, start_mcap_sol=st.start_mcap_sol)
+                   fee_pct=st.fee_pct, start_mcap_sol=st.start_mcap_sol,
+                   quote_mint=st.quote_mint)
         if stage >= 2:
             row["features_json"] = store.j(dict(F, momentum_parts=a.momentum_parts, insiders=a.insiders))
         return row

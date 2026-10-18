@@ -59,6 +59,10 @@ class Service:
                                      program=rpcws.PUMP_PROGRAM, stale_sec=cfg.stale_sec, fallbacks=urls2[1:]) \
             if urls2 and (cfg.ws_url2 or self.helius_ws) else None
         self.helius_bytes, self.helius_credits, self.helius_paused = 0, 0.0, ""
+        # curves quoted in another token: SOL per quote token, from our own live curve or DexScreener
+        self.quote_px = {rpcws.WSOL_MINT: (float("inf"), 1.0)}          # mint -> (ts, SOL per token)
+        rpcws.QUOTE_PRICE = self.quote_price
+        self.quote_replayed = 0
         self._helius_day = (time.strftime("%Y-%m-%d"), 0.0)
         # bonk: LaunchLab events name the pool, not the mint; pools are derived from the mint (rpcws.bonk_pool)
         self.bonk_pools, self.bonk_mints = {}, {}          # pool -> mint, mint -> pool
@@ -478,6 +482,38 @@ class Service:
             l2.skip.discard(url)
             log.info("Strom 2: Helius wieder frei")
 
+    QUOTE_FRESH, QUOTE_STALE = 120, 3600
+
+    def quote_price(self, mint, now=None):
+        """SOL per token of a curve's quote token; called by the decoder in the event loop (no network here).
+        A pump.fun coin we follow live prices itself; others come from quote_round (DexScreener)."""
+        now = now or time.time()
+        st = self.engine.launches.get(mint)
+        if st is not None and not st.migrated and st.price_sol > 0 and now - st.last_trade_ts <= self.QUOTE_FRESH:
+            return st.price_sol
+        ts, px = self.quote_px.get(mint, (0, None))
+        if now - ts > self.QUOTE_FRESH:
+            rpcws.QUOTE_WANTED[mint] = now
+        return px if now - ts <= self.QUOTE_STALE else None
+
+    def quote_round(self):
+        """Every 5 s: prices of the quote tokens the decoder needed in the last 10 minutes (stale after 2 min)."""
+        now = time.time()
+        want = [m for m, t in list(rpcws.QUOTE_WANTED.items())
+                if now - t <= 600 and now - self.quote_px.get(m, (0, None))[0] > self.QUOTE_FRESH]
+        for m in [m for m, t in list(rpcws.QUOTE_WANTED.items()) if now - t > 3600]:
+            rpcws.QUOTE_WANTED.pop(m, None)
+        if not want or not self.sol_usd():
+            return
+        got = feed.token_prices_sol(sorted(want, key=lambda m: -rpcws.QUOTE_WANTED.get(m, 0))[:60], self.sol_usd())
+        for m, px in got.items():
+            self.quote_px[m] = (now, px)
+            for msg in rpcws.replay_quoted(m, time.time()):     # the first trades of its launches, held back
+                self.quote_replayed += 1
+                self._on_rpc_trade(msg)
+        for m in [m for m in list(rpcws.QUOTE_PENDING) if m not in rpcws.QUOTE_WANTED]:
+            rpcws.QUOTE_PENDING.pop(m, None)
+
     def curve_live_round(self):
         """Every few seconds: latest curve state of the launches that traded, for other processes (copytrade)."""
         now = time.time()
@@ -685,6 +721,12 @@ class Service:
         log.info("Dekoder-Verwürfe (5 min): %d Trades eigener Launches (%d Launches) | nach Instruktion (gesamt): %s | "
                  "Kurven mit weniger als 30 virtuellen SOL angenommen (gesamt): %d", len(own), len(set(own)),
                  ", ".join(f"{k} {v}" for k, v in sorted(rpcws.REJECT_IX.items())) or "keine", rpcws.LOW_START["trades"])
+        q = rpcws.QUOTE
+        top = sorted(rpcws.QUOTE_BY_MINT.items(), key=lambda kv: -kv[1])[:4]
+        log.info("Kurven in Fremdwährung (gesamt): %d Trades in SOL umgerechnet, %d ohne Kurs verworfen | Quoten: %s | "
+                 "Kurse bekannt %d, %d zurückgehaltene Trades nachgereicht", q["trades"], q["unpriced"],
+                 ", ".join(f"{'PUMP' if m == rpcws.PUMP_TOKEN_MINT else m[:6]} {n}" for m, n in top) or "keine",
+                 len(self.quote_px) - 1, self.quote_replayed)
         if self.logs_bonk:
             b = self.logs_bonk
             log.info("Bonk-Datenstrom: %s, %d Pools im Abo, %d Trades dekodiert, %d an Launches (%d nachgereicht) | "
@@ -713,6 +755,7 @@ class Service:
                  asyncio.create_task(self.every(300, self.sol_round)),
                  asyncio.create_task(self.every(10, self.heartbeat, 1)),
                  asyncio.create_task(self.every(3, self.curve_live_round, 3)),
+                 asyncio.create_task(self.every(5, self.quote_round, 5)),
                  asyncio.create_task(self.every(10, self.helius_meter, 10)),
                  asyncio.create_task(self.every(self.cfg.dex_every_sec, self.dex_round, 10)),
                  asyncio.create_task(self.every(600, self.tiers_round, 600)),

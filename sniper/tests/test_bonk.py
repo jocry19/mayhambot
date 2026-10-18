@@ -2,6 +2,7 @@
 traders attached afterwards, the service mapping pool -> launch, per-launch fees in paper fills and research."""
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -279,3 +280,61 @@ def test_stream_2_goes_to_helius_first_and_leaves_it_at_the_reserve(tmp_path, mo
 
 def test_stream_errors_never_carry_the_key():
     assert "k123" not in rpcws._redact("server rejected WebSocket connection wss://x/?api-key=k123: HTTP 401")
+
+
+# real TradeEvents of 18.10. (sniper.log) of curves quoted in another token: PUMP and a pump.fun coin
+QUOTED_PUMP = ("vdt/007mYe4366GPIfGooYV2XtP60qIvrIiVphzPNx2tZp2hedtX/wAAAAAAAAAA6MudppEDAAABZp57pIP7glBlAA+qJJuCe7l+yEsD"
+               "G4GwIXsPmhKBR+7oKdRqAAAAAAAAAAAAAAAA7aJir1FXAQAAAAAAAAAAAO0KUGPAWAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+               "AAAAAABfAAAAAAAAACMKogwAAAAArP1lbfo0oKcXm1KZQUhqwlnr+VczXeg14NpXa9Ce06vIAAAAAAAAACGBmBoAAAAAAAAAAAAAAAAA"
+               "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEgAAAGJ1eV9leGFjdF9xdW90ZV9pbgAAAAAAAAAAAAAAAAAAAAAAiBMAAAAAAAARBVEGAAAA"
+               "AAAAAAAMRfffjZ5ylWKEkz9tmLdXAy6D34RgT7XhF//2HVsS+W84yTEFAAAArI8R4vgBAACZsalDRwEAAAAAAAAAAAAAAAAAAAAAAADl"
+               "6CfdBAAAAA==")
+QUOTED_COIN = ("vdt/007mYe61JjCNQKyas1ovSwLTBonx8jmWcADGpo5LNmiQr8EQjwAAAAAAAAAAGWK2ug0uAAAB3fbOecXTXpMydlpcDzEsbjMu"
+               "6NNv/V8WQXlsi5Z4nP2XHtRqAAAAAAAAAAAAAAAA560hjdWhAwAAAAAAAAAAAOcVD0FEowIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+               "AAAAAAAAAABfAAAAAAAAAE5cCdgBAAAAF8kqXw9jUQ8cPTDN8qTMIwRqMO8TFCCAKEsjjRmo6HwsAQAAAAAAAOhLpNIFAAAAAAAAAAAA"
+               "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAGJ1eQAAAAAAAAAAAAAAAAAAAAAAiBMAAAAAAAAnrgTsAAAAAAAAAAB4JNJflfqv"
+               "HgOaqQ2uXu9nqsnqtspb9puh525fVRJ+D3g3DxjCAAAAB65E5hAQAAB4Nw8YwgAAACwBAAAAAAAA6Euk0gUAAADoS6TSBQAAAA==")
+
+
+def test_quoted_curves_are_priced_in_sol(monkeypatch):
+    import base64
+    monkeypatch.setattr(rpcws, "QUOTE_PRICE", None)
+    q = rpcws.quote_fields(base64.b64decode(QUOTED_PUMP))
+    assert q == (rpcws.PUMP_TOKEN_MINT, 22310107247, 2168456318892, 1405589500313)
+    assert rpcws.quote_fields(base64.b64decode(QUOTED_COIN))[0] == "95zVNJn96PE9aEvUwgg5AWa6TTQNj9v26DrmSnQbpump"
+    assert rpcws.decode_trade(QUOTED_PUMP) is None           # no price yet: held back, not a decoder reject
+    assert rpcws._UNPRICED[0] == rpcws.PUMP_TOKEN_MINT
+    monkeypatch.setattr(rpcws, "QUOTE_PRICE", lambda m: 2.5e-5)
+    m = rpcws.to_stream_msg(rpcws.decode_trade(QUOTED_PUMP), "S")
+    assert m["quoteMint"] == rpcws.PUMP_TOKEN_MINT and m["txType"] == "buy"
+    assert m["feePct"] == pytest.approx(0.95 + 2.0 + rpcws.QUOTE_SWAP_FEE_PCT)   # protocol + creator + swap leg
+    assert m["solAmount"] == pytest.approx(22310.107247 * 2.5e-5, rel=1e-6)
+    assert m["vSolInBondingCurve"] == pytest.approx(2168456.318892 * 2.5e-5, rel=1e-6)
+    # the trade's own price sits just below the curve's price after it (a buy moves the price up)
+    assert 0.9 < (m["solAmount"] / m["tokenAmount"]) / (m["marketCapSol"] / 1e9) < 1.0
+    st = LaunchState(mint=m["mint"], created_ts=T0)
+    st.apply_trade(dict(m, txType="buy"), T0 + 1)
+    assert st.start_mcap_sol == pytest.approx((2168456.318892 - 1405589.500313) * 2.5e-5 / 1.073e9 * 1e9, rel=1e-3)
+
+
+def test_held_back_quoted_trades_replay_once_priced(tmp_path, monkeypatch):
+    from sniper import feed, service
+    svc = service.Service(cfg(), db_path=str(tmp_path / "q.db"))
+    note_ = {"method": "logsNotification", "params": {"result": {"context": {"slot": 7}, "value": {
+        "signature": "SIGQ", "err": None,
+        "logs": ["Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [1]", "Program data: " + QUOTED_PUMP,
+                 "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P success"]}}}}
+    svc.quote_px.pop(rpcws.PUMP_TOKEN_MINT, None)
+    assert rpcws.parse_notification(note_) == [] and rpcws.QUOTE_PENDING[rpcws.PUMP_TOKEN_MINT]
+    seen = []
+    monkeypatch.setattr(svc, "_on_rpc_trade", seen.append)
+    monkeypatch.setattr(svc, "sol_usd", lambda: 160.0)
+    monkeypatch.setattr(feed, "token_prices_sol", lambda mints, sol_usd: {m: 2.5e-5 for m in mints})
+    svc.quote_round()
+    assert [x["signature"] for x in seen] == ["SIGQ"] and seen[0]["_rx"] > 0
+    assert svc.quote_price(rpcws.PUMP_TOKEN_MINT) == 2.5e-5 and rpcws.PUMP_TOKEN_MINT not in rpcws.QUOTE_PENDING
+    # a quote that is a coin we follow live prices itself from its own curve
+    st = LaunchState(mint="QC", created_ts=time.time())
+    st.v_sol, st.v_tok, st.last_trade_ts = 40.0, 8e8, time.time()
+    svc.engine.launches["QC"] = st
+    assert svc.quote_price("QC") == pytest.approx(5e-8)

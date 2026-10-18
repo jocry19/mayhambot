@@ -67,6 +67,36 @@ def dex_prices(mints, sol_usd):
     return out
 
 
+def token_prices_sol(mints, sol_usd):
+    """{mint: SOL per token} from DexScreener (the pair with the most liquidity), for the quote tokens of pump.fun
+    curves that are not quoted in SOL. Mints without a pair are left out."""
+    out = {}
+    for i in range(0, len(mints), 30):
+        chunk = mints[i:i + 30]
+        try:
+            pairs = http.get_json(f"{DEXSCREENER}/tokens/v1/solana/{','.join(chunk)}", retries=1)
+        except Exception as e:  # noqa: BLE001
+            log.debug("dexscreener quote prices failed: %s", e)
+            continue
+        if isinstance(pairs, dict):
+            pairs = pairs.get("pairs") or []
+        best = {}
+        for p in pairs or []:
+            m = (p.get("baseToken") or {}).get("address")
+            liq = (p.get("liquidity") or {}).get("usd") or 0
+            if m not in chunk or liq < best.get(m, (0, None))[0]:
+                continue
+            px = None
+            if (p.get("quoteToken") or {}).get("address") == SOL_MINT and p.get("priceNative"):
+                px = float(p["priceNative"])
+            elif p.get("priceUsd") and sol_usd:
+                px = float(p["priceUsd"]) / sol_usd
+            if px and px > 0:
+                best[m] = (liq, px)
+        out.update({m: v[1] for m, v in best.items()})
+    return out
+
+
 # ---------------------------------------------------------------- GeckoTerminal: new pools outside pump.fun
 SKIP_DEX = {"pump-fun", "pumpswap", "pump-swap"}
 

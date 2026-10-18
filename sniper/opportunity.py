@@ -11,7 +11,8 @@ from . import research
 FEATURES = ["mcap_decide_sol", "start_mcap_sol", "n_trades", "n_buyers", "n_sellers", "buy_sol", "sell_sol",
             "net_sol", "top10_pct", "curve_progress", "bundle_wallets", "bundle_pct", "unseen_pct", "block0_wallets",
             "insider_flag", "bundle_flag", "dev_buy_pct", "dev_sold_pct", "dev_launches", "dev_launches_24h",
-            "known_bad", "fast_buyers", "n_smart", "n_good", "momentum", "risk", "score", "fee_pct"]
+            "known_bad", "fast_buyers", "n_smart", "n_good", "momentum", "risk", "score", "fee_pct",
+            "quote_mint"]
 HORIZON_MIN = 60
 
 
@@ -27,6 +28,12 @@ def net_result(row, cfg):
     if row.get("fee_pct"):
         side += (row["fee_pct"] - cfg.curve_fee_pct) / 100
     return max(-1.0, (1 + min(r, research.MAX_TRADE_NET)) * (1 - side) ** 2 - 1 - 2 * tx)
+
+
+def _quote_label(mint):
+    """What the curve is quoted in: SOL, PUMP or another coin (pump.fun "depth" coins)."""
+    from .rpcws import PUMP_TOKEN_MINT
+    return "SOL" if not mint else ("PUMP" if mint == PUMP_TOKEN_MINT else "coin")
 
 
 def from_row(row, cfg):
@@ -75,7 +82,8 @@ def shared_features(o, row):
            "sniper.dev_sold_pct": f.get("dev_sold_pct"), "sniper.dev_launches": f.get("dev_launches"),
            "sniper.dev_launches_24h": f.get("dev_launches_24h"), "sniper.known_bad": f.get("known_bad"),
            "sniper.fast_buyers": f.get("fast_buyers"), "sniper.smart_buyers": f.get("n_smart"),
-           "sniper.good_buyers": f.get("n_good"), "sniper.momentum": f.get("momentum"), "sniper.fee": f.get("fee_pct")}
+           "sniper.good_buyers": f.get("n_good"), "sniper.momentum": f.get("momentum"), "sniper.fee": f.get("fee_pct"),
+           "sniper.quote": _quote_label(f.get("quote_mint"))}
     return out
 
 

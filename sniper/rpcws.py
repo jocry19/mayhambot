@@ -80,6 +80,71 @@ def curve_ok(v_sol, v_tok, r_sol, r_tok):
             and abs(v_tok - r_tok - PUMP_TOKEN_OFFSET) <= 1e6)
 
 
+# Curves quoted in another token (10/2026: PUMP, other pump.fun coins, "depth" coins): the SOL fields of the event
+# are 0 and the quote side sits in its tail (IDL pump-fun/pump-public-docs idl/pump.json: after ix_name come
+# mayhem_mode bool, cashback bps/fee, buyback bps/fee u64, shareholders vec<(pubkey, u16)>, quote_mint, quote_amount,
+# virtual_quote_reserves, real_quote_reserves, ...). 18.10.: about 40 % of the launches we track, all of them
+# decided "without trades" before. The service sets QUOTE_PRICE (SOL per quote token); amounts become SOL with it.
+PUMP_TOKEN_MINT = "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn"
+QUOTE_SWAP_FEE_PCT = 1.0   # paper: a buy and a sell of a quoted coin each need a SOL <-> quote swap as well
+QUOTE = {"trades": 0, "unpriced": 0}
+QUOTE_BY_MINT = {}        # quote mint -> converted trades
+QUOTE_WANTED = {}         # quote mint -> last time a trade needed its price and none was known
+QUOTE_PRICE = None        # callable(quote_mint) -> SOL per quote token (UI units) or None
+QUOTE_PENDING = {}        # quote mint -> deque of (rx time, data, signature, slot) waiting for its price
+_UNPRICED = [None]        # quote mint of the last event decode_trade held back (read right after by the parser)
+
+
+def quote_decimals(mint):
+    return 9 if mint == "So11111111111111111111111111111111111111112" else 6   # pump.fun coins and PUMP: 6
+
+
+def quote_fields(raw):
+    """(quote_mint, quote_amount, virtual_quote_reserves, real_quote_reserves) in raw units, or None."""
+    if len(raw) < 263:
+        return None
+    n = int.from_bytes(raw[258:262], "little")
+    if not 0 < n <= 32:
+        return None
+    p = 262 + n + 1 + 32
+    if len(raw) < p + 4:
+        return None
+    k = int.from_bytes(raw[p:p + 4], "little")
+    if k > 64:
+        return None
+    p += 4 + 34 * k
+    if len(raw) < p + 56:
+        return None
+    amt, vq, rq = struct.unpack_from("<QQQ", raw, p + 32)
+    return b58(raw[p:p + 32]), amt, vq, rq
+
+
+def _quoted(raw, vtok, rtok):
+    """SOL-denominated (sol, v_sol, r_sol) lamports of a curve quoted in another token, False if it is none,
+    None if it is one but its quote has no price yet."""
+    if abs(vtok / 1e6 - rtok / 1e6 - PUMP_TOKEN_OFFSET) > 1e6 or vtok <= 0:
+        return False
+    q = quote_fields(raw)
+    if not q or q[2] <= 0 or q[3] > q[2]:
+        return False
+    qm, amt, vq, rq = q
+    px = None
+    try:
+        px = QUOTE_PRICE(qm) if QUOTE_PRICE else None
+    except Exception:  # noqa: BLE001
+        px = None
+    if not px or px <= 0:
+        import time as _t
+        QUOTE["unpriced"] += 1
+        QUOTE_WANTED[qm] = _t.time()
+        _UNPRICED[0] = qm
+        return None
+    k = px / 10 ** quote_decimals(qm) * 1e9          # lamports per raw quote unit
+    QUOTE["trades"] += 1
+    QUOTE_BY_MINT[qm] = QUOTE_BY_MINT.get(qm, 0) + 1
+    return int(amt * k), int(vq * k), int(rq * k), qm
+
+
 def decode_trade(data_b64):
     """pump.fun TradeEvent -> dict, or None for other events. Layout (Anchor): disc 8, mint 32, sol_amount u64,
     token_amount u64, is_buy bool, user 32, timestamp i64, virtual_sol_reserves u64, virtual_token_reserves u64."""
@@ -99,6 +164,14 @@ def decode_trade(data_b64):
     if not ok and rsol is not None and curve_ok(vsol / 1e9, vtok / 1e6, rsol / 1e9, rtok / 1e6):
         ok = True
         LOW_START["trades"] += 1
+    quote_mint = None
+    if not ok and vsol == 0 and not rsol and rtok is not None:
+        qd = _quoted(raw, vtok, rtok)
+        if qd is None:
+            return None           # a quoted curve whose quote price is not known yet (counted in QUOTE)
+        if qd:
+            sol, vsol, rsol, quote_mint = qd
+            ok = True
     if not ok:
         REJECTS["trade"] += 1     # a layout we do not know (or garbage): a broken price must not reach the engine
         why = _reject_reason(vsol / 1e9, vtok / 1e6)
@@ -115,8 +188,15 @@ def decode_trade(data_b64):
                         sol / 1e9, tok / 1e6, ix or "?", len(raw),
                         (", roh " + base64.b64encode(raw).decode()) if len(_SAMPLES) <= 3 else "")
         return None
-    return {"mint": mint, "sol_lamports": sol, "token_raw": tok, "is_buy": is_buy, "user": user, "ts": ts,
-            "v_sol_lamports": vsol, "v_tok_raw": vtok, "r_sol_lamports": rsol}
+    # the curve's own fee (protocol fee_basis_points @161 + creator_fee_basis_points @209): 1.25 % on SOL curves,
+    # 2.95 to 3.95 % on the quoted ones of 18.10.
+    fee_pct = None
+    if len(raw) >= 225:
+        bps = struct.unpack_from("<Q", raw, 161)[0] + struct.unpack_from("<Q", raw, 209)[0]
+        if 0 < bps <= 2000:
+            fee_pct = bps / 100 + (QUOTE_SWAP_FEE_PCT if quote_mint else 0.0)
+    return {"mint": mint, "sol_lamports": sol, "token_raw": tok, "is_buy": is_buy, "user": user, "ts": ts, "fee_pct": fee_pct,
+            "v_sol_lamports": vsol, "v_tok_raw": vtok, "r_sol_lamports": rsol, "quote_mint": quote_mint}
 
 
 def to_stream_msg(ev, signature, slot=None):
@@ -127,7 +207,9 @@ def to_stream_msg(ev, signature, slot=None):
             "solAmount": ev["sol_lamports"] / 1e9, "newTokenBalance": None, "vSolInBondingCurve": v_sol,
             "vTokensInBondingCurve": v_tok, "marketCapSol": v_sol / v_tok * 1e9 if v_tok else 0.0,
             "pool": "pump", "slot": slot, "chainTs": ev["ts"], "src": "rpc_logs",
-            "rSolInBondingCurve": ev["r_sol_lamports"] / 1e9 if ev.get("r_sol_lamports") is not None else None}
+            "rSolInBondingCurve": ev["r_sol_lamports"] / 1e9 if ev.get("r_sol_lamports") is not None else None,
+            **({"quoteMint": ev["quote_mint"]} if ev.get("quote_mint") else {}),
+            **({"feePct": ev["fee_pct"]} if ev.get("fee_pct") else {})}
 
 
 def decode_create(data_b64):
@@ -230,9 +312,31 @@ def parse_notification(m):
     slot = (res.get("context") or {}).get("slot")
     out = []
     for d in program_data(v.get("logs"), PUMP_PROGRAM):
+        _UNPRICED[0] = None
         ev = decode_trade(d)
         if ev:
             out.append(to_stream_msg(ev, v.get("signature") or "", slot))
+        elif _UNPRICED[0]:
+            import time as _t
+            q = QUOTE_PENDING.get(_UNPRICED[0])
+            if q is None:
+                q = QUOTE_PENDING[_UNPRICED[0]] = deque(maxlen=500)
+            q.append((_t.time(), d, v.get("signature") or "", slot))
+    return out
+
+
+def replay_quoted(quote_mint, now, max_age=120):
+    """Trades held back until their quote token had a price: decoded again (now with it), oldest first, each with
+    its arrival time as _rx; older than max_age seconds are dropped."""
+    q = QUOTE_PENDING.pop(quote_mint, None) or ()
+    out = []
+    for ts, d, sig, slot in q:
+        if now - ts > max_age:
+            continue
+        QUOTE["unpriced"] -= 1        # counted again by decode_trade if it still has no price
+        ev = decode_trade(d)
+        if ev:
+            out.append(dict(to_stream_msg(ev, sig, slot), _rx=ts))
     return out
 
 

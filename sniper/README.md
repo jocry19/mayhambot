@@ -92,6 +92,10 @@ Wünsche an andere Pakete (über den Coordinator):
 7. **Ergebnis** nach 1, 5, 15, 60 min für **jeden** entschiedenen Launch: Datenstrom solange abonniert, sonst
    DexScreener im Stapel (30 Coins je Call). `rugged` siehe unten (Forschung).
 
+### Kurven in Fremdwährung (seit 18.10.)
+
+Rund 40 % der pump.fun-Launches werden nicht mehr in SOL, sondern in PUMP oder einem anderen pump.fun-Coin gehandelt. Ihre TradeEvents tragen 0 bei den SOL-Feldern; Menge und Reserven der Quote stehen am Ende des Events (IDL `pump-fun/pump-public-docs`, `idl/pump.json`: nach `ix_name` mayhem_mode, Cashback und Buyback, `shareholders`, dann `quote_mint`, `quote_amount`, `virtual_quote_reserves`, `real_quote_reserves`). `rpcws.decode_trade` rechnet sie mit dem SOL-Kurs der Quote in SOL um: ein Coin, den der Sniper selbst live verfolgt, bepreist sich aus seiner Kurve, sonst holt `quote_round` den Kurs alle 5 s bei DexScreener (`feed.token_prices_sol`). Trades, deren Quote noch keinen Kurs hat, werden zurückgehalten und nachgereicht, sobald er da ist (höchstens 2 min alt). Die Gebühr kommt aus dem Event selbst (Protokoll + Creator, 1,25 % bei SOL-Kurven, 2,95–3,95 % bei den gequoteten) plus 1 % für den Tausch SOL ↔ Quote je Seite im Papierhandel. Spalte `quote_mint`, Merkmal `sniper.quote` (SOL, PUMP, coin) in der Gelegenheiten-Tabelle; der 5-min-Bericht zählt sie unter „Kurven in Fremdwährung“.
+
 ## Score
 
     momentum = 100 × (0,25 Käufer + 0,30 Netto-SOL + 0,15 Kaufdruck + 0,20 Smart Money + 0,10 Streuung)   (nur organische Käufer)

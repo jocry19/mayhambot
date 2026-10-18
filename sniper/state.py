@@ -154,6 +154,7 @@ class LaunchState:
     learned: bool = False                             # picked by the accepted research rule (sniper.research)
     create_slot: int | None = None                    # slot of the creation (RPC create stream), bundle reference
     path: PricePath | None = None                     # bucketed mcap path for exit replays (sniper_paths)
+    quote_mint: str | None = None                     # pump: the curve is quoted in this token (PUMP, a coin), not SOL
     start_mcap_sol: float | None = None               # pump: market cap at the curve's start (v_sol - real_sol)
     fee_pct: float | None = None                      # curve fee seen in the trades (bonk: per platform, ~1-6 %)
 
@@ -210,6 +211,8 @@ class LaunchState:
             self.start_mcap_sol = max(0.0, t.v_sol - f(m["rSolInBondingCurve"])) / PUMP_START_TOKENS * self.supply
         if m.get("feePct") is not None:
             self.fee_pct = f(m["feePct"], None)
+        if m.get("quoteMint"):
+            self.quote_mint = m["quoteMint"]
         self.seen_net_tokens += t.tokens if side == "buy" else -t.tokens
         if t.v_sol > 0 and t.v_tok > 0:
             self.v_sol, self.v_tok = t.v_sol, t.v_tok
