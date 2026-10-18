@@ -164,4 +164,5 @@ des Mittelwerts in der älteren UND der neueren Hälfte und positivem Schnitt de
 sofort zurück). Nur in einer freigegebenen Tasche setzt Kelly auf den Mittelwert und der Challenge-Modus seine
 größeren Einsätze; sonst rechnet Kelly mit der Untergrenze der Kante, ein unbewiesener Vorteil setzt also das
 Minimum (Plan „Hundertmal besser“, 18.10.: bei negativem Erwartungswert verlieren größere Einsätze nur schneller).
-Stand in `brain_state.pockets`, Zeile im Tagebuch.
+Stand in `brain_state.pockets` (Zeilen mit key, label, source, n, mean, lower95, Hälften, last50_mean, released,
+released_at, demoted_at, reason), lesend über `pockets.table(conn)` fürs Dashboard; Zeile im Tagebuch.

@@ -40,8 +40,29 @@ def keys(kind: str, feats: dict) -> list[str]:
     return out
 
 
+def label(key: str) -> str:
+    from .features import describe
+
+    kind, _, feat = key.partition("|")
+    src = {"whale": "Wal-Kopien", "signal": "Signale", "signal_v2": "Signale v2", "launch": "Launches",
+           "market": "Markt-Coins"}.get(kind, kind)
+    return f"{src}, {describe(feat)}" if feat else f"{src} (alle)"
+
+
+def _why(n, lo, ln, last) -> str:
+    if n < MIN_N:
+        return f"erst {n} von {MIN_N} Fällen"
+    if lo is None or lo <= 0:
+        return f"ältere Hälfte nicht sicher im Plus (Untergrenze {lo:+.1%})" if lo is not None else "ältere Hälfte zu klein"
+    if ln is None or ln <= 0:
+        return f"neuere Hälfte nicht sicher im Plus (Untergrenze {ln:+.1%})" if ln is not None else "neuere Hälfte zu klein"
+    if last <= 0:
+        return f"die letzten {LAST_N} Fälle Ø {last:+.1%}: zurückgestuft"
+    return "in beiden Hälften sicher im Plus, die letzten 50 tragen"
+
+
 def scan(conn, now: float) -> dict:
-    """{pocket: {n, mean, lb, lb_old, lb_new, last}} for every pocket with MIN_N cases; released ones flagged."""
+    """{pocket: row} for every pocket with at least MIN_N // 2 cases (so the way to a release is visible)."""
     rows = conn.execute("SELECT kind, features, realized_plan FROM brain_opps WHERE realized_plan IS NOT NULL "
                         "AND evaluated_at>=? ORDER BY ts", (int(now - WINDOW_S),)).fetchall()
     by: dict[str, list[float]] = {}
@@ -50,24 +71,40 @@ def scan(conn, now: float) -> dict:
             feats = json.loads(f or "{}")
         except ValueError:
             feats = {}
+        if kind == "signal" and feats.get("sig") == "v2":
+            kind = "signal_v2"
         for k in keys(kind, feats):
             by.setdefault(k, []).append(float(r))
     out = {}
     for k, xs in by.items():
         n = len(xs)
-        if n < MIN_N:
+        if n < MIN_N // 2:
             continue
         h = n // 2
-        lb, lo, ln = lower(xs), lower(xs[:h]), lower(xs[h:])
+        a, b = xs[:h], xs[h:]
+        lb, lo, ln = lower(xs), lower(a), lower(b)
         last = sum(xs[-LAST_N:]) / min(n, LAST_N)
-        live = lo is not None and ln is not None and lo > 0 and ln > 0 and last > 0
-        out[k] = {"n": n, "mean": round(sum(xs) / n, 4), "lb": round(lb, 4), "lb_old": round(lo, 4),
-                  "lb_new": round(ln, 4), "last": round(last, 4), "live": live}
+        live = n >= MIN_N and lo is not None and ln is not None and lo > 0 and ln > 0 and last > 0
+        out[k] = {"key": k, "label": label(k), "source": k.split("|")[0], "n": n, "mean": round(sum(xs) / n, 4),
+                  "lower95": round(lb, 4) if lb is not None else None,
+                  "n_first_half": len(a), "mean_first_half": round(sum(a) / len(a), 4) if a else None,
+                  "lower95_first_half": round(lo, 4) if lo is not None else None,
+                  "n_second_half": len(b), "mean_second_half": round(sum(b) / len(b), 4) if b else None,
+                  "lower95_second_half": round(ln, 4) if ln is not None else None,
+                  "last50_mean": round(last, 4), "released": live, "reason": _why(n, lo, ln, last)}
     return out
 
 
+def table(conn) -> dict:
+    """What the dashboard reads (read only): {"rule", "at", "pockets": [rows, best lower bound first]}."""
+    st = store.get(conn, "pockets") or {}
+    return {"rule": {"min_n": MIN_N, "conf": 0.95, "last_n": LAST_N, "window_days": WINDOW_S // 86400},
+            "at": st.get("at"), "pockets": st.get("rows") or []}
+
+
 class Book:
-    """The released pockets, rescanned every EVERY_S and kept in brain_state for the journal and the dashboard."""
+    """The released pockets, rescanned every EVERY_S and kept in brain_state["pockets"] for the journal and the
+    dashboard (rows with released_at / demoted_at carried over between scans)."""
 
     def __init__(self, conn, clock):
         self.conn, self.clock = conn, clock
@@ -83,12 +120,22 @@ class Book:
             res = scan(self.conn, now)
         except Exception:
             return self.live
-        self.live = {k for k, v in res.items() if v["live"]}
-        top = sorted(res.items(), key=lambda kv: -kv[1]["lb"])[:20]
-        store.put(self.conn, "pockets", {"at": int(now), "live": sorted(self.live), "top": dict(top),
-                                         "checked": len(res)})
+        prev = {r["key"]: r for r in (store.get(self.conn, "pockets") or {}).get("rows") or []}
+        for k, r in res.items():
+            p = prev.get(k, {})
+            r["released_at"], r["demoted_at"] = p.get("released_at"), p.get("demoted_at")
+            if r["released"] and not p.get("released"):
+                r["released_at"] = int(now)
+            if p.get("released") and not r["released"]:
+                r["demoted_at"] = int(now)
+        self.live = {k for k, v in res.items() if v["released"]}
+        rows = sorted(res.values(), key=lambda r: -(r["lower95"] if r["lower95"] is not None else -9))
+        store.put(self.conn, "pockets", {"at": int(now), "live": sorted(self.live), "checked": len(res),
+                                         "rows": rows[:300]})
         return self.live
 
     def match(self, kind: str, feats: dict) -> str | None:
         live = self.refresh()
+        if kind == "signal" and feats.get("sig") == "v2":
+            kind = "signal_v2"
         return next((k for k in keys(kind, feats) if k in live), None)
