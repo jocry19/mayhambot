@@ -1007,7 +1007,7 @@ class Strategy:
                 reason = "smart_exit"
             elif (now - p["opened_at"]) / 60 >= p["max_hold_min"]:
                 reason = "time"
-            if reason == "target" and p["mode"] in PAPER_MODES and not self._target_confirmed(p):
+            if reason == "target" and p["mode"] in PAPER_MODES and not self._target_confirmed(p, price):
                 reason = None  # trailing stop, stop and time limit still apply
             if reason == "stop" and paper and not self._stop_confirmed(p, now):
                 reason = None  # the quote says the coin is not down: the price that fired was stale
@@ -1147,13 +1147,15 @@ class Strategy:
             return False
         return True
 
-    def _target_confirmed(self, p) -> bool:
-        """Paper targets are judged on the screener's mid price; confirm with what a sell would bring (one Jupiter
-        quote, only when the target fires). 10/2026: a 'target' exit was booked at -7 % because the mid price ran
-        ahead of the sellable price. Without a quote the mid price decides, as before."""
+    def _target_confirmed(self, p, price: float = 0.0) -> bool:
+        """Paper targets are judged on the mid price against the market price at the buy; confirm with what a sell
+        would bring (one Jupiter quote, only when the target fires). 10/2026: a 'target' exit was booked at -7 %
+        because the mid price ran ahead of the sellable price. Without a quote the price must also clear the target
+        against our own fill: Kaida (18.10.) was booked 'target' at -25.9 % when the fill lay far above the mid."""
         gain = self._quote_gain(p)
         if gain is None:
-            return True
+            fill = p["entry_price_sol"] or 0.0
+            return not (price and fill) or price / fill - 1 >= p["take_profit"] * 0.8
         return gain >= p["take_profit"] * 0.8  # quote vs mid: a little of the spread is allowed
 
     # ------------------------------------------------------------------ commands from dashboard / terminal

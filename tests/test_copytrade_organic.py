@@ -2,7 +2,7 @@
 import dataclasses
 import types
 
-from copytrade import control, organic, strategy
+from copytrade import control, market, organic, strategy
 from test_copytrade import MINT, env  # noqa: F401  (fixture)
 
 from brain import exits as real_exits
@@ -138,3 +138,15 @@ def test_curve_price_is_ignored_when_it_is_another_unit(monkeypatch):
     assert st._curve_price("m", 1.0, 0) is None  # 10x off the screener: a units error
     monkeypatch.setattr(sstore, "curve_now", lambda conn, mint, age, now=None: {"price_sol": 10.0, "complete": True})
     assert st._curve_price("m", 9.0, 0) is None  # migrated: the screener's pool price counts
+
+
+def test_a_paper_target_without_a_quote_must_also_clear_our_own_fill(env, monkeypatch):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    p = _signal_position(st, conn, state)
+    monkeypatch.setattr(market, "jupiter_quote", lambda *a, **k: None)
+    fill = p["entry_price_sol"]
+    # the mid at the buy lay far below our fill (Kaida, 18.10.): the target on the mid is a loss on the fill
+    assert not st._target_confirmed(p, fill * 0.75)
+    assert st._target_confirmed(p, fill * (1 + p["take_profit"]))
+    assert st._target_confirmed(p, 0.0)  # no price known: as before

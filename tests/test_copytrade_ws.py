@@ -1057,6 +1057,14 @@ def test_buys_land_in_the_brains_opportunity_table(env):
                 raise AssertionError("a repeat must not reach the strategy")
 
         watch.handle_swap(Strat(), again)
+        # another wallet of the group in the same coin: the group buys together, one report per coin
+        W3 = "B0two" + "z" * 39
+        tracker.BLOCK0.add(W3)
+        mate = chain.Swap("sigQ3", W3, int(time.time()) - 2, "buy", "m", 1000.0, 0.005, 0.000005, dex="pump")
+        tracker.record_detection(conn, mate, "ws", sol_usd=100.0)
+        assert "sigQ3" in tracker.B0_REPEAT
+        assert conn.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0] == 1
+        tracker.BLOCK0.discard(W3)
     finally:
         tracker.BLOCK0.discard(W)
         opportunity.set_sink(None)

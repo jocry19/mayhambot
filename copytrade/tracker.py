@@ -73,20 +73,27 @@ def record_detection(conn, sw: chain.Swap, source: str, notified_at: float | Non
     now = time.time()
     lag = max(0.0, now - sw.block_time) if sw.block_time else float("nan")
     LAG.append((source, sw.side, lag, now))
-    repeat = False
+    repeat = again = False
     if sw.wallet in BLOCK0:
         if sw.side == "buy":
-            last_at, last_sig = _B0_LAST.get((sw.wallet, sw.mint), (0.0, ""))
-            _B0_LAST[(sw.wallet, sw.mint)] = (now, sw.signature)
-            # the same bot buying the same coin again (437x, 18.10.); the same signature twice is no repeat
-            repeat = sw.signature != last_sig and now - last_at < B0_REPEAT_S
+            # per coin across the group: its wallets buy together, so one opportunity and one decision per coin in
+            # 30 min (per wallet it was up to 33 reports a coin and hour, 18.10.); the same signature seen again (ws,
+            # then a gap poll) is no repeat for the strategy, but is not offered twice
+            last_at, last_sig = _B0_LAST.get(sw.mint, (0.0, ""))
+            again = sw.signature == last_sig
+            if not again:
+                _B0_LAST[sw.mint] = (now, sw.signature)
+            repeat = not again and now - last_at < B0_REPEAT_S
+            if len(_B0_LAST) > 20000:
+                for k in [k for k, (ts, _) in _B0_LAST.items() if now - ts >= B0_REPEAT_S]:
+                    del _B0_LAST[k]
             if repeat:
                 B0_REPEAT[sw.signature] = None
                 while len(B0_REPEAT) > 5000:
                     B0_REPEAT.popitem(last=False)
-        if not repeat:
+        if not repeat and not again:
             LAG.append(("block0", sw.side, lag, now))  # the group's own lag (its edge is the first seconds)
-    if not repeat:
+    if not repeat and not again:
         opportunity.emit(conn, sw, source, lag, notified_at, sol_usd)  # the shared opportunity table (plan 18.10.)
     try:
         usd = sol_usd or 0.0

@@ -130,7 +130,8 @@ class Engine:
                   f"{self.rpc.fallbacks}, public bulk failures {self.rpc.bulk_failures}"
                 + f"; opportunities to the brain {opportunity.SKIPPED['sent']} "
                   f"({opportunity.SKIPPED['stale']} older than {opportunity.STALE_S} s not sent)"
-                + f"; poll backlog older than {tracker.BACKFILL_S} s kept out of the lag {sum(tracker.BACKFILL.values())}")
+                + f"; poll backlog older than {tracker.BACKFILL_S} s kept out of the lag {sum(tracker.BACKFILL.values())}"
+                  f" (websocket-covered {tracker.BACKFILL['gap']})")
         opportunity.SKIPPED.update(sent=0, stale=0)
         tracker.BACKFILL.clear()
         tracker.DETECTED.update(wslog=0, ws=0, poll=0, gap=0)
