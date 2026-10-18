@@ -28,6 +28,7 @@ DS_EVERY_S = 180
 DS_CALLS = 10  # DexScreener calls per step (30 coins each); a step is a minute
 MAX_TRACK = 6000
 SAVE_EVERY_S = 600  # the followed paths are kept in brain_state this often (a restart loses at most this much)
+CAP = 10.0  # +1000 %: beyond it a label is a price glitch more often than a coin (18.10.: means of +155724 %)
 RUG = 0.1  # the low under 10 % of the entry: rugged, counted as -100 %
 COLS = (("label_at", "INTEGER"), ("label_horizon_min", "REAL"), ("label_n", "INTEGER"), ("label_entry_sol", "REAL"),
         ("label_max15", "REAL"), ("label_max60", "REAL"), ("label_ret60", "REAL"), ("label_min60", "REAL"),
@@ -65,15 +66,16 @@ def label(pts: list, c: float) -> dict | None:
     in15 = [px for t, px in pts if t - t0 <= 900]
     lo = min(px for _, px in pts)
     rug = lo <= RUG * p0
-    ret = -1.0 if rug else pts[-1][1] / p0 - 1 - c
+    ret = -1.0 if rug else min(CAP, pts[-1][1] / p0 - 1 - c)
     cs = candles(pts)
     outs = {}
     for p in PLANS:
         r = sim.simulate(cs, t0, p.variant(0), cost=c)
         if r is not None:
-            outs[p.name] = round(r[0], 5)
+            outs[p.name] = round(min(CAP, r[0]), 5)
     return {"label_horizon_min": round((pts[-1][0] - t0) / 60, 1), "label_n": len(pts), "label_entry_sol": p0,
-            "label_max15": round(max(in15) / p0 - 1 - c, 5), "label_max60": round(max(px for _, px in pts) / p0 - 1 - c, 5),
+            "label_max15": round(min(CAP, max(in15) / p0 - 1 - c), 5),
+            "label_max60": round(min(CAP, max(px for _, px in pts) / p0 - 1 - c), 5),
             "label_ret60": round(ret, 5), "label_min60": round(lo / p0 - 1 - c, 5), "label_rug": int(rug),
             "label_outcomes": json.dumps(outs)}
 

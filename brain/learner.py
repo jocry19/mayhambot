@@ -21,7 +21,7 @@ import time
 
 from copytrade import sim
 
-from . import exits, features, store
+from . import exits, features, labels, store
 from .plans import BASE, NAMES, PLANS, gains_from_grid, nearest_delay
 
 log = logging.getLogger("brain.learner")
@@ -666,7 +666,8 @@ def _ranks(xs: list) -> list:
 def label_skill(conn, lo: float, hi: float | None = None) -> dict | None:
     """Does the pool model rank the opportunities? Rows labelled in [lo, hi) with a prediction, the first per source
     and coin only (copytrade/strategy reported one coin up to 413 times): rank correlation of pred_mean with
-    label_ret60 (after costs, rug -100 %), and the mean label_ret60 of the top and bottom tenth by pred_mean."""
+    label_ret60 (after costs, rug -100 %), and the mean (values capped at labels.CAP) and median label_ret60 of the
+    top tenth by pred_mean, the bottom tenth's mean. A stake on the pool needs the top tenth's median above 0."""
     try:
         rows = conn.execute("SELECT source, mint, pred_mean, label_ret60, label_max60, label_outcomes FROM "
                             "opportunities WHERE label_at>=? AND "
@@ -679,12 +680,13 @@ def label_skill(conn, lo: float, hi: float | None = None) -> dict | None:
         if (src, mint) not in seen:
             seen.add((src, mint))
             xs.append(float(p))
-            ys.append(float(y))
+            ys.append(min(labels.CAP, float(y)))  # labels written before the cap: a glitch must not carry a mean
             try:
                 o = json.loads(outs or "{}")
             except (TypeError, ValueError):
                 o = {}
-            extra.append((m60, o))
+            extra.append((min(labels.CAP, m60) if m60 is not None else None,
+                          {k: min(labels.CAP, v) for k, v in o.items() if isinstance(v, (int, float))}))
     n = len(xs)
     if n < 20:
         return {"n": n}
@@ -705,7 +707,8 @@ def label_skill(conn, lo: float, hi: float | None = None) -> dict | None:
     # the top tenth three ways: held 60 min (no exit), its best price (the ceiling), and the best plan's net on
     # average (an exit chosen after the fact: an upper bound, not a result)
     best = max(plans.items(), key=lambda kv: sum(kv[1]) / len(kv[1]), default=None)
-    return {"n": n, "rho": round(rho, 3), "top": round(sum(ys[i] for i in top) / k, 4),
+    tops = sorted(ys[i] for i in top)
+    return {"n": n, "rho": round(rho, 3), "top": round(sum(tops) / k, 4), "top_median": round(tops[k // 2], 4),
             "bottom": round(sum(ys[i] for i in bottom) / k, 4),
             "top_max60": round(sum(m60) / len(m60), 4) if m60 else None,
             "top_plan": (best[0], round(sum(best[1]) / len(best[1]), 4)) if best else None}

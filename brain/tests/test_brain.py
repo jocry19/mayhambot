@@ -1657,3 +1657,40 @@ def test_label_skill_ranks_one_row_per_source_and_coin(conn, s):
     line = sv._labelled(now - 10)
     assert "skill rho +" in line and "max60 +50.0%" in line and "(n 41 coins)" in line, line
     assert store.get(conn, "label_skill_hist")[-1][1] == 41
+
+
+def test_a_curve_coin_without_a_jupiter_route_is_sold_on_the_curve(conn, s):
+    from brain import opportunities as O
+    mk = Market()
+    mk.snaps[MINT] = snap(liq=0, dex="pumpfun", price=1e-6)
+    curve = {"price_sol": 1e-6, "complete": False, "v_sol": 40.0}
+    t, _ = _pool_trader(conn, s, mk, curve_now=lambda c, m, now: dict(curve) if m == MINT else None)
+
+    class NoRoute(Paper):
+        def sell(self, mint, tokens, decimals, sn, last):
+            return Fill(True, tokens=tokens, sol=0.0, price_sol=0.0, price_impact=1.0, fees_sol=0.0002,
+                        source="no_route")
+    t._executor = NoRoute()
+    O.report(conn, "sniper", "C1", MINT, time.time(), {"buyers": 12})
+    assert t.scan() == 1
+    p = conn.execute("SELECT * FROM brain_positions").fetchone()
+    assert t.close(p, mk.snaps[MINT], "time")
+    p = conn.execute("SELECT * FROM brain_positions").fetchone()
+    # 0.03 SOL at a 2 % worse paper fill, sold on a 40-SOL curve: the curve fee and the fees, no -100 %
+    assert p["status"] == "closed" and -0.06 < p["pnl_pct"] < -0.03, p["pnl_pct"]
+
+
+def test_a_kind_whose_trades_lost_explores_no_more(conn, s):
+    import types
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    t = make_trader(conn, s, trained(), mk)
+    d = types.SimpleNamespace(explore=True, enter=True, size_sol=0.1)
+    for i in range(20):
+        conn.execute("INSERT INTO brain_positions(kind, mint, status, opened_at, closed_at, size_sol, pnl_pct) "
+                     "VALUES ('whale', ?, 'closed', 1, ?, 0.1, -0.1)", (f"m{i}", 2 + i))
+    assert t._gate("whale", MINT, mk.snaps[MINT], d).startswith("Bewährung: whale zuletzt -10.0%")
+    assert not (t._gate("market", MINT, mk.snaps[MINT], d) or "").startswith("Bewährung")
+    d.explore = False
+    t._records.clear()
+    assert not (t._gate("whale", MINT, mk.snaps[MINT], d) or "").startswith("Bewährung")
