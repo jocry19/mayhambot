@@ -1098,6 +1098,7 @@ def check_masche(ctx):
     r.data.update(dev_buy_pct=round(d, 2), migrated=bool(row and row[0]), migrated_after_sec=mig_after)
     if d >= ctx.cfg.masche_dev_buy_pct:
         r.hard = True
+        _log_once(ctx.mint, "block", f"safety masche: {ctx.mint} gesperrt, Ersteller kaufte {d:.2f} % beim Start (Sniper-Datensatz)")
         r.add(95, f"Der Ersteller kaufte beim Start {d:.1f} % des Supplies, also die ganze Bonding-Curve: Muster "
                   "der Marken-Masche (Setup-Kauf im selben Block, Airdrops an Hunderte Wallets, Abverkauf in einer "
                   "Transaktion). In unseren Daten endeten alle 8 solchen Millionen-Läufe bei ≤ 2 % ihrer Liquidität: gesperrt.")
@@ -1128,6 +1129,7 @@ def _masche_from_chain(ctx, r):
     if state != "done":
         r.status = "gap"
         r.hard = True
+        _log_once(ctx.mint, "gap", f"safety masche: {ctx.mint} ohne Launch-Datensatz, Chain-Prüfung läuft (gap, gesperrt)")
         r.add(60, "Junger pump.fun-Coin ohne Launch-Datensatz: der Kauf des Erstellers beim Start wird noch geprüft "
                   "(Marken-Masche ausschließen), bis dahin gesperrt.")
         return r.finish()
@@ -1144,11 +1146,53 @@ def _masche_from_chain(ctx, r):
     r.data.update(dev_buy_pct=round(d, 2), creator=creator, setup_buyers=setup[:5])
     if d >= c.masche_dev_buy_pct:
         r.hard = True
+        _log_once(ctx.mint, "block", f"safety masche: {ctx.mint} gesperrt, Ersteller kaufte {d:.2f} % beim Start (Chain)"
+                  + (f", Setup-Kauf {setup[0]}" if setup else ""))
         r.add(95, f"Der Ersteller kaufte beim Start {d:.1f} % des Supplies (aus der Chain gelesen), also die ganze "
                   "Bonding-Curve: Muster der Marken-Masche: gesperrt."
                   + (f" Im selben Block kaufte {short(setup[0])} für ≥ {c.masche_setup_sol:g} SOL (Setup-Kauf)." if setup else ""))
     else:
+        _log_once(ctx.mint, "free", f"safety masche: {ctx.mint} Chain-Prüfung frei, Ersteller kaufte {d:.2f} %")
         r.positives.append(f"Ersteller kaufte beim Start {d:.1f} % des Supplies.")
+    return r.finish(cap=95)
+
+
+_logged = {}
+
+
+def _log_once(mint, what, text):
+    """One INFO line per coin and outcome per process (the log readers grep 'safety masche:')."""
+    if _logged.get(mint) == what:
+        return
+    if len(_logged) > 20000:
+        _logged.clear()
+    _logged[mint] = what
+    log.info(text)
+
+
+def check_rugged(ctx):
+    """A coin one of our own accounts already sold as a rug (brain exit_reason 'rug': liquidity pulled or a sale at
+    -90 % or worse; copy trader the same) stays blocked for SAFETY_RUGGED_BLOCK_SEC in every
+    path. DOPE 18.10.: sold as rug at 07:10, bought again as a whale copy at 07:13."""
+    r = CheckResult("rugged", "Schon als Rug verkauft")
+    since = ctx.now - ctx.cfg.rugged_block_sec
+    hit = None
+    for sql in ("SELECT closed_at, 'Hirn' FROM brain_positions WHERE mint=? AND exit_reason='rug' AND closed_at>=? "
+                "ORDER BY closed_at DESC LIMIT 1",
+                "SELECT closed_at, 'Copy-Trader' FROM ct_positions WHERE mint=? AND exit_reason='rug' "
+                "AND closed_at>=? ORDER BY closed_at DESC LIMIT 1"):
+        try:
+            row = ctx.conn.execute(sql, (ctx.mint, since)).fetchone()
+        except Exception:  # noqa: BLE001 - that package is not installed
+            continue
+        if row and (hit is None or row[0] > hit[0]):
+            hit = row
+    if hit:
+        r.hard = True
+        r.data.update(rug_ts=int(hit[0]), by=hit[1])
+        mins = max(1, int((ctx.now - hit[0]) // 60))
+        r.add(90, f"{hit[1]} hat diesen Coin vor {mins} min als Rug verkauft (Liquidität abgezogen oder ≥ 90 % "
+                  "Verlust): gesperrt.")
     return r.finish(cap=95)
 
 
@@ -1190,6 +1234,6 @@ def check_exit(ctx):
 # masche runs before watchlist: its launch analysis (coins without a sniper record) stores the launch buyers the
 # watchlist then checks against the setup wallets in the same pass
 QUICK = [check_authorities, check_sell_sim, check_liquidity, check_lp, check_socials, check_wash,
-         check_rugcheck, check_holders, check_exit, check_history, check_masche, check_watchlist,
+         check_rugcheck, check_holders, check_exit, check_history, check_rugged, check_masche, check_watchlist,
          check_block0, check_staged]
 DEEP = [check_dev, check_insiders, check_bundles]

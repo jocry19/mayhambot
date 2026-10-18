@@ -915,3 +915,31 @@ def test_pair_created_at_in_seconds_or_ms_and_old_rows_repaired():
     store.ensure_schema(c)    # idempotent
     got = dict(c.execute("SELECT mint, pair_created_at FROM safety_tokens"))
     assert got == {"A": 1792297000, "B": 1792297962}
+
+
+def test_coin_sold_as_rug_by_our_own_account_stays_blocked(caplog):
+    c = conn()
+    c.execute("CREATE TABLE brain_positions (mint TEXT, status TEXT, closed_at INTEGER, exit_reason TEXT)")
+    c.execute("INSERT INTO brain_positions VALUES (?, 'closed', ?, 'rug')", (MINT, NOW - 180))
+    c.commit()
+    a = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
+    assert a.blocked and a.checks["rugged"]["hard"] and a.checks["rugged"]["data"]["by"] == "Hirn"
+    c.execute("UPDATE brain_positions SET closed_at=?", (NOW - 2 * 86400,))
+    c.commit()
+    a = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
+    assert not a.checks["rugged"]["hard"]
+
+
+def test_masche_writes_one_log_line_per_coin(caplog):
+    import logging
+    from types import SimpleNamespace
+    c = conn()
+    c.execute("CREATE TABLE sniper_launches (mint TEXT, created_ts INTEGER, migrated INTEGER, migrated_ts INTEGER, "
+              "dev_buy_pct REAL)")
+    c.execute("INSERT INTO sniper_launches VALUES ('Logpump', ?, 1, ?, 79.31)", (NOW - 60, NOW - 59))
+    x = SimpleNamespace(mint="Logpump", cfg=CFG, now=NOW, conn=c)
+    with caplog.at_level(logging.INFO, logger="mayhambot.safety"):
+        checks.check_masche(x)
+        checks.check_masche(x)
+    lines = [m for m in caplog.messages if m.startswith("safety masche:")]
+    assert len(lines) == 1 and "gesperrt" in lines[0]
