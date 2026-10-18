@@ -745,6 +745,21 @@ def test_spearman_and_calibration():
     assert len(dec) == 10 and gap == 0 and Q._calibration([(0, 0)] * 10) == ([], None)
 
 
+def test_brain_factor_skips_transfer(tmp_path):
+    from brain import store
+    from web import queries as Q
+
+    conn = sqlite3.connect(str(tmp_path / "t.db"))
+    store.init(conn)
+    conn.row_factory = sqlite3.Row
+    d0 = 1_790_000_000 - 1_790_000_000 % 86400
+    conn.executemany("INSERT INTO brain_equity(ts, balance_sol, open_value_sol, equity_sol) VALUES (?,?,?,?)",
+                     [(d0 + 60, 5, 0, 5.0), (d0 + 3600, 4, 0, 4.0), (d0 + 7200, 4.4, 0, 4.4)])
+    store.put(conn, "equity_transfers", [[d0 + 3000, -0.6]])  # 0.6 left for the learning account: not a loss
+    day = next(x for x in Q._brain_days(conn, d0 + 7200, []) if x["ts"] == d0)
+    assert day["mult"] == 1.0 and Q._brain_moved(Q._brain_transfers(conn), d0 + 60, d0 + 7200) == -0.6
+
+
 def test_local_day0():
     import time as _t
     from web import queries as Q
@@ -797,6 +812,10 @@ def test_brain_view(demo, empty, tmp_path):
     assert all(x["trade_lo_7d"] <= x["trade_mean_7d"] <= x["trade_hi_7d"] for x in lc["days"] if x.get("trade_lo_7d") is not None)
     assert sum(x["learn_n_trades"] for x in lc["days"]) == 60 and any(x["learn_trade_mean_7d"] is not None for x in lc["days"])  # pool apart
     assert len(lc["deciles"]) == 10 and sum(x["n"] for x in lc["deciles"]) == lc["n_7d"] and lc["cal_gap_7d"] >= 0
+    lr = d["learn"]  # the learning account's own book; the own account excludes pool positions and the transfer
+    assert lr["closed"] == 60 and all(p["kind"] != "pool" for p in d["open"] + d["closed"]) and lr["split"]["moved_sol"] == 0.6
+    assert d["account"]["moved_sol"] == -0.6 and abs(lr["result_sol"] - lr["pnl_sol"]) < 1e-3  # 0.6 moved in, rest is its trades
+    assert any(p.get("learn_equity_sol") is not None for p in d["equity"])
     held = d["open"] + d["closed"]
     assert {p["exit_mode"] for p in held} <= {"organic", "plan"}
     for p in d["open"]:

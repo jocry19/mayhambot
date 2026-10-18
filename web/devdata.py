@@ -221,6 +221,12 @@ def _brain_demo(conn, r, tokens, now):
                      "pnl_pct, exit_reason) VALUES ('pool',?,?,?,1e-6,0.03,'closed',?,?,?,?)",
                      [(f"DemoPool{i}", f"P{i}", ts, ts + 1800, round(0.03 * g, 5), round(g, 4), r.choice(("organic", "stop", "rug")))
                       for i, ts, g in ((i, now - r.randint(3600, 3 * 86400), max(-1.0, r.gauss(-0.12, 0.3))) for i in range(60))])
+    # the learning account's own book (brain b8ac58b): balance from 0 after a one-time split, equity per minute
+    split_ts = now - 2 * 86400
+    store.put(conn, "learn_split", {"at": split_ts, "moved_sol": 0.6, "open_value_sol": 0.21, "positions": 7})
+    store.put(conn, "equity_transfers", [[split_ts - split_ts % 60, -0.6]])
+    pool_pnl = sum(row[0] for row in conn.execute("SELECT pnl_sol FROM brain_positions WHERE kind='pool'"))
+    store.put(conn, "learn_balance_sol", round(0.6 + pool_pnl, 4))
     # the shared opportunity table of every source (brain/opportunities.py), the model getting better day by day
     from brain import opportunities as bo
 
@@ -244,9 +250,10 @@ def _brain_demo(conn, r, tokens, now):
                      "pred_mean, pred_sd, decision, evaluated_at, outcome_net, source_result) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", opp)
     store.put(conn, "regime_history", [{"at": now - 3 * 86400 + 5000, "n": 31, "err": -0.042, "z": -3.1},
                                        {"at": now - 20000, "n": 27, "err": 0.035, "z": 2.7}])
-    conn.executemany("INSERT OR REPLACE INTO brain_equity(ts, balance_sol, open_value_sol, equity_sol) VALUES (?,?,?,?)",
-                     [(ts, b, o, b + o) for ts, b, o in eq_pts])
-    store.put(conn, "balance_sol", round(bal - open_sz, 4))  # cash: open stakes are out of the balance
+    conn.executemany("INSERT OR REPLACE INTO brain_equity(ts, balance_sol, open_value_sol, equity_sol, learn_equity_sol) VALUES (?,?,?,?,?)",
+                     [(ts, b - mv, o, b + o - mv, round(0.6 + pool_pnl * min(1, (ts - split_ts) / (now - split_ts)), 4) if ts >= split_ts else None)
+                      for ts, b, o in eq_pts for mv in [0.6 if ts >= split_ts else 0.0]])
+    store.put(conn, "balance_sol", round(bal - open_sz - 0.6, 4))  # 0.6 went to the learning account at the split  # cash: open stakes are out of the balance
     store.put(conn, "started_at", now - 2 * 86400)
     for d in (1, 0):
         day = time.strftime("%Y-%m-%d", time.gmtime(now - d * 86400))

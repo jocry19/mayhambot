@@ -13,7 +13,7 @@ const dayLabel = (ts) => { const d = new Date(ts * 1000); return `${String(d.get
 const fx = (v, d = 2) => (v == null ? "–" : `×${n(v, d)}`);
 const regimeText = (x) => `Regime gewechselt: die letzten ${n(x.n)} Ergebnisse lagen Ø ${pctSigned(x.err, 1)} neben der Vorhersage, altes Wissen halbiert`;
 
-function EquityChart({ eq, start, regimes = [] }) {
+function EquityChart({ eq, start, regimes = [], split = null }) {
   if (!eq || eq.length < 2) return <Empty>Noch keine Equity-Kurve: der Dienst schreibt sie jede Minute, sobald er läuft</Empty>;
   return (
     <EChart height={220} deps={[eq]} ariaLabel="Equity des Entscheider-Papierkontos"
@@ -22,7 +22,7 @@ function EquityChart({ eq, start, regimes = [] }) {
           ...baseOption(c).tooltip,
           formatter: (ps) => {
             const p = eq[ps[0].dataIndex];
-            return `<b>${dt(p.ts)}</b>${tipRow(c.s[0], "Equity", sol(p.equity_sol, 3))}${tipRow("transparent", "davon offen", sol(p.open_value_sol, 3))}`;
+            return `<b>${dt(p.ts)}</b>${tipRow(c.s[0], "Leistungskonto", sol(p.equity_sol, 3))}${tipRow("transparent", "davon offen", sol(p.open_value_sol, 3))}${p.learn_equity_sol != null ? tipRow(c.s[1], "Lernkonto", sol(p.learn_equity_sol, 3)) : ""}`;
           },
         },
         xAxis: timeAxis(c), yAxis: valueAxis(c, (v) => n(v, 2), { scale: true }),
@@ -32,12 +32,33 @@ function EquityChart({ eq, start, regimes = [] }) {
           markLine: { symbol: "none", lineStyle: { color: c.muted, type: "dashed", width: 1 },
             label: { color: c.muted, formatter: "Start", position: "insideEndTop" },
             tooltip: { trigger: "item", formatter: (p) => p.data.tip || "" },
-            data: [{ yAxis: start }, ...regimes.filter((x) => x.at * 1000 >= eq[0].ts * 1000).map((x) => ({
+            data: [{ yAxis: start }, ...(split?.at && split.at * 1000 >= eq[0].ts * 1000 ? [{
+              xAxis: split.at * 1000, tip: `<b>${dt(split.at)}</b><br/>Lernkonto abgetrennt: ${sol(split.moved_sol, 2)} umgebucht (${n(split.positions)} Positionen), kein Verlust`,
+              lineStyle: { color: c.muted, type: "solid", width: 1 }, label: { color: c.muted, formatter: "Trennung", position: "insideEndTop" },
+            }] : []), ...regimes.filter((x) => x.at * 1000 >= eq[0].ts * 1000).map((x) => ({
               xAxis: x.at * 1000, tip: `<b>${dt(x.at)}</b><br/>${regimeText(x)}`,
               lineStyle: { color: c.warn, type: "solid", width: 1 }, label: { color: c.warn, formatter: "Regime", position: "insideEndTop" },
             }))] },
         }],
       })} />
+  );
+}
+
+/** The learning account's own equity (from 0 at the split), its own scale: on one axis with the main account it
+ *  would flatten both lines. */
+function LearnEquity({ eq }) {
+  const pts = (eq || []).filter((p) => p.learn_equity_sol != null);
+  if (pts.length < 2) return null;
+  return (
+    <>
+      <div className="help" style={{ marginTop: 8 }}>Lernkonto, eigenes Buch seit der Trennung</div>
+      <EChart height={130} deps={[eq]} ariaLabel="Equity des Lernkontos"
+        build={(c) => baseOption(c, {
+          tooltip: { ...baseOption(c).tooltip, formatter: (ps) => { const p = pts[ps[0].dataIndex]; return `<b>${dt(p.ts)}</b>${tipRow(c.s[1], "Lernkonto", sol(p.learn_equity_sol, 3))}`; } },
+          xAxis: timeAxis(c), yAxis: valueAxis(c, (v) => n(v, 2), { scale: true, splitNumber: 2 }),
+          series: [{ type: "line", showSymbol: false, lineStyle: { width: 2, color: c.s[1] }, itemStyle: { color: c.s[1] }, data: pts.map((p) => [p.ts * 1000, p.learn_equity_sol]) }],
+        })} />
+    </>
   );
 }
 
@@ -414,9 +435,14 @@ export default function Brain() {
         Ergebnis, auch aus dem, was er ausgelassen hat. Eigenes Papierkonto mit {sol(a.start_sol, 0)} Start, nie Echtgeld.
       </Callout>
       <div className="tiles wrap-sub">
-        <Tile label="Equity (Papier)" value={sol(a.equity_sol, 3)} sub={`Start ${sol(a.start_sol, 1)} · ${n(a.open)} offen, ${sol(a.open_value_sol, 2)} im Markt`} />
+        <Tile label="Leistungskonto (Papier)" value={sol(a.equity_sol, 3)} sub={`Start ${sol(a.start_sol, 1)} · ${n(a.open)} offen, ${sol(a.open_value_sol, 2)} im Markt`} />
         <Tile label="Ergebnis" value={solSigned(a.result_sol, 3)} cls={sign(a.result_sol)}
-          sub={a.closed ? `${n(a.closed)} Trades · ${pct(a.win_rate)} im Plus` : "noch kein Trade abgeschlossen"} />
+          sub={a.closed ? `${n(a.closed)} Trades · ${pct(a.win_rate)} im Plus${a.moved_sol ? ` · Umbuchung ${solSigned(a.moved_sol, 2)} nicht mitgezählt` : ""}` : "noch kein Trade abgeschlossen"} />
+        {d.learn && (d.learn.closed > 0 || d.learn.open > 0 || d.learn.split) && (
+          <Tile label="Lernkonto (Papier)" value={sol(d.learn.equity_sol, 3)}
+            sub={<>Ergebnis <span className={sign(d.learn.result_sol)}>{solSigned(d.learn.result_sol, 3)}</span> · {n(d.learn.open)} offen · {n(d.learn.closed)} Trades{d.learn.closed ? `, ${pct(d.learn.win_rate)} im Plus` : ""}</>}
+            title="kleine Einsätze auf alles, was die Ziehung durchlässt; eigenes Buch, getrennt vom Leistungskonto" />
+        )}
         <Tile label="Entscheidungen 24 h" value={n(l.n)} sub={`${n(l.entered)} gekauft · ${n(l.explored)} zum Erkunden · ${n(l.blocked)} von Grenzen gestoppt`} />
         <Tile label="Nachgeprüft" value={`${n(h.n_taken)} / ${n(h.target)}`} sub={<LoadBar v={h.progress} />} title="genommene Gelegenheiten mit bekanntem Ergebnis, Ziel 100" />
         <Tile label="Tagesfaktor heute" value={fx(d.goal.today)} cls={d.goal.today == null ? "" : d.goal.today >= d.goal.mult[0] ? "up" : d.goal.today < 1 ? "down" : ""}
@@ -430,8 +456,9 @@ export default function Brain() {
       )}
 
       <div className="grid g-wide-left">
-        <Card title="Equity über Zeit" sub="Guthaben plus offene Positionen zum letzten Preis, jede Minute">
-          <EquityChart eq={d.equity} start={a.start_sol} regimes={d.regimes} />
+        <Card title="Equity über Zeit" sub="Guthaben plus offene Positionen zum letzten Preis, jede Minute; oben das Leistungskonto, darunter das Lernkonto">
+          <EquityChart eq={d.equity} start={a.start_sol} regimes={d.regimes} split={d.learn?.split} />
+          <LearnEquity eq={d.equity} />
         </Card>
         <Card title="Stundenfaktor, letzte 24 h" sub={`Konto am Ende jeder Stunde geteilt durch den Anfang; Challenge: ×${d.goal.hour ?? 2} je Stunde`}>
           <HourFactor hours={d.hours} goal={d.goal.hour ?? 2} />

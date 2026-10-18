@@ -2348,6 +2348,17 @@ def _brain_capture(gain, max_up):
 BRAIN_HOUR_GOAL = 2  # the user's challenge (10/2026): double the paper account every hour
 
 
+def _brain_transfers(conn):
+    """[(minute ts, sol)] moved into the brain's own account from the other book (the one-time split of the learning
+    account): a transfer, not a gain, so factors subtract it like brain/journal._factor."""
+    raw = _j(scalar(conn, "SELECT value FROM brain_state WHERE key='equity_transfers'"), []) if has(conn, "brain_state") else []
+    return [(int(x[0]), float(x[1])) for x in raw or [] if isinstance(x, (list, tuple)) and len(x) == 2 and x[1] is not None]
+
+
+def _brain_moved(tr, a, b):
+    return sum(x for t, x in tr if a < t <= b)
+
+
 def _brain_hours(conn, now):
     """Hour factor of the last 24 hours as brain.journal.hour_factors counts it (equity at the hour's last minute /
     at its first), plus the running hour marked partial. From brain_equity, so it exists before the diary carries
@@ -2355,12 +2366,13 @@ def _brain_hours(conn, now):
     if not has(conn, "brain_equity"):
         return []
     end = now - now % 3600 + 3600
-    out = []
+    out, tr = [], _brain_transfers(conn)
     for r in rows(conn, "SELECT ts / 3600 * 3600 h, MIN(ts) a, MAX(ts) b FROM brain_equity WHERE ts>=? AND ts<? GROUP BY h ORDER BY h",
                   (end - 25 * 3600, end)):
         first = scalar(conn, "SELECT equity_sol FROM brain_equity WHERE ts=?", (r["a"],))
         last = scalar(conn, "SELECT equity_sol FROM brain_equity WHERE ts=?", (r["b"],))
-        if first:
+        if first and last is not None:
+            last -= _brain_moved(tr, r["a"], r["b"])
             out.append({"ts": r["h"], "mult": _f(last / first, 4), "start_sol": _f(first, 4), "end_sol": _f(last, 4),
                         "partial": r["h"] + 3600 > now})
     return out
@@ -2376,10 +2388,12 @@ def _brain_days(conn, now, regimes):
     day = lambda ts: int(ts) - int(ts) % 86400  # noqa: E731
     out = {lo + k * 86400: {"ts": lo + k * 86400} for k in range(BRAIN_DAYS)}
     if has(conn, "brain_equity"):
+        tr = _brain_transfers(conn)
         for r in rows(conn, "SELECT ts / 86400 * 86400 d, MIN(ts) a, MAX(ts) b FROM brain_equity WHERE ts>=? GROUP BY d", (lo,)):
             first = scalar(conn, "SELECT equity_sol FROM brain_equity WHERE ts=?", (r["a"],))
             last = scalar(conn, "SELECT equity_sol FROM brain_equity WHERE ts=?", (r["b"],))
-            if r["d"] in out and first:
+            if r["d"] in out and first and last is not None:
+                last -= _brain_moved(tr, r["a"], r["b"])
                 out[r["d"]].update(start_sol=_f(first, 4), end_sol=_f(last, 4), mult=_f(last / first, 4))
     ev = defaultdict(list)
     for r in rows(conn, "SELECT evaluated_at, wanted, realized_plan, realized_base FROM brain_opps "
@@ -2635,7 +2649,7 @@ def brain_view(conn, kind=None, show="all", limit=60, now=None):
         start = 5.0
     bal = _f(st.get("balance_sol"), 4) if st.get("balance_sol") is not None else start
     pos = rows(conn, "SELECT * FROM brain_positions ORDER BY COALESCE(closed_at, opened_at) DESC LIMIT 300") if has(conn, "brain_positions") else []
-    open_, closed = [], []
+    open_, closed, l_open, l_closed = [], [], [], []
     for p in pos:
         d = {k: p.get(k) for k in ("id", "opp_id", "kind", "mint", "symbol", "wallet", "opened_at", "closed_at", "size_sol",
                                    "entry_price_sol", "last_price_sol", "plan", "take_profit", "stop_loss", "max_hold_min",
@@ -2657,13 +2671,24 @@ def brain_view(conn, kind=None, show="all", limit=60, now=None):
             if p.get("high_price_sol") and p.get("entry_price_sol"):
                 d["peak_pct"] = _f(p["high_price_sol"] / p["entry_price_sol"] - 1, 4)
             d["held_min"] = _f((now - (p.get("opened_at") or now)) / 60, 1)
-            open_.append(d)
+            (l_open if p.get("kind") == "pool" else open_).append(d)
         else:
             d["exit_label"] = BRAIN_EXIT.get(p.get("exit_reason"), p.get("exit_reason"))
-            closed.append(d)
-    eq = rows(conn, "SELECT ts, balance_sol, open_value_sol, equity_sol FROM brain_equity ORDER BY ts") if has(conn, "brain_equity") else []
+            (l_closed if p.get("kind") == "pool" else closed).append(d)
+    learn_cols = has(conn, "brain_equity") and "learn_equity_sol" in {c["name"] for c in rows(conn, "PRAGMA table_info(brain_equity)")}
+    eq = rows(conn, "SELECT ts, balance_sol, open_value_sol, equity_sol" + (", learn_equity_sol" if learn_cols else "") +
+              " FROM brain_equity ORDER BY ts") if has(conn, "brain_equity") else []
     if len(eq) > 400:
         eq = eq[:: len(eq) // 400 + 1] + [eq[-1]]
+    moved = sum(x for _, x in _brain_transfers(conn))  # into the own account; the learning account gave it
+    l_bal = _f(st.get("learn_balance_sol"), 4) or 0.0
+    l_val = sum(p.get("value_sol") or p.get("size_sol") or 0 for p in l_open)
+    l_wins = sum(1 for p in l_closed if (p.get("pnl_pct") or 0) > 0)
+    learn = {"balance_sol": l_bal, "open_value_sol": _f(l_val, 4), "equity_sol": _f(l_bal + l_val, 4),
+             "result_sol": _f(l_bal + l_val + moved, 4), "open": len(l_open), "closed": len(l_closed),
+             "pnl_sol": _f(sum(p["pnl_sol"] or 0 for p in l_closed), 4),
+             "win_rate": _f(l_wins / len(l_closed), 3) if l_closed else None,
+             "split": st.get("learn_split") if isinstance(st.get("learn_split"), dict) else None}
     pnl = [p["pnl_sol"] or 0 for p in closed]
     wins = sum(1 for p in closed if (p.get("pnl_pct") or 0) > 0)
     open_val = sum(p.get("value_sol") or p.get("size_sol") or 0 for p in open_)
@@ -2718,12 +2743,13 @@ def brain_view(conn, kind=None, show="all", limit=60, now=None):
         "available": True, "now": now,
         "account": {"start_sol": start, "balance_sol": bal, "open_value_sol": _f(open_val, 4),
                     "equity_sol": _f(bal + open_val, 4) if bal is not None else None,
-                    "result_sol": _f(bal + open_val - start, 4) if bal is not None else None,
+                    "result_sol": _f(bal + open_val - start - moved, 4) if bal is not None else None, "moved_sol": _f(moved, 4),
                     "open": len(open_), "closed": len(closed), "pnl_sol": _f(sum(pnl), 4),
                     "win_rate": _f(wins / len(closed), 3) if closed else None,
                     "opportunities": tot.get("n") or 0, "entered": tot.get("entered") or 0,
                     "started_at": st.get("started_at"), "model_saved_at": st.get("model_saved_at"),
                     "prior_rows": st.get("prior_rows")},
+        "learn": learn,
         "last24": {k: c24.get(k) or 0 for k in ("n", "entered", "explored", "blocked")},
         "honest": {**h, "target": BRAIN_TARGET, "progress": _f(min(1.0, (h.get("n_taken") or 0) / BRAIN_TARGET), 3),
                    "by_kind": [{"kind": k, "label": BRAIN_KIND.get(k, k), **v} for k, v in (h.get("by_kind") or {}).items()]},
