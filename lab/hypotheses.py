@@ -209,6 +209,57 @@ def snipe_entries(conn, since: int) -> pd.DataFrame:
     return pd.DataFrame(out, columns=COLS) if out else _empty()
 
 
+SIGNAL_DIPS = (0.15, 0.3)   # limit entry: buy only once the price comes back this far below the alarm price
+SIGNAL_DIP_WAIT_S = 7200    # ... within this long after the alarm, else no entry
+SIGNAL_EXITS = (("60m", 3600, None), ("240m", 14400, None), ("tp100_240m", 14400, 1.0))
+
+
+def signal_entries(conn, since: int, prices: pd.DataFrame) -> pd.DataFrame:
+    """The signal calls (signals) and the coins the funnel rejected (signal_shadow, per reason), each bought either at
+    once (first snapshot >= 60 s after the alarm) or with a limit order 15 / 30 % below the alarm price (signals
+    18.10.: calls often run to 1.5x-10x, the loss is the entry at a local high). Exits: held 60 / 240 min, or sold at
+    x2 within 240 min."""
+    S = pd.read_sql("SELECT ts, mint, 'call' grp FROM signals WHERE ts>=?", conn, params=(since,))
+    try:
+        sh = pd.read_sql("SELECT ts, mint, reason grp FROM signal_shadow WHERE ts>=? AND reason IS NOT NULL", conn,
+                         params=(since,))
+        S = pd.concat([S, sh.assign(grp="schatten_" + sh.grp.astype(str))], ignore_index=True)
+    except Exception:  # older databases without the shadow book
+        pass
+    if S.empty or prices.empty:
+        return _empty()
+    S = S.sort_values("ts").assign(blk=lambda x: x.ts // 7200).drop_duplicates(["mint", "grp", "blk"])  # 1 per coin/2 h
+    G = {m: g for m, g in prices[prices.mint.isin(set(S.mint))].groupby("mint")}
+    tok = pd.read_sql("SELECT mint, dex FROM tokens", conn).set_index("mint").dex
+    out = []
+    for r in S.itertuples():
+        g = G.get(r.mint)
+        if g is None:
+            continue
+        ts, p, lq = g.ts.to_numpy(), g.p.to_numpy(), g.liq.to_numpy()
+        a = np.searchsorted(ts, r.ts)
+        if a >= len(ts) or ts[a] - r.ts > ENTRY_TOL_S:
+            continue
+        alarm = p[a]
+        entries = []
+        j = np.searchsorted(ts, r.ts + ENTRY_DELAY_S)
+        if j < len(ts) and ts[j] - (r.ts + ENTRY_DELAY_S) <= ENTRY_TOL_S:
+            entries.append(("sofort", j))
+        for dip in SIGNAL_DIPS:
+            w = np.searchsorted(ts, r.ts + SIGNAL_DIP_WAIT_S, side="right")
+            hit = np.nonzero(p[a + 1:w] <= alarm * (1 - dip))[0]
+            if len(hit):
+                entries.append((f"limit{int(dip * 100)}", a + 1 + hit[0]))
+        dex = str(tok.get(r.mint) or "")
+        for ename, j in entries:
+            for xname, hz, tp in SIGNAL_EXITS:
+                gr = _exit(ts, p, j, hz, tp)
+                if gr is not None:
+                    out.append((f"signal_{r.grp}_{ename}_{xname}", r.mint, int(ts[j]), dex, float(lq[j] or 0), "copy",
+                                gr))
+    return pd.DataFrame(out, columns=COLS) if out else _empty()
+
+
 LABEL_COST = 0.055  # what labels.py takes off (simulator 3 % + pool 2.5 %); added back to get gross
 
 
@@ -240,7 +291,8 @@ def all_entries(conn, since: int) -> tuple[pd.DataFrame, dict]:
     parts, info = [], {"prices": len(prices), "coins": int(prices.mint.nunique()) if len(prices) else 0,
                        "panel_points": len(P)}
     for name, fn in (("panel", lambda: panel_entries(P)), ("migration", lambda: migration_entries(conn, since, prices)),
-                     ("snipe", lambda: snipe_entries(conn, since)), ("labels", lambda: label_entries(conn, since))):
+                     ("snipe", lambda: snipe_entries(conn, since)), ("labels", lambda: label_entries(conn, since)),
+                     ("signal", lambda: signal_entries(conn, since, prices))):
         try:
             parts.append(fn())
         except Exception as e:  # one broken family must not cost the others

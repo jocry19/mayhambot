@@ -47,12 +47,14 @@ def net_of_costs(E: pd.DataFrame, stake_sol: float = STAKE_SOL) -> pd.DataFrame:
 
 def brain_kind(hyp: str) -> str:
     """The brain's opportunity kind a pocket stands for (brain/trader.py frees main-account buys per kind):
-    label_* rows are the pool's opportunities, launch_* the sniper's launches, the price-panel and migration families
-    coins the market kind sees."""
+    label_* rows are the pool's opportunities, launch_* the sniper's launches, signal_* the signal calls and the funnel's
+    rejects, the price-panel and migration families coins the market kind sees."""
     if hyp.startswith("label_"):
         return "pool"
     if hyp.startswith("launch_"):
         return "launch"
+    if hyp.startswith("signal_"):
+        return "signal"  # a kind of its own: a carrying signal pocket must not free every market buy
     return "market"
 
 

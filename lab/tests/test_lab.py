@@ -80,6 +80,25 @@ def test_snipe_entries_leave_out_masche_launches():
     assert set(E.mint) == {"ok"} and E.hyp.str.startswith("launch_mc100-200").all()
 
 
+def test_signal_entries_at_once_and_on_a_dip():
+    c = _db()
+    c.executescript("""CREATE TABLE signals (ts INTEGER, mint TEXT);
+        CREATE TABLE signal_shadow (ts INTEGER, mint TEXT, reason TEXT);""")
+    c.execute("INSERT INTO tokens VALUES ('s', 'pumpswap', 0)")
+    c.execute("INSERT INTO signals VALUES (1000, 's')")
+    c.execute("INSERT INTO signal_shadow VALUES (1000, 's', 'low_net')")
+    for i in range(300):  # alarm 1.0, local high 1.2, back to 0.8, then a run to 2.0
+        t = 1000 + 60 * i
+        p = 1.0 if i == 0 else 1.2 if i < 10 else 0.8 if i < 20 else 2.0
+        c.execute("INSERT INTO token_prices VALUES ('s', ?, ?, 0, 5e4)", (t, p))
+    E = hypotheses.signal_entries(c, 0, hypotheses.load_prices(c, 0)).set_index("hyp").gross
+    assert abs(E["signal_call_sofort_240m"] - (2.0 / 1.2 - 1)) < 1e-9
+    assert abs(E["signal_call_limit15_240m"] - 1.5) < 1e-9 and E["signal_call_limit15_tp100_240m"] == 1.5
+    assert "signal_call_limit30_60m" not in E  # never came back 30 %
+    assert "signal_schatten_low_net_sofort_60m" in E
+    assert pruefstand.brain_kind("signal_call_sofort_60m") == "signal"
+
+
 def test_evaluate_needs_all_thirds_and_enough_coins():
     rng = np.random.default_rng(1)
     n = 600
