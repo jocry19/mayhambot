@@ -416,6 +416,26 @@ def test_market_tokens_index_on_existing_db():
     assert "idx_market_tokens_updated" in plan
 
 
+def test_pair_created_at_in_seconds_whatever_unit_the_source_sends():
+    assert sources.epoch_s(1792140000000) == 1792140000  # ms (DexScreener's documented unit)
+    assert sources.epoch_s(1792140000) == 1792140000  # seconds, must not become January 1970
+    assert sources.epoch_s(None) is None and sources.epoch_s(0) is None
+    p = {"chainId": "solana", "baseToken": {"address": "MintSec", "symbol": "SEC"}, "pairCreatedAt": 1792140000}
+    assert sources.parse_pair(p)["pair_created_at"] == 1792140000
+
+
+def test_ensure_schema_repairs_pair_created_at_stored_in_1970():
+    conn = make_db("off")
+    store.save_tokens(conn, [{"mint": "MintOld", "symbol": "OLD", "name": "old", "pair_created_at": 1792140,
+                              "updated_at": NOW, "first_seen": NOW},
+                             {"mint": "MintOk", "symbol": "OK", "name": "ok", "pair_created_at": 1792140000,
+                              "updated_at": NOW, "first_seen": NOW}])
+    store.ensure_schema(conn)
+    store.ensure_schema(conn)  # idempotent
+    got = dict(conn.execute("SELECT mint, pair_created_at FROM market_tokens WHERE mint IN ('MintOld','MintOk')"))
+    assert got == {"MintOld": 1792140000, "MintOk": 1792140000}
+
+
 def test_service_writes_market_report(monkeypatch):
     conn = make_db("on")
     monkeypatch.setattr(sources, "apply_budgets", lambda c: None)

@@ -21,6 +21,15 @@ def _f(x):
         return 0.0
 
 
+def epoch_s(x):
+    """Unix seconds from a timestamp in seconds or milliseconds (DexScreener's pairCreatedAt is documented as ms,
+    a seconds value divided by 1000 again would land in January 1970). None when missing."""
+    v = _f(x)
+    if v <= 0:
+        return None
+    return int(v / 1000) if v > 1e11 else int(v)
+
+
 def _get(url, params=None):
     try:
         return http.get_json(url, params=params)
@@ -47,7 +56,7 @@ def parse_pair(p):
         "mint": mint, "symbol": base.get("symbol") or "", "name": base.get("name") or "", "dex": p.get("dexId") or "",
         "pool": p.get("pairAddress") or "", "price_usd": _f(p.get("priceUsd")),
         "mcap_usd": _f(p.get("marketCap") or p.get("fdv")), "liquidity_usd": _f((p.get("liquidity") or {}).get("usd")),
-        "pair_created_at": int(_f(p.get("pairCreatedAt")) / 1000) or None,
+        "pair_created_at": epoch_s(p.get("pairCreatedAt")),
         "price_change_h1": _f(pc.get("h1")), "price_change_h6": _f(pc.get("h6")), "price_change_h24": _f(pc.get("h24")),
         "volume_h1": _f(vol.get("h1")), "volume_h6": _f(vol.get("h6")), "volume_h24": _f(vol.get("h24")),
         "buys_h1": int(_f((tx.get("h1") or {}).get("buys"))), "sells_h1": int(_f((tx.get("h1") or {}).get("sells"))),

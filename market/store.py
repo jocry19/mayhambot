@@ -70,6 +70,14 @@ def ensure_schema(conn):
                 conn.execute(sql)
                 conn.commit()
             db.retry_locked(conn, mk)
+    # pair_created_at was once stored as seconds/1000 (~1.79e6, i.e. January 1970) when a source sent seconds;
+    # x1000 restores it to the second up to <=999 s truncation, idempotent since real values are > 1e9
+    if conn.execute("SELECT 1 FROM market_tokens WHERE pair_created_at BETWEEN 1 AND 100000000 LIMIT 1").fetchone():
+        def fix():
+            conn.execute("UPDATE market_tokens SET pair_created_at=pair_created_at*1000 "
+                         "WHERE pair_created_at BETWEEN 1 AND 100000000")
+            conn.commit()
+        db.retry_locked(conn, fix)
     return conn
 
 
