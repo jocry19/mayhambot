@@ -1786,7 +1786,9 @@ def test_the_main_account_buys_only_a_kind_the_lab_says_carries(conn, s, tmp_pat
     assert t._gate("whale", MINT, mk.snaps[MINT], d).startswith("Hauptkonto pausiert")
     assert not (t._gate("pool", MINT, mk.snaps[MINT], d) or "").startswith("Hauptkonto pausiert")
     (tmp_path / "report.json").write_text(json.dumps({"results": [
-        {"hyp": "market_cooled_h1", "verdict": "traegt"}, {"hyp": "whale_top", "verdict": "kandidat"}]}))
+        {"hyp": "abgekuehlt_h1", "verdict": "traegt", "brain_kind": "market"},
+        {"hyp": "whale_top", "verdict": "kandidat"}, {"hyp": "label_copytrade_x", "verdict": "traegt",
+                                                       "brain_kind": "pool", "source": "copytrade"}]}))
     t._lab = (-1e18, [])
     assert not (t._gate("market", MINT, mk.snaps[MINT], d) or "").startswith("Hauptkonto pausiert")
     assert t._gate("whale", MINT, mk.snaps[MINT], d).startswith("Hauptkonto pausiert")
