@@ -104,11 +104,13 @@ def _with_price(snap, px: float):
 
 
 def _always_learn(row) -> bool:
-    """A signals call or band candidate: always a learning buy (they are rare and the model must measure them)."""
+    """A signals call, band candidate or near call (>= 2 smart groups bought, only a later gate said no; ~100 a day):
+    always a learning buy (rare, and the model must measure them)."""
     if row["source_action"] == "alerted":
         return True
     try:
-        return json.loads(row["features"] or "{}").get("signals.band") in (True, 1, "yes")
+        f = json.loads(row["features"] or "{}")
+        return any(f.get(k) in (True, 1, "yes") for k in ("signals.band", "signals.near_call"))
     except (TypeError, ValueError):
         return False
 
@@ -223,11 +225,15 @@ class Trader:
             cur = self._cursor("cursor_whale", "SELECT MAX(rowid) FROM ct_swaps")
             rows = c.execute("SELECT rowid AS rid, * FROM ct_swaps WHERE rowid>? ORDER BY rowid LIMIT 500",
                              (cur,)).fetchall()
+            live = store.has(c, "ct_detect")
             for r in rows:
                 if r["side"] == "buy" and (r["sol_amount"] or 0) >= self.s.min_whale_sol:
                     if now - (r["ts"] or 0) <= self.s.max_whale_delay_s:
                         out.append(("whale", r["sig"], r))
-                    else:  # too late: counted in the hourly line, split into tracker lag (chain -> ct_swaps) and ours
+                    elif not live or c.execute("SELECT 1 FROM ct_detect WHERE sig=? LIMIT 1",
+                                               (r["sig"],)).fetchone():
+                        # too late: counted in the hourly line, split into tracker lag (chain -> ct_swaps) and ours;
+                        # only swaps the tracker saw live (ct_detect): backfill and filled gaps are hours old by design
                         self.too_late += 1
                         seen = r["seen_at"] if "seen_at" in r.keys() and r["seen_at"] else None
                         if seen:
