@@ -39,6 +39,17 @@ def _market(conn, mint, price, now):
     return t, before, created
 
 
+NOT_NEAR = ("no_smart", "few_entities", "cooldown", "stale_price")
+
+
+def near_call(m, reason, action="passed"):
+    """2+ smart owners bought, only a later gate said no (18.10. shadow, 24 h: under $500 few_holders 7 of 24 and
+    safety_drop 5 of 21 ran +50 % in 1 h). The brain's learning account may buy these small, with its own rug gate."""
+    if action == "alerted":
+        return True
+    return (m.get("entities", m.get("smart_buyers")) or 0) >= 2 and reason not in NOT_NEAR
+
+
 def _band(m):
     try:
         from signals import engine
@@ -76,6 +87,7 @@ def report_opportunity(conn, source, ref, mint, now, price, m, reason=None, acti
          "signals.volume_h1": t[7] if t else None, "signals.holders": m.get("holders"),
          "signals.hold_share": m.get("share"), "signals.span_min": m.get("span_min"),
          "signals.receivers": m.get("n_receivers"), "signals.band": _band(m),
+         "signals.near_call": near_call(m, reason, action),
          "signals.lag_last_s": now - m["smart_last_ts"] if m.get("smart_last_ts") else None}
     try:
         return report(conn, source, ref, mint, now, f, symbol=(t[8] if t else "") or "", price_usd=price,

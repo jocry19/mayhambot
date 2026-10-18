@@ -89,3 +89,11 @@ def test_band_candidates_broken_down_by_reason():
     assert g["band candidate, thin_liq"]["n"] == 1 and g["band candidate, cooldown"]["n"] == 1
     assert g["entities>=2, net <500"]["n"] == 0 and g["entities>=2, net >2000"]["n"] == 0
     assert shadow._band(dict(entities=2, smart_buyers=2, net_usd=900)) is True
+
+
+def test_near_call_flag():
+    from signals import shadow
+    assert shadow.near_call(dict(entities=2, net_usd=200), "few_holders")
+    assert shadow.near_call(dict(entities=3), "safety_drop")
+    assert not shadow.near_call(dict(entities=2), "cooldown") and not shadow.near_call(dict(entities=1), "low_net")
+    assert shadow.near_call(dict(entities=1), None, "alerted")
