@@ -455,7 +455,10 @@ def test_prune_backups_caps_total_size(tmp_path, monkeypatch):
 def test_recent_hourly_backup_is_reused(repo, tmp_path):
     work, push, head, alerts = repo
     (tmp_path / "backups").mkdir()
-    (tmp_path / "backups" / "mayhambot-20261016-190000.tar.gz").write_bytes(b"x")
+    f = tmp_path / "backups" / "mayhambot-20261016-190000.tar.gz"
+    f.write_bytes(b"x")
+    old = time.time() - 70 * 60   # the hourly job's archive is often a little over an hour old
+    os.utime(f, (old, old))
     (work / "BACKUP_FAILS").write_text("")          # the updater's own backup would fail: it must not run
     push("feature")
     assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil")).startswith("eingespielt")

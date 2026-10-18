@@ -380,8 +380,10 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
 
     # no deploy without a fresh, verified backup (integrity_check in ops.backup; a damaged copy is never written).
     # The hourly backup job counts when it is young enough: a backup of the grown DB takes ~10 min on the Mac.
+    # 90 min, not 60: the job starts every 3600 s and finishes minutes later, so its last archive is often a
+    # little over an hour old and a 60-min limit made a round write its own (18.10. 02:57).
     t_b = time.time()
-    recent = _recent_backup(ops.cfg("AUTO_UPDATE_BACKUP_MAX_AGE_MIN", 60) * 60)
+    recent = _recent_backup(ops.cfg("AUTO_UPDATE_BACKUP_MAX_AGE_MIN", 90) * 60)
     if recent:
         log(f"backup before deploy of {subject}: {recent.name} is {(time.time() - recent.stat().st_mtime) / 60:.0f} min old, reused")
     else:

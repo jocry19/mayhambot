@@ -829,6 +829,11 @@ _pool_fail = {}  # host -> consecutive failures (this process)
 METHOD_AVOID_BASE = 10
 METHOD_AVOID_MAX = 600
 METHOD_AVOID_DECAY = 0.75
+# When a long ban (strike score >= METHOD_PROBE_FROM) runs out, every queued call of every service used to hit
+# the endpoint at once (18.10.: ~30 getTransaction 429s per 600-s ban on mainnet-beta). Now the first caller
+# claims one probe and the others stay away METHOD_PROBE_S more; each probe takes a notch off the shared score.
+METHOD_PROBE_FROM = 3
+METHOD_PROBE_S = 10
 _method_429 = {}    # (host, method) -> strike score (this process)
 _method_stats = {}  # (host, method) -> {"calls", "429", "avoided"} (this process)
 
@@ -849,6 +854,25 @@ def method_stats():
 
 def _avoid_until(st, host, method):
     return (st.get(host, {}).get("avoid") or {}).get(method, 0) if method else 0
+
+
+def _claim_probe(host, method, now):
+    """True for the one caller that may try `host` for `method` after a long ban ran out."""
+    won = []
+
+    def fn(st):
+        h = st.setdefault(host, {})
+        av, strikes = h.setdefault("avoid", {}), h.setdefault("strikes", {})
+        if av.get(method, 0) > now:
+            return
+        won.append(1)
+        av[method] = now + METHOD_PROBE_S
+        if strikes.get(method, 0) - 1 < METHOD_PROBE_FROM:
+            strikes.pop(method, None)
+        else:
+            strikes[method] -= 1
+    _pool_edit(fn)
+    return bool(won)
 
 
 def public_rpc_urls():
@@ -993,6 +1017,11 @@ def pick_public_rpc(priority="bulk", probe=None, method=None):
     if method and method != "batch" and len(urls) > 1:
         st, now = _pool_state(), time.time()
         free = [u for u in urls if _avoid_until(st, urlparse(u).netloc, method) <= now]
+        for u in [u for u in free if (st.get(urlparse(u).netloc, {}).get("strikes") or {}).get(method, 0)
+                  >= METHOD_PROBE_FROM]:
+            if _claim_probe(urlparse(u).netloc, method, now):
+                return u   # the claimed probe goes out now, or the window is lost for everyone
+            free.remove(u)
         for u in urls:
             if u not in free:
                 _mstat(urlparse(u).netloc, method, "avoided")
@@ -1044,8 +1073,14 @@ def _pool_result(host, ok, ms=None, status=None, method=None):
             _mstat(host, method, "429")
             n = _method_429[(host, method)] = _method_429.get((host, method), 0) + 1
             away = round(min(METHOD_AVOID_BASE * 2 ** (n - 1), METHOD_AVOID_MAX))
-            _pool_edit(lambda st: st.setdefault(host, {}).setdefault("avoid", {}).__setitem__(
-                method, time.time() + away))
+
+            def ban(st):
+                h = st.setdefault(host, {})
+                h.setdefault("avoid", {})[method] = time.time() + away
+                if n >= METHOD_PROBE_FROM:
+                    sk = h.setdefault("strikes", {})
+                    sk[method] = max(sk.get(method, 0), int(n))
+            _pool_edit(ban)
             if any(n - 1 < k <= n for k in (3, 6)) or away == METHOD_AVOID_MAX:
                 log.info("public RPC %s refuses %s (strike score %.1f), other endpoints for %d s",
                          host, method, n, away)

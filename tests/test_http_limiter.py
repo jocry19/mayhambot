@@ -497,6 +497,29 @@ def test_method_ban_grows_when_429s_and_successes_alternate(monkeypatch, tmp_pat
     assert http._method_429[("a.example", "getTransaction")] == 0
 
 
+def test_after_a_long_ban_one_caller_probes_and_the_rest_stay_away(monkeypatch, tmp_path):
+    """18.10.: every 600-s ban of mainnet-beta getTransaction ended in ~30 429s at once, queued calls of all
+    services hitting it together. Now one probe goes out and the others keep using the other endpoint."""
+    _fresh(monkeypatch, tmp_path)
+    monkeypatch.setenv("PUBLIC_RPC_URLS", "https://a.example,https://c.example")
+    monkeypatch.setattr(http, "_method_429", {})
+    monkeypatch.setattr(http, "_method_stats", {})
+    monkeypatch.setattr(http, "_latency", {"a.example": 1.0, "c.example": 99.0})  # a is the fastest
+    for _ in range(5):
+        http._pool_result("a.example", False, status=429, method="getTransaction")
+    t = http.time.time() + http.METHOD_AVOID_MAX + 1   # the ban has run out
+    monkeypatch.setattr(http.time, "time", lambda: t)
+    picks = [http.pick_public_rpc("live", method="getTransaction") for _ in range(5)]
+    assert picks == ["https://a.example"] + ["https://c.example"] * 4
+    assert http.pick_public_rpc("live", method="getSlot") == "https://a.example"   # other methods unaffected
+    for k in range(1, 4):   # each probe that is not refused takes a notch off; then a is back for everyone
+        t += http.METHOD_PROBE_S + 1
+        http.pick_public_rpc("live", method="getTransaction")
+    assert "getTransaction" not in http.pool_status()["a.example"].get("strikes", {})
+    t += http.METHOD_PROBE_S + 1
+    assert [http.pick_public_rpc("live", method="getTransaction") for _ in range(3)] == ["https://a.example"] * 3
+
+
 def test_own_transactions_keep_helius_when_share_used_up(monkeypatch, tmp_path):
     _credit_env(monkeypatch, tmp_path, "copytrade", day=31, month_credits=100)  # 15 credits today
     for _ in range(15):
