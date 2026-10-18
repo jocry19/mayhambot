@@ -1549,3 +1549,44 @@ def test_a_coin_sold_as_rug_is_banned_for_a_day_in_every_path(conn, s):
     add_whale_buy(conn, "r1")
     assert t.scan() == 0
     assert "Rug" in json.loads(conn.execute("SELECT raw FROM brain_opps").fetchone()[0])["gate"]
+
+
+def test_a_row_supplemented_before_its_first_decision_is_still_decided_twice(conn, s):
+    from brain import opportunities as O
+    s.pool_trade = "shadow"
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    t, _ = _pool_trader(conn, s, mk)
+    O.report(conn, "sniper", MINT, MINT, time.time(), {"buyers": 12}, source_action="queued")
+    O.supplement(conn, "sniper", MINT, {"buyers": 30})
+    t.scan()
+    t.scan()
+    refs = [r[0] for r in conn.execute("SELECT ref FROM brain_opps")]
+    assert len(refs) == 2, (refs, store.get(conn, "cursor_pool_supp"))
+
+
+def test_the_same_coin_from_the_same_source_is_learned_from_its_labels_once(conn, s):
+    from brain import opportunities as O
+    from brain.pool import Pool
+    now = time.time()
+    outs = json.dumps({PLANS[0].name: 0.5})
+    for i, (src, mint) in enumerate((("copytrade", MINT), ("copytrade", MINT), ("strategy", MINT),
+                                     ("copytrade", "Other" + MINT[5:]))):
+        O.report(conn, src, f"r{i}", mint, now + i, {"wallets_n": 3})
+    conn.execute("UPDATE opportunities SET label_at=?, label_outcomes=?", (int(now) + 3600, outs))
+    pm = Pool(len(PLANS))
+    assert learner.learn_labels(conn, pm, s) == 3  # the second copytrade report of MINT adds no new path
+
+
+def test_the_learning_account_buys_only_its_best_draws(conn, s):
+    from brain import trader as T
+    mk = Market()
+    t, _ = _pool_trader(conn, s, mk)
+    s.pool_sample = 0.05
+    t.pool_draws.clear()
+    t.pool_draws.extend(i / 1000 for i in range(T.POOL_DRAWS_MIN))  # 0 .. 0.199
+    assert t._top_draw(0.195) and not t._top_draw(0.15)
+    s.pool_sample = 1.0
+    assert t._top_draw(-1.0)
+    s.pool_sample = 0.0
+    assert not t._top_draw(9.0)

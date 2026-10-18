@@ -70,15 +70,15 @@ class Settings:
     max_signal_age_s: float = field(default_factory=lambda: _f("BRAIN_MAX_SIGNAL_AGE_S", 180))
     # the shared opportunities table (every source): its learning buys stake this much, the rest by Kelly
     # on: the learning account buys; shadow: every pooled row is still predicted, decided and written back, but
-    # nothing is bought (18.10. 07:10: paused until its booking is proven on fresh cases; the labels teach meanwhile);
-    # off: pooled rows are not read at all
-    pool_trade: str = field(default_factory=lambda: _s("BRAIN_POOL_TRADE", "shadow").lower())
+    # nothing is bought (07:10-09:30 18.10. while its booking was proven); off: pooled rows are not read at all
+    pool_trade: str = field(default_factory=lambda: _s("BRAIN_POOL_TRADE", "on").lower())
     learn_size_sol: float = field(default_factory=lambda: _f("BRAIN_LEARN_SIZE_SOL", 0.03))
     max_pool_age_s: float = field(default_factory=lambda: _f("BRAIN_MAX_POOL_AGE_S", 180))
     pool_max_open: int = field(default_factory=lambda: int(_f("BRAIN_POOL_MAX_OPEN", 120)))
     labels: str = field(default_factory=lambda: _s("BRAIN_LABELS", "on").lower())  # labels.py: follow every row 1 h
-    # share of the learning account's positive draws that are bought (calls and band candidates always are)
-    pool_sample: float = field(default_factory=lambda: _f("BRAIN_POOL_SAMPLE", 0.1))
+    # the learning account buys a positive draw only when it is among this share of the best recent draws (calls and
+    # band candidates always)
+    pool_sample: float = field(default_factory=lambda: _f("BRAIN_POOL_SAMPLE", 0.05))
     max_launch_age_s: float = field(default_factory=lambda: _f("BRAIN_MAX_LAUNCH_AGE_S", 60))
     min_liquidity_usd: float = field(default_factory=lambda: _f("BRAIN_MIN_LIQ_USD", 3000))
     # pump.fun bonding curve: DexScreener reports no pool liquidity there, the curve itself is the market

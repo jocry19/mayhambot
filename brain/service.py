@@ -150,7 +150,14 @@ class Service:
             return "pooled none"
         # reported / decided / bought: reported but undecided = too old when read (BRAIN_MAX_POOL_AGE_S), the brain's
         # own sources, or the same coin from the same source within 6 h
-        return "pooled reported/decided/bought " + (", ".join(f"{r[0]} {r[1]}/{r[2]}/{r[3]}" for r in rows) or "none")
+        sup, self.trader.supp = self.trader.supp, {"read": set(), "old": set(), "own": set()}
+        try:
+            two = self.conn.execute("SELECT COUNT(*) FROM brain_opps WHERE kind='pool' AND ref LIKE 'opp%+' AND ts>=?",
+                                    (int(since),)).fetchone()[0]
+        except Exception:
+            two = 0
+        return ("pooled reported/decided/bought " + (", ".join(f"{r[0]} {r[1]}/{r[2]}/{r[3]}" for r in rows) or "none")
+                + f", supplemented read {len(sup['read'])} (old {len(sup['old'])}, own/bought {len(sup['own'])}) decided again {two}")
 
     def _candles(self, conn, mint: str, lo: int, hi: int, allow_net: bool = True) -> list:
         """The learning round's candles: from the caches only; a window that is missing goes to the fetch thread
