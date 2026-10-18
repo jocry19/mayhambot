@@ -41,6 +41,9 @@ SERVICES = {
 # research + retraining loop from model/ (other thread), started only once it exists
 if (ROOT / "model" / "__main__.py").exists():
     SERVICES["research"] = [PY, "-m", "model", "service"]
+# test bench from lab/ (read-only, every LAB_EVERY_H hours; lab/README.md), started only once it exists
+if (ROOT / "lab" / "__main__.py").exists():
+    SERVICES["lab"] = [PY, "-m", "lab", "run"]
 
 
 def _is_service(pid, name):
