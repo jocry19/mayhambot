@@ -227,25 +227,39 @@ def dense_mints(conn, infos, now=None):
 def followed_mints(conn, now=None):
     now = now or int(time.time())
     out = {r[0] for r in conn.execute("SELECT DISTINCT mint FROM signals WHERE ts > ?", (now - plan.FOLLOW_HOURS * 3600,))}
-    for q, args in (("SELECT DISTINCT mint FROM signal_shadow WHERE ts > ?", (now - 4 * 3600,)),
-                    ("SELECT DISTINCT mint FROM ct_positions WHERE status='open'", ()),     # held: exits need minutes
-                    ("SELECT DISTINCT mint FROM brain_positions WHERE status='open'", ())):
-        try:
-            out |= {r[0] for r in conn.execute(q, args)}
-        except Exception:  # noqa: BLE001 - table absent (service not installed / old DB)
-            pass
-    return out
+    try:
+        out |= {r[0] for r in conn.execute("SELECT DISTINCT mint FROM signal_shadow WHERE ts > ?", (now - 4 * 3600,))}
+    except Exception:  # noqa: BLE001 - table absent in old DBs
+        pass
+    return out | set(held_mints(conn, now))  # held: exits and labels need minutes
 
 
 TOKEN_REFRESH_S = int(os.getenv("TOKEN_REFRESH_SECONDS", 60))
 TOKEN_REFRESH_MAX = 900  # mints per round: 30 per DexScreener request, 30 requests of the 300/min pair limit
 
 
+def held_mints(conn, now=None):
+    """Coins the paper books hold or the brain bought in the last 2 h: most are new coins nobody else watches, and
+    without this they got no token_prices rows at all (18.10.: >80 % of the brain's losses had no price path)."""
+    now = now or int(time.time())
+    out = []
+    for q, args in (("SELECT DISTINCT mint FROM brain_positions WHERE status='open' OR opened_at > ?", (now - 7200,)),
+                    ("SELECT DISTINCT mint FROM ct_positions WHERE status='open'", ()),
+                    ("SELECT DISTINCT mint FROM opportunities WHERE decided_at > ? AND decision IN ('learn','perform')",
+                     (now - 7200,))):
+        try:
+            out += [r[0] for r in conn.execute(q, args)]
+        except Exception:  # noqa: BLE001 - table absent (service not installed / old DB)
+            pass
+    return list(dict.fromkeys(out))
+
+
 def refresh_tokens(conn, now=None):
     """Prices, momentum and activity (price_change_m5, txns_m5, volume_h1, last_updated) of every watched coin and
     of the calls still followed, written to tokens (+ a token_prices snapshot) without touching the watch flags."""
     now = now or int(time.time())
-    mints = [r[0] for r in conn.execute("SELECT mint FROM tokens WHERE tracked=1 ORDER BY last_updated DESC")]
+    mints = held_mints(conn, now)  # first, so the TOKEN_REFRESH_MAX cut never drops a held or just-bought coin
+    mints += [r[0] for r in conn.execute("SELECT mint FROM tokens WHERE tracked=1 ORDER BY last_updated DESC")]
     mints += [r[0] for r in conn.execute("SELECT DISTINCT mint FROM signals WHERE ts > ?",
                                          (now - plan.FOLLOW_HOURS * 3600,))]
     mints = list(dict.fromkeys(mints))[:TOKEN_REFRESH_MAX]

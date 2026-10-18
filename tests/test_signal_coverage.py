@@ -120,3 +120,14 @@ def test_snapshots_thinned_except_followed(tmp_path, monkeypatch):
         now[0] += 60
     n = dict(conn.execute("SELECT mint, COUNT(*) FROM token_prices GROUP BY mint").fetchall())
     assert n == {"A": 3, "B": 1, "Y": 3}
+
+
+def test_held_and_bought_coins_get_prices(tmp_path):
+    from core import db
+    conn = db.connect(str(tmp_path / "h.db"))
+    now = 3_000_000_000
+    conn.execute("CREATE TABLE brain_positions (id INTEGER PRIMARY KEY, mint TEXT, status TEXT, opened_at INTEGER)")
+    conn.executemany("INSERT INTO brain_positions(mint, status, opened_at) VALUES (?,?,?)",
+                     [("OPEN", "open", now - 99999), ("JUSTSOLD", "closed", now - 600), ("OLD", "closed", now - 99999)])
+    assert run.held_mints(conn, now) == ["OPEN", "JUSTSOLD"]
+    assert {"OPEN", "JUSTSOLD"} <= run.followed_mints(conn, now)
