@@ -82,6 +82,8 @@ def _default_safety(conn, mint):
     return a.level, bool(a.blocked), a.level != "unchecked", [r.get("text") for r in (a.reasons or [])[:2]]
 
 
+HELD_S = 30
+CURVE_MARK_MAX_RATIO = 5.0  # a curve price this far from DexScreener's is a units error (quote coins), not lag
 CURVE_MARK_AGE_S = 120  # a curve price stays the price until the next trade; older than this the sniper stopped watching
 
 
@@ -135,6 +137,7 @@ class Trader:
         self.staged_check = staged_check or _default_staged
         self._staged: dict[str, tuple[float, bool, float | None]] = {}
         self.curve_now = curve_now or _default_curve
+        self._held: dict[int, float] = {}  # position -> when the quote last contradicted its stop or target
         self._snaps: dict = {}  # the last market snapshot per open mint, for the curve exits between two price rounds
         try:  # once, before the first trade on the split accounts
             moved = store.split_learning(conn, s.start_balance_sol, clock())
@@ -174,7 +177,9 @@ class Trader:
                 log.debug("curve %s: %s", mint[:6], e)
                 cv = None
             if cv and not cv.get("complete") and cv.get("price_sol"):
-                out[mint] = _with_price(snap, float(cv["price_sol"]))
+                px = float(cv["price_sol"])
+                if 1 / CURVE_MARK_MAX_RATIO < px / snap.price_sol < CURVE_MARK_MAX_RATIO:
+                    out[mint] = _with_price(snap, px)
         return out
 
     @property
@@ -366,6 +371,7 @@ class Trader:
                 # the learning account is a sample now (plan 05:07): its trades measure execution and slippage, the
                 # pool model learns the opportunities themselves from their replays
                 d.enter, d.why_not = False, f"Lernkonto-Stichprobe: nur {self.s.pool_sample:.0%} der Ziehungen"
+                raw["gate"] = "Lernkonto-Stichprobe"
         if pocket:
             raw["pocket"], raw["trust"] = pocket, trust
         block = None
@@ -482,8 +488,8 @@ class Trader:
             log.warning("paper buy %s failed: %s", row["mint"][:6], e)
         if not fill or not fill.ok:
             why = getattr(fill, "error", "") or "kein Fill"
-            c.execute("UPDATE brain_opps SET decision='skip', note=note || ? WHERE id=?",
-                      (f"\nKauf nicht ausgeführt: {why}.", opp_id))
+            c.execute("UPDATE brain_opps SET decision='skip', note=note || ?, raw=json_set(COALESCE(raw, '{}'), '$.gate', ?) "
+                      "WHERE id=?", (f"\nKauf nicht ausgeführt: {why}.", f"Kauf nicht ausgeführt: {why}", opp_id))
             return None
         p = BY_NAME[d.plan]
         now = int(self.clock())
@@ -772,6 +778,8 @@ class Trader:
 
     def close(self, p, snap, reason: str) -> bool:
         c = self.conn
+        if reason in ("stop", "target") and self.clock() - self._held.get(p["id"], -1e18) < HELD_S:
+            return False  # the last quote contradicted this trigger: no new quote for a while
         try:
             fill = self.executor.sell(p["mint"], p["tokens"], p["decimals"] if p["decimals"] is not None else 6, snap,
                                       p["last_price_sol"] or p["entry_price_sol"])
@@ -783,10 +791,23 @@ class Trader:
         if getattr(fill, "source", "") == "no_route" and features.on_curve(snap):
             return False  # a coin on the bonding curve has a market; a missing quote is a hiccup, retry next round
         now = int(self.clock())
-        partial = _meta(p).get("partial_sol", 0.0) or 0.0  # the half sold earlier was booked then
+        meta = _meta(p)
+        partial = meta.get("partial_sol", 0.0) or 0.0  # the half sold earlier was booked then
         proceeds = fill.sol + partial
         pnl = proceeds - p["size_sol"]
         pct = pnl / p["size_sol"] if p["size_sol"] else 0.0
+        if (reason == "stop" and pct > 0) or (reason == "target" and pct < 0):
+            # the trigger read a stale price (DexScreener runs behind on fast coins), the quote says otherwise: no
+            # sale, the position keeps running (18.10.: Elliot +22.9 % and AURORA -6.8 % booked as stop / target)
+            self._held[p["id"]] = now
+            log.info("exit held %s %s: %s triggered, the quote says %+.1f%%", p["kind"], p["symbol"] or p["mint"][:6],
+                     reason, pct * 100)
+            return False
+        if pct <= -0.9 and reason not in ("rug", "no_market"):
+            # whatever fired, a sale at -90 % or worse is a rug (18.10.: NAPCLUB -98.9 % booked as time)
+            meta["trigger"] = reason
+            reason = "rug"
+            c.execute("UPDATE brain_positions SET meta=? WHERE id=?", (json.dumps(meta), p["id"]))
         done = c.execute("UPDATE brain_positions SET status='closed', closed_at=?, exit_price_sol=?, proceeds_sol=?, "
                          "pnl_sol=?, pnl_pct=?, exit_reason=? WHERE id=? AND status='open'",
                          (now, fill.price_sol, proceeds, pnl, pct, reason, p["id"])).rowcount

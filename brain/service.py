@@ -126,7 +126,7 @@ class Service:
                 g = json.loads(raw or "{}").get("gate")
             except (TypeError, ValueError):
                 g = None
-            g = re.split(r"[(:\d$]", g or "no gate recorded", maxsplit=1)[0].strip() or "?"
+            g = re.split(r"[(\d$]", g or "no gate recorded", maxsplit=1)[0].strip(" :,")[:50] or "?"
             by[g] = by.get(g, 0) + 1
         top = sorted(by.items(), key=lambda kv: -kv[1])[:4]
         return "gates " + (", ".join(f"{k} {n}" for k, n in top) or "none")

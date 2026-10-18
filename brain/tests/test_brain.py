@@ -1435,3 +1435,57 @@ def test_the_learning_round_never_waits_for_the_network(conn, s, monkeypatch):
     stop.set()
     th.join(5)
     assert calls[-1] is True and not sv._want  # fetched once in the background
+
+
+def test_a_stale_trigger_the_quote_contradicts_does_not_sell_and_a_minus_ninety_sale_is_a_rug(conn, s):
+    mk = Market()
+    set_tier(conn, WHALE, "ultra")
+    mk.snaps[MINT] = snap()
+    clock = [time.time()]
+
+    class Quote(Paper):
+        px = None
+
+        def sell(self, mint, tokens, decimals, sn, last):
+            return Fill(True, tokens=tokens, sol=tokens * self.px, price_sol=self.px, source="test")
+    ex = Quote()
+    t = Trader(conn, s, trained(), snapshots=mk, executor=ex, rng=random.Random(7), safety_check=ok_safety,
+               staged_check=lambda c, m: False, curve_now=lambda c, m, n: None, clock=lambda: clock[0])
+    t.scan()
+    add_whale_buy(conn, "q1", ts=clock[0])
+    assert t.scan() == 1
+    p = conn.execute("SELECT * FROM brain_positions").fetchone()
+    ex.px = p["entry_price_sol"] * 1.2  # the market is up ...
+    assert not t.close(p, mk.snaps[MINT], "stop")  # ... while a stale price fired the stop
+    assert conn.execute("SELECT status FROM brain_positions").fetchone()[0] == "open"
+    clock[0] += 10
+    assert not t.close(p, mk.snaps[MINT], "stop")  # no new quote for 30 s
+    ex.px = p["entry_price_sol"] * 0.05
+    clock[0] += 60
+    assert t.close(p, mk.snaps[MINT], "time")
+    r = conn.execute("SELECT exit_reason, meta FROM brain_positions").fetchone()
+    assert r[0] == "rug" and json.loads(r[1])["trigger"] == "time"
+
+
+def test_held_back_learning_draws_name_their_reason(conn, s):
+    from brain import opportunities as O
+    s.pool_sample = 0.0
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    t, _ = _pool_trader(conn, s, mk)
+    O.report(conn, "sniper", "h1", MINT, time.time(), {"buyers": 12})
+    t.scan()
+    raw = json.loads(conn.execute("SELECT raw FROM brain_opps").fetchone()[0])
+    assert raw["gate"] == "Lernkonto-Stichprobe"
+    s.pool_sample = 1.0
+
+    class NoFill(Paper):
+        def buy(self, mint, size, sn):
+            return Fill(False, error="Token-Dezimalen unbekannt")
+    t._executor = NoFill()
+    m2 = "Fail" + MINT[4:]
+    mk.snaps[m2] = snap(mint=m2)
+    O.report(conn, "sniper", "h2", m2, time.time(), {"buyers": 12})
+    t.scan()
+    raw = json.loads(conn.execute("SELECT raw FROM brain_opps WHERE mint=?", (m2,)).fetchone()[0])
+    assert raw["gate"] == "Kauf nicht ausgeführt: Token-Dezimalen unbekannt"
