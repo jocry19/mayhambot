@@ -26,6 +26,7 @@ def s(tmp_path, monkeypatch):
     st = config.Settings()
     st.telegram = "off"
     st.pool_sample = 1.0  # the learning-account tests buy every positive draw; the sample has its own test
+    st.main_trade = "on"  # the default pauses the main account until the lab finds a carrying pocket; own test
     st.pool_trade = "on"  # the default is shadow (paused); the pause has its own test
     return st
 
@@ -1756,3 +1757,36 @@ def test_no_main_account_trade_takes_more_than_the_hard_stake(conn, s, monkeypat
     o = conn.execute("SELECT decision, size_sol, raw FROM brain_opps WHERE ref='big'").fetchone()
     assert o["decision"] == "enter" and o["size_sol"] == pytest.approx(max(s.min_size_sol, s.hard_stake * 5.0), abs=2e-3)
     assert json.loads(o["raw"])["capped_from"] == 0.9
+
+
+def test_no_buy_in_the_hour_after_a_migration_or_after_a_pump(conn, s):
+    import types
+    mk = Market()
+    t = make_trader(conn, s, trained(), mk)
+    d = types.SimpleNamespace(explore=False, enter=True, size_sol=0.1)
+    m = "Migr" + "1" * 36 + "pump"
+    fresh = snap(mint=m, dex="pumpswap")
+    fresh.pair_created_ms = int((time.time() - 1200) * 1000)
+    assert t._gate("pool", m, fresh, d).startswith("frisch migriert (20 min)")
+    fresh.pair_created_ms = int((time.time() - 4000) * 1000)
+    assert not (t._gate("pool", m, fresh, d) or "").startswith("frisch migriert")
+    pumped = snap()
+    pumped.change_h1 = 80.0
+    assert t._gate("whale", MINT, pumped, d).startswith("schon gepumpt (+80 % in 1 h)")
+
+
+def test_the_main_account_buys_only_a_kind_the_lab_says_carries(conn, s, tmp_path, monkeypatch):
+    import types
+    s.main_trade = "lab"
+    monkeypatch.setenv("LAB_DIR", str(tmp_path))
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    t = make_trader(conn, s, trained(), mk)
+    d = types.SimpleNamespace(explore=False, enter=True, size_sol=0.1)
+    assert t._gate("whale", MINT, mk.snaps[MINT], d).startswith("Hauptkonto pausiert")
+    assert not (t._gate("pool", MINT, mk.snaps[MINT], d) or "").startswith("Hauptkonto pausiert")
+    (tmp_path / "report.json").write_text(json.dumps({"results": [
+        {"hyp": "market_cooled_h1", "verdict": "traegt"}, {"hyp": "whale_top", "verdict": "kandidat"}]}))
+    t._lab = (-1e18, [])
+    assert not (t._gate("market", MINT, mk.snaps[MINT], d) or "").startswith("Hauptkonto pausiert")
+    assert t._gate("whale", MINT, mk.snaps[MINT], d).startswith("Hauptkonto pausiert")
