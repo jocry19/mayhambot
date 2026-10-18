@@ -2,6 +2,7 @@
 import json
 import random
 import time
+import types
 
 import pytest
 
@@ -12,6 +13,14 @@ from brain.model import Brain
 from brain.plans import BASE, BY_NAME, NAMES, PLANS, grid_index
 from brain.service import Service
 from brain.trader import Trader
+
+REAL_HISTORY = Trader._history
+
+
+@pytest.fixture(autouse=True)
+def _watched(monkeypatch):
+    """The price-history gate has its own test; every other test judges its coin as if long watched."""
+    monkeypatch.setattr(Trader, "_history", lambda self, mint, snap=None: None)
 from copytrade import learn as ct_learn, sim, store as ct_store
 from copytrade.execution import Fill
 from copytrade.market import PairSnapshot
@@ -1115,14 +1124,18 @@ def test_every_source_reports_and_the_brain_decides_learns_and_writes_back(conn,
     assert row["decision"] in ("learn", "perform") and row["pred_mean"] > 0 and row["position_id"]
     assert row["model"].startswith("pool-") and row["pred_q10"] < row["pred_mean"]
     assert conn.execute("SELECT COUNT(*) FROM brain_opps").fetchone()[0] == 1
-    # hours later the replay writes the honest result back and the pool learns from it
+    # hours later the label writes the honest result back (the pool learns it in learn_labels)
     old = time.time() - learner.horizon_s() - learner.CACHE_GRACE_S - 600
     conn.execute("UPDATE brain_opps SET ts=?, decided_at=? WHERE kind='pool'", (int(old), old))
-    n0 = pm.n
+    assert learner.evaluate_pool(conn, old + 3 * 3600 - 60) == 0  # no label yet: waits, stays open
+    assert conn.execute("SELECT evaluated_at FROM brain_opps").fetchone()[0] is None
+    conn.execute("UPDATE opportunities SET label_at=?, label_rug=0, label_cost=0.03, label_outcomes=? WHERE "
+                 "source='sniper'", (int(old) + 3600, json.dumps({p.name: 0.2 for p in PLANS})))
     assert learner.evaluate(conn, t.model, s, candles_up, limit=10, pool=pm) == 1
     row = conn.execute("SELECT * FROM opportunities WHERE source='sniper'").fetchone()
-    assert row["evaluated_at"] and row["outcome_net"] is not None and row["exit_plan"] in NAMES
-    assert row["rug"] == 0 and set(json.loads(row["outcomes"])) <= set(NAMES) and pm.n > n0 * 0.5
+    assert row["evaluated_at"] and row["outcome_net"] == 0.2 and row["exit_plan"] in NAMES and row["cost"] == 0.03
+    assert row["rug"] == 0 and set(json.loads(row["outcomes"])) == set(NAMES)
+    assert conn.execute("SELECT realized_best FROM brain_opps WHERE kind='pool'").fetchone()[0] == 0.2
 
 
 def test_a_rug_counts_minus_one_hundred_in_the_shared_table(conn, s):
@@ -1143,9 +1156,23 @@ def test_a_rug_counts_minus_one_hundred_in_the_shared_table(conn, s):
                  " wanted, plan) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (int(old), old, "pool", f"opp{oid}", MINT, "", "signals", int(old), json.dumps({"src": "signals"}),
                   json.dumps({"opp": oid}), "skip", 0, "swing"))
+    conn.execute("UPDATE opportunities SET label_at=?, label_rug=1, label_outcomes=?",
+                 (int(old) + 3600, json.dumps({p.name: -1.0 for p in PLANS})))
     assert learner.evaluate(conn, Brain(len(PLANS)), s, rug, limit=5, pool=pm) == 1
     row = conn.execute("SELECT * FROM opportunities").fetchone()
     assert row["rug"] == 1 and row["outcome_net"] <= -0.9
+
+
+def test_pooled_rows_do_not_block_the_replay_and_unlabelled_ones_close(conn, s):
+    from brain.pool import Pool
+    old = time.time() - 4 * 3600
+    for i in range(600):  # 18.10.: thousands of pooled rows held the oldest replay window
+        conn.execute("INSERT INTO brain_opps(ts, decided_at, kind, ref, mint, wallet, entity, src_ts, features, raw, "
+                     "decision, wanted, plan) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (int(old) + i, old + i, "pool", f"opp{i}", MINT, "", "signals", int(old), "{}",
+                      json.dumps({"opp": 999999}), "skip", 0, "swing"))
+    assert learner.evaluate_pool(conn, time.time()) == 0
+    assert conn.execute("SELECT COUNT(*) FROM brain_opps WHERE evaluated_at IS NULL").fetchone()[0] == 0
 
 
 def test_the_learning_account_has_its_own_ceiling(conn, s):
@@ -1786,7 +1813,9 @@ def test_the_main_account_buys_only_a_kind_the_lab_says_carries(conn, s, tmp_pat
     assert t._gate("whale", MINT, mk.snaps[MINT], d).startswith("Hauptkonto pausiert")
     assert not (t._gate("pool", MINT, mk.snaps[MINT], d) or "").startswith("Hauptkonto pausiert")
     mp = store.get(conn, "main_paused")
-    assert mp["paused"] and mp["since"] and mp["until_verdict"] == "traegt" and mp["released"] == []
+    from brain.trader import PAUSE_DECIDED_TS
+    assert mp["paused"] and mp["until_verdict"] == "traegt" and mp["released"] == []
+    assert mp["since"] == mp["decided_at"] == PAUSE_DECIDED_TS and mp["live_since"] >= PAUSE_DECIDED_TS  # user's word
     (tmp_path / "report.json").write_text(json.dumps({"results": [
         {"hyp": "abgekuehlt_h1", "verdict": "traegt", "brain_kind": "market"},
         {"hyp": "whale_top", "verdict": "kandidat"}, {"hyp": "label_copytrade_x", "verdict": "traegt",
@@ -1794,8 +1823,13 @@ def test_the_main_account_buys_only_a_kind_the_lab_says_carries(conn, s, tmp_pat
     t._lab = (-1e18, [])
     assert not (t._gate("market", MINT, mk.snaps[MINT], d) or "").startswith("Hauptkonto pausiert")
     assert t._gate("whale", MINT, mk.snaps[MINT], d).startswith("Hauptkonto pausiert")
-    assert store.get(conn, "main_paused") == {"paused": False, "since": None, "until_verdict": "traegt",
-                                              "released": ["market"], "reason": ""}
+    assert store.get(conn, "main_paused") == {"paused": False, "since": None, "decided_at": None, "live_since": None,
+                                              "until_verdict": "traegt", "released": ["market"], "reason": ""}
+    (tmp_path / "report.json").write_text(json.dumps({"results": []}))
+    t._lab = (-1e18, [])
+    t._gate("whale", MINT, mk.snaps[MINT], d)
+    mp = store.get(conn, "main_paused")  # a later pause is the lab's own, from when it began
+    assert mp["paused"] and mp["decided_at"] is None and mp["since"] == mp["live_since"] > PAUSE_DECIDED_TS
 
 
 def test_labels_take_the_venues_costs_and_follow_rows_for_a_day(conn, s):
@@ -1823,3 +1857,35 @@ def test_labels_take_the_venues_costs_and_follow_rows_for_a_day(conn, s):
         lb.step()
     a = conn.execute("SELECT * FROM opportunities WHERE ref='a'").fetchone()
     assert a["label_ret1440"] == -1.0 and a["label_long_min"] is not None and not lb.long
+
+
+def test_no_price_history_and_an_old_rug_block_every_account(conn, s):
+    from brain import trader as T
+    t = make_trader(conn, s, trained(), Market())
+    t._history = types.MethodType(REAL_HISTORY, t)
+    now = int(t.clock())
+    assert "kein Kursverlauf" in t._history(MINT)
+    old_pool = snap()
+    old_pool.pair_created_ms = (now - 2 * 3600) * 1000
+    assert t._history(MINT, old_pool) is None  # a two-hour-old pool has its market's price history
+    conn.executemany("INSERT INTO token_prices(mint, ts, price_usd) VALUES (?,?,?)",
+                     [(MINT, now - 600 * i, 1.0) for i in range(1, 4)])
+    assert "kein Kursverlauf" in t._history(MINT)  # three points, but the first only 30 min old
+    conn.execute("INSERT INTO token_prices(mint, ts, price_usd) VALUES (?,?,?)", (MINT, now - T.HIST_SPAN_S - 60, 1.0))
+    assert t._history(MINT) is None
+    new_coin = "New" + MINT[3:]
+    d0 = types.SimpleNamespace(explore=False)
+    young = snap(mint=new_coin)
+    young.pair_created_ms = (now - 1200) * 1000
+    t.rng = types.SimpleNamespace(random=lambda: 0.1)  # inside the learning account's sample
+    assert "kein Kursverlauf" not in (t._gate("pool", new_coin, young, d0) or "")
+    assert "kein Kursverlauf" in (t._gate("whale", new_coin, young, d0) or "")
+    t.rng = types.SimpleNamespace(random=lambda: 0.9)
+    assert "kein Kursverlauf" in (t._gate("pool", new_coin, young, d0) or "")
+    from brain import features
+    assert features._history(conn, MINT, now) == "45m+" and features._history(conn, "x", now) == "none"
+    d = types.SimpleNamespace(explore=False)
+    conn.execute("INSERT INTO brain_positions(kind, mint, status, opened_at, closed_at, exit_reason) VALUES "
+                 "('pool', ?, 'closed', ?, ?, 'rug')", (MINT, now - 9 * 86400, now - 9 * 86400))
+    for kind in ("pool", "whale"):
+        assert "dauerhaft gesperrt" in (t._gate(kind, MINT, snap(), d) or ""), kind
