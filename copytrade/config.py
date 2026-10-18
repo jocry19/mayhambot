@@ -97,7 +97,9 @@ class Settings:
     # wallets the bot has seen (unique match only), full addresses are taken as they are
     block0_wallets: list[str] = field(default_factory=lambda: [w.strip() for w in os.getenv(
         "CT_BLOCK0_WALLETS", "52bZXsA9XHvWP5JYgmt1r8GQJ5bse3FK5ALf6j3pVu4e,5kGadrQbtuyi5KHDM69oVuFsUwsw98xopsRsRF3QnuFR,"
-        "3dy8rc,2XMRHn,9ZYMMX,7nZn5L,Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA,AopdiF…Qtke").split(",") if w.strip()])
+        "3dy8rcMdXBRQP2GLf2LgMhy9L9a2mEbsjQNv8EZ9gBWe,2XMRHnX9u1jYW8EardqAgtDPgrz89xLBTnDc35wV8LSS,"
+        "9ZYMMXvVPSfq6JdUjXBv9yCo1J1XbphPQMbWS5oDThJ,7nZn5LKSzqh39Xx62ju6x8DCJ9ZaJHR3h254bTiJWiuF,"
+        "Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA,AopdiFdCvoP84YYGzfnLcmtehtiWKet3fzxTZbq9Qtke").split(",") if w.strip()])
     discover_every_s: float = field(default_factory=lambda: _f("CT_DISCOVER_EVERY_SECONDS", 1800))
     poll_warm_seconds: float = field(default_factory=lambda: _f("CT_POLL_WARM_SECONDS", 60))
     poll_cold_seconds: float = field(default_factory=lambda: _f("CT_POLL_COLD_SECONDS", 300))

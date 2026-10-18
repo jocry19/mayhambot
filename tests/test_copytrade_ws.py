@@ -1,6 +1,7 @@
 """Websocket wallet detection, public-RPC-first reads and dedupe between websocket and polling (offline)."""
 import asyncio
 import json
+import queue
 import threading
 import time
 
@@ -1016,3 +1017,51 @@ def test_buys_land_in_the_brains_opportunity_table(env):
     finally:
         tracker.BLOCK0.discard(W)
         opportunity.set_sink(None)
+
+
+def _venue_logs(prog: str | None) -> list[str]:
+    from copytrade import chain
+
+    pid = next(iter(chain.DEX_PROGRAMS)) if prog == "dex" else "11111111111111111111111111111111"
+    return [f"Program {pid} invoke [1]", f"Program {pid} success"]
+
+
+def test_whale_notifications_jump_ahead_of_bulk_and_block0_floods_are_dropped(monkeypatch):
+    from copytrade import watch
+
+    B0 = "B0bot1111111111111111111111111111111111111"
+    monkeypatch.setattr(tracker, "BLOCK0", {B0})
+    q = watch.EventLanes()
+    now = time.time()
+    q.put((B0, "b0-transfer", now, _venue_logs(None)))  # launch bot, no swap venue: never read
+    q.put((B0, None, now, "catchup"))  # polling covers the launch bots
+    q.put((B0, "b0-swap", now, _venue_logs("dex")))
+    q.put((W, "w-transfer", now, _venue_logs(None)))
+    q.put((W, None, now, "catchup"))
+    q.put((W, "w-swap", now, _venue_logs("dex")))
+    q.put((W, "w-nologs", now, None))
+    order = [q.get(timeout=1)[1] for _ in range(5)]
+    assert order == ["w-swap", "w-nologs", None, "b0-swap", "w-transfer"] and q.empty()
+    assert q.dropped == {"block0_noswap": 1, "block0_catchup": 1}
+    for i in range(watch.EventLanes.LOW_MAX + 5):  # the bulk lane is bounded, the whale lane never waits on it
+        q.put((B0, f"b{i}", now, _venue_logs("dex")))
+    q.put((W, "w2", now, None))
+    assert q.get(timeout=1)[1] == "w2" and q.dropped["overflow"] == 5 and q.qsize() == watch.EventLanes.LOW_MAX
+    with pytest.raises(queue.Empty):
+        watch.EventLanes().get(timeout=0.05)
+
+
+def test_block0_wallets_never_ride_the_paid_helius_stream(tmp_path, monkeypatch):
+    from copytrade import watch
+
+    B0 = "B0bot1111111111111111111111111111111111111"
+    monkeypatch.setattr(tracker, "BLOCK0", {B0})
+    s = Settings(db_path=tmp_path / "h.db", ws_urls=["ws://n0"], ws_parallel=1)
+    w = watch.Watcher(s, None, {}, threading.Event())
+    w.helius = w.streams[0].__class__(s, url="ws://helius", events=w.events, name="wallet-ws-helius")
+    w.streams.append(w.helius)
+    w.set_wallets([W, B0])
+    assert w.streams[0]._wanted == [W, B0] and w.helius._wanted == [W]
+    w.helius_paused = "x"
+    w.set_wallets([W, B0])
+    assert w.helius._wanted == []

@@ -37,6 +37,69 @@ def handle_swap(strat, sw) -> None:
 HELIUS_WS_CREDITS_PER_100KB = 2.0  # Helius billing for standard websockets (helius.dev/docs/billing/credits, 10/2026)
 
 
+class EventLanes:
+    """The streams' notification queue with lanes, so the whale detection never waits behind bulk traffic.
+
+    lane 0: notifications of tracked whales that touch a swap venue (or whose logs are unknown)
+    lane 1: catch-ups after a resubscribe
+    lane 2: whale notifications without any swap venue (transfers, closes, spam) and block-0 launch bots
+    Block-0 wallets fire masses of non-swap transactions: those are dropped before they are queued (no read at
+    all), so are their catch-ups (polling covers them). Lane 2 is bounded: when full, the oldest entry goes.
+    """
+
+    LOW_MAX = 300
+
+    def __init__(self):
+        self._cv = threading.Condition()
+        self._lanes = [collections.deque(), collections.deque(), collections.deque()]
+        self.dropped = collections.Counter()  # block0_noswap | block0_catchup | overflow
+
+    def lane(self, item) -> int | None:
+        wallet, sig, _got, *rest = item
+        extra = rest[0] if rest else None
+        b0 = wallet in tracker.BLOCK0
+        if sig is None:
+            if b0:
+                self.dropped["block0_catchup"] += 1
+                return None
+            return 1
+        venues = chain.log_venues(extra) if isinstance(extra, list) else None
+        if b0 and venues is not None and not venues:
+            self.dropped["block0_noswap"] += 1
+            return None
+        return 2 if b0 or venues == set() else 0
+
+    def put(self, item) -> None:
+        n = self.lane(item)
+        if n is None:
+            return
+        with self._cv:
+            q = self._lanes[n]
+            if n == 2 and len(q) >= self.LOW_MAX:
+                q.popleft()
+                self.dropped["overflow"] += 1
+            q.append(item)
+            self._cv.notify()
+
+    def get(self, timeout: float | None = None):
+        with self._cv:
+            if not self._cv.wait_for(lambda: any(self._lanes), timeout):
+                raise queue.Empty
+            return next(q for q in self._lanes if q).popleft()
+
+    def get_nowait(self):
+        return self.get(0)
+
+    def empty(self) -> bool:
+        return not any(self._lanes)
+
+    def qsize(self) -> int:
+        return sum(len(q) for q in self._lanes)
+
+    def sizes(self) -> list[int]:
+        return [len(q) for q in self._lanes]
+
+
 def w_in(st, wallet: str) -> bool:
     with st._lock:
         return wallet in st._subs
@@ -45,7 +108,7 @@ def w_in(st, wallet: str) -> bool:
 class Watcher:
     def __init__(self, s: Settings, rpc, exs, stop: threading.Event):
         self.s, self.rpc, self.exs, self._stop = s, rpc, exs, stop
-        self.events: queue.Queue = queue.Queue()
+        self.events = EventLanes()
         urls = [u for u in s.ws_urls if u != "off"]
         n = max(1, min(s.ws_parallel, len(urls))) if urls else 0
         # stream i starts on endpoint i and rotates through the rest on drops
@@ -89,7 +152,7 @@ class Watcher:
             return self
         self._wallets = list(wallets)
         for st in self.streams:
-            st.set_wallets([] if st is self.helius and self.helius_paused else wallets)
+            st.set_wallets(self._for(st, wallets))
             st.start()
         self._thread = threading.Thread(target=self._work, name="wallet-ws-decider", daemon=True)
         self._thread.start()
@@ -101,10 +164,17 @@ class Watcher:
         for st in self.streams:
             st.stop()
 
+    def _for(self, st, wallets) -> list[str]:
+        """The Helius stream bills every byte: never the block-0 launch bots (their flood stays on the free
+        public streams) and nothing while paused."""
+        if st is not self.helius:
+            return list(wallets)
+        return [] if self.helius_paused else [w for w in wallets if w not in tracker.BLOCK0]
+
     def set_wallets(self, wallets) -> None:
         self._wallets = list(wallets)
         for st in self.streams:
-            st.set_wallets([] if st is self.helius and self.helius_paused else wallets)
+            st.set_wallets(self._for(st, wallets))
 
     def meter(self, now: float | None = None) -> None:
         """Book the Helius stream's data (2 credits per 0.1 MB) and pause it below the day's reserve (the same one
@@ -133,7 +203,7 @@ class Watcher:
             log.info("Helius wallet stream paused: %s", why)
         elif not why and self.helius_paused:
             self.helius_paused = ""
-            h.set_wallets(self._wallets)
+            h.set_wallets(self._for(h, self._wallets))
             log.info("Helius wallet stream resumed")
 
     def covered(self) -> set[str]:
@@ -153,7 +223,9 @@ class Watcher:
         parts.append(f"queue wait p50 {pct(self.waits, .5):.1f}s p90 {pct(self.waits, .9):.1f}s, transaction read "
                      f"p50 {pct(self.fetch_s, .5):.1f}s p90 {pct(self.fetch_s, .9):.1f}s, "
                      f"{self.catchups} catch-ups after reconnects ({self.skipped_catchups} skipped, covered elsewhere), "
-                     f"{self.lean} without swap venue read public-only"
+                     f"{self.lean} without swap venue read public-only, lanes {'/'.join(map(str, self.events.sizes()))}"
+                     + (", dropped " + ", ".join(f"{k} {n}" for k, n in self.events.dropped.most_common())
+                        if self.events.dropped else "")
                      + (f", Helius stream {self.helius.bytes / 1e6:.1f} MB = {self.helius_credits:.0f} credits"
                         + (f" (paused: {self.helius_paused})" if self.helius_paused else "") if self.helius else ""))
         v = tracker.VERIFY
@@ -214,7 +286,9 @@ class Watcher:
         """One notification -> swap: pump.fun trades straight from the logs (verified against the full
         transaction afterwards), everything else via getTransaction."""
         start = time.time()
-        self.waits.append(max(0.0, start - got))
+        venues = chain.log_venues(logs) if logs is not None else None
+        if venues != set() and wallet not in tracker.BLOCK0:  # the whale lane (bulk lane waits by design)
+            self.waits.append(max(0.0, start - got))
         sw = None
         try:
             sw = store.retry_locked(tracker.process_logs, conn, self.s, wallet, sig, logs, got)
@@ -224,8 +298,7 @@ class Watcher:
                     self._verify.append((time.time() + 3, 0, sw))
             else:
                 # Helius credits only for transactions that touch a swap venue (or whose logs we cannot see)
-                venues = chain.log_venues(logs) if logs is not None else None
-                escalate = venues is None or bool(venues)
+                escalate = (venues is None or bool(venues)) and wallet not in tracker.BLOCK0  # bots: public
                 if not escalate:
                     self.lean += 1
                 sw = store.retry_locked(tracker.process_signature, conn, self.s, self.rpc, wallet, sig, 3, got,
