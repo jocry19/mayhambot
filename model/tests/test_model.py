@@ -492,6 +492,9 @@ def test_wallet_features_for_the_opportunity_table(market):
     assert set(f) == set(WALLET_FEATURE_NAMES)
     assert f["w_known"] == 2 and f["w_n_ultra"] == 2 and f["w_tier_rank_max"] == 3
     assert 0 < f["w_evidence_top"] <= 1 and f["w_c_win_top"] is not None
+    bot = wallet_features(["BOTX"] * 9 + ultra[:1], conn)
+    assert bot["w_max_buys_one_wallet"] == 9 and bot["w_top_buyer_share"] == pytest.approx(0.9)
+    assert bot["w_n_buyers"] == 2 and bot["w_n_unknown"] == 1
     empty = wallet_features(["NOPE"], conn)
     assert empty["w_known"] == 0 and empty["w_score_max"] is None
     flagged = [w for w, r in rows.items() if r["flag"]]

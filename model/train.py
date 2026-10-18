@@ -189,6 +189,7 @@ def retrain_if_due(conn, every, last_ok):
         return last_ok
     from core.db import retry_locked
     t0 = time.time()
+    log.info("retrain started (last successful %s)", _utc(last_ok) if last_ok else "never")
     try:
         vid = retry_locked(conn, lambda: run_once(conn), attempts=2)
     except Exception:  # noqa: BLE001

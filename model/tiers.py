@@ -1,6 +1,7 @@
 """Wallet score and tier rules (pure functions) + DB accessors for the current tiers."""
 import json
 import math
+from collections import Counter
 
 from model.config import PRIOR_WALLET_WEIGHTS, TIERS, msettings
 from research.wallet_stats import COMPONENTS
@@ -152,7 +153,8 @@ TIER_RANK = {"ultra": 3, "smart": 2, "good": 1}
 WALLET_FEATURE_NAMES = (["w_known", "w_n_ultra", "w_n_smart", "w_n_good", "w_n_flagged", "w_n_one_hit",
                          "w_score_max", "w_score_mean", "w_tier_rank_max", "w_n_tokens_top", "w_evidence_top",
                          "w_win_rate_top", "w_net_roi_top", "w_net_pnl_sum_usd", "w_excess_roi_top",
-                         "w_top_coin_share_top", "w_rug_rate_top", "w_n_clusters"]
+                         "w_top_coin_share_top", "w_rug_rate_top", "w_n_clusters", "w_n_buyers", "w_n_unknown",
+                         "w_max_buys_one_wallet", "w_top_buyer_share"]
                         + [f"w_c_{c}_top" for c in COMPONENTS])
 
 
@@ -186,8 +188,14 @@ def wallet_features(addresses, conn=None, rows=None):
     rows = wallet_rows(addresses, conn) if rows is None else rows
     known = [rows[a] for a in dict.fromkeys(addresses) if a in rows]
     f = dict.fromkeys(WALLET_FEATURE_NAMES)
+    cnt = Counter(a for a in addresses if a)
+    top_n = max(cnt.values(), default=0)
+    # a volume bot shows up as one address with many buys (bots over the trades-per-coin limit get no stats and
+    # count as unknown): 851 buys of one wallet were 90 % of all inflow on 18.10.
     f.update(w_known=float(len(known)), w_n_ultra=0.0, w_n_smart=0.0, w_n_good=0.0, w_n_flagged=0.0,
-             w_n_one_hit=0.0, w_net_pnl_sum_usd=0.0, w_n_clusters=0.0)
+             w_n_one_hit=0.0, w_net_pnl_sum_usd=0.0, w_n_clusters=0.0, w_n_buyers=float(len(cnt)),
+             w_n_unknown=float(len(cnt) - len(known)), w_max_buys_one_wallet=float(top_n),
+             w_top_buyer_share=top_n / sum(cnt.values()) if cnt else None)
     if not known:
         return f
     for r in known:
