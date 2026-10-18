@@ -509,3 +509,23 @@ def test_stored_predictions_are_reported_as_opportunities(market, monkeypatch):
     assert kw["source_action"] == "scored" and 0 <= kw["source_score"] <= 1
     assert "wallet_model.w_known" in feats and "wallet_model.p_1h" in feats and "mc_usd" in feats
     assert all(isinstance(v, (int, float, str, bool)) for v in feats.values())
+
+
+def test_prediction_outcome_is_written_back_as_source_result(tmp_path):
+    from brain.opportunities import report
+    conn, truth, now = fixtures.build(str(tmp_path / "o.db"), days=2, n_tokens=30)
+    train.run_once(conn, now=now, write_files=False)
+    mint = conn.execute("SELECT mint FROM trades GROUP BY mint ORDER BY COUNT(*) DESC LIMIT 1").fetchone()[0]
+    ts = conn.execute("SELECT MIN(ts) FROM trades WHERE mint=?", (mint,)).fetchone()[0] + 1800
+    r = score_token(mint, now=ts, conn=conn, store=True)
+    if r is None:
+        pytest.skip("no features for this coin")
+    row = conn.execute("SELECT ref FROM opportunities WHERE source='wallet_model'").fetchone()
+    assert row is not None and report is not None
+    update_outcomes(conn, now=ts + 7 * 3600)
+    res = conn.execute("SELECT source_result, source_horizon_min FROM opportunities WHERE ref=?", (row[0],)).fetchone()
+    ret = conn.execute("SELECT ret_1h FROM model_predictions WHERE id=?", (int(row[0][5:]),)).fetchone()[0]
+    if ret is None:
+        assert res[0] is None
+    else:
+        assert res[0] == pytest.approx(max(-1.0, ret) - 0.06) and res[1] == 60

@@ -223,7 +223,12 @@ def update_outcomes(conn=None, now=None):
                         (now - 8 * 86400,)).fetchall()
     if not rows:
         return 0
+    from research.config import rsettings
     from research.prices import PriceIndex
+    try:
+        from brain.opportunities import source_result as result
+    except ImportError:
+        result = None
     pidx = PriceIndex.from_db(conn, {r["mint"] for r in rows})
     n = 0
     for r in rows:
@@ -245,6 +250,11 @@ def update_outcomes(conn=None, now=None):
             conn.execute(f"UPDATE model_predictions SET {', '.join(k + '=?' for k in upd)} WHERE id=?",
                          (*upd.values(), r["id"]))
             n += 1
+            if "ret_1h" in upd and result:  # our own honest view: bought at the prediction, held 1 h, minus costs
+                try:
+                    result(conn, "wallet_model", f"pred:{r['id']}", max(-1.0, upd["ret_1h"]) - rsettings.cost_roundtrip, 60)
+                except Exception:  # noqa: BLE001
+                    log.exception("source_result for prediction %s failed", r["id"])
     conn.commit()
     return n
 
