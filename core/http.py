@@ -487,11 +487,21 @@ def _ledger_read():
     return _roll(led)
 
 
+def daily_limit_on():
+    """18.10. the user: Helius may be used as much as the bot needs, they watch the plan and the key themselves.
+    So the per-service day shares only book and show usage; they refuse calls (CreditsExhausted, public
+    fallback) only with HELIUS_DAILY_LIMIT=1. Per-second limits and 429 handling stay either way."""
+    return (os.getenv("HELIUS_DAILY_LIMIT") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def credits_left_today(service=None):
-    """Credits this service may still spend today (None = no limit, e.g. a process without a service name)."""
+    """Credits this service may still spend today (None = no limit, e.g. a process without a service name;
+    inf while HELIUS_DAILY_LIMIT is off, so callers comparing it with a reserve keep the Helius lane)."""
     svc = service if service is not None else _service
     if not svc:
         return None
+    if not daily_limit_on():
+        return float("inf")
     st = credits(svc)
     if not st or st["credits_day_budget"] is None:
         return None
@@ -544,7 +554,7 @@ def _charge(cost, force=False):
 
     def book(led):
         st = _svc_stats(led, svc)
-        if _service and st["credits_day_budget"] is not None and not force:
+        if _service and st["credits_day_budget"] is not None and not force and daily_limit_on():
             day_left = st["credits_day_budget"] * CREDIT_BURST.get(svc, 1.0) - st["credits_today"]
             if cost > min(day_left, st["credits_cap"] - st["credits_month"]) and cost > _borrowable(led, svc):
                 return st, False

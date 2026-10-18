@@ -152,7 +152,9 @@ DAS methods 10, Enhanced Transactions / Wallet API on api.helius.xyz 100, getTra
 ```python
 http.credit_cost(url, {"json": payload})   # credits of one request (0 for non-Helius hosts)
 http.credits()                    # {service: {credits_today, credits_month, credits_cap, credits_day_budget, share_pct, ...}}
-http.credits_left_today()         # this service, None = unlimited (process without a service name)
+http.credits_left_today()         # this service, None = unlimited (process without a service name), inf = limit off
+http.daily_limit_on()             # HELIUS_DAILY_LIMIT=1: the day shares refuse calls; default off since 18.10.
+                                  # (the user watches the plan and the key), shares then only book and show usage
 http.rpc_url(method, helius_url)  # Helius URL, or the public RPC once today's share is used up (standard methods only)
 http.throttle(host, cost=n)       # own HTTP clients: pass the request's credit cost (default: host base cost)
 http.CreditsExhausted             # raised instead of calling when today's share is used up (a RequestException)

@@ -56,6 +56,7 @@ def _fresh(monkeypatch, tmp_path, service=""):
     for name in ("_budgets", "_recent", "_usage", "_usage_window"):
         monkeypatch.setattr(http, name, {})
     monkeypatch.setattr(http, "_service", service)
+    monkeypatch.delenv("HELIUS_DAILY_LIMIT", raising=False)
 
 
 def test_no_service_means_no_budget(monkeypatch, tmp_path):
@@ -113,6 +114,7 @@ def test_credit_costs():
 def _credit_env(monkeypatch, tmp_path, service, day=16, month_credits=31_000):
     import calendar
     _fresh(monkeypatch, tmp_path, service)
+    monkeypatch.setenv("HELIUS_DAILY_LIMIT", "1")   # the day shares refuse only when switched on
     ts = calendar.timegm((2026, 10, day, 12, 0, 0))
     monkeypatch.setattr(http.time, "time", lambda: ts)
     monkeypatch.setenv("HELIUS_CREDITS_MONTH", str(month_credits))
@@ -137,6 +139,18 @@ def test_daily_share_spreads_over_rest_of_month(monkeypatch, tmp_path):
         raise AssertionError("expected CreditsExhausted")
     assert http.credits("signals")["credits_today"] == 150
     assert http.usage()["helius"]["refused"] == 1
+
+
+def test_without_daily_limit_helius_is_never_refused_but_still_booked(monkeypatch, tmp_path):
+    """18.10. the user watches the plan and the key: a used-up day share neither refuses nor moves to public."""
+    _credit_env(monkeypatch, tmp_path, "signals", day=1)   # 150/day
+    monkeypatch.delenv("HELIUS_DAILY_LIMIT")
+    for _ in range(400):
+        http._charge(1)
+    assert http.credits("signals")["credits_today"] == 400
+    assert http.credits_left_today() == float("inf")
+    helius = "https://beta.helius-rpc.com/?api-key=k"
+    assert http.rpc_url("getBalance", helius) == helius
 
 
 def _lend_env(monkeypatch, tmp_path, service):
