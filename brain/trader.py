@@ -238,10 +238,10 @@ class Trader:
                     feats["safety"] = self._safe[0]
             except Exception as e:
                 log.debug("safety %s: %s", row["mint"][:6], e)
-        pocket = self.pockets.match(kind, feats)
-        d = decide.choose(self.model, kind, feats, self.settings(now, pocket), self.rng, equity=self.equity())
+        pocket, trust = self.pockets.match(kind, feats)
+        d = decide.choose(self.model, kind, feats, self.settings(now, trust), self.rng, equity=self.equity())
         if pocket:
-            raw["pocket"] = pocket
+            raw["pocket"], raw["trust"] = pocket, trust
         block = None
         wanted = d.enter and not d.explore  # convinced before the hard gates: what the honest score judges
         if d.enter:
@@ -423,19 +423,19 @@ class Trader:
         self._challenge_at = (now, on)
         return on
 
-    def settings(self, now: float, pocket: str | None = None):
-        """The settings a decision runs with. Outside a released pocket Kelly sizes on the lower bound of the edge (an
-        unproven edge stakes the minimum); inside one on its mean, with the challenge's bigger stakes while it is on
-        (plan 18.10.: with a negative expected value bigger stakes only lose faster)."""
+    def settings(self, now: float, trust: float = 0.5):
+        """The settings a decision runs with. No gate: while the challenge is on, the stake share slides from the
+        normal Kelly share to the challenge's (½-Kelly up to 35 %) as the pattern's trust goes from 50 % to 95 %, and
+        falls back the same way when its recent results turn (user 18.10.: freer, organic, no fixed rules)."""
+        if not self.challenge_on(now):
+            return self.s
         import dataclasses
 
-        if not pocket:
-            return dataclasses.replace(self.s, kelly_edge="lb")
-        if not self.challenge_on(now):
-            return dataclasses.replace(self.s, kelly_edge="mean")
-        return dataclasses.replace(self.s, kelly_edge="mean", kelly_frac=self.s.challenge_kelly_frac,
-                                   max_stake=self.s.challenge_max_stake,
-                                   explore_share=self.s.challenge_explore_share)
+        w = max(0.0, min(1.0, (trust - 0.5) / 0.45))
+        s = self.s
+        return dataclasses.replace(s, kelly_frac=s.kelly_frac + w * (s.challenge_kelly_frac - s.kelly_frac),
+                                   max_stake=s.max_stake + w * (s.challenge_max_stake - s.max_stake),
+                                   explore_share=w * s.challenge_explore_share)
 
     def market_live(self) -> bool:
         """The side source trades only once its own out-of-sample record earned it: auto = what the brain wanted from

@@ -910,7 +910,7 @@ def test_challenge_explores_side_sources_with_account_stakes_and_pauses_after_lo
         conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (h0 - k * 3600 + 3500, eq * 0.9, 0, eq * 0.9))
     t._challenge_at = (-1e18, False)
     assert not t.challenge_on(time.time())
-    assert t.settings(time.time(), "market").kelly_frac == s.kelly_frac  # paused: even a released pocket stakes normally
+    assert t.settings(time.time(), 0.99) is s  # paused: even a trusted pattern stakes normally
     assert "Challenge pausiert" in journal.write(conn, unsure, s)
 
 
@@ -1004,29 +1004,37 @@ def test_pockets_release_only_a_pattern_beyond_chance_in_both_halves_and_fall_ba
     res = pockets.scan(conn, now)
     assert res["market|dex=pumpswap"]["released"]
     assert not res["market|dex=raydium"]["released"] and "neuere Hälfte" in res["market|dex=raydium"]["reason"]
-    assert "whale|tier=ultra" not in res
+    assert not res["whale|tier=ultra"]["released"] and res["whale|tier=ultra"]["trust"] > 0.99  # few, but trusted
     b = pockets.Book(conn, lambda: now)
-    assert b.match("market", {"dex": "pumpswap", "why": "x"}) == "market|dex=pumpswap"
-    assert b.match("market", {"dex": "raydium"}) is None
+    assert b.match("market", {"dex": "pumpswap", "why": "x"})[0] == "market|dex=pumpswap"
+    assert b.match("market", {"dex": "raydium"})[1] < b.match("market", {"dex": "pumpswap"})[1]
     assert "market|dex=pumpswap" in store.get(conn, "pockets")["live"]
-    assert "1 von" in journal.write(conn, Brain(len(PLANS)), config.Settings(), now)
+    assert "1 davon in beiden" in journal.write(conn, Brain(len(PLANS)), config.Settings(), now)
     tab = pockets.table(conn)
     row = next(r for r in tab["pockets"] if r["key"] == "market|dex=pumpswap")
     assert tab["rule"]["min_n"] == 100 and row["released_at"] and row["label"].startswith("Markt-Coins")
 
 
-def test_kelly_on_the_lower_bound_outside_released_pockets(s):
+def test_an_unsure_edge_stakes_less_by_itself(s):
     import dataclasses
-    m = trained()
     s = dataclasses.replace(s, max_stake=100.0, kelly_frac=0.01)  # no cap: the edge alone decides
-    lb = choose(m, "whale", {"tier": "ultra"}, dataclasses.replace(s, kelly_edge="lb"), random.Random(3), equity=10.0)
-    mean = choose(m, "whale", {"tier": "ultra"}, dataclasses.replace(s, kelly_edge="mean"), random.Random(3), equity=10.0)
-    assert lb.enter and mean.enter and lb.size_sol < mean.size_sol
+    sure, unsure = trained(), trained()
+    sure_d = choose(sure, "whale", {"tier": "ultra"}, s, random.Random(3), equity=10.0)
+    unsure.fade(0.02)  # same mean, far less evidence
+    unsure_d = choose(unsure, "whale", {"tier": "ultra"}, s, random.Random(3), equity=10.0)
+    assert sure_d.enter and (not unsure_d.enter or unsure_d.size_sol < sure_d.size_sol)
 
 
-def test_challenge_stakes_run_only_in_a_released_pocket(conn, s):
+def test_challenge_stakes_slide_with_the_patterns_trust(conn, s):
     t = make_trader(conn, s, trained(), Market())
     now = time.time()
-    assert t.settings(now).kelly_edge == "lb" and t.settings(now).kelly_frac == s.kelly_frac
-    big = t.settings(now, "market|dex=pumpswap")
-    assert big.kelly_edge == "mean" and big.kelly_frac == s.challenge_kelly_frac and big.max_stake == s.challenge_max_stake
+    low, mid, high = t.settings(now, 0.5), t.settings(now, 0.725), t.settings(now, 0.95)
+    assert low.kelly_frac == s.kelly_frac and low.max_stake == s.max_stake
+    assert high.kelly_frac == pytest.approx(s.challenge_kelly_frac) and high.max_stake == pytest.approx(s.challenge_max_stake)
+    assert s.kelly_frac < mid.kelly_frac < high.kelly_frac
+    from brain import pockets
+    rng = random.Random(1)
+    _opps(conn, "market", {"dex": "pumpswap"}, [0.05 + rng.gauss(0, 0.1) for _ in range(40)], now - 4000)
+    key, tr = t.pockets.match("market", {"dex": "pumpswap"})
+    assert key and tr > 0.9
+    assert t.pockets.match("whale", {"tier": "ultra"}) == (None, 0.5)

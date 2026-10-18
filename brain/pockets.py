@@ -1,11 +1,15 @@
-"""Pockets: patterns that earned a real stake.
+"""Pockets: how much each pattern has earned the right to a bigger stake (soft, no gate).
 
 Every opportunity of every source is booked with its counterfactual result after costs (brain_opps, taken or not:
 the shadow book). A pocket is one source alone or one source with one feature value ("market" + "dex=pumpswap"). It is
 released only when its record is beyond chance: at least MIN_N cases in the window, and the 95 % lower bound of the
 mean is above zero in BOTH halves of that window (older and newer), so a pocket that paid only once does not count.
-It falls back the moment its last LAST_N cases no longer pay. Plan "Hundertmal besser" (18.10.): with a negative
-expected value bigger stakes only lose faster, so the challenge stakes run on released pockets only."""
+It falls back the moment its last LAST_N cases no longer pay.
+
+User, 18.10.: no fixed rule will ever form, the brain should be freer. So the release is only a label for the
+dashboard; what sizes a trade is `trust`, the probability that the pattern's recent mean after costs is above zero
+(normal approximation, newer half weighted double so it follows the market). Every opportunity is still taken or
+explored by the model; trust only blends the stake from the normal Kelly share towards the challenge's bigger one."""
 from __future__ import annotations
 
 import json
@@ -15,6 +19,7 @@ from . import store
 
 WINDOW_S = 7 * 86400
 MIN_N = 100
+TRUST_MIN_N = 20  # below this a pattern says nothing (trust 0.5)
 LAST_N = 50
 Z = 1.96
 EVERY_S = 600
@@ -29,6 +34,20 @@ def lower(xs: list[float]) -> float | None:
     m = sum(xs) / n
     var = sum((x - m) ** 2 for x in xs) / (n - 1)
     return m - Z * math.sqrt(var / n)
+
+
+def trust(xs: list[float]) -> float:
+    """P(mean > 0), the newer half counted twice."""
+    n = len(xs)
+    if n < TRUST_MIN_N:
+        return 0.5
+    w = [1.0] * (n // 2) + [2.0] * (n - n // 2)
+    sw = sum(w)
+    m = sum(a * b for a, b in zip(w, xs)) / sw
+    var = sum(a * (x - m) ** 2 for a, x in zip(w, xs)) / sw
+    neff = sw * sw / sum(a * a for a in w)
+    se = math.sqrt(var / max(neff - 1, 1)) or 1e-9
+    return 0.5 * (1 + math.erf(m / se / math.sqrt(2)))
 
 
 def keys(kind: str, feats: dict) -> list[str]:
@@ -62,7 +81,7 @@ def _why(n, lo, ln, last) -> str:
 
 
 def scan(conn, now: float) -> dict:
-    """{pocket: row} for every pocket with at least MIN_N // 2 cases (so the way to a release is visible)."""
+    """{pocket: row} for every pocket with at least TRUST_MIN_N cases."""
     rows = conn.execute("SELECT kind, features, realized_plan FROM brain_opps WHERE realized_plan IS NOT NULL "
                         "AND evaluated_at>=? ORDER BY ts", (int(now - WINDOW_S),)).fetchall()
     by: dict[str, list[float]] = {}
@@ -78,7 +97,7 @@ def scan(conn, now: float) -> dict:
     out = {}
     for k, xs in by.items():
         n = len(xs)
-        if n < MIN_N // 2:
+        if n < TRUST_MIN_N:
             continue
         h = n // 2
         a, b = xs[:h], xs[h:]
@@ -91,7 +110,7 @@ def scan(conn, now: float) -> dict:
                   "lower95_first_half": round(lo, 4) if lo is not None else None,
                   "n_second_half": len(b), "mean_second_half": round(sum(b) / len(b), 4) if b else None,
                   "lower95_second_half": round(ln, 4) if ln is not None else None,
-                  "last50_mean": round(last, 4), "released": live, "reason": _why(n, lo, ln, last)}
+                  "last50_mean": round(last, 4), "trust": round(trust(xs), 4), "released": live, "reason": _why(n, lo, ln, last)}
     return out
 
 
@@ -110,6 +129,7 @@ class Book:
         self.conn, self.clock = conn, clock
         self._at = -1e18
         self.live: set[str] = set()
+        self.trust: dict[str, float] = {}
 
     def refresh(self) -> set[str]:
         now = self.clock()
@@ -129,13 +149,17 @@ class Book:
             if p.get("released") and not r["released"]:
                 r["demoted_at"] = int(now)
         self.live = {k for k, v in res.items() if v["released"]}
-        rows = sorted(res.values(), key=lambda r: -(r["lower95"] if r["lower95"] is not None else -9))
+        self.trust = {k: v["trust"] for k, v in res.items()}
+        rows = sorted(res.values(), key=lambda r: -r["trust"])
         store.put(self.conn, "pockets", {"at": int(now), "live": sorted(self.live), "checked": len(res),
                                          "rows": rows[:300]})
         return self.live
 
-    def match(self, kind: str, feats: dict) -> str | None:
-        live = self.refresh()
+    def match(self, kind: str, feats: dict) -> tuple[str | None, float]:
+        """(pattern, trust) of the most trusted pattern this opportunity belongs to; (None, 0.5) if none has data."""
+        self.refresh()
         if kind == "signal" and feats.get("sig") == "v2":
             kind = "signal_v2"
-        return next((k for k in keys(kind, feats) if k in live), None)
+        best = max(((k, self.trust[k]) for k in keys(kind, feats) if k in self.trust), key=lambda kv: kv[1],
+                   default=(None, 0.5))
+        return best

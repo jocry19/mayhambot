@@ -162,9 +162,9 @@ def write(conn, model, s, now: float | None = None) -> str:
     pk = store.get(conn, "pockets") or {}
     if pk.get("checked"):
         best = next(iter(pk.get("rows") or []), None)
-        lines.append(f"Taschen (Einsatz nur bei positiver 95-%-Untergrenze in beiden Zeithälften, ≥ 100 Fälle): "
-                     f"{len(pk.get('live') or [])} von {pk['checked']} freigegeben"
-                     + (f"; beste Untergrenze {best['label']} {_p(best['lower95'])} bei {best['n']} Fällen"
+        lines.append(f"Muster ({pk['checked']} mit ≥ 20 Fällen): Einsatz wächst weich mit dem Vertrauen, {len(pk.get('live') or [])} "
+                     f"davon in beiden Zeithälften sicher im Plus"
+                     + (f"; am meisten Vertrauen {best['label']} {best['trust']:.0%} (Ø {_p(best['mean'])}, {best['n']} Fälle)"
                         if best else "") + ".")
 
     # what changed in the beliefs since the last entry
