@@ -26,6 +26,7 @@ def s(tmp_path, monkeypatch):
     st = config.Settings()
     st.telegram = "off"
     st.pool_sample = 1.0  # the learning-account tests buy every positive draw; the sample has its own test
+    st.pool_trade = "on"  # the default is shadow (paused); the pause has its own test
     return st
 
 
@@ -1489,3 +1490,16 @@ def test_held_back_learning_draws_name_their_reason(conn, s):
     t.scan()
     raw = json.loads(conn.execute("SELECT raw FROM brain_opps WHERE mint=?", (m2,)).fetchone()[0])
     assert raw["gate"] == "Kauf nicht ausgeführt: Token-Dezimalen unbekannt"
+
+
+def test_a_paused_learning_account_predicts_and_writes_back_but_buys_nothing(conn, s):
+    from brain import opportunities as O
+    s.pool_trade = "shadow"
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    t, _ = _pool_trader(conn, s, mk, src="signals")
+    O.report(conn, "signals", "signal:1", MINT, time.time(), {"wallets_n": 3}, source_action="alerted")
+    assert t.scan() == 0
+    row = conn.execute("SELECT * FROM opportunities").fetchone()
+    assert row["decision"] == "skip" and row["pred_mean"] is not None
+    assert json.loads(conn.execute("SELECT raw FROM brain_opps").fetchone()[0])["gate"] == "Lernkonto pausiert"
