@@ -533,6 +533,9 @@ export default function Brain() {
         <Tile label="Einfangquote" value={pct(lastOf(d.days, "capture_own") ?? lastOf(d.days, "capture_organic"))}
           sub={lastOf(d.days, "capture_own") != null ? "Anteil am besten Anstieg, eigene Trades (letzter Tag)" : "Anteil am besten Anstieg, organisch nachgespielt"} />
       </div>
+      {d.main_gate && d.main_gate.mode !== "on" && (d.main_gate.paused
+        ? <Callout kind="warn" icon="alert">Hauptkonto pausiert seit 18.10. 17:06 (Entscheidung des Nutzers): es kauft erst wieder, wenn im Prüfstand eine Tasche das Urteil „trägt“ hat, und dann nur deren Art. {d.main_gate.report ? `Letzter Bericht ${ago(d.main_gate.report_at)}: keine tragende Tasche.` : "Der Prüfstand hat noch keinen Bericht."} Das Lernkonto handelt weiter{d.main_gate.stopped_24h ? `; ${n(d.main_gate.stopped_24h)} Hauptkonto-Käufe in 24 h deshalb gestoppt` : ""}.</Callout>
+        : <Callout kind="good" icon="info">Hauptkonto kauft nur, wo der Prüfstand eine tragende Tasche sieht: {d.main_gate.open_labels.join(", ")} ({d.main_gate.carrying.join(", ")}).</Callout>)}
       {d.challenge?.paused_until && (
         <Callout kind="warn" icon="alert">Stunden-Challenge (×2 je Stunde) pausiert bis {dt(d.challenge.paused_until)}: die letzten 3 vollen Stunden zusammen lagen bei {fx(d.challenge.pauses_24h?.[d.challenge.pauses_24h.length - 1]?.factor, 3)}. Bis dahin gelten die normalen Einsatzgrößen{d.challenge.pauses_24h?.length > 1 ? ` (${n(d.challenge.pauses_24h.length)} Pausen in 24 h)` : ""}.</Callout>
       )}

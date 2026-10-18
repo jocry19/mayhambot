@@ -931,3 +931,32 @@ def test_lab_view_reads_report(tmp_path, monkeypatch):
     with open(rep, "w") as f:
         json.dump(d, f)
     assert "SECRET123" not in json.dumps(Q.lab_view(now=now)["errors"])
+
+
+def test_brain_main_gate_mirrors_lab(demo, monkeypatch):
+    """The main account's lab gate: paused while no 'traegt' hypothesis names a kind, open for the named kind."""
+    from web import devdata
+    from web import queries as Q
+
+    monkeypatch.delenv("LAB_DIR", raising=False)
+    monkeypatch.delenv("BRAIN_MAIN_TRADE", raising=False)
+    conn = sqlite3.connect(demo)
+    conn.row_factory = sqlite3.Row
+    now = 1_700_000_000
+    g = Q._brain_main_gate(conn, now)
+    assert g["paused"] and g["report"] is False and g["mode"] == "lab"
+    path = devdata.lab_report(os.path.join(Q.ROOT_DIR, "data", "lab"), now=now)
+    with open(path) as f:
+        rep = json.load(f)
+    rep["results"][0].update(hyp="label_whale_tp2", verdict="traegt")
+    with open(path, "w") as f:
+        json.dump(rep, f)
+    g = Q._brain_main_gate(conn, now)
+    assert not g["paused"] and g["open_kinds"] == ["whale"] and g["open_labels"] == ["Wal-Kauf"]
+    g = Q._brain_main_gate(conn, now, {"paused": True, "since": now - 60, "released": []})
+    assert g["paused"] and g["from_brain"] and g["open_kinds"] == []
+    g = Q._brain_main_gate(conn, now, {"paused": False, "released": ["market", "pool"]})
+    assert not g["paused"] and g["open_kinds"] == ["market"]
+    monkeypatch.setenv("BRAIN_MAIN_TRADE", "on")
+    assert Q._brain_main_gate(conn, now) == {"mode": "on", "paused": False}
+    assert "main_gate" in Q.brain_view(conn, now=now)

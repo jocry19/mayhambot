@@ -2820,6 +2820,7 @@ def brain_view(conn, kind=None, show="all", limit=60, now=None):
         "prior_check": st.get("prior_check") if isinstance(st.get("prior_check"), dict) else None,
         "total": {"equity_sol": _f(bal + open_val + learn["equity_sol"], 4) if bal is not None else None,
                   "result_sol": _f(bal + open_val + learn["equity_sol"] - start, 4) if bal is not None else None},
+        "main_gate": _brain_main_gate(conn, now, st.get("main_paused")),
         "challenge": {"paused_until": st.get("challenge_paused_until") if (st.get("challenge_paused_until") or 0) > now else None,
                       "pauses_24h": [x for x in (st.get("challenge_pauses") or []) if isinstance(x, dict) and (x.get("at") or 0) >= now - 86400]},
         "goal": {"mult": list(BRAIN_GOAL_MULT), "today": days[-1].get("mult") if days else None,
@@ -2902,3 +2903,32 @@ def lab_view(now=None):
         "rule": {"min_n": 200, "min_coins": 50, "min_t": 3.0},
         "results": res,
     }
+
+
+MAIN_GATE_TEXT = "Hauptkonto pausiert: keine Tasche trägt laut Prüfstand"
+
+
+def _brain_main_gate(conn, now, state=None):
+    """The main account's lab gate (brain/trader._gate, BRAIN_MAIN_TRADE=lab by default since the user's decision on
+    18.10. 17:06): it buys only a kind a 'traegt' hypothesis of data/lab/report.json names; mirrors that rule."""
+    mode = (os.getenv("BRAIN_MAIN_TRADE") or "lab").lower()
+    if mode == "on":
+        return {"mode": "on", "paused": False}
+    lab = lab_view(now)
+    carrying = lab.get("carrying") or [] if lab.get("available") else []
+    kinds = set(BRAIN_KIND)
+    if has(conn, "brain_opps"):
+        kinds |= {r["kind"] for r in rows(conn, "SELECT DISTINCT kind FROM brain_opps WHERE ts>=? AND kind IS NOT NULL",
+                                          (now - 7 * 86400,)) if r["kind"] and r["kind"] != "pool"}
+    named = {str(r.get("brain_kind")) for r in lab.get("results") or []
+             if r.get("verdict") == "traegt" and r.get("brain_kind") and r.get("brain_kind") != "pool"}
+    open_kinds = sorted(named | {k for k in kinds if any(k in h.lower() for h in carrying)})
+    if isinstance(state, dict) and "paused" in state:
+        # brain's own word (brain_state main_paused, written at most once a minute) wins over the mirror
+        open_kinds = sorted(str(k) for k in state.get("released") or [] if k != "pool")
+    stopped = scalar(conn, "SELECT COUNT(*) FROM brain_opps WHERE ts>=? AND note LIKE ?",
+                     (now - 86400, f"%{MAIN_GATE_TEXT}%")) if has(conn, "brain_opps") else 0
+    paused = bool(state.get("paused")) if isinstance(state, dict) and "paused" in state else not open_kinds
+    return {"mode": mode, "paused": paused, "open_kinds": open_kinds, "from_brain": isinstance(state, dict) and "paused" in state,
+            "open_labels": [BRAIN_KIND.get(k, k) for k in open_kinds], "carrying": carrying,
+            "report_at": lab.get("at"), "report": bool(lab.get("available")), "stopped_24h": int(stopped or 0)}
