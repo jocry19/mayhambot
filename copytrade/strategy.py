@@ -46,6 +46,9 @@ STAGED_AFTER_HIGH_S = 15 * 60  # ... or 15 min after the last high: 74 % drained
 STAGED_REFRESH_S = 300  # the pattern can only form within 45 min of the launch: re-read young coins every 5 min
 STAGED_YOUNG_H = 1.0
 CURVE_SNAP_MAX_AGE_S = 30  # the sniper's live curve state (sniper.store.curve_now) when DexScreener has no pair yet
+CURVE_MARK_AGE_S = 120  # paper exits: a curve price stays the price until the next trade (brain/trader.py, same rule)
+CURVE_MARK_MAX_RATIO = 5.0  # a curve price this far from DexScreener's is a units error, not lag
+HELD_S = 30  # a paper stop the sell quote contradicted: no new quote for this long
 RUG_LIQ_DROP = 0.5  # liquidity half its value at entry: the pool is being pulled, exit before the price stop (18.10.: two
 # stops booked at -100 %, the price fell through them between polls). A pool only halves by trading when the price
 # falls 75 %, far past every stop, so this fires on LP pulls only
@@ -118,6 +121,7 @@ class Strategy:
         self._missing: dict[int, int] = {}
         self._noroute: dict[int, float] = {}  # last 'no sell route' alarm per live position
         self._sconn = None  # own connection for the sniper's curve state (sniper.store.connect)
+        self._held: dict[int, float] = {}  # paper position -> when the quote last contradicted its stop
         self._opp: dict | None = None  # the whale decision in progress, reported to brain.opportunities
         self._staged: dict[str, tuple[float, bool]] = {}  # mint -> (checked at, staged pump pattern)
         self._blocked: dict[str, tuple[float, dict, str]] = {}  # mint -> (blocked at, safety info, reason)
@@ -928,6 +932,9 @@ class Strategy:
                 continue
             self._missing.pop(p["id"], None)
             price = snap.price_sol
+            paper = p["mode"] in PAPER_MODES
+            if paper:  # the screener runs behind on fast coins: the live curve price triggers stops in time
+                price = self._curve_price(p["mint"], price, now) or price
             if p["mode"] not in PAPER_MODES:  # real money: judge the stop on what a sell would bring now (Jupiter quote)
                 ev = getattr(self._ex_for_position(p), "exit_value", None)
                 v = ev(p["mint"], p["tokens"], p["token_decimals"] or 6) if ev else False
@@ -946,7 +953,10 @@ class Strategy:
                      last_buys_m5=?, peak_buys_m5=? WHERE id=?""",
                 (high, price, snap.price_usd, snap.fdv, snap.buys_m5, peak_buys, p["id"]),
             )
-            entry = p["entry_price_sol"]
+            # gains against the market price at the buy (the brain's ref_price), not the fill: the fill carries the
+            # entry slippage, so a stop measured from it fired late and the sale landed far below (18.10.: 27
+            # exploration stops at -24 % on average, Gelato -68 %)
+            entry = self._ref_price(p) if paper else p["entry_price_sol"]
             gain, high_gain = price / entry - 1, high / entry - 1
             trail_act = p["trail_activate"] if p["trail_activate"] is not None else self.s.trail_activate
             trail_dd = p["trail_drawdown"] if p["trail_drawdown"] is not None else self.s.trail_drawdown
@@ -989,6 +999,8 @@ class Strategy:
                 reason = "time"
             if reason == "target" and p["mode"] in PAPER_MODES and not self._target_confirmed(p):
                 reason = None  # trailing stop, stop and time limit still apply
+            if reason == "stop" and paper and not self._stop_confirmed(p, now):
+                reason = None  # the quote says the coin is not down: the price that fired was stale
             if reason:
                 self._exit(p, snap, reason)
                 if org:
@@ -1051,16 +1063,60 @@ class Strategy:
         self._staged[mint] = (now, hit)
         return hit
 
-    def _target_confirmed(self, p) -> bool:
-        """Paper targets are judged on the screener's mid price; confirm with what a sell would bring (one Jupiter
-        quote, only when the target fires). 10/2026: a 'target' exit was booked at -7 % because the mid price ran
-        ahead of the sellable price. Without a quote the mid price decides, as before."""
+    @staticmethod
+    def _ref_price(p) -> float:
+        """The market price at the buy (meta mid_sol) for paper exits; the fill price when it was not recorded."""
+        try:
+            ref = json.loads(p["meta"] or "{}").get("mid_sol")
+        except (TypeError, ValueError):
+            ref = None
+        return float(ref) if ref else p["entry_price_sol"]
+
+    def _curve_price(self, mint: str, screener: float, now: float) -> float | None:
+        """The sniper's live bonding-curve price of a coin still on the curve (None: unknown, stale, migrated, or
+        too far from the screener's to be the same unit)."""
+        try:
+            from sniper import store as sstore
+
+            if self._sconn is None:
+                self._sconn = sstore.connect(self.s.db_path)
+            c = sstore.curve_now(self._sconn, mint, CURVE_MARK_AGE_S, now=now)
+        except Exception as e:
+            log.debug("curve price %s failed: %s", mint[:6], e)
+            return None
+        if not c or c["complete"] or not c["price_sol"]:
+            return None
+        px = float(c["price_sol"])
+        return px if not screener or 1 / CURVE_MARK_MAX_RATIO < px / screener < CURVE_MARK_MAX_RATIO else None
+
+    def _quote_gain(self, p) -> float | None:
+        """Net result of selling the whole position now, from one Jupiter quote (None: no quote)."""
         from .config import SOL_MINT
 
         q = market.jupiter_quote(self.s, p["mint"], SOL_MINT, int(p["tokens"] * 10 ** (p["token_decimals"] or 6)))
         if not q or int(q.get("outAmount", 0)) <= 0:
+            return None
+        return int(q["outAmount"]) / 1e9 / (p["entry_cost_sol"] or p["size_sol"]) - 1
+
+    def _stop_confirmed(self, p, now: float) -> bool:
+        """A paper stop sells unless the sell quote contradicts it (the position is in profit by what a sale would
+        bring); then no new quote for HELD_S. Without a quote the stop sells, as before."""
+        if now - self._held.get(p["id"], -1e18) < HELD_S:
+            return False
+        g = self._quote_gain(p)
+        if g is not None and g > 0:
+            self._held[p["id"]] = now
+            log.info("stop held %s %s: the quote says %+.1f%%", p["mode"], p["symbol"] or p["mint"][:6], g * 100)
+            return False
+        return True
+
+    def _target_confirmed(self, p) -> bool:
+        """Paper targets are judged on the screener's mid price; confirm with what a sell would bring (one Jupiter
+        quote, only when the target fires). 10/2026: a 'target' exit was booked at -7 % because the mid price ran
+        ahead of the sellable price. Without a quote the mid price decides, as before."""
+        gain = self._quote_gain(p)
+        if gain is None:
             return True
-        gain = int(q["outAmount"]) / 1e9 / (p["entry_cost_sol"] or p["size_sol"]) - 1
         return gain >= p["take_profit"] * 0.8  # quote vs mid: a little of the spread is allowed
 
     # ------------------------------------------------------------------ commands from dashboard / terminal

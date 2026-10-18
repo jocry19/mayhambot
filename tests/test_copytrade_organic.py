@@ -32,7 +32,8 @@ def _signal_position(st, conn, state):
 
 
 def _price(state, p, gain):
-    state["snap"] = dataclasses.replace(state["snap"], price_sol=p["entry_price_sol"] * (1 + gain))
+    # paper exits measure from the market price at the buy (meta mid_sol), not from the fill
+    state["snap"] = dataclasses.replace(state["snap"], price_sol=strategy.Strategy._ref_price(p) * (1 + gain))
 
 
 def _row(conn, pid):
@@ -100,3 +101,40 @@ def test_live_brain_keeps_the_accounts_stop_and_max_hold(env):
     conn.execute("UPDATE ct_positions SET opened_at=opened_at-? WHERE id=?", (p2["max_hold_min"] * 60 + 5, p2["id"]))
     st.update()
     assert _row(conn, p2["id"])["exit_reason"] == "time"
+
+
+def test_paper_stop_uses_the_live_curve_price_and_the_quote_can_hold_it(env, monkeypatch):
+    from copytrade import market
+
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    p = _signal_position(st, conn, state)
+    ref = strategy.Strategy._ref_price(p)
+    # the screener still shows the buy price, the curve is already below the stop: the stop fires on the curve
+    _price(state, p, 0.0)
+    monkeypatch.setattr(st, "_curve_price", lambda mint, screener, now: ref * (1 - p["stop_loss"] - 0.05))
+    st.update()
+    assert _row(conn, p["id"])["exit_reason"] == "stop"
+    # a stop the sell quote contradicts (a sale would bring a profit) does not sell, and is not re-quoted at once
+    p2 = _signal_position(st, conn, state)
+    monkeypatch.setattr(st, "_curve_price", lambda mint, screener, now: None)
+    _price(state, p2, -p2["stop_loss"] - 0.05)
+    quotes = []
+    out = int(p2["entry_cost_sol"] * 1.1 * 1e9)
+    monkeypatch.setattr(market, "jupiter_quote", lambda *a, **k: quotes.append(1) or {"outAmount": out})
+    st.update()
+    assert _row(conn, p2["id"])["status"] == "open" and quotes == [1]
+    st.update()
+    assert _row(conn, p2["id"])["status"] == "open" and quotes == [1]
+
+
+def test_curve_price_is_ignored_when_it_is_another_unit(monkeypatch):
+    from sniper import store as sstore
+
+    st = strategy.Strategy.__new__(strategy.Strategy)
+    st._sconn = object()
+    monkeypatch.setattr(sstore, "curve_now", lambda conn, mint, age, now=None: {"price_sol": 10.0, "complete": False})
+    assert st._curve_price("m", 9.0, 0) == 10.0
+    assert st._curve_price("m", 1.0, 0) is None  # 10x off the screener: a units error
+    monkeypatch.setattr(sstore, "curve_now", lambda conn, mint, age, now=None: {"price_sol": 10.0, "complete": True})
+    assert st._curve_price("m", 9.0, 0) is None  # migrated: the screener's pool price counts
