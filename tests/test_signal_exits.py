@@ -40,3 +40,17 @@ def test_verdict_needs_enough_calls_and_both_halves(tmp_path):
     assert exits.verdict(c, 1, NOW)["switch_to"] is None                     # 4 calls: not decidable
     v = exits.verdict(c, 1, NOW, min_n=4)
     assert v["switch_to"] is not None and v["switch_to"] != exits.CURRENT     # same dip-then-pump path in both halves
+
+
+def test_limit_entry_fills_on_the_dip_or_is_no_trade():
+    r15 = exits.RULES["limit -15 % (30 min), then sl-30, trail 30 % from +100"]
+    # fills at 0.85 on the 0.75 print, then 2.2 high (+159 %), trail 30 % -> out at 1.5: 1.5/0.85-1
+    assert round(exits.trade(PATH, 1.0, r15), 3) == round(1.5 / 0.85 - 1, 3)
+    never = [(60, 0.95), (600, 1.4), (1200, 2.0)]                     # runs away without a dip: no fill, no cost
+    assert exits.trade(never, 1.0, r15) is None
+    assert exits._net(dict(path=never, pe=1.0, dead=False, cost=0.06), r15) is None
+    late = [(60, 1.0), (2400, 0.7)]                                   # dip only after 30 min: too late
+    assert exits.trade(late, 1.0, r15) is None
+    assert exits._score([dict(path=never, pe=1.0, dead=False, cost=0.06)], r15) == 0.0
+    # no limit: unchanged immediate entry
+    assert exits.trade(PATH, 1.0, exits.RULES["tp+50 sl-35, no trail"]) == 0.5

@@ -339,7 +339,7 @@ def cycle(conn, i):
     hot_mints = {r["mint"] for r in hot}
     new_trades += fetch_trades(conn, [r for r in watch if r["mint"] not in hot_mints],
                                budget=max(10, settings.trades_budget_seconds - t_fetch))
-    engine.update_outcomes(conn)
+    db.retry_locked(conn, lambda: engine.update_outcomes(conn))  # a lock must not cost the cycle its outcomes
     try:
         shadow.update(conn)  # what the rejected coins did since: the funnel's gates checked on data
     except Exception:  # noqa: BLE001

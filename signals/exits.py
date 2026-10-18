@@ -21,10 +21,13 @@ COST = 0.06
 CAP = 3.0  # a single +3000 % print must not carry a mean
 
 
-def rule(tp=None, sl=None, trail=None, hold_min=HOURS * 60, partial=None):
+def rule(tp=None, sl=None, trail=None, hold_min=HOURS * 60, partial=None, entry_dip=None, entry_wait_min=30):
     """tp / sl as returns; trail=(activate, drawdown); partial=[(ret, share), ...] sold on the way up, then the rest
-    runs with a stop at entry (breakeven) and trail if given."""
-    return dict(tp=tp, sl=sl, trail=trail, hold=hold_min * 60, partial=partial or [])
+    runs with a stop at entry (breakeven) and trail if given. entry_dip: no buy at the alert but a limit order
+    entry_dip below it, filled if the price gets there within entry_wait_min (else no trade, no cost); tp / sl /
+    trail then count from the fill (18.10.: calls run 1.5-10x but the alert price is mostly a local high)."""
+    return dict(tp=tp, sl=sl, trail=trail, hold=hold_min * 60, partial=partial or [], entry_dip=entry_dip,
+                entry_wait=entry_wait_min * 60)
 
 
 RULES = {
@@ -38,6 +41,15 @@ RULES = {
     "hold 1 h (no exits)": rule(hold_min=60),
     # winner study 17.10.: no fixed target under +100 %, trail 30 % once +100 %, stop -30 % (band class goal)
     "sl-30, trail 30 % from +100": rule(sl=-0.3, trail=(1.0, 0.3)),
+    # limit entries below the alert price (no fill in 30 min = no trade); -15 / -30 and the x2 target as in the
+    # Prüfstand's signal family (18.10.: calls held 4 h lose, limit15 with x2 target was positive on few cases)
+    "limit -15 % (30 min), then sl-30, trail 30 % from +100": rule(sl=-0.3, trail=(1.0, 0.3), entry_dip=0.15),
+    "limit -30 % (30 min), then sl-30, trail 30 % from +100": rule(sl=-0.3, trail=(1.0, 0.3), entry_dip=0.3),
+    "limit -15 % (30 min), then tp+50 sl-35": rule(tp=0.5, sl=-0.35, entry_dip=0.15),
+    "limit -15 % (30 min), then tp+100 sl-35": rule(tp=1.0, sl=-0.35, entry_dip=0.15),
+    "limit -30 % (30 min), then tp+100 sl-35": rule(tp=1.0, sl=-0.35, entry_dip=0.3),
+    "limit -30 % (30 min), then half at +50, rest trail 25 %": rule(sl=-0.35, partial=[(0.5, 0.5)], trail=(0.5, 0.25),
+                                                                       entry_dip=0.3),
 }
 
 
@@ -71,6 +83,24 @@ def simulate(path, pe, r, dead=False):
     return booked + left * ((last[-1] / pe - 1) if last else 0.0)
 
 
+def trade(path, pe, r, dead=False):
+    """Return of one call under rule r, None when its limit entry never filled (no trade, no cost)."""
+    if not r.get("entry_dip"):
+        return simulate(path, pe, r, dead)
+    lim = pe * (1 - r["entry_dip"])
+    for i, (t, p) in enumerate(path):
+        if t > r["entry_wait"]:
+            return None
+        if p <= lim:
+            return simulate([(t2 - t, p2) for t2, p2 in path[i + 1:]], lim, r, dead)
+    return None if not dead else simulate([], lim, r, dead)  # died before any later print: the order filled into it
+
+
+def _net(p, r):
+    x = trade(p["path"], p["pe"], r, p["dead"])
+    return None if x is None else min(x, CAP) - p.get("cost", COST)
+
+
 def paths(conn, days=7, now=None, kind=None):
     now = now or int(time.time())
     q = ("SELECT id, ts, mint, symbol, price_usd, outcome_flag, cost FROM signals WHERE ts>=? AND ts<=? AND price_usd>0"
@@ -97,7 +127,7 @@ CURRENT = "paper now (tp+50 sl-20 trail 20/12)"
 
 
 def _score(ps, r):
-    xs = [min(simulate(p["path"], p["pe"], r, p["dead"]), CAP) - p.get("cost", COST) for p in ps]
+    xs = [_net(p, r) or 0.0 for p in ps]  # an unfilled limit is a trade not made: 0, not a loss
     return sum(xs) / len(xs) if xs else None
 
 
@@ -127,11 +157,14 @@ def compare(conn, days=7, now=None, rules=None, kind=None):
     ps = paths(conn, days, now, kind)
     res = {}
     for name, r in (rules or RULES).items():
-        xs = sorted(min(simulate(p["path"], p["pe"], r, p["dead"]), CAP) - p.get("cost", COST) for p in ps)
-        if not xs:
+        nets = [_net(p, r) for p in ps]
+        xs = sorted(x for x in nets if x is not None)
+        if not ps:
             continue
-        res[name] = dict(n=len(xs), mean_after_cost=round(sum(xs) / len(xs), 3), median=round(xs[len(xs) // 2], 3),
-                         win_rate=round(sum(x > 0 for x in xs) / len(xs), 3),
+        res[name] = dict(n=len(ps), filled=len(xs), mean_after_cost=round(sum(xs) / len(ps), 3),
+                         mean_per_trade=round(sum(xs) / len(xs), 3) if xs else None,
+                         median=round(xs[len(xs) // 2], 3) if xs else None,
+                         win_rate=round(sum(x > 0 for x in xs) / len(xs), 3) if xs else None,
                          sum_per_0_3_sol=round(0.3 * sum(xs), 3))
     return res
 
