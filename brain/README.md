@@ -200,3 +200,11 @@ Einsatz, egal wie gut ein Muster aussieht.
 Ausstieg vor dem Preis-Stopp: fällt die Liquidität (Curve-Coins: Tiefe der Bonding Curve, `curve_liq_usd`) 60 % unter
 den Kauf, verkauft das Hirn als „rug“. Meldet die Rug-Prüfung einen bestätigten inszenierten Pump (Check `staged`,
 `data.pattern`), verkauft es 10 % unter dem Hoch oder 15 min nach dem Hoch („staged“), in allen Konten.
+
+## Lernkonto getrennt, Curve-Kurs, echte Ergebnisse (18.10., Lesung 05:07)
+
+- **Zwei Konten.** Die Käufe aus `opportunities` (`kind='pool'`) buchen auf das Lernkonto (`brain_state.learn_balance_sol`, Start 0 SOL), alles andere auf das eigene Konto des Hirns (`balance_sol`). `brain_equity` führt beide: die ersten Spalten sind das eigene Konto (Stundenfaktor, Challenge, Kelly), `learn_balance_sol`, `learn_open_sol`, `learn_equity_sol` das Lernkonto. Die einmalige Umbuchung der Pool-Trades von vorher steht in `brain_state.learn_split` und in `equity_transfers`; der Stundenfaktor rechnet sie heraus, sie ist kein Gewinn.
+- **Stichprobe.** Das Lernkonto kauft nur `BRAIN_POOL_SAMPLE` (Standard 10 %) der positiven Ziehungen. Echte Calls (`source_action='alerted'`) und Band-Kandidaten (`signals.band`) kauft es immer in Lerngröße; Rug-Prüfung und Liquidität entscheiden weiter.
+- **Curve-Kurs.** Für Coins auf der Bonding Curve gilt der Live-Kurs des Snipers (`sniper.store.curve_now`, bis 120 s alt) statt DexScreener, beim Referenzkurs des Kaufs wie bei allen Ausstiegen. Zwischen zwei Preisrunden prüft `manage_curves()` diese Positionen in jedem Takt aus der Datenbank, ohne HTTP.
+- **Echtes Ergebnis sofort.** Schließt eine Lernkonto-Position, steht ihr Netto nach Kosten sofort in `opportunities` (`exit_plan='real'`, `outcome_net`, `rug`), und das Pool-Modell lernt daraus, auch bei organischem Ausstieg. Die spätere Nachspielung ergänzt dort nur noch `outcomes`.
+- **Stundenzeile.** Sie kommt als erster Schritt jeder Runde, in eigenem try, und nennt Lernkonto-Equity, offene und in der Stunde geschlossene Lernpositionen.

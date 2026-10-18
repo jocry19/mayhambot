@@ -10,21 +10,35 @@ from brain.plans import PLANS  # noqa: F401
 
 
 def status(conn):
-    """{balance_sol, equity_sol, open, closed, pnl_sol, win_rate, honest: {...}, model: {...}, started_at}"""
+    """{balance_sol, equity_sol, open, closed, pnl_sol, win_rate, learn: {balance_sol, equity_sol, open, closed, pnl_sol,
+    win_rate, split}, honest: {...}, model: {...}, started_at}. The top level is the brain's own account; "learn" is
+    the learning account of the pooled opportunities (starts at 0 SOL)."""
     _store.init(conn)
     from brain import config
 
     s = config.load()
     bal = _store.balance(conn, s.start_balance_sol)
     eq = conn.execute("SELECT equity_sol FROM brain_equity ORDER BY ts DESC LIMIT 1").fetchone()
+    # the brain's own account; the learning account (pooled opportunities, kind 'pool') is reported beside it
     closed = conn.execute("SELECT COUNT(*), COALESCE(SUM(pnl_sol),0), SUM(pnl_pct>0) FROM brain_positions "
-                          "WHERE status='closed'").fetchone()
-    n_open = conn.execute("SELECT COUNT(*) FROM brain_positions WHERE status='open'").fetchone()[0]
+                          "WHERE status='closed' AND kind!='pool'").fetchone()
+    lc = conn.execute("SELECT COUNT(*), COALESCE(SUM(pnl_sol),0), SUM(pnl_pct>0) FROM brain_positions "
+                      "WHERE status='closed' AND kind='pool'").fetchone()
+    n_open = conn.execute("SELECT COUNT(*) FROM brain_positions WHERE status='open' AND kind!='pool'").fetchone()[0]
+    l_open = conn.execute("SELECT COUNT(*) FROM brain_positions WHERE status='open' AND kind='pool'").fetchone()[0]
+    try:
+        leq = conn.execute("SELECT learn_equity_sol FROM brain_equity WHERE learn_equity_sol IS NOT NULL "
+                           "ORDER BY ts DESC LIMIT 1").fetchone()
+    except Exception:
+        leq = None
+    learn = {"balance_sol": _store.get(conn, _store.LEARN, 0.0), "equity_sol": leq[0] if leq else None,
+             "open": l_open, "closed": lc[0], "pnl_sol": lc[1], "win_rate": (lc[2] or 0) / lc[0] if lc[0] else None,
+             "split": _store.get(conn, "learn_split")}
     n_opps = conn.execute("SELECT COUNT(*), SUM(decision='enter') FROM brain_opps").fetchone()
     return {"balance_sol": bal, "equity_sol": eq[0] if eq else bal, "start_sol": s.start_balance_sol,
             "open": n_open, "closed": closed[0], "pnl_sol": closed[1],
             "win_rate": (closed[2] or 0) / closed[0] if closed[0] else None,
-            "opportunities": n_opps[0], "entered": n_opps[1] or 0,
+            "learn": learn, "opportunities": n_opps[0], "entered": n_opps[1] or 0,
             "honest": honest(conn), "prior_check": _store.get(conn, "prior_check", {}),
             "prior_rows": _store.get(conn, "prior_rows", 0), "started_at": _store.get(conn, "started_at"),
             "model_saved_at": _store.get(conn, "model_saved_at")}
