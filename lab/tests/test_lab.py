@@ -1,5 +1,7 @@
 import json
+import os
 import sqlite3
+import time
 
 import numpy as np
 import pandas as pd
@@ -87,3 +89,18 @@ def test_run_once_writes_report_even_when_a_family_fails(tmp_path):
     rep = json.loads((tmp_path / "lab" / "report.json").read_text())
     assert res == [] and rep["results"] == [] and any(k.startswith("error_") for k in rep["info"])
     assert (tmp_path / "lab" / "report.md").read_text().startswith("# Prüfstand")
+
+
+def test_run_waits_for_the_last_report_and_a_running_retrain(tmp_path):
+    from lab.__main__ import next_round
+    out, db = tmp_path / "lab", tmp_path / "mayham.db"
+    out.mkdir()
+    assert next_round(out, db, 6 * 3600, now=1_000_000) == 0  # no report yet: run now
+    (out / "report.json").write_text(json.dumps({"at": 1_000_000 - 3600}))
+    assert next_round(out, db, 6 * 3600, now=1_000_000) == 5 * 3600  # a restart does not start a fresh round
+    assert next_round(out, db, 6 * 3600, now=1_000_000 + 6 * 3600) == 0
+    now = time.time()
+    (tmp_path / "TRAINING").write_text("")
+    os.utime(tmp_path / "TRAINING", (now, now))
+    assert next_round(out, db, 6 * 3600, now=now) == 600  # report due, but a retrain runs: wait
+    assert next_round(out, db, 6 * 3600, now=now + 2 * 3600) == 0  # marker older than 90 min: stale

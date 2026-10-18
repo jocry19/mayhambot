@@ -36,4 +36,6 @@ pumpswap 0,30 %, Raydium/Meteora 0,25 %. Beispiele bei 0,1 SOL: pumpswap mit 500
 (ein Coin mit vielen Einstiegen zählt einmal). `kandidat`: im Mittel positiv und in zwei von drei Dritteln.
 Nur eine tragende Tasche soll Einsatz im Hauptkonto bekommen.
 
+Als Dienst `lab` in mayham.py: die nächste Runde zählt ab `at` im letzten Bericht (ein Deploy-Neustart rechnet nicht neu), wartet während `data/TRAINING` (Retrain) und läuft mit nice 10.
+
 Einstellungen: `LAB_EVERY_H` (6), `LAB_WINDOW_H` (72, Rückblick), `LAB_STAKE_SOL` (0,1), `LAB_DIR` (data/lab).
