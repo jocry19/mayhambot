@@ -420,3 +420,29 @@ def test_good_wallets_join_the_learning_universe_watched_not_copied(env):
     _wallet_row(conn, "G3" * 22, "good", score=40)
     assert tracker.load_watch(conn, s2) == 0
     tracker.WATCH.clear()
+
+
+def test_watch_candidates_pick_broad_independent_active_wallets(env):
+    from copytrade import tracker
+    s, conn, ex, state = env
+    conn.execute("DROP TABLE IF EXISTS model_wallet_stats")
+    conn.execute("CREATE TABLE model_wallet_stats (address TEXT PRIMARY KEY, flag TEXT, n_tokens INTEGER, "
+                 "top_coin_share REAL, median_excess_roi REAL, score REAL, cluster_id TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS trades (sig TEXT, wallet TEXT, mint TEXT, side TEXT, ts INTEGER, "
+                 "token_amount REAL, sol_amount REAL, usd_amount REAL, price_usd REAL, source TEXT)")
+    now = time.time()
+    rows = [("A", None, 9, 0.2, 0.9, 10, "c1"), ("B", None, 9, 0.2, 0.8, 10, "c1"), ("C", None, 9, 0.2, 0.7, 10, "c1"),
+            ("D", None, 9, 0.2, 0.6, 10, None), ("BOT", "launch_bot", 9, 0.2, 2.0, 99, None),
+            ("FEW", None, 3, 0.2, 2.0, 99, None), ("ONE", None, 9, 0.9, 2.0, 99, None),
+            ("DEAD", None, 9, 0.2, 2.0, 99, None)] + [(f"R{i}", None, 9, 0.2, 0.1, 1, None) for i in range(10)]
+    conn.executemany("INSERT INTO model_wallet_stats VALUES (?,?,?,?,?,?,?)", rows)
+    conn.executemany("INSERT INTO trades(sig, wallet, mint, ts) VALUES (?,?,?,?)",
+                     [(f"s{a}", a, "m", int(now - 3600)) for a, *_ in rows if a != "DEAD"]
+                     + [("sDEAD", "DEAD", "m", int(now - 5 * 86400))])
+    got = tracker.watch_candidates(conn, 5, now, seed="x")
+    assert got[:4] == ["A", "B", "D", "R0"] and len(got) == 5 and got[4].startswith("R")  # one random slot
+    assert not {"C", "BOT", "FEW", "ONE", "DEAD"} & set(got)
+    assert tracker.load_watch(conn, s) > 0
+    assert {r[0] for r in conn.execute("SELECT source FROM ct_wallets")} == {"watch_model"}
+    conn.execute("DROP TABLE model_wallet_stats")
+    tracker.WATCH.clear()

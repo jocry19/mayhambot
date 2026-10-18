@@ -63,6 +63,12 @@ def brain_report(conn, f: dict) -> None:
                                             "exit_capture", "rank_samples", "rank_hit_rate", "rank_ev",
                                             "rank_score", "rank_avg_loss")}
     own["copytrade.size_sol"] = f["sol"]
+    try:  # what the research model knows about the wallet (w_score_max, w_evidence_top, w_c_*_top, ...)
+        from model import wallet_features  # type: ignore
+
+        shared.update(wallet_features([f["wallet"]], conn=conn))
+    except Exception as e:
+        log.debug("wallet features %s: %s", f["wallet"][:6], e)
     own["copytrade.block0"] = f["group"] == "block0"
     report(conn, "copytrade", f"{f['sig']}:{f['wallet']}", f["mint"], f["seen_at"], {**shared, **own},
            src_ts=f["ts"], price_sol=f["price_sol"] or None, mcap_usd=f["mcap_usd"])

@@ -180,18 +180,59 @@ def load_block0(conn, s: Settings) -> list[str]:
 WATCH: set[str] = set()  # watched for learning only (sources watch_*): exploration copies, never strict ones
 
 
+WATCH_RANDOM_SHARE = 0.2  # of the slots drawn at random from the pool: shows whether the ranking helps at all
+WATCH_PER_CLUSTER = 2  # a cluster is often one operator: more of it only repeats the same signal
+WATCH_ACTIVE_S = 48 * 3600
+
+
+def watch_candidates(conn, n: int, now: float | None = None, seed: str | None = None) -> list[str]:
+    """The learning universe's pick (wallet research, 18.10.: the score shows no forward edge, so breadth and
+    independence count): from model_wallet_stats, no flag (launch_bot / flipper / wash / one_hit), >= 5 tokens, top
+    coin under 70 % of its gains, active in the last 48 h (trades or ct_swaps); at most 2 per cluster; best
+    median_excess_roi first (model_score breaks ties), 20 % of the slots drawn at random from the rest."""
+    import random
+
+    now = now or time.time()
+    since = int(now - WATCH_ACTIVE_S)
+    rows = conn.execute(
+        """SELECT m.address, m.cluster_id FROM model_wallet_stats m
+           WHERE m.flag IS NULL AND COALESCE(m.n_tokens, 0) >= 5 AND COALESCE(m.top_coin_share, 0) <= 0.7
+             AND (EXISTS (SELECT 1 FROM trades t WHERE t.wallet=m.address AND t.ts>=?)
+                  OR EXISTS (SELECT 1 FROM ct_swaps x WHERE x.wallet=m.address AND x.ts>=?))
+           ORDER BY m.median_excess_roi IS NULL, m.median_excess_roi DESC, COALESCE(m.score, 0) DESC""",
+        (since, since)).fetchall()
+    per: dict = {}
+    pool = []
+    for addr, cluster in rows:
+        if cluster:
+            per[cluster] = per.get(cluster, 0) + 1
+            if per[cluster] > WATCH_PER_CLUSTER:
+                continue
+        pool.append(addr)
+    n_top = n - int(round(n * WATCH_RANDOM_SHARE))
+    top, rest = pool[:n_top], pool[n_top:]
+    rnd = random.Random(seed or time.strftime("%Y-%m-%d", time.gmtime(now)))
+    return top + rnd.sample(rest, min(len(rest), n - len(top)))
+
+
 def load_watch(conn, s: Settings) -> int:
-    """The learning universe: the research model's 'good' wallets (best model_score first) as source 'watch_good',
-    within CT_MAX_ACTIVE_WALLETS; fills WATCH with every active watch_* wallet."""
+    """The learning universe: research-picked wallets (watch_candidates) as source 'watch_model' within
+    CT_MAX_ACTIVE_WALLETS (the research 'good' tier when the model's stats are missing); fills WATCH with every
+    active watch_* wallet."""
     added = 0
     room = max(0, s.max_active_wallets - len(active_wallets(conn)))
     if room and s.watch_good_limit > 0:
+        n = min(room, s.watch_good_limit)
         try:
-            rows = conn.execute("SELECT address FROM wallets WHERE tier='good' ORDER BY COALESCE(model_score, 0) DESC "
-                                "LIMIT ?", (min(room, s.watch_good_limit),)).fetchall()
-            added = store.add_wallets(conn, [r[0] for r in rows], "watch_good")
-        except Exception as e:  # core's wallets table missing
-            log.debug("good wallets unavailable: %s", e)
+            added = store.add_wallets(conn, watch_candidates(conn, n), "watch_model")
+        except Exception as e:  # research tables or their newer columns missing
+            log.debug("model wallet stats unavailable (%s): the 'good' tier instead", e)
+            try:
+                rows = conn.execute("SELECT address FROM wallets WHERE tier='good' ORDER BY COALESCE(model_score, 0) "
+                                    "DESC LIMIT ?", (n,)).fetchall()
+                added = store.add_wallets(conn, [r[0] for r in rows], "watch_good")
+            except Exception as e2:  # core's wallets table missing
+                log.debug("good wallets unavailable: %s", e2)
     WATCH.clear()
     WATCH.update(r[0] for r in conn.execute("SELECT address FROM ct_wallets WHERE active=1 AND source LIKE 'watch%'"))
     if added:
