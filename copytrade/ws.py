@@ -73,7 +73,7 @@ class WalletStream:
         self._tokens, self._tok_at = 1.0, 0.0
         self.stats["limited"] = 0
         self.bytes = 0  # received on this stream (Helius bills streamed data)
-        self.notes: collections.deque = collections.deque(maxlen=20000)  # (received_at, wallet) of notifications
+        self.notes: collections.deque = collections.deque(maxlen=50000)  # (received_at, wallet, bytes) of notifications
         self._wanted: list[str] = []  # best first (manual, Ultra, Smart, rank)
         self._subs: dict[str, int] = {}  # wallet -> subscription id
         self._lock = threading.Lock()
@@ -213,6 +213,7 @@ class WalletStream:
             except asyncio.TimeoutError:
                 continue
             self.bytes += len(raw)
+            self._last_len = len(raw)
             self._handle(json.loads(raw), pending, sub_wallet)
 
     def _handle(self, msg: dict, pending: dict, sub_wallet: dict) -> None:
@@ -242,7 +243,7 @@ class WalletStream:
             self.stats["notifications"] += 1
             now = self.last_notification = time.time()
             self.recent[v["signature"]] = (now, w)
-            self.notes.append((now, w))
+            self.notes.append((now, w, getattr(self, "_last_len", 0)))
             while len(self.recent) > 3000:
                 self.recent.popitem(last=False)
             # the logs ride along: pump.fun trades can be read from them without asking for the transaction

@@ -131,6 +131,12 @@ def test_covered_wallets_are_only_polled_as_safety_net(env):
     assert [r["address"] for r in tracker.due_wallets(conn, s, now)] == [W]
     assert tracker.due_wallets(conn, s, now, covered={W}) == []
     assert tracker.hot_wallets(conn, s, now) == [W]
+    # on the Helius stream: the safety net waits 3 minutes instead of one
+    conn.execute("UPDATE ct_wallets SET last_polled=?", (int(now - 90),))
+    assert [r["address"] for r in tracker.due_wallets(conn, s, now, covered={W})] == [W]
+    assert tracker.due_wallets(conn, s, now, covered={W}, solid={W}) == []
+    conn.execute("UPDATE ct_wallets SET last_polled=?", (int(now - 200),))
+    assert [r["address"] for r in tracker.due_wallets(conn, s, now, covered={W}, solid={W})] == [W]
 
 
 def test_rpc_reads_public_first_live_paths_on_main(monkeypatch):
@@ -1103,9 +1109,9 @@ def test_noisy_wallets_leave_the_paid_helius_stream_for_a_while(tmp_path, monkey
     w.set_wallets([W, B0])
     assert w.helius._wanted == [W, B0]  # block-0 rides Helius like everyone else
     now = time.time()
-    for i in range(watch.HELIUS_NOISY + 1):
-        w.helius.notes.append((now - i, B0))
-    w.helius.notes.append((now, W))
+    for i in range(41):
+        w.helius.notes.append((now - i, B0, 100_000))
+    w.helius.notes.append((now, W, 3_000_000))  # a few big notifications stay under 4 MB
     assert w.bench_noisy(now) == [B0]
     assert w.streams[0]._wanted == [W, B0] and w.helius._wanted == [W]  # the public stream keeps it
     assert "1 noisy wallets benched" in w.status()

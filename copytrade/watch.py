@@ -36,7 +36,10 @@ def handle_swap(strat, sw) -> None:
         strat.on_whale_sell(sw)
 
 
-HELIUS_NOISY = 60  # notifications per wallet in 10 min on the Helius stream before it is benched
+# streamed bytes per wallet in 10 min on the Helius stream before it is benched: 4 MB = 80 credits. The user keeps
+# the quota (18.10.); a wallet benched at 60 notifications (07:43 Gygj9Q) fell back to the stale public streams and
+# its buys arrived as polling gaps, "zu spät erkannt"
+HELIUS_NOISY_BYTES = 4_000_000
 HELIUS_BENCH_S = 1800
 HELIUS_WS_CREDITS_PER_100KB = 2.0  # Helius billing for standard websockets (helius.dev/docs/billing/credits, 10/2026)
 
@@ -181,18 +184,21 @@ class Watcher:
         return [] if self.helius_paused else [w for w in wallets if self.benched.get(w, 0) <= now]
 
     def bench_noisy(self, now: float | None = None) -> list[str]:
-        """Wallets with more than HELIUS_NOISY notifications on the Helius stream in 10 minutes (a bot repeating
-        the same buy hundreds of times, 18.10.) leave it for 30 minutes; the free public streams keep them."""
+        """Wallets that streamed more than HELIUS_NOISY_BYTES on the Helius stream in 10 minutes (the block-0
+        flood, 18.10.: up to 97 MB in 15 min) leave it for 30 minutes; the free public streams keep them."""
         h = self.helius
         if h is None:
             return []
         now = now or time.time()
-        n = collections.Counter(w for t, w in list(h.notes) if t > now - 600)
-        new = [w for w, k in n.items() if k > HELIUS_NOISY and self.benched.get(w, 0) <= now]
+        n: collections.Counter = collections.Counter()
+        for t, w, size in list(h.notes):
+            if t > now - 600:
+                n[w] += size
+        new = [w for w, k in n.items() if k > HELIUS_NOISY_BYTES and self.benched.get(w, 0) <= now]
         for w in new:
             self.benched[w] = now + HELIUS_BENCH_S
-            log.info("wallet %s off the Helius stream for %d min: %d notifications in 10 min", w[:6],
-                     HELIUS_BENCH_S // 60, n[w])
+            log.info("wallet %s off the Helius stream for %d min: %.1f MB in 10 min", w[:6],
+                     HELIUS_BENCH_S // 60, n[w] / 1e6)
         back = [w for w, until in self.benched.items() if until <= now]
         for w in back:
             del self.benched[w]
@@ -234,6 +240,11 @@ class Watcher:
             self.helius_paused = ""
             h.set_wallets(self._for(h, self._wallets))
             log.info("Helius wallet stream resumed")
+
+    def solid(self) -> set[str]:
+        """Wallets the running Helius stream holds (it does not drop notifications, unlike the public nodes)."""
+        h = self.helius
+        return set() if h is None or self.helius_paused else h.covered()
 
     def covered(self) -> set[str]:
         out: set[str] = set()

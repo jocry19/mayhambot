@@ -285,14 +285,18 @@ def _tracked(conn, s: Settings) -> list:
         (s.max_tracked_wallets,)).fetchall()
 
 
-def due_wallets(conn, s: Settings, now: float | None = None, covered: set | frozenset = frozenset()) -> list:
+def due_wallets(conn, s: Settings, now: float | None = None, covered: set | frozenset = frozenset(),
+                solid: set | frozenset = frozenset()) -> list:
     """Active wallets (max CT_MAX_TRACKED_WALLETS, best ranked) whose poll interval has passed, longest waiting first.
-    covered: wallets the websocket watches live; they are only polled as a safety net (warm interval)."""
+    covered: wallets the websocket watches live; they are only polled as a safety net (warm interval).
+    solid: wallets on the Helius stream, which does not drop notifications: safety net every CT_POLL_SAFE_SECONDS."""
     now = now or time.time()
     rows = _tracked(conn, s)
 
     def interval(r) -> float:
         iv = poll_interval(s, r["last_swap"], now, r["source"] == "manual")
+        if r["address"] in solid:
+            return max(iv, getattr(s, "poll_safe_seconds", s.poll_warm_seconds))
         return max(iv, s.poll_warm_seconds) if r["address"] in covered else iv
 
     due = [r for r in rows if now - (r["last_polled"] or 0) >= interval(r) - 0.5]

@@ -102,6 +102,8 @@ class Settings:
         "Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA,AopdiFdCvoP84YYGzfnLcmtehtiWKet3fzxTZbq9Qtke").split(",") if w.strip()])
     discover_every_s: float = field(default_factory=lambda: _f("CT_DISCOVER_EVERY_SECONDS", 1800))
     poll_warm_seconds: float = field(default_factory=lambda: _f("CT_POLL_WARM_SECONDS", 60))
+    # wallets the Helius stream holds (it does not drop notifications): their safety-net poll every 3 min
+    poll_safe_seconds: float = field(default_factory=lambda: _f("CT_POLL_SAFE_SECONDS", 180))
     poll_cold_seconds: float = field(default_factory=lambda: _f("CT_POLL_COLD_SECONDS", 300))
     min_whale_buy_sol: float = field(default_factory=lambda: _f("CT_MIN_WHALE_BUY_SOL", 2.0))
 

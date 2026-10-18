@@ -81,7 +81,8 @@ class Engine:
         """Poll the wallets that are due (hot ones every few seconds, quiet ones every 1-5 min), within the RPC budget."""
         budget = max(1, int(self.s.rpc_max_rps * self.s.wallet_poll_seconds * 0.5))
         covered = self.watcher.covered() if self.watcher else set()
-        batch = tracker.due_wallets(self.conn, self.s, covered=covered)[:budget]
+        solid = self.watcher.solid() if self.watcher else set()
+        batch = tracker.due_wallets(self.conn, self.s, covered=covered, solid=solid)[:budget]
         hot = set(tracker.hot_wallets(self.conn, self.s)) - covered  # no live watch: polling is the fast path
         seen = 0
         for w in batch:
