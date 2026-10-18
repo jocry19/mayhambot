@@ -446,23 +446,38 @@ def credits_status():
     return out
 
 
+FORECAST_HOURS = 6
+
+
 def cap_forecast(led=None, status=None):
-    """When the month's credits run out at today's rate (the ledger's day is UTC): {cap_at, cap_at_no_stream}.
-    The calendar ratio alone hid a day that burnt ten times the days before (18.10.)."""
+    """When the month's credits run out at the rate of the last FORECAST_HOURS (6; today's UTC rate while the
+    ledger has no hourly marks that far back): {cap_at, cap_at_no_stream, rate_per_h}. The calendar ratio
+    alone hid a day that burnt ten times the days before, and the day's average lagged an afternoon that
+    burnt 39k an hour instead of 25k (18.10.)."""
     led = _ledger_read() if led is None else led
     st = status or _status(led)
     day = _now_parts()[1]
     per = {s: (v.get("days") or {}).get(day, 0) for s, v in led.get("services", {}).items()}
     now = time.time()
     hours = (now % 86400) / 3600
+    marks = led.get("hourly") or {}
+    old = [int(k) for k in marks if int(k) >= int(now // 3600) - FORECAST_HOURS]
+    if old and now - min(old) * 3600 >= 2 * 3600:
+        m = marks[str(min(old))]
+        hours = (now - min(old) * 3600) / 3600
+        sniper_month = (led.get("services", {}).get("sniper") or {}).get("month", 0)
+        per = {"all": st.get("used", 0) - m.get("all", 0), "sniper": sniper_month - m.get("sniper", 0)}
+        today = per["all"]
+    else:
+        today = sum(per.values())
 
     def cap(spent):
         if not (st.get("limit") and spent > 0 and hours >= 1):
             return None
         left_h = max(0.0, st["limit"] - st.get("used", 0)) / (spent / hours)
         return now + left_h * 3600 if left_h < 31 * 24 else None
-    today = sum(per.values())
-    return {"cap_at": cap(today), "cap_at_no_stream": cap(today - per.get("sniper", 0))}
+    return {"cap_at": cap(today), "cap_at_no_stream": cap(today - per.get("sniper", 0)),
+            "rate_per_h": round(today / hours) if hours >= 1 else None}
 
 
 def _key_fp():
@@ -626,6 +641,14 @@ def _charge(cost, force=False):
             if cost > min(day_left, st["credits_cap"] - st["credits_month"]) and cost > _borrowable(led, svc):
                 return st, False
         day = _now_parts()[1]
+        # month totals at the start of each UTC hour (first booking of the hour), for the 6-h rate in cap_forecast
+        hours = led.setdefault("hourly", {})
+        hk = str(int(time.time() // 3600))
+        if hk not in hours:
+            hours[hk] = {"all": st["credits_month_all"],
+                         "sniper": (led.get("services", {}).get("sniper") or {}).get("month", 0)}
+            for k in sorted(hours, key=int)[:-30]:
+                del hours[k]
         d = led.setdefault("services", {}).setdefault(svc, {"month": 0, "days": {}})
         d["month"] = d.get("month", 0) + cost
         d.setdefault("days", {})[day] = d["days"].get(day, 0) + cost

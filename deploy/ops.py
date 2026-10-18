@@ -1146,7 +1146,7 @@ def credits_line(c: dict) -> str:
     day = f"heute {_fmt_int(c['today'])}" + (f" von {_fmt_int(c['day_budget'])}" if c["day_budget"] else "")
     pace = f" (Kalender x{c['pace']:.2f})".replace(".", ",") if c.get("pace") is not None else ""
     when = lambda t: time.strftime('%d.%m. %H:%M', time.localtime(t)) if t else "nach Monatsende"  # noqa: E731
-    cap = f", Kappe bei heutiger Rate am {when(c['cap_at'])}" if c.get("cap_at") else ""
+    cap = f", Kappe bei aktueller Rate am {when(c['cap_at'])}" if c.get("cap_at") else ""
     if cap and "cap_at_no_stream" in c:
         cap += f" (ohne Sniper-Strom 2: {when(c['cap_at_no_stream'])})"
     return f"Helius-Credits: {day}, Monat {_fmt_int(c['month_used'])} von {_fmt_int(c['month_limit'])}{pace}{cap}"

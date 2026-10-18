@@ -191,6 +191,14 @@ def test_cap_forecast_at_todays_rate_with_and_without_the_sniper_stream(monkeypa
     now = calendar.timegm((2026, 10, 18, 12, 0, 0))
     assert abs(f["cap_at"] - (now + 748_000 / 21_000 * 3600)) < 60          # about 35.6 h
     assert f["cap_at_no_stream"] is None                                    # 748 h: after the month
+    # three hours later the afternoon burns faster: the forecast follows the hourly marks, not the day average
+    later = now + 3 * 3600
+    monkeypatch.setattr(http.time, "time", lambda: later)
+    monkeypatch.setattr(http, "_service", "sniper")
+    http._charge(150_000)                     # 402k booked since the 12:00 mark: 134k an hour
+    f = http.credits_status()
+    assert f["rate_per_h"] == 134_000                                       # day average would say 26.8k
+    assert abs(f["cap_at"] - (later + 598_000 / 134_000 * 3600)) < 60
 
 
 def test_used_up_month_sends_every_service_public_even_without_day_limits(monkeypatch, tmp_path):
