@@ -1790,3 +1790,30 @@ def test_the_main_account_buys_only_a_kind_the_lab_says_carries(conn, s, tmp_pat
     t._lab = (-1e18, [])
     assert not (t._gate("market", MINT, mk.snaps[MINT], d) or "").startswith("Hauptkonto pausiert")
     assert t._gate("whale", MINT, mk.snaps[MINT], d).startswith("Hauptkonto pausiert")
+
+
+def test_labels_take_the_venues_costs_and_follow_rows_for_a_day(conn, s):
+    from brain import labels, opportunities as O
+    clock = [time.time()]
+    live = {"on": True}
+
+    def snaps(mints):
+        return {m: snap(mint=m, price=2e-6, dex="raydium", liq=200_000) for m in mints if live["on"]}
+    lb = labels.Labeler(conn, s, snapshots=snaps, clock=lambda: clock[0], curve_now=lambda c, m, now: None)
+    lb.step()
+    O.report(conn, "copytrade", "a", MINT, clock[0], {"wallets_n": 3})
+    O.report(conn, "signals", "b", "Gone" + MINT[4:], clock[0], {"wallets_n": 3})
+    conn.execute("UPDATE opportunities SET reported_at=?", (int(clock[0]),))
+    for i in range(62):
+        clock[0] += 60
+        lb.step()
+    a = conn.execute("SELECT * FROM opportunities WHERE ref='a'").fetchone()
+    # raydium 0.25 % a side, 0.1 SOL against 200 k$ depth, tx fees, the copy delay: about 3 %, not the flat 5.5 %
+    assert 0.02 < a["label_cost"] < 0.04 and a["label_ret240"] is None and len(lb.long) == 2
+    for i in range(30):  # the next 23 h, one step an hour is enough for the slow cadence
+        clock[0] += 3600 if i < 23 else 60
+        if i == 2:
+            live["on"] = False  # every pair vanishes after 3 h: the market is gone
+        lb.step()
+    a = conn.execute("SELECT * FROM opportunities WHERE ref='a'").fetchone()
+    assert a["label_ret1440"] == -1.0 and a["label_long_min"] is not None and not lb.long
