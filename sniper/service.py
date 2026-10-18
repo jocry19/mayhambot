@@ -63,6 +63,7 @@ class Service:
         self.quote_px = {rpcws.WSOL_MINT: (float("inf"), 1.0)}          # mint -> (ts, SOL per token)
         rpcws.QUOTE_PRICE = self.quote_price
         self.quote_replayed = 0
+        self.block_reads = 0
         self._helius_day = (time.strftime("%Y-%m-%d"), 0.0)
         # bonk: LaunchLab events name the pool, not the mint; pools are derived from the mint (rpcws.bonk_pool)
         self.bonk_pools, self.bonk_mints = {}, {}          # pool -> mint, mint -> pool
@@ -531,6 +532,38 @@ class Service:
                     self.quote_replayed += 1
                     self._on_rpc_trade(msg)
 
+    def launch_block_round(self):
+        """Launches that migrated at once: their launch-block buyers (AMM buys the curve stream never sees) into
+        sniper_launch_wallets, their count and SOL into sniper_launches (rug thread: second veto signal)."""
+        due = self.engine.block_due(time.time())
+        if not due:
+            return
+        from sniper import launchblock
+
+        def rpc(method, params):
+            j = http.post_json(self.cfg.rpc_url, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                               retries=1)
+            if "error" in j:
+                raise RuntimeError(f"{method}: {j['error']}")
+            return j.get("result")
+        conn = self._own_conn()
+        try:
+            for st in due[:6]:
+                try:
+                    rows = launchblock.block_buyers(rpc, st.mint, st.create_slot, exclude=(st.creator,))
+                except Exception as e:  # noqa: BLE001
+                    log.info("Launch-Block %s nicht lesbar: %s", st.mint[:6], e)
+                    continue
+                store.save_wallets(conn, st.mint, rows)
+                store.update_launch(conn, st.mint, block_buyers=len(rows),
+                                    block_buy_sol=round(sum(r["sol"] for r in rows), 3))
+                self.block_reads += 1
+                if rows:
+                    log.info("Launch-Block %s %s: %d Käufer, %.1f SOL (sofort migriert)", st.symbol, st.mint[:6],
+                             len(rows), sum(r["sol"] for r in rows))
+        finally:
+            conn.close()
+
     def curve_live_round(self):
         """Every few seconds: latest curve state of the launches that traded, for other processes (copytrade)."""
         now = time.time()
@@ -779,6 +812,7 @@ class Service:
                  asyncio.create_task(self.every(10, self.heartbeat, 1)),
                  asyncio.create_task(self.every(3, self.curve_live_round, 3)),
                  asyncio.create_task(self.every(5, self.quote_round, 5)),
+                 asyncio.create_task(self.every(15, self.launch_block_round, 30)),
                  asyncio.create_task(self.every(10, self.helius_meter, 10)),
                  asyncio.create_task(self.every(self.cfg.dex_every_sec, self.dex_round, 10)),
                  asyncio.create_task(self.every(600, self.tiers_round, 600)),

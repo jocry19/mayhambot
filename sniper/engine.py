@@ -205,6 +205,17 @@ class Engine:
                      "v_sol": st.v_sol, "mcap_sol": st.mcap_sol, "n_trades": st.n_seen, "complete": st.migrated}
                     for st in self.launches.values() if st.last_trade_ts > since and st.price_sol > 0]
 
+    def block_due(self, now, fast_sec=60, wait_sec=10):
+        """Decided launches that migrated within `fast_sec` of their creation and whose launch-block buyers are
+        not read yet (the curve stream never sees those AMM buys)."""
+        with self.lock:
+            out = [st for st in self.launches.values()
+                   if st.migrated and not st.block_checked and st.decided_ts and st.pool == "pump"
+                   and st.migrated_ts and st.migrated_ts - st.created_ts <= fast_sec and now - st.migrated_ts >= wait_sec]
+            for st in out:
+                st.block_checked = True
+            return out
+
     def coverage(self, now, window=3600):
         """Share of pump.fun launches with at least one trade at the decision, and of migrations whose run we saw."""
         out = {}

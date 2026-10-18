@@ -385,3 +385,39 @@ def test_curve_starting_near_278_virtual_sol_is_accepted():
     m = rpcws.to_stream_msg(ev, "S")
     assert m["txType"] == "sell" and m["vSolInBondingCurve"] == pytest.approx(279.505, abs=1e-3)
     assert (m["solAmount"] / m["tokenAmount"]) / (m["marketCapSol"] / 1e9) == pytest.approx(1.0, abs=0.01)
+
+
+def _tx(keys, pre, post, tok_pre, tok_post, mint="MASCHE"):
+    tb = lambda xs: [{"mint": mint, "owner": o, "accountIndex": i, "uiTokenAmount": {"uiAmount": a}}  # noqa: E731
+                     for i, (o, a) in enumerate(xs)]
+    return {"meta": {"err": None, "preBalances": pre, "postBalances": post, "preTokenBalances": tb(tok_pre),
+                     "postTokenBalances": tb(tok_post)},
+            "transaction": {"message": {"accountKeys": [{"pubkey": k} for k in keys]}}}
+
+
+def test_launch_block_buyers_from_the_chain():
+    from sniper import launchblock
+    # create: the creator buys 79.31 % (excluded by name); the curve gains its rest without paying
+    create = _tx(["DEV", "CURVE"], [100e9, 0], [14e9, 86e9], [], [("DEV", 793.1e6), ("CURVE", 206.9e6)])
+    # setup buy on the AMM in the same block: 160 SOL from the buyer's own account; the pool vault receives SOL
+    setup = _tx(["SETUP", "POOL"], [200e9, 86e9], [40e9, 246e9], [("POOL", 206.9e6)], [("SETUP", 150e6), ("POOL", 56.9e6)])
+    later = _tx(["LATE"], [5e9], [4e9], [], [("LATE", 1e6)])
+    sigs = [{"signature": "C", "slot": 100}, {"signature": "S", "slot": 100}, {"signature": "L", "slot": 140}]
+    txs = {"C": create, "S": setup, "L": later}
+
+    def rpc(method, params):
+        return sigs if method == "getSignaturesForAddress" else txs[params[0]]
+    rows = launchblock.block_buyers(rpc, "MASCHE", 100, exclude=("DEV",))
+    assert [(r["wallet"], r["role"], round(r["sol"]), round(r["tokens"] / 1e6, 1)) for r in rows] == \
+        [("SETUP", "launch_block", 160, 150.0)]
+
+
+def test_only_launches_that_migrate_at_once_get_a_block_read(tmp_path):
+    from sniper import store
+    from sniper.engine import Engine
+    eng = Engine(cfg(), store.connect(str(tmp_path / "b.db")), enricher=None)
+    fast, slow = LaunchState(mint="F", created_ts=T0), LaunchState(mint="S", created_ts=T0)
+    for st, mig in ((fast, T0 + 2), (slow, T0 + 900)):
+        st.migrated, st.migrated_ts, st.decided_ts = True, mig, T0 + 75
+        eng.launches[st.mint] = st
+    assert [s.mint for s in eng.block_due(T0 + 1000)] == ["F"] and eng.block_due(T0 + 1000) == []
