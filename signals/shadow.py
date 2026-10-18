@@ -209,6 +209,12 @@ def groups(rows):
     out["any reason: net 500-2000, entities>=2"] = _stats(band)
     for k in sorted({r["reason"] for r in band}):  # why band candidates did not become calls
         out[f"band candidate, {k}"] = _stats([r for r in band if r["reason"] == k])
+    # is the $500-2000 band special, or does the owner count carry it? the same split below and above the band
+    for name, lo, hi in (("net <500", -1e18, 500), ("net >2000", 2000, 1e18)):
+        sub = [r for r in rows if ent(r) >= 2 and lo <= (r["net_usd"] or 0) < hi]
+        out[f"entities>=2, {name}"] = _stats(sub)
+        for k in sorted({r["reason"] for r in sub}):
+            out[f"entities>=2, {name}, {k}"] = _stats([r for r in sub if r["reason"] == k])
     return out
 
 

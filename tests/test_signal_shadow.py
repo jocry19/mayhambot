@@ -87,4 +87,5 @@ def test_band_candidates_broken_down_by_reason():
     rows = [type("R", (dict,), {"keys": dict.keys})(r) for r in rows]
     g = shadow.groups(rows)
     assert g["band candidate, thin_liq"]["n"] == 1 and g["band candidate, cooldown"]["n"] == 1
+    assert g["entities>=2, net <500"]["n"] == 0 and g["entities>=2, net >2000"]["n"] == 0
     assert shadow._band(dict(entities=2, smart_buyers=2, net_usd=900)) is True
