@@ -296,6 +296,27 @@ def test_signal_mode_uses_model_when_trained(env, monkeypatch):
     assert pos and pos["size_sol"] == pytest.approx(control.preset(conn, "signal").size_sol * strategy.GRADE_SIZE["A"])
 
 
+def test_signal_gate_uses_the_net_model_when_it_has_one(env, monkeypatch):
+    import model
+
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, _strict(s), ex)
+    follow_signals(conn, st)
+    h6 = {"p_pump": 0.6, "algo": "gbm", "p_win_net": 0.3, "exp_net_ret": -0.08}
+    monkeypatch.setattr(model, "score_token", lambda mint, conn=None: {"score": 62.0, "grade": "A", "version": 11,
+                                                                       "horizons": {"6h": h6}})
+    _signal(conn, score=95)
+    follow_signals(conn, st)  # pump score 62 but the net model expects -8 % after costs: no buy (v11 holdout)
+    assert conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0] == 0
+    assert any("nach Kosten in 6 h" in r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'"))
+    h6["exp_net_ret"] = 0.04
+    monkeypatch.setattr(model, "score_token", lambda mint, conn=None: {"score": 12.0, "grade": "E", "version": 11,
+                                                                       "horizons": {"6h": h6}})
+    _signal(conn, score=95)
+    follow_signals(conn, st)  # low pump score, positive expected net: the net model decides
+    assert conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0] == 1
+
+
 def test_geckoterminal_uses_shared_limiter(monkeypatch):
     from copytrade import http as cthttp
 

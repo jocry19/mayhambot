@@ -561,7 +561,11 @@ class Strategy:
         model = model_view(sig, self.conn)
         if model and model["informative"]:  # trained research model: its score is P(pump within 1 h) x 100
             score = model["score"]
-            if score < p.min_model_score:
+            en = model.get("exp_net_6h")
+            if en is not None:  # the net model where it exists: P(pump) ranks volatility, not profit (see GRADE_SIZE)
+                if en <= 0:
+                    why = f"Modell erwartet {en:+.0%} nach Kosten in 6 h"
+            elif score < p.min_model_score:
                 why = f"Modell {score:.0f} (Note {model.get('grade')}) < {p.min_model_score:.0f}"
         else:  # model not trained yet, or only the base rate: the signal engine's own score
             score = sig["score"]
@@ -1330,6 +1334,8 @@ def model_view(sig, conn=None) -> dict | None:
     # a horizon whose model did not beat the base rate in the holdout only returns the base rate: no information,
     # so no grade-based sizing (and a missing p_win_net is never read as a signal)
     informative = h1.get("algo") != "base" and h1.get("model") != "prior"
+    h6 = (out.get("horizons") or {}).get("6h") or {}
     return {"score": float(out["score"]), "grade": grade, "version": out.get("version"),
+            "exp_net_6h": h6.get("exp_net_ret") if h6.get("algo") != "base" else None,
             "p_pump_1h": h1.get("p_pump"), "p_win_net_1h": h1.get("p_win_net"), "informative": informative,
             "size_factor": GRADE_SIZE.get(grade, 1.0) if informative else 1.0, "tiers": out.get("tiers")}
