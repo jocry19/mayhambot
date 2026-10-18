@@ -27,12 +27,20 @@ CURVE_AGE_S = 900  # a curve price stays the price until the next trade
 DS_EVERY_S = 180
 DS_CALLS = 10  # DexScreener calls per step (30 coins each); a step is a minute
 MAX_TRACK = 6000
+LONG_S = (4 * 3600, 24 * 3600)  # the longer horizons (overhaul 18.10.: is there a right tail beyond the hour?)
+LONG_EVERY_S = ((4 * 3600, 900), (24 * 3600, 3600))  # DexScreener cadence by age after the first hour
+MAX_LONG = 12000
+DS_MISS_STOP = 3  # DexScreener without a pair this many times in a row (and no curve price): the path ends
+STAKE_SOL = 0.1  # the stake the costs are taken at (the lab's)
 SAVE_EVERY_S = 600  # the followed paths are kept in brain_state this often (a restart loses at most this much)
 CAP = 10.0  # +1000 %: beyond it a label is a price glitch more often than a coin (18.10.: means of +155724 %)
 RUG = 0.1  # the low under 10 % of the entry: rugged, counted as -100 %
 COLS = (("label_at", "INTEGER"), ("label_horizon_min", "REAL"), ("label_n", "INTEGER"), ("label_entry_sol", "REAL"),
         ("label_max15", "REAL"), ("label_max60", "REAL"), ("label_ret60", "REAL"), ("label_min60", "REAL"),
-        ("label_rug", "INTEGER"), ("label_outcomes", "TEXT"), ("label_rules", "TEXT"))
+        ("label_rug", "INTEGER"), ("label_outcomes", "TEXT"), ("label_rules", "TEXT"), ("label_cost", "REAL"),
+        ("label_ret240", "REAL"), ("label_max240", "REAL"), ("label_ret1440", "REAL"), ("label_max1440", "REAL"),
+        ("label_long_min", "REAL"))
+KIND = {"sniper": "launch", "copytrade": "copy", "strategy": "copy", "wallet_model": "copy"}  # else 'market'
 
 
 def _rules() -> dict:
@@ -54,6 +62,36 @@ def cost(s) -> float:
     from copytrade import sim
 
     return sim.ROUNDTRIP_COST + s.extra_cost("pool")
+
+
+def row_cost(s, source: str | None, dex: str | None, liq_usd: float | None) -> float:
+    """Round trip after costs for one row: the lab's cost model (fee by venue, impact of the stake against the pool,
+    transaction fees, delay by kind of trigger) at the venue and depth the coin had when it was first priced; the old
+    flat cost where lab/ is missing."""
+    try:
+        from lab import costs
+    except Exception:
+        return cost(s)
+    return costs.roundtrip(dex, liq_usd, STAKE_SOL, KIND.get(source or "", "market"))
+
+
+def long_labels(pts: list, t0: float) -> dict:
+    """ret and best price at 4 h and 24 h from the first price at or after t0 (before costs; label_cost holds them),
+    from the last sample within each horizon; a low under RUG of the entry within it is -100 %. A horizon the path
+    did not reach (to 90 %) stays out; label_long_min says how far it reached."""
+    pts = sorted(p for p in pts if p[0] >= t0)
+    if len(pts) < 2 or pts[0][1] <= 0:
+        return {}
+    p0, out = pts[0][1], {}
+    for h, name in zip(LONG_S, ("240", "1440")):
+        if pts[-1][0] < t0 + 0.9 * h:
+            continue
+        inside = [px for t, px in pts if t <= t0 + h + 600]
+        rug = min(inside) <= RUG * p0
+        out[f"label_ret{name}"] = -1.0 if rug else round(min(CAP, inside[-1] / p0 - 1), 5)
+        out[f"label_max{name}"] = round(min(CAP, max(inside) / p0 - 1), 5)
+    out["label_long_min"] = round((min(pts[-1][0], t0 + LONG_S[-1]) - t0) / 60, 1)
+    return out
 
 
 def candles(pts: list) -> list:
@@ -118,9 +156,13 @@ class Labeler:
         self.snapshots = snapshots or _default_snapshots
         self.curve_now = curve_now or _default_curve
         st = store.get(conn, "label_track") or {}
-        self.track: dict[str, list] = st.get("rows") or {}  # opportunity id -> [mint, t0]
+        # opportunity id -> [mint, t0, source] for the first hour; older saves hold [mint, t0]
+        self.track: dict[str, list] = {k: (v + [""])[:3] for k, v in (st.get("rows") or {}).items()}
+        self.long: dict[str, list] = st.get("long") or {}  # id -> [mint, t0] until 24 h (or the path ends)
         self.paths: dict[str, list] = st.get("paths") or {}  # mint -> [[unix s, price SOL], ...]
         self.ds_at: dict[str, float] = st.get("ds_at") or {}  # mint -> last DexScreener sample
+        self.venue: dict[str, list] = st.get("venue") or {}  # mint -> [dex, liquidity USD] when first priced
+        self.miss: dict[str, int] = st.get("miss") or {}  # mint -> DexScreener answers without a pair in a row
         self.saved_at = 0.0
         self.done = 0
 
@@ -128,50 +170,70 @@ class Labeler:
         cur = store.get(self.conn, "label_cursor")
         if cur is None:  # first start: from what comes next
             cur = self.conn.execute("SELECT MAX(id) FROM opportunities").fetchone()[0] or 0
-        rows = self.conn.execute("SELECT id, mint, ts, reported_at FROM opportunities WHERE id>? ORDER BY id LIMIT 5000",
-                                 (cur,)).fetchall()
-        for oid, mint, ts, rep in rows:
+        rows = self.conn.execute("SELECT id, mint, ts, reported_at, source FROM opportunities WHERE id>? ORDER BY id "
+                                 "LIMIT 5000", (cur,)).fetchall()
+        for oid, mint, ts, rep, src in rows:
             if len(self.track) < MAX_TRACK and mint and now - (rep or ts or 0) <= FRESH_S:
-                self.track[str(oid)] = [mint, rep or ts]
+                self.track[str(oid)] = [mint, rep or ts, src or ""]
         if rows:
             cur = rows[-1][0]
         store.put(self.conn, "label_cursor", cur)
 
+    def _every(self, mint_age: float) -> float:
+        if mint_age < HORIZON_S:
+            return DS_EVERY_S
+        return next((e for h, e in LONG_EVERY_S if mint_age < h), LONG_EVERY_S[-1][1])
+
     def _sample(self, now: float) -> None:
-        mints = {m for m, _ in self.track.values()}
+        youngest: dict[str, float] = {}
+        for v in list(self.track.values()) + list(self.long.values()):
+            youngest[v[0]] = min(youngest.get(v[0], 1e18), now - v[1])
         prices: dict[str, float] = {}
         ds = []
-        for mint in mints:
+        for mint, age in youngest.items():
             try:
                 cv = self.curve_now(self.conn, mint, now)
             except Exception:
                 cv = None
             if cv and not cv.get("complete") and cv.get("price_sol"):
                 prices[mint] = float(cv["price_sol"])
-            elif now - self.ds_at.get(mint, 0.0) >= DS_EVERY_S:
+                self.venue.setdefault(mint, ["pumpfun", None])
+                self.miss.pop(mint, None)
+            elif self.miss.get(mint, 0) < DS_MISS_STOP and now - self.ds_at.get(mint, 0.0) >= self._every(age):
                 ds.append(mint)
-        ds.sort(key=lambda m: self.ds_at.get(m, 0.0))
+        # the first hour first, then the longest overdue
+        ds.sort(key=lambda m: (youngest[m] >= HORIZON_S, self.ds_at.get(m, 0.0)))
         ds = ds[:DS_CALLS * 30]
         if ds:
             try:
                 snaps = self.snapshots(ds)
             except Exception as e:
                 log.warning("label snapshots failed: %s", e)
-                snaps = {}
+                snaps = None
             for m in ds:
                 self.ds_at[m] = now
+                if snaps is None:
+                    continue
                 sn = snaps.get(m)
                 if sn is not None and sn.price_sol:
                     prices[m] = float(sn.price_sol)
+                    self.venue.setdefault(m, [sn.dex_id, sn.liquidity_usd or getattr(sn, "curve_liq_usd", 0) or None])
+                    self.miss.pop(m, None)
+                else:
+                    self.miss[m] = self.miss.get(m, 0) + 1
         for mint, px in prices.items():
             path = self.paths.setdefault(mint, [])
             if not path or now > path[-1][0]:
                 path.append([round(now, 1), float(f"{px:.6g}")])
 
+    def _write(self, oid: str, lab: dict) -> None:
+        keys = list(lab)
+        self.conn.execute(f"UPDATE opportunities SET {', '.join(k + '=?' for k in keys)} WHERE id=?",
+                          (*[lab[k] for k in keys], int(oid)))
+
     def _finish(self, now: float) -> int:
-        c = cost(self.s)
         n = 0
-        for oid, (mint, t0) in list(self.track.items()):
+        for oid, (mint, t0, src) in list(self.track.items()):
             age = now - t0
             pts = [p for p in self.paths.get(mint, ()) if t0 <= p[0] <= t0 + HORIZON_S + 120]
             if not pts and age > NO_MARKET_S:
@@ -180,23 +242,40 @@ class Labeler:
             if age < HORIZON_S:
                 continue
             del self.track[oid]
+            dex, liq = (self.venue.get(mint) or [None, None])[:2]
+            c = row_cost(self.s, src, dex, liq)
             lab = label(pts, c)
             if lab is None:
                 continue
-            keys = list(lab)
-            self.conn.execute(f"UPDATE opportunities SET label_at=?, {', '.join(k + '=?' for k in keys)} WHERE id=?",
-                              (int(now), *[lab[k] for k in keys], int(oid)))
+            self._write(oid, {"label_at": int(now), **lab, "label_cost": round(c, 5)})
             n += 1
+            if len(self.long) < MAX_LONG:
+                self.long[oid] = [mint, t0]
+        for oid, (mint, t0) in list(self.long.items()):
+            if now - t0 < LONG_S[-1] + 600 and self.miss.get(mint, 0) < DS_MISS_STOP:
+                continue
+            del self.long[oid]
+            pts = list(self.paths.get(mint, []))
+            if self.miss.get(mint, 0) >= DS_MISS_STOP and pts:
+                # the market is gone before the day was over: no survivors only. A curve coin keeps its last curve
+                # price (no trade, no move, still sellable on the curve); a pool that vanished is worth nothing
+                curve = (self.venue.get(mint) or [""])[0] == "pumpfun"
+                pts.append([t0 + LONG_S[-1], pts[-1][1] if curve else 0.0])
+            lab = long_labels(pts, t0)
+            if lab:
+                self._write(oid, lab)
         first: dict[str, float] = {}
-        for m, t0 in self.track.values():
-            first[m] = min(first.get(m, t0), t0)
+        for v in list(self.track.values()) + list(self.long.values()):
+            first[v[0]] = min(first.get(v[0], v[1]), v[1])
         self.ds_at = {m: t for m, t in self.ds_at.items() if m in first}
+        self.venue = {m: v for m, v in self.venue.items() if m in first}
+        self.miss = {m: v for m, v in self.miss.items() if m in first}
         self.paths = {m: [p for p in pts if p[0] >= first[m]] for m, pts in self.paths.items() if m in first}
         return n
 
     def step(self) -> int:
-        """One round (a minute): take new rows, sample prices, write the labels of rows an hour old. Returns the
-        number labelled."""
+        """One round (a minute): take new rows, sample prices, write the labels of rows an hour old and the long
+        horizons of rows a day old. Returns the number labelled (first hour)."""
         now = self.clock()
         self._take_new(now)
         self._sample(now)
@@ -209,5 +288,6 @@ class Labeler:
     def save(self, now: float | None = None) -> None:
         now = now or self.clock()
         self.saved_at = now
-        store.put(self.conn, "label_track", {"at": int(now), "rows": self.track, "paths": self.paths,
-                                             "ds_at": self.ds_at})
+        store.put(self.conn, "label_track", {"at": int(now), "rows": self.track, "long": self.long,
+                                             "paths": self.paths, "ds_at": self.ds_at, "venue": self.venue,
+                                             "miss": self.miss})
