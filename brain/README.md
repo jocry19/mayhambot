@@ -155,14 +155,16 @@ Kontos; Erkundungen mit 2 % des Kontos; die noch unbelegten Nebenquellen werden 
 Probekäufe je Stunde, Rug-Prüfung nur beim Kauf). Haben die letzten 3 vollen Stunden zusammen mehr als 15 % verloren
 (`BRAIN_CHALLENGE_STOP` 0,85), pausiert der Modus 6 Stunden mit den normalen Einsätzen; das Tagebuch meldet es.
 
-## Taschen (Einsatz nur für bewiesene Muster)
+## Muster und Einsatz (weich, ohne Schwelle)
 
 Jede Gelegenheit jeder Quelle steht mit ihrem nachgespielten Ergebnis nach Kosten in `brain_opps`, genommen oder
 nicht (Schatten-Buch). `pockets.py` prüft alle 10 min jede Quelle allein und jede Quelle mit einem Merkmal
-(`market|dex=pumpswap`) über 7 Tage: freigegeben ist eine Tasche erst mit ≥ 100 Fällen, positiver 95-%-Untergrenze
-des Mittelwerts in der älteren UND der neueren Hälfte und positivem Schnitt der letzten 50 (kippt der, fällt sie
-sofort zurück). Nur in einer freigegebenen Tasche setzt Kelly auf den Mittelwert und der Challenge-Modus seine
-größeren Einsätze; sonst rechnet Kelly mit der Untergrenze der Kante, ein unbewiesener Vorteil setzt also das
-Minimum (Plan „Hundertmal besser“, 18.10.: bei negativem Erwartungswert verlieren größere Einsätze nur schneller).
-Stand in `brain_state.pockets` (Zeilen mit key, label, source, n, mean, lower95, Hälften, last50_mean, released,
-released_at, demoted_at, reason), lesend über `pockets.table(conn)` fürs Dashboard; Zeile im Tagebuch.
+(`market|dex=pumpswap`) über 7 Tage und gibt jedem Muster ab 20 Fällen ein Vertrauen: die Wahrscheinlichkeit, dass
+sein Schnitt nach Kosten über null liegt, die neuere Hälfte doppelt gewichtet. Es gibt kein Tor: das Modell entscheidet
+jede Gelegenheit selbst. Im Challenge-Modus gleitet der Einsatz mit dem Vertrauen des besten passenden Musters vom
+normalen Kelly-Anteil (50 %) zum großen (½-Kelly bis 35 %, ab 95 %) und fällt genauso zurück, wenn die jüngsten
+Ergebnisse kippen. Kelly selbst rechnet die eigene Unsicherheit des Modells mit ein (Varianz plus sd²): ein unsicherer
+Vorteil setzt von allein weniger (Nutzer 18.10.: freier, organischer, keine festen Regeln; nichts schönrechnen).
+„Freigegeben“ (≥ 100 Fälle, 95-%-Untergrenze in beiden Hälften positiv, letzte 50 positiv) ist nur noch ein Etikett
+fürs Dashboard. Stand in `brain_state.pockets` (Zeilen mit key, label, source, n, mean, lower95, Hälften,
+last50_mean, trust, released, released_at, demoted_at, reason), lesend über `pockets.table(conn)`.
