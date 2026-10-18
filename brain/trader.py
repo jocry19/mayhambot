@@ -12,8 +12,9 @@ import logging
 import random
 import time
 
-from . import decide, exits, features, pockets, store
-from .plans import BY_NAME
+from . import decide, exits, features, opportunities, pockets, store
+from .pool import Pool
+from .plans import BY_NAME, PLANS
 
 log = logging.getLogger("brain.trader")
 
@@ -48,10 +49,20 @@ def _default_safety(conn, mint):
     return a.level, bool(a.blocked), a.level != "unchecked", [r.get("text") for r in (a.reasons or [])[:2]]
 
 
+OWN_SOURCES = ("whale", "launch", "market")  # the brain reads these itself (ct_swaps, sniper, signal_shadow)
+
+
+def opportunities_model(pm) -> str:
+    from .pool import VERSION
+
+    return f"{VERSION}/{pm.n:.0f}"
+
+
 class Trader:
     def __init__(self, conn, s, model, *, snapshots=None, executor=None, safety_check=None, notify=None,
-                 on_close=None, rng: random.Random | None = None, clock=time.time, exit_model=None):
+                 on_close=None, rng: random.Random | None = None, clock=time.time, exit_model=None, pool_model=None):
         self.conn, self.s, self.model = conn, s, model
+        self.pm = pool_model if pool_model is not None else Pool(len(PLANS))
         self.xm = exit_model  # organic exits (exits.py); None = the plans' fixed exits only
         self.live = exits.Live()
         self.pockets = pockets.Book(conn, lambda: self.clock())
@@ -159,6 +170,16 @@ class Trader:
                     rows = []
                 for r in rows:
                     out.append(("market", f"mom{r['mint']}{int(now) // 3600}", r))
+        if self.s.pool_trade != "off" and store.has(c, "opportunities"):
+            # every other source's opportunities (sniper, copytrade, signals, wallet model, strategy): one pooled model
+            # learns them all; the brain's own sources come in their own way above
+            cur = self._cursor("cursor_pool", "SELECT MAX(id) FROM opportunities")
+            rows = c.execute("SELECT * FROM opportunities WHERE id>? ORDER BY id LIMIT 500", (cur,)).fetchall()
+            for r in rows:
+                if r["source"] not in OWN_SOURCES and now - (r["ts"] or 0) <= self.s.max_pool_age_s:
+                    out.append(("pool", f"opp{r['id']}", r))
+            if rows:
+                store.put(c, "cursor_pool", rows[-1]["id"])
         if store.has(c, "sniper_launches") and store.has(c, "sniper_positions"):
             # 'enter' is written at stage 2 together with the sniper's paper position, after decided_ts (stage 1):
             # the cursor runs on the position's opened_ts, as copytrade.engine.follow_launches does
@@ -197,6 +218,8 @@ class Trader:
                 from copytrade import store as ct_store
 
                 ent = ct_store.entity(self.conn, row["wallet"])
+            elif kind == "pool":
+                ent = row["source"]  # one decision per source and coin in 6 h
             if (kind, ref) in self.pending or (kind, row["mint"], ent) in batch:
                 continue
             if not self._seen(kind, ref, row["mint"], ent, now):
@@ -225,11 +248,11 @@ class Trader:
     def decide(self, kind: str, ref: str, row, entity: str, snap) -> int | None:
         now = self.clock()
         builder = {"whale": features.whale, "signal": features.signal, "launch": features.launch,
-                   "market": features.market}[kind]
+                   "market": features.market, "pool": features.pool}[kind]
         feats, raw = builder(self.conn, row, snap, now)
         symbol = (snap.symbol if snap else "") or (row["symbol"] if "symbol" in row.keys() else "") or ""
         self._safe = None
-        if snap is not None and snap.price_sol and (kind != "market" or self.market_live()):
+        if snap is not None and snap.price_sol and kind != "pool" and (kind != "market" or self.market_live()):
             # the rug verdict is part of what the brain sees (new coins have no stored verdict yet) and the gate
             # below reuses it: one quick check per priced opportunity
             try:
@@ -239,7 +262,14 @@ class Trader:
             except Exception as e:
                 log.debug("safety %s: %s", row["mint"][:6], e)
         pocket, trust = self.pockets.match(kind, feats)
-        d = decide.choose(self.model, kind, feats, self.settings(now, trust), self.rng, equity=self.equity())
+        st = self.settings(now, trust)
+        model = self.model
+        if kind == "pool":  # the learning account: whatever the draw lets through, at a small stake
+            import dataclasses
+
+            model = self.pm
+            st = dataclasses.replace(st, min_size_sol=self.s.learn_size_sol, explore_share=0.0, no_explore="")
+        d = decide.choose(model, kind, feats, st, self.rng, equity=self.equity())
         if pocket:
             raw["pocket"], raw["trust"] = pocket, trust
         block = None
@@ -264,9 +294,20 @@ class Trader:
              "enter" if d.enter else "skip", int(wanted), d.plan, d.mean, d.std, d.p_pos, d.sample, int(d.explore),
              d.size_sol if d.enter else None, note))
         opp_id = cur.lastrowid
-        if not d.enter or not cur.rowcount:
-            return None
-        return self.open(opp_id, kind, row, snap, d, note, symbol)
+        pid = self.open(opp_id, kind, row, snap, d, note, symbol) if d.enter and cur.rowcount else None
+        if kind == "pool" and cur.rowcount:
+            self._write_back(row["id"], d, block, pid)
+        return pid
+
+    def _write_back(self, oid: int, d, block, pid) -> None:
+        """The brain's view on a pooled opportunity, in its own row: prediction, draw, decision, stake."""
+        q10 = d.mean - 1.2816 * d.std
+        dec = "skip" if not pid else ("learn" if d.explore else "perform")
+        self.conn.execute(
+            "UPDATE opportunities SET model=?, pred_mean=?, pred_sd=?, pred_q10=?, draw=?, decision=?, account=?, "
+            "size_sol=?, decided_at=?, position_id=? WHERE id=?",
+            (opportunities_model(self.pm), round(d.mean, 5), round(d.std, 5), round(q10, 5), round(d.sample, 5),
+             dec, None if not pid else dec, d.size_sol if pid else None, int(self.clock()), pid, oid))
 
     def _gate(self, kind: str, mint: str, snap, d, row=None, raw=None) -> str | None:
         """Hard limits the model never overrides: a market to trade, the rug check, risk limits."""
@@ -424,18 +465,23 @@ class Trader:
         return on
 
     def settings(self, now: float, trust: float = 0.5):
-        """The settings a decision runs with. No gate: while the challenge is on, the stake share slides from the
-        normal Kelly share to the challenge's (½-Kelly up to 35 %) as the pattern's trust goes from 50 % to 95 %, and
-        falls back the same way when its recent results turn (user 18.10.: freer, organic, no fixed rules)."""
-        if not self.challenge_on(now):
-            return self.s
+        """The settings a decision runs with. No gate, a slide: the most one position may take of the account grows
+        with the trust of the best pattern it belongs to, from BRAIN_UNPROVEN_STAKE (3 %) at 50 % trust or less to the
+        full share (the challenge's ½-Kelly up to 35 % while it is on) at 95 %, and falls back the same way when the
+        recent results turn. 18.10.: the model was "convinced" on two market coins and staked a third of the account
+        each, in a source whose record after costs was negative; conviction alone no longer moves a third of the
+        account, conviction plus a record does (user 18.10.: freer, organic, no fixed rules, but honest numbers)."""
         import dataclasses
 
-        w = max(0.0, min(1.0, (trust - 0.5) / 0.45))
         s = self.s
-        return dataclasses.replace(s, kelly_frac=s.kelly_frac + w * (s.challenge_kelly_frac - s.kelly_frac),
-                                   max_stake=s.max_stake + w * (s.challenge_max_stake - s.max_stake),
-                                   explore_share=w * s.challenge_explore_share)
+        on = self.challenge_on(now)
+        w = max(0.0, min(1.0, (trust - 0.5) / 0.45))
+        hi_k = s.challenge_kelly_frac if on else s.kelly_frac
+        hi_m = s.challenge_max_stake if on else s.max_stake
+        lo_m = min(s.unproven_stake, hi_m)
+        return dataclasses.replace(s, kelly_frac=s.kelly_frac + w * (hi_k - s.kelly_frac),
+                                   max_stake=lo_m + w * (hi_m - lo_m),
+                                   explore_share=w * s.challenge_explore_share if on else s.explore_share)
 
     def market_live(self) -> bool:
         """The side source trades only once its own out-of-sample record earned it: auto = what the brain wanted from

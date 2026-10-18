@@ -168,3 +168,22 @@ Vorteil setzt von allein weniger (Nutzer 18.10.: freier, organischer, keine fest
 „Freigegeben“ (≥ 100 Fälle, 95-%-Untergrenze in beiden Hälften positiv, letzte 50 positiv) ist nur noch ein Etikett
 fürs Dashboard. Stand in `brain_state.pockets` (Zeilen mit key, label, source, n, mean, lower95, Hälften,
 last50_mean, trust, released, released_at, demoted_at, reason), lesend über `pockets.table(conn)`.
+
+## Alle Quellen in einem Modell (`opportunities`, `pool.py`)
+
+Sniper, Copytrading, Signale, Wallet-Modell und Strategie melden jede Gelegenheit über
+`brain.opportunities.report()` in die gemeinsame Tabelle `opportunities` (Schema:
+plan/gelegenheiten_schema.md). Das Hirn liest sie per Cursor (`cursor_pool`, nur frische Zeilen bis
+`BRAIN_MAX_POOL_AGE_S`), bildet aus den Rohwerten generische Stufen (halbe Zehnerpotenzen, Text, ja/nein) und
+schickt sie als Art `pool` durch dieselbe Entscheidung: Ziehung aus der vorhergesagten Verteilung je Ausstiegsplan,
+gekauft wird, was die Ziehung über die Kosten bringt. Ohne Tor, ohne Quote. Der Einsatz einer Ziehung ist das
+Lernkonto (`BRAIN_LEARN_SIZE_SOL`, 0,03 SOL); ist das Modell sicher, rechnet Kelly mit seiner Unsicherheit.
+
+Das Modell (`pool.py`) hält je Merkmal und Plan eine eigene Normalverteilung (Assumed Density Filtering), damit
+Tausende Merkmale möglich sind; jedes Merkmal steht einmal quellenübergreifend und einmal mit Quelle im Modell.
+Halbwertszeit 72 h, vergessene Muster fallen auf den Prior zurück. Gespeichert in `data/brain/pool_model.json`.
+
+Das Hirn schreibt in jede Zeile zurück: `model`, `pred_mean`, `pred_sd`, `pred_q10`, `draw`, `decision`
+(learn/perform/skip), Einsatz und Position, später `outcome_net` nach Kosten mit dem gewählten Plan (Rug −100 %),
+`outcomes` je Plan und `rug`. Rug-Prüfung vor jedem Kauf bleibt Pflicht. `BRAIN_POOL_TRADE=off` schaltet nur das
+Lesen ab.

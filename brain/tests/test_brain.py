@@ -910,7 +910,7 @@ def test_challenge_explores_side_sources_with_account_stakes_and_pauses_after_lo
         conn.execute("INSERT OR REPLACE INTO brain_equity VALUES (?,?,?,?)", (h0 - k * 3600 + 3500, eq * 0.9, 0, eq * 0.9))
     t._challenge_at = (-1e18, False)
     assert not t.challenge_on(time.time())
-    assert t.settings(time.time(), 0.99) is s  # paused: even a trusted pattern stakes normally
+    assert t.settings(time.time(), 0.99).max_stake == s.max_stake  # paused: even a trusted pattern stakes normally
     assert "Challenge pausiert" in journal.write(conn, unsure, s)
 
 
@@ -1029,7 +1029,8 @@ def test_challenge_stakes_slide_with_the_patterns_trust(conn, s):
     t = make_trader(conn, s, trained(), Market())
     now = time.time()
     low, mid, high = t.settings(now, 0.5), t.settings(now, 0.725), t.settings(now, 0.95)
-    assert low.kelly_frac == s.kelly_frac and low.max_stake == s.max_stake
+    assert low.kelly_frac == s.kelly_frac and low.max_stake == s.unproven_stake  # conviction alone: 3 % at most
+    assert t.settings(now, 0.1).max_stake == s.unproven_stake
     assert high.kelly_frac == pytest.approx(s.challenge_kelly_frac) and high.max_stake == pytest.approx(s.challenge_max_stake)
     assert s.kelly_frac < mid.kelly_frac < high.kelly_frac
     from brain import pockets
@@ -1052,3 +1053,87 @@ def test_every_source_reports_into_one_opportunity_table(conn):
     assert [r["source"] for r in rows] == ["sniper", "copytrade"]
     assert json.loads(rows[0]["features"]) == {"mc_usd": 12000.0, "buyers": 7, "bundle": True, "sniper.risk": 40}
     assert rows[0]["source_result"] == -1.0 and rows[0]["reported_at"]
+
+
+# ---------------------------------------------------------------------- pooled opportunities (every source)
+def test_pool_model_learns_across_sources_and_survives_a_restart(tmp_path):
+    from brain.pool import Pool
+    pm = Pool(len(PLANS))
+    rng = random.Random(2)
+    good = tokens("pool", {"src": "sniper", "buyers": "1e1", "dex": "pumpswap"})
+    bad = tokens("pool", {"src": "copytrade", "buyers": "1e0", "dex": "pumpfun"})
+    m0, s0 = pm.predict(good)[0]
+    for _ in range(200):
+        pm.update(good, {i: 0.15 + rng.gauss(0, 0.1) for i in range(len(PLANS))})
+        pm.update(bad, {i: -0.2 + rng.gauss(0, 0.1) for i in range(len(PLANS))})
+    (mg, sg), (mb, _) = pm.predict(good)[0], pm.predict(bad)[0]
+    assert mg > 0.08 and mb < -0.12 and sg < s0  # learned, and surer than at the start
+    # what one source taught carries to another through the shared names
+    other = tokens("pool", {"src": "signals", "buyers": "1e1", "dex": "pumpswap"})
+    assert pm.predict(other)[0][0] > 0
+    pm.save(tmp_path / "pool.json")
+    from brain.pool import Pool as P2
+    back = P2.load(tmp_path / "pool.json", len(PLANS))
+    assert back.predict(good)[0] == pytest.approx(pm.predict(good)[0])
+    pm.fade(0.5)
+    assert abs(pm.predict(good)[0][0]) < mg
+
+
+def test_generic_buckets():
+    from brain.features import gb
+    assert gb(True) == "yes" and gb(0) == "0" and gb(31_000) == "1e4" and gb(40_000) == "1e4.5"
+    assert gb(-0.2) == "-1e-1" and gb("PumpSwap") == "pumpswap" and gb(float("nan")) == "?"
+
+
+def test_every_source_reports_and_the_brain_decides_learns_and_writes_back(conn, s):
+    from brain import opportunities as O
+    from brain.pool import Pool
+    mk = Market()
+    mk.snaps[MINT] = snap(dex="pumpswap")
+    pm = Pool(len(PLANS))
+    for _ in range(50):  # the pool learned that this pattern pays
+        pm.update(tokens("pool", {"src": "sniper", "buyers": "1e1"}), {i: 0.3 for i in range(len(PLANS))})
+    t = make_trader(conn, s, trained(), mk, pool_model=pm)
+    t.scan()
+    now = time.time()
+    O.report(conn, "sniper", "L1", MINT, now, {"buyers": 12, "mc_usd": 30_000, "bundle": False},
+             source_action="took", source_score=0.7)
+    O.report(conn, "whale", "x", MINT, now, {})  # the brain's own source: not read twice
+    assert t.scan() == 1
+    o = conn.execute("SELECT * FROM brain_opps WHERE kind='pool'").fetchone()
+    assert o["decision"] == "enter" and json.loads(o["features"])["src"] == "sniper"
+    row = conn.execute("SELECT * FROM opportunities WHERE source='sniper'").fetchone()
+    assert row["decision"] in ("learn", "perform") and row["pred_mean"] > 0 and row["position_id"]
+    assert row["model"].startswith("pool-") and row["pred_q10"] < row["pred_mean"]
+    assert conn.execute("SELECT COUNT(*) FROM brain_opps").fetchone()[0] == 1
+    # hours later the replay writes the honest result back and the pool learns from it
+    old = time.time() - learner.horizon_s() - learner.CACHE_GRACE_S - 600
+    conn.execute("UPDATE brain_opps SET ts=?, decided_at=? WHERE kind='pool'", (int(old), old))
+    n0 = pm.n
+    assert learner.evaluate(conn, t.model, s, candles_up, limit=10, pool=pm) == 1
+    row = conn.execute("SELECT * FROM opportunities WHERE source='sniper'").fetchone()
+    assert row["evaluated_at"] and row["outcome_net"] is not None and row["exit_plan"] in NAMES
+    assert row["rug"] == 0 and set(json.loads(row["outcomes"])) <= set(NAMES) and pm.n > n0 * 0.5
+
+
+def test_a_rug_counts_minus_one_hundred_in_the_shared_table(conn, s):
+    from brain import opportunities as O
+    from brain.pool import Pool
+
+    def rug(conn, mint, lo, hi, allow_net=True):
+        out = []
+        for i, ts in enumerate(range(lo - lo % 60, hi, 60)):
+            px = 1.0 if i <= 22 else 1e-6
+            out.append((ts, px, px, px, px, 1000.0))
+        return out
+    pm = Pool(len(PLANS))
+    old = time.time() - learner.horizon_s() - learner.CACHE_GRACE_S - 600
+    O.report(conn, "signals", "9", MINT, old, {"inflow_usd": 900})
+    oid = conn.execute("SELECT id FROM opportunities").fetchone()[0]
+    conn.execute("INSERT INTO brain_opps(ts, decided_at, kind, ref, mint, wallet, entity, src_ts, features, raw, decision,"
+                 " wanted, plan) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (int(old), old, "pool", f"opp{oid}", MINT, "", "signals", int(old), json.dumps({"src": "signals"}),
+                  json.dumps({"opp": oid}), "skip", 0, "swing"))
+    assert learner.evaluate(conn, Brain(len(PLANS)), s, rug, limit=5, pool=pm) == 1
+    row = conn.execute("SELECT * FROM opportunities").fetchone()
+    assert row["rug"] == 1 and row["outcome_net"] <= -0.9
