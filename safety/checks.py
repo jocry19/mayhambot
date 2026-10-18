@@ -1069,13 +1069,30 @@ def check_staged(ctx):
             r.positives.append("Kein auffällig schneller Anstieg direkt nach dem Start.")
     return r.finish(cap=60)
 
-def _dev_buy_pct(ctx):
-    """Share of the supply the creator bought in the create transaction (sniper launch record), or None."""
+def _sniper_launch(ctx):
+    """The sniper's launch record as a dict, or None. A record whose stage 1 saw no trade at all (skip 'activity',
+    n_trades 0: about half of all records) reads dev_buy_pct 0 and bundle_pct 0 for want of data, not because
+    nobody bought: PROINU 18.10. had a 74 % buy in the create slot and such a record. It counts as no record."""
     try:
-        r = ctx.conn.execute("SELECT dev_buy_pct FROM sniper_launches WHERE mint=?", (ctx.mint,)).fetchone()
+        cur = ctx.conn.execute("SELECT * FROM sniper_launches WHERE mint=?", (ctx.mint,))
+        row = cur.fetchone()
     except Exception:  # noqa: BLE001 - sniper not installed
         return None
-    return float(r[0]) if r and r[0] is not None else None
+    if not row:
+        return None
+    d = dict(zip([x[0] for x in cur.description], row))
+    if d.get("dev_buy_pct") is None:
+        return None
+    seen = (d.get("n_trades") or 0) > 0 or (d.get("dev_buy_pct") or 0) > 0 or (d.get("bundle_pct") or 0) > 0
+    if "n_trades" in d and not seen:
+        return None
+    return d
+
+
+def _dev_buy_pct(ctx):
+    """Share of the supply the creator bought in the create transaction (sniper launch record), or None."""
+    d = _sniper_launch(ctx)
+    return float(d["dev_buy_pct"]) if d else None
 
 
 def check_masche(ctx):
@@ -1088,23 +1105,45 @@ def check_masche(ctx):
     confirmed market cap >= 1 M$ (liquidity >= 20 k$ and >= 2 % of MC, 3 snapshots), 8 were this pattern and all 8
     ended at <= 2 % of their peak liquidity; none of the other 33 runners had a creator buy above 52 %. Hard veto."""
     r = CheckResult("masche", "Marken-Masche (Curve-Komplettkauf)")
-    d = _dev_buy_pct(ctx)
-    if d is None:
+    rec = _sniper_launch(ctx)
+    if rec is None:
         return _masche_from_chain(ctx, r)
-    try:
-        row = ctx.conn.execute("SELECT migrated, migrated_ts, created_ts FROM sniper_launches WHERE mint=?",
-                               (ctx.mint,)).fetchone()
-    except Exception:  # noqa: BLE001
-        row = None
-    mig_after = int(row[1] - row[2]) if row and row[1] and row[2] else None
-    r.data.update(dev_buy_pct=round(d, 2), migrated=bool(row and row[0]), migrated_after_sec=mig_after)
-    if d >= ctx.cfg.masche_dev_buy_pct:
+    d = float(rec["dev_buy_pct"])
+    share = d + float(rec.get("bundle_pct") or 0)
+    mig, mts, cts = rec.get("migrated"), rec.get("migrated_ts"), rec.get("created_ts")
+    mig_after = int(mts - cts) if mts and cts else None
+    r.data.update(dev_buy_pct=round(d, 2), launch_share_pct=round(share, 2), migrated=bool(mig),
+                  migrated_after_sec=mig_after)
+    return _masche_verdict(ctx, r, d, share, "Sniper-Datensatz")
+
+
+def _masche_verdict(ctx, r, d, share, src, setup=()):
+    """dev >= masche_dev_buy_pct: the creator bought the whole curve. Creator plus same-slot buyers >=
+    masche_launch_share_pct: the same scam with the curve bought by a second wallet in the create block (sniper
+    records 18.10., dev < 75 and dev + bundle >= 70: 118 launches, 97 rugged; 79 migrated, 69 of them rugged)."""
+    c = ctx.cfg
+    tag = "Sniper-Datensatz" if src == "Sniper-Datensatz" else "Chain"
+    if d >= c.masche_dev_buy_pct:
         r.hard = True
-        _log_once(ctx.mint, "block", f"safety masche: {ctx.mint} gesperrt, Ersteller kaufte {d:.2f} % beim Start (Sniper-Datensatz)")
-        r.add(95, f"Der Ersteller kaufte beim Start {d:.1f} % des Supplies, also die ganze Bonding-Curve: Muster "
-                  "der Marken-Masche (Setup-Kauf im selben Block, Airdrops an Hunderte Wallets, Abverkauf in einer "
-                  "Transaktion). In unseren Daten endeten alle 8 solchen Millionen-Läufe bei ≤ 2 % ihrer Liquidität: gesperrt.")
+        _log_once(ctx.mint, "block", f"safety masche: {ctx.mint} gesperrt, Ersteller kaufte {d:.2f} % beim Start ({tag})"
+                  + (f", Setup-Kauf {setup[0]}" if setup else ""))
+        r.add(95, f"Der Ersteller kaufte beim Start {d:.1f} % des Supplies"
+                  + (" (aus der Chain gelesen)" if tag == "Chain" else "")
+                  + ", also die ganze Bonding-Curve: Muster der Marken-Masche (Setup-Kauf im selben Block, Airdrops "
+                  "an Hunderte Wallets, Abverkauf in einer Transaktion). In unseren Daten endeten alle 8 solchen "
+                  "Millionen-Läufe bei ≤ 2 % ihrer Liquidität: gesperrt."
+                  + (f" Im selben Block kaufte {short(setup[0])} für ≥ {c.masche_setup_sol:g} SOL (Setup-Kauf)." if setup else ""))
+    elif share >= c.masche_launch_share_pct:
+        r.hard = True
+        _log_once(ctx.mint, "block", f"safety masche: {ctx.mint} gesperrt, Start-Block kaufte {share:.2f} % "
+                  f"(Ersteller {d:.2f} %, {tag})")
+        r.add(95, f"Im Erstellungs-Block wurden {share:.1f} % des Supplies gekauft (Ersteller {d:.1f} %, der Rest "
+                  "von anderen Wallets im selben Block): die Bonding-Curve ging beim Start fast ganz an wenige "
+                  "Wallets. 87 % solcher migrierten Launches wurden gerugged: gesperrt.")
     else:
+        if tag == "Chain":
+            _log_once(ctx.mint, "free", f"safety masche: {ctx.mint} Chain-Prüfung frei, Ersteller kaufte {d:.2f} %, "
+                      f"Start-Block {share:.2f} %")
         r.positives.append(f"Ersteller kaufte beim Start {d:.1f} % des Supplies.")
     return r.finish(cap=95)
 
@@ -1119,10 +1158,22 @@ def _masche_from_chain(ctx, r):
         r.status = "unknown"
         return r.finish()
     created = _created_ts(ctx)
-    if not created or ctx.now - created > c.masche_verify_max_age_sec:
+    if not created:
         r.status = "unknown"
         return r.finish()
-    la = ctx.launch()
+    if ctx.now - created > c.masche_verify_max_age_sec:
+        # too old to page back for, but a launch already read (deep bundle check, an earlier verify) still counts
+        try:
+            la = store.launch(ctx.conn, ctx.mint) or {}
+        except Exception:  # noqa: BLE001
+            la = {}
+        if la and "state" not in la:
+            la["state"] = "done" if la.get("reachable") else "unreachable"
+        if la.get("state") != "done":
+            r.status = "unknown"
+            return r.finish()
+    else:
+        la = ctx.launch()
     state = la.get("state")
     r.data.update(source="chain", launch_state=state)
     if state == "unreachable":
@@ -1138,25 +1189,17 @@ def _masche_from_chain(ctx, r):
     supply = (ctx.mint_info() or {}).get("supply_ui") or 0
     creator = la.get("creator")
     buyers = la.get("buyers") or []
+    slot0 = la.get("created_slot")
     dev = sum(b["tokens"] for b in buyers if b["wallet"] == creator)
-    setup = [b["wallet"] for b in buyers if b["wallet"] != creator and b.get("slot") == la.get("created_slot")
+    block = sum(b["tokens"] for b in buyers if b["wallet"] == creator or (slot0 is not None and b.get("slot") == slot0))
+    setup = [b["wallet"] for b in buyers if b["wallet"] != creator and b.get("slot") == slot0
              and (b.get("sol") or 0) >= c.masche_setup_sol]
     if not supply:
         r.status = "unknown"
         return r.finish()
-    d = 100 * dev / supply
-    r.data.update(dev_buy_pct=round(d, 2), creator=creator, setup_buyers=setup[:5])
-    if d >= c.masche_dev_buy_pct:
-        r.hard = True
-        _log_once(ctx.mint, "block", f"safety masche: {ctx.mint} gesperrt, Ersteller kaufte {d:.2f} % beim Start (Chain)"
-                  + (f", Setup-Kauf {setup[0]}" if setup else ""))
-        r.add(95, f"Der Ersteller kaufte beim Start {d:.1f} % des Supplies (aus der Chain gelesen), also die ganze "
-                  "Bonding-Curve: Muster der Marken-Masche: gesperrt."
-                  + (f" Im selben Block kaufte {short(setup[0])} für ≥ {c.masche_setup_sol:g} SOL (Setup-Kauf)." if setup else ""))
-    else:
-        _log_once(ctx.mint, "free", f"safety masche: {ctx.mint} Chain-Prüfung frei, Ersteller kaufte {d:.2f} %")
-        r.positives.append(f"Ersteller kaufte beim Start {d:.1f} % des Supplies.")
-    return r.finish(cap=95)
+    d, share = 100 * dev / supply, 100 * block / supply
+    r.data.update(dev_buy_pct=round(d, 2), launch_share_pct=round(share, 2), creator=creator, setup_buyers=setup[:5])
+    return _masche_verdict(ctx, r, d, share, "Chain", setup)
 
 
 _logged = {}

@@ -943,3 +943,40 @@ def test_masche_writes_one_log_line_per_coin(caplog):
         checks.check_masche(x)
     lines = [m for m in caplog.messages if m.startswith("safety masche:")]
     assert len(lines) == 1 and "gesperrt" in lines[0]
+
+
+def test_curve_bought_by_a_second_wallet_in_the_create_block_is_the_same_scam():
+    c = conn()
+    c.execute("CREATE TABLE sniper_launches (mint TEXT, created_ts INTEGER, migrated INTEGER, migrated_ts INTEGER, "
+              "dev_buy_pct REAL, bundle_pct REAL, n_trades INTEGER)")
+    c.execute("INSERT INTO sniper_launches VALUES (?, ?, 1, ?, 0.1, 79.2, 40)", (MINT, NOW - 3600, NOW - 3599))
+    c.commit()
+    a = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
+    m = a.checks["masche"]
+    assert m["hard"] and a.blocked and m["data"]["launch_share_pct"] == 79.3
+    c.execute("UPDATE sniper_launches SET bundle_pct=12")
+    c.commit()
+    a = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
+    assert not a.checks["masche"]["hard"]
+
+
+def test_sniper_record_that_saw_no_trade_falls_back_to_the_chain():
+    from types import SimpleNamespace
+    from safety import store
+    c = conn()
+    store.ensure_schema(c)
+    c.execute("CREATE TABLE sniper_launches (mint TEXT, created_ts INTEGER, migrated INTEGER, migrated_ts INTEGER, "
+              "dev_buy_pct REAL, bundle_pct REAL, n_trades INTEGER)")
+    c.execute("INSERT INTO sniper_launches VALUES ('Proinupump', ?, 1, ?, 0, 0, 0)", (NOW - 17 * 3600, NOW - 17 * 3600))
+    # PROINU 18.10.: a second wallet bought 74 % in the create slot, the stage-1 record saw nothing
+    store.save_launch(c, "Proinupump", {"state": "done", "creator": "DEV", "created_slot": 7, "reachable": True,
+                                        "buyers": [{"wallet": "BUNDLER", "tokens": 742.8e6, "sol": 68.7, "slot": 7},
+                                                   {"wallet": "X", "tokens": 66e3, "sol": 0.02, "slot": 8}]})
+    x = SimpleNamespace(mint="Proinupump", cfg=CFG, now=NOW, conn=c, mint_info=lambda: {"supply_ui": 1e9},
+                        launch=lambda: (_ for _ in ()).throw(AssertionError("too old to page")),
+                        pair=lambda: {"pairCreatedAt": (NOW - 17 * 3600) * 1000})
+    assert checks._sniper_launch(x) is None
+    r = checks.check_masche(x)
+    assert r.hard and r.data["source"] == "chain" and r.data["launch_share_pct"] == 74.28 and r.data["dev_buy_pct"] == 0
+    x.mint = "Otherpump"     # old and never read: unknown, not a gap
+    assert checks.check_masche(x).status == "unknown"
