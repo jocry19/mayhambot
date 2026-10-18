@@ -579,8 +579,8 @@ class Strategy:
             if en is not None:  # the net model where it exists: P(pump) ranks volatility, not profit (see GRADE_SIZE)
                 if en <= 0:
                     why = f"Modell erwartet {en:+.0%} nach Kosten in 6 h"
-            elif score < p.min_model_score:
-                why = f"Modell {score:.0f} (Note {model.get('grade')}) < {p.min_model_score:.0f}"
+            else:  # 10/18: no net model, no strict buy; P(pump) alone put 0.5 SOL on signal 67
+                why = f"kein Netto-Modell (Modell {score:.0f}, Note {model.get('grade')})"
         else:  # model not trained yet, or only the base rate: the signal engine's own score
             score = sig["score"]
             if p.require_model:
@@ -588,6 +588,8 @@ class Strategy:
                        else "Modell schlägt die Basisrate nicht (keine Aussage)")
             elif score < p.min_score:
                 why = f"Signal-Score {score:.0f} < {p.min_score:.0f}"
+            elif STRICT_SIGNAL_NEEDS_NET_MODEL:
+                why = f"kein Netto-Modell (Signal-Score {score:.0f})"
         if not why and (sig["smart_buyers"] or 0) < p.min_smart_buyers:
             why = f"nur {sig['smart_buyers']} Smart Wallets"
         feats = learn.signal_features(sig)
@@ -634,9 +636,8 @@ class Strategy:
             return None
         first = None
         if not why:
-            size = p.size_sol
-            if model and model.get("size_factor"):
-                size *= max(0.25, min(2.0, float(model["size_factor"])))
+            # a probe until strict signal trades prove the net model: v11 had no band with a positive realised net
+            size = p.size_sol * SIGNAL_PROBE_SIZE
             block = self._risk_block("signal", p, size, mint)
             if block:
                 self._skip("signal", mint, block, snap)
@@ -1352,6 +1353,8 @@ def wash_share(conn, mint: str) -> float | None:
 # v10 (5.4k / 5.1k signals) lose most in the top fifth (mean net -13 % / -16 %, 4th fifth -7 % / -6 %), live v9
 # predictions 10/17 (493 with 1 h outcome): median 1 h -1 % under score 20, -16 % at 20-30, -23 % at 30-45,
 # -27 % from 45. The old 1.5x for A put the most money on the worst band
+STRICT_SIGNAL_NEEDS_NET_MODEL = True  # 10/18: strict signal trades n 4, -24 %; signals measure -8..-13 % after costs
+SIGNAL_PROBE_SIZE = 0.25  # x the signal preset's size_sol (0.5 -> 0.125 SOL), like learn.THOMPSON_PROBE_SIZE
 GRADE_SIZE = {"A": 1.0, "B": 1.0, "C": 1.0, "D": 1.0, "E": 1.0}
 
 

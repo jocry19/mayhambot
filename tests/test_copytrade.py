@@ -166,8 +166,9 @@ def _strict(s):
     return dataclasses.replace(s, explore=False)  # strict account only
 
 
-def test_signal_mode_auto_buys_and_respects_preset(env):
+def test_signal_mode_auto_buys_and_respects_preset(env, monkeypatch):
     s, conn, ex, state = env
+    monkeypatch.setattr(strategy, "STRICT_SIGNAL_NEEDS_NET_MODEL", False)  # the preset's own gates
     st = strategy.Strategy(conn, _strict(s), ex)
     assert follow_signals(conn, st) == 0  # first call only sets the cursor
     _signal(conn, score=40)
@@ -175,12 +176,29 @@ def test_signal_mode_auto_buys_and_respects_preset(env):
     assert follow_signals(conn, st) == 2
     pos = conn.execute("SELECT * FROM ct_positions WHERE strategy='signal'").fetchall()
     assert len(pos) == 1 and pos[0]["managed"] == "auto" and pos[0]["signal_id"]
-    assert pos[0]["size_sol"] == control.preset(conn, "signal").size_sol
+    assert pos[0]["size_sol"] == pytest.approx(control.preset(conn, "signal").size_sol * strategy.SIGNAL_PROBE_SIZE)
     assert conn.execute("SELECT COUNT(*) FROM ct_alerts WHERE action='bought'").fetchone()[0] == 1
 
 
-def test_manual_mode_only_alerts(env):
+def test_strict_signal_buys_need_the_net_model(env, monkeypatch):
+    import model
+
     s, conn, ex, state = env
+    st = strategy.Strategy(conn, _strict(s), ex)
+    follow_signals(conn, st)
+    _signal(conn, score=85)
+    follow_signals(conn, st)  # no model at all: the signal score alone buys nothing strictly
+    assert not conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0]
+    assert conn.execute("SELECT 1 FROM ct_events WHERE message LIKE '%kein Netto-Modell%'").fetchone()
+    monkeypatch.setattr(model, "score_token", lambda mint, conn=None: {"score": 67.0, "grade": "A", "version": 3})
+    _signal(conn, score=85)
+    follow_signals(conn, st)  # P(pump) 67 without a net model: still nothing (10/18 signal 67 went in with 0.5 SOL)
+    assert not conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0]
+
+
+def test_manual_mode_only_alerts(env, monkeypatch):
+    s, conn, ex, state = env
+    monkeypatch.setattr(strategy, "STRICT_SIGNAL_NEEDS_NET_MODEL", False)
     control.set_mode(conn, "signal", "manual")
     control.set_mode(conn, "whale", "manual")
     st = strategy.Strategy(conn, s, ex)
@@ -292,9 +310,8 @@ def test_signal_mode_uses_model_when_trained(env, monkeypatch):
 
     monkeypatch.setattr(model, "score_token", lambda mint, conn=None: {"score": 62.0, "grade": "A", "version": 3})
     _signal(conn, score=40)
-    follow_signals(conn, st)  # model 62 % (A): buy, grade sizing is neutral (the top band loses most net)
-    pos = conn.execute("SELECT * FROM ct_positions").fetchone()
-    assert pos and pos["size_sol"] == pytest.approx(control.preset(conn, "signal").size_sol * strategy.GRADE_SIZE["A"])
+    follow_signals(conn, st)  # model 62 % (A) but no net model: P(pump) ranks volatility, no strict buy
+    assert conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0] == 0
 
 
 def test_signal_gate_uses_the_net_model_when_it_has_one(env, monkeypatch):
@@ -425,6 +442,7 @@ def test_live_buy_requires_fresh_safety_check(env, monkeypatch):
 
     from copytrade import control
     s, conn, ex, state = env
+    monkeypatch.setattr(strategy, "STRICT_SIGNAL_NEEDS_NET_MODEL", False)
     live = PaperExecutor(s, rpc=None)
     live.mode = "live"
     st = strategy.Strategy(conn, s, {"paper": ex, "live": live})
@@ -825,10 +843,11 @@ def test_exploration_can_be_turned_off_and_its_positions_still_sell_on_their_own
     assert off.exs["explore"].balance(conn) > s.explore_start_balance_sol - 0.1
 
 
-def test_exploration_buys_signals_the_strict_gates_turn_down(env):
+def test_exploration_buys_signals_the_strict_gates_turn_down(env, monkeypatch):
     import dataclasses
 
     s, conn, ex, state = env
+    monkeypatch.setattr(strategy, "STRICT_SIGNAL_NEEDS_NET_MODEL", False)
     st = strategy.Strategy(conn, s, ex)
     follow_signals(conn, st)
     state["snap"] = dataclasses.replace(state["snap"], liquidity_usd=8000)  # under the preset's $15k
