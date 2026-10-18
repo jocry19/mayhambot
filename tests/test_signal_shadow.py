@@ -97,3 +97,18 @@ def test_near_call_flag():
     assert shadow.near_call(dict(entities=3), "safety_drop")
     assert not shadow.near_call(dict(entities=2), "cooldown") and not shadow.near_call(dict(entities=1), "low_net")
     assert shadow.near_call(dict(entities=1), None, "alerted")
+
+
+def test_horizons_4h_24h_and_own_cost(tmp_path):
+    from core import db
+    from signals import funnel, shadow
+    c = db.connect(str(tmp_path / "h.db"))
+    t, now = 1_000_000, 1_000_000 + 2 * 86400
+    for dt, p in ((60, 1.0), (3600, 1.2), (4 * 3600, 1.5), (10 * 3600, 3.0), (86400, 0.8)):
+        c.execute("INSERT INTO token_prices(mint, ts, price_usd) VALUES ('M', ?, ?)", (t + dt, p))
+    o = shadow.outcome(c, "M", t, 1.0, now)
+    assert round(o["ret_4h"], 3) == 0.5 and round(o["ret_24h"], 3) == -0.2
+    assert round(o["max_ret_4h"], 3) == 0.5 and round(o["max_ret_24h"], 3) == 2.0
+    assert funnel.trade_cost("pumpswap", 50_000) < funnel.trade_cost("pumpfun", None)   # deeper, cheaper venue
+    row = dict(ret_4h=0.5, cost=0.04)
+    assert round(shadow._net(row, "4h"), 3) == 0.46 and shadow._net(dict(ret_4h=None), "4h") is None

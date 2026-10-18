@@ -129,6 +129,7 @@ def test_vanished_coin_counts_as_dead_not_unmeasured(tmp_path):
     engine.update_outcomes(c, now=now)
     s = c.execute("SELECT * FROM signals").fetchone()
     assert s["ret_1h"] == -0.95 and s["outcome_flag"] == "dead"
+    assert 0 < s["cost"] < 0.5 and s["ret_4h"] is None             # own round trip (lab.costs); 4 h not due yet
     c.execute("UPDATE tokens SET last_updated=? WHERE mint='OK'", (t + 600,))   # bot was asleep: unknown, not dead
     c.execute("UPDATE signals SET ret_1h=NULL, outcome_flag=NULL")
     c.commit()

@@ -733,7 +733,8 @@ def update_outcomes(conn, now=None, cfg=settings):
     dead_liq = cfg.min_liquidity_usd / 4
     newest_update = conn.execute("SELECT MAX(last_updated) FROM tokens").fetchone()[0]
     for s in conn.execute("SELECT * FROM signals WHERE ts > ? AND (ret_1h IS NULL OR max_ret_1h IS NULL "
-                          "OR max_ret_24h IS NULL OR ret_6h IS NULL OR max_ret_4h IS NULL OR max_ret_15m IS NULL)",
+                          "OR max_ret_24h IS NULL OR ret_6h IS NULL OR max_ret_4h IS NULL OR max_ret_15m IS NULL "
+                          "OR ret_24h IS NULL OR cost IS NULL)",
                           (now - 72 * 3600,)).fetchall():
         p0 = s["price_usd"]
         if not p0:
@@ -774,7 +775,11 @@ def update_outcomes(conn, now=None, cfg=settings):
             flags.append("gap")
             return None
         upd = {"ret_5m": ret(300, 120), "ret_15m": ret(900, 300), "ret_1h": ret(3600, 300),
-               "ret_6h": ret(6 * 3600, 1800)}
+               "ret_4h": ret(4 * 3600, 1800), "ret_6h": ret(6 * 3600, 1800), "ret_24h": ret(86400, 3600)}
+        if s["cost"] is None:  # the venue and depth at the call: lab.costs round trip
+            from signals.funnel import trade_cost
+            d = conn.execute("SELECT dex FROM tokens WHERE mint=?", (s["mint"],)).fetchone()
+            upd["cost"] = trade_cost(d[0] if d else None, s["liquidity_usd"])
         # highs as someone acting on the alert could get them: from ENTRY_DELAY_S after the call, entering at the
         # worse of the call price and the price then, and with single bad prints filtered out (robust_max)
         pe = max(p0, price_near(pts, s["ts"] + ENTRY_DELAY_S, 120) or p0)

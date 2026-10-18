@@ -3,7 +3,8 @@
 Every call's price path (DexScreener snapshots + pool trade prints, single bad prints filtered as for the outcomes)
 from ENTRY_DELAY_S after the call for HOURS; entry at the worse of the call price and the price then. Each rule walks
 the path point by point and books the weighted return of its (partial) sells, minus COST per round trip. A coin
-whose prices stop and that died (outcome_flag 'dead') is sold at DEAD_RET at the end.
+whose prices stop and that died (outcome_flag 'dead') is sold at DEAD_RET at the end. COST only where a call has no
+own round trip (signals.cost from lab.costs by venue and depth).
 
     python -m signals.exits --db <copy of the DB> --days 7
 """
@@ -72,7 +73,7 @@ def simulate(path, pe, r, dead=False):
 
 def paths(conn, days=7, now=None, kind=None):
     now = now or int(time.time())
-    q = ("SELECT id, ts, mint, symbol, price_usd, outcome_flag FROM signals WHERE ts>=? AND ts<=? AND price_usd>0"
+    q = ("SELECT id, ts, mint, symbol, price_usd, outcome_flag, cost FROM signals WHERE ts>=? AND ts<=? AND price_usd>0"
          + (" AND COALESCE(kind,'v1')=?" if kind else ""))
     out = []
     for s in conn.execute(q + " ORDER BY ts", (now - days * 86400, now - HOURS * 3600) + ((kind,) if kind else ())).fetchall():
@@ -86,7 +87,8 @@ def paths(conn, days=7, now=None, kind=None):
         pe = max(p0, price_near(clean, t0 + ENTRY_DELAY_S, 120) or p0)
         path = [(t - t0 - ENTRY_DELAY_S, p) for t, p in clean if t >= t0 + ENTRY_DELAY_S]
         if path or s[5] == "dead":
-            out.append(dict(id=s[0], symbol=s[3], pe=pe, path=path, dead=s[5] == "dead"))
+            out.append(dict(id=s[0], symbol=s[3], pe=pe, path=path, dead=s[5] == "dead",
+                            cost=s[6] if s[6] is not None else COST))
     return out
 
 
@@ -95,7 +97,7 @@ CURRENT = "paper now (tp+50 sl-20 trail 20/12)"
 
 
 def _score(ps, r):
-    xs = [min(simulate(p["path"], p["pe"], r, p["dead"]), CAP) - COST for p in ps]
+    xs = [min(simulate(p["path"], p["pe"], r, p["dead"]), CAP) - p.get("cost", COST) for p in ps]
     return sum(xs) / len(xs) if xs else None
 
 
@@ -125,7 +127,7 @@ def compare(conn, days=7, now=None, rules=None, kind=None):
     ps = paths(conn, days, now, kind)
     res = {}
     for name, r in (rules or RULES).items():
-        xs = sorted(min(simulate(p["path"], p["pe"], r, p["dead"]), CAP) - COST for p in ps)
+        xs = sorted(min(simulate(p["path"], p["pe"], r, p["dead"]), CAP) - p.get("cost", COST) for p in ps)
         if not xs:
             continue
         res[name] = dict(n=len(xs), mean_after_cost=round(sum(xs) / len(xs), 3), median=round(xs[len(xs) // 2], 3),

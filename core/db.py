@@ -116,6 +116,9 @@ MIGRATIONS = [
     ("signals", "kind", "TEXT"),
     ("signals", "staged_ts", "INTEGER"),            # safety found the staged-pump pattern after the call (exit alert sent)
     # signal_shadow: market state at the rejection, so momentum / dip / venue can be checked as a later signal type
+    ("signals", "ret_4h", "REAL"),                  # price 4 h / 24 h after the call (lab horizons, 18.10.)
+    ("signals", "ret_24h", "REAL"),
+    ("signals", "cost", "REAL"),                    # round trip of a 0.1 SOL trade by venue and depth (lab.costs)
     ("signal_shadow", "dex", "TEXT"),
     ("signal_shadow", "mcap_usd", "REAL"),
     ("signal_shadow", "age_min", "REAL"),                # minutes since the pool was created
@@ -124,6 +127,10 @@ MIGRATIONS = [
     ("signal_shadow", "txns_m5", "INTEGER"),
     ("signal_shadow", "txns_h1", "INTEGER"),
     ("signal_shadow", "volume_h1", "REAL"),
+    ("signal_shadow", "ret_4h", "REAL"),
+    ("signal_shadow", "ret_24h", "REAL"),
+    ("signal_shadow", "max_ret_24h", "REAL"),
+    ("signal_shadow", "cost", "REAL"),                   # round trip by venue and depth (lab.costs), as for signals
     ("signal_shadow", "ret_15m_before", "REAL"),         # own prices: move over the 15 min before (dip or run-up)                    # NULL/'v1' = smart buying now, 'v2' = smart money accumulating (signals.accum)
     ("signal_metrics", "ev", "REAL"),
     ("signal_metrics", "model_exp_net", "REAL"),   # model's expected 1h return after costs (for later replays)

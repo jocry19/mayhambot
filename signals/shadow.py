@@ -18,6 +18,7 @@ import sqlite3
 import time
 
 from signals.backtest import DEAD_RET, confirmed, price_near
+from signals.funnel import COST, trade_cost
 
 log = logging.getLogger("mayhambot.signals.shadow")
 EVERY_S = 3600
@@ -109,13 +110,13 @@ def record(conn, mint, reason, m, price, now, kind="v1"):
     t, before, created = mkt
     cur = conn.execute("INSERT INTO signal_shadow(ts, mint, kind, reason, entities, net_usd, score, min_net, min_score, "
                  "safety_risk, liquidity_usd, price_usd, model_exp_net, dex, mcap_usd, age_min, pc_m5, pc_h1, txns_m5, "
-                 "txns_h1, volume_h1, ret_15m_before) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 "txns_h1, volume_h1, ret_15m_before, cost) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (now, mint, kind, reason, m.get("entities", m.get("smart_buyers")), m.get("net_usd"), m.get("score"),
                   m.get("min_net"), m.get("min_score"), sp.get("risk"), m.get("liquidity_usd"), price,
                   m.get("model_exp_net"), t[0] if t else None, t[1] if t else None,
                   (now - created) / 60 if created else None, t[3] if t else None, t[4] if t else None,
                   t[5] if t else None, t[6] if t else None, t[7] if t else None,
-                  price / before - 1 if before else None))
+                  price / before - 1 if before else None, trade_cost(t[0] if t else None, m.get("liquidity_usd"))))
     report_opportunity(conn, "signals_v2" if kind == "v2" else "signals", f"shadow:{cur.lastrowid}", mint, now, price, m,
                        reason, "passed", kind, mkt)
     return True
@@ -132,13 +133,15 @@ def _points(conn, mint, t0, t1):
 
 
 def outcome(conn, mint, t, p0, now, liq=None, last_updated=None):
-    """dict(ret_1h, max_ret_1h, max_ret_4h, outcome_flag) as far as due; {} when nothing is due yet."""
+    """dict(ret_1h, max_ret_1h, ret_4h, max_ret_4h, ret_24h, max_ret_24h, outcome_flag) as far as due; {} when
+    nothing is due yet."""
     if now < t + 3900:
         return {}
-    pts = _points(conn, mint, t, t + 4 * 3600)
+    pts = _points(conn, mint, t, t + 86400)
     pe = max(p0, price_near(pts, t + ENTRY_DELAY_S, 120) or p0)
     after = [(x, p) for x, p in pts if x >= t + ENTRY_DELAY_S]
     h1 = [p for x, p in after if x <= t + 3600]
+    h4 = [p for x, p in after if x <= t + 4 * 3600]
     out = {}
     p1 = price_near(pts, t + 3600, 300)
     # died: pool drained, or DexScreener stopped returning a coin it still returned at the decision
@@ -151,8 +154,18 @@ def outcome(conn, mint, t, p0, now, liq=None, last_updated=None):
         out["max_ret_1h"] = max(h1) / pe - 1
     elif out.get("ret_1h") == DEAD_RET:
         out["max_ret_1h"] = DEAD_RET
-    if now >= t + 4 * 3600 and after:
-        out["max_ret_4h"] = max(p for _, p in after) / pe - 1
+    for key, dt, tol in (("4h", 4 * 3600, 1800), ("24h", 86400, 3600)):
+        if now < t + dt + tol:
+            continue
+        p = price_near(pts, t + dt, tol)
+        if p is not None:
+            out["ret_" + key] = p / p0 - 1
+        elif gone and not any(x > t + dt for x, _ in pts):
+            out["ret_" + key] = DEAD_RET
+    if now >= t + 4 * 3600 and h4:
+        out["max_ret_4h"] = max(h4) / pe - 1
+    if now >= t + 86400 and after:
+        out["max_ret_24h"] = max(p for _, p in after) / pe - 1
     out["outcome_flag"] = "dead" if out.get("ret_1h") == DEAD_RET else "ok" if "max_ret_1h" in out else "gap"
     return out
 
@@ -162,8 +175,9 @@ def update(conn, now=None):
     n = 0
     for s in conn.execute("""SELECT g.id, g.ts, g.mint, g.price_usd, t.liquidity_usd, t.last_updated FROM signal_shadow g
                              LEFT JOIN tokens t ON t.mint=g.mint
-                             WHERE g.ts > ? AND g.ts < ? AND (g.max_ret_4h IS NULL)""",
-                          (now - 2 * 86400, now - 3900)).fetchall():
+                             WHERE g.ts > ? AND g.ts < ? AND (g.max_ret_4h IS NULL
+                                   OR (g.ret_24h IS NULL AND g.max_ret_24h IS NULL AND g.ts < ?))""",
+                          (now - 2 * 86400, now - 3900, now - 86400 - 3600)).fetchall():
         o = outcome(conn, s[2], s[1], s[3], now, s[4], s[5])
         if o:
             conn.execute(f"UPDATE signal_shadow SET {', '.join(k + '=?' for k in o)} WHERE id=?", (*o.values(), s[0]))
@@ -188,7 +202,18 @@ def _stats(rows):
                 hit_100=round(sum(x >= 1.0 for x in mx) / len(m), 3), median_max_1h=_med(mx),
                 hit_50_4h=round(sum(x >= 0.5 for x in m4) / len(m4), 3) if m4 else None,
                 dead=round(sum(1 for r in m if r["ret_1h"] == DEAD_RET) / len(m), 3),
-                median_ret_1h=_med(r["ret_1h"] for r in m))
+                median_ret_1h=_med(r["ret_1h"] for r in m),
+                **{f"median_net_{h}": _med(_net(r, h) for r in m if _net(r, h) is not None) for h in ("1h", "4h", "24h")})
+
+
+def _net(r, h):
+    """End-of-horizon return after this row's own round trip (lab.costs); None when not measured."""
+    keys = r.keys()
+    x = r[f"ret_{h}"] if f"ret_{h}" in keys else None
+    if x is None:
+        return None
+    c = r["cost"] if "cost" in keys and r["cost"] is not None else COST
+    return min(x, 3.0) - c
 
 
 def groups(rows):

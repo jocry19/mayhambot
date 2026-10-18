@@ -87,7 +87,17 @@ def funnel(conn, hours=10, cfg=settings, now=None):
 
 
 RET_CAP = 3.0  # a mean is capped at +300 % per call: three +3,000 % prints turned a -14 % backtest into +1 %
-COST = 0.06  # round trip: fees + slippage + priority, as in copytrade paper trading
+COST = 0.06  # round trip when venue and depth are unknown (lab.costs gives ~5.5 % for a typical call)
+COST_STAKE_SOL = 0.1
+
+
+def trade_cost(dex, liq_usd, stake_sol=COST_STAKE_SOL):
+    """Round trip of one trade on this venue and pool depth (lab.costs: fees, impact, tx, entry delay)."""
+    try:
+        from lab.costs import roundtrip
+        return round(roundtrip(dex, liq_usd, stake_sol, kind="copy"), 4)
+    except Exception:  # noqa: BLE001 - lab/ absent
+        return COST
 
 
 def _med(vals):
@@ -116,12 +126,22 @@ def peak_after_call(rows):
     return out
 
 
-def outcomes(conn, hours=168, cost=COST, now=None, bands=(0, 20, 30, 40, 50, 60, 101), kind="v1"):
+def _cost(r, cost=None):
+    return cost if cost is not None else (r["cost"] if r["cost"] is not None else COST)
+
+
+def _mean_net(rows, key, cost=None):
+    xs = [min(r[key], RET_CAP) - _cost(r, cost) for r in rows if r[key] is not None]
+    return round(sum(xs) / len(xs), 3) if xs else None
+
+
+def outcomes(conn, hours=168, cost=None, now=None, bands=(0, 20, 30, 40, 50, 60, 101), kind="v1"):
     """Signal results by score band after costs: hit rate (+50% max within 1h), median max_ret_1h, mean ret_1h
-    minus costs. This is what the score bands get calibrated on. One kind at a time (v1 burst, v2 accumulation)."""
+    (and 4 h / 24 h where due) minus costs. This is what the score bands get calibrated on. One kind at a time (v1
+    burst, v2 accumulation). cost=None: each call's own round trip (signals.cost, lab.costs), COST where unknown."""
     now = now or int(time.time())
     rows = conn.execute("SELECT score, ret_1h, max_ret_1h, max_ret_15m, max_ret_4h, peak_min_1h, dd_before_peak_1h, "
-                        "target_hit_ts, stop_hit_ts, lag_first_s, lag_last_s FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NOT NULL "
+                        "target_hit_ts, stop_hit_ts, lag_first_s, lag_last_s, ret_4h, ret_24h, cost FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NOT NULL "
                         "AND COALESCE(kind,'v1')=?", (now - int(hours * 3600), now - 3900, kind)).fetchall()
     missing = conn.execute("SELECT COUNT(*) FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NULL AND COALESCE(kind,'v1')=?",
                            (now - int(hours * 3600), now - 3900, kind)).fetchone()[0]
@@ -135,7 +155,10 @@ def outcomes(conn, hours=168, cost=COST, now=None, bands=(0, 20, 30, 40, 50, 60,
         d = dict(band=name, n=len(b),
                  hit_50=round(sum(1 for r in b if (r["max_ret_1h"] or 0) >= 0.5) / len(b), 3),
                  median_max_ret_1h=round(mx[len(mx) // 2], 3),
-                 mean_ret_1h_after_cost=round(sum(min(r["ret_1h"], RET_CAP) for r in b) / len(b) - cost, 3),
+                 mean_ret_1h_after_cost=_mean_net(b, "ret_1h", cost),
+                 mean_ret_4h_after_cost=_mean_net(b, "ret_4h", cost),
+                 mean_ret_24h_after_cost=_mean_net(b, "ret_24h", cost),
+                 mean_cost=round(sum(_cost(r, cost) for r in b) / len(b), 4),
                  dead=sum(1 for r in b if r["ret_1h"] <= -0.9))
         d.update(peak_after_call(b))
         if name == "all":  # unmeasured calls (no price near +1 h, not provably dead) count as misses here
