@@ -45,6 +45,7 @@ TRAIL_MIN_HOLD_S = 60  # the trail arms after a minute: the first quotes after a
 PRICE_RETRY_S = 30  # a coin without a DexScreener pair yet gets this long to show one before it is decided
 FLIP_MAX = 0.6
 RAN_5M_MAX = 0.05  # 10/2026: whale copies after >5 % in the 5 min before lost 9-20 % on average, flat ones about 0  # wallets that sell this share of their buys within FLIP_S are gone before a copy can follow
+HIGH_JUMP = 3.0  # see _manage: a single price this far above the last one is not a high yet
 NO_MARKET_S = 15 * 60  # an open position without any price this long is closed as "kein Markt"
 RUG_LIQ_DROP = 0.6  # pool (curve: curve depth) 60 % under the buy: LP pulled, before the price stop sees it
 STAGED_TRAIL = 0.10  # staged pump (safety check 'staged', data.pattern, 15784c6): 10 % under the high ...
@@ -692,9 +693,14 @@ class Trader:
                 reason = self._exit_reason(p, snap, now)
             if snap and snap.price_sol > 0:
                 self.live.observe(p["id"], now, snap.price_sol, snap.volume_m5)
-                c.execute("UPDATE brain_positions SET last_price_sol=?, high_price_sol=MAX(high_price_sol, ?), "
+                # a jump to more than HIGH_JUMP times the last price counts as a high only once a second price confirms
+                # it: one stray quote (18.10.: TSI +1430 %, then sold by the trail at -7.6 %) neither arms a trail nor
+                # sets where it fires; ordinary peaks of one tick still count
+                last = p["last_price_sol"] or snap.price_sol
+                seen = snap.price_sol if snap.price_sol <= HIGH_JUMP * last else last
+                c.execute("UPDATE brain_positions SET last_price_sol=?, high_price_sol=MAX(COALESCE(high_price_sol, 0), ?), "
                           "last_seen=?, peak_buys_m5=MAX(COALESCE(peak_buys_m5,0), ?) WHERE id=?",
-                          (snap.price_sol, snap.price_sol, int(now), snap.buys_m5 or 0, p["id"]))
+                          (snap.price_sol, seen, int(now), snap.buys_m5 or 0, p["id"]))
             if half:
                 self.sell_half(p, snap)
             if reason and self.close(p, snap, reason):
@@ -801,7 +807,12 @@ class Trader:
         if px <= entry * (1 - exits.CRASH_STOP):
             return "stop", False
         held = (now - p["opened_at"]) / 60
-        if held >= exits.MAX_HOLD_MIN:
+        limit = exits.MAX_HOLD_MIN
+        if p["kind"] == "pool" and p["max_hold_min"]:
+            # the learning account keeps its plan's time limit (18.10. evening: SAINDRA, GTATRUMP, EGG ... open over
+            # 3 h on the organic 4 h hold), so its trades end where the labels measure the plan
+            limit = min(limit, p["max_hold_min"])
+        if held >= limit:
             return "time", False
         high = max(p["high_price_sol"] or entry, px)
         if high / entry - 1 >= exits.RUNNER_UP and px <= high * (1 - exits.RUNNER_TRAIL):

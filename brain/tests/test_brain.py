@@ -1740,10 +1740,11 @@ def test_labels_carry_exit_rules_and_the_best_rule_is_judged_out_of_sample(conn,
                                json.dumps({"hold60": -0.05, "trail30@0.2": 0.2 if good else -0.1}), f"x{i}"))
     ex = learner.exit_skill(conn, now - 10)
     assert ex["rule"] == "trail30@0.2" and ex["oos_mean"] == pytest.approx(0.2) and ex["oos_n"] == 10
+    assert ex["same"] == 0 and ex["thin"] == 1.0  # every rule differs; no row has its point count
     from brain.service import Service
     sv = Service(s, conn, snapshots=Market(), executor=Paper(), safety_check=ok_safety,
                  staged_check=lambda c, m: False, curve_now=lambda c, m, n: None)
-    assert "exit 6h best trail30@0.2" in sv._labelled(now - 10)
+    assert "exit 6h best trail30@0.2" in sv._labelled(now - 10) and "rules agree 0%" in sv._labelled(now - 10)
     assert sv._main_buys(now - 10) == "main bought/closed/net none"
 
 
@@ -1889,3 +1890,32 @@ def test_no_price_history_and_an_old_rug_block_every_account(conn, s):
                  "('pool', ?, 'closed', ?, ?, 'rug')", (MINT, now - 9 * 86400, now - 9 * 86400))
     for kind in ("pool", "whale"):
         assert "dauerhaft gesperrt" in (t._gate(kind, MINT, snap(), d) or ""), kind
+
+
+def test_one_stray_quote_is_no_high_and_learning_trades_keep_their_plan_time(conn, s):
+    class Bullish:
+        n = 10_000
+
+        def predict(self, toks):
+            return [(0.1, 0.05)]
+    s.organic_exit = "on"
+    set_tier(conn, WHALE, "ultra")
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    clock = [time.time()]
+    t = make_trader(conn, s, trained(), mk, clock=lambda: clock[0], exit_model=Bullish())
+    t.scan()
+    add_whale_buy(conn, "n", ts=clock[0])
+    t.scan()
+    p = conn.execute("SELECT * FROM brain_positions").fetchone()
+    ref = json.loads(p["meta"])["ref_price"]
+    mk.snaps[MINT] = snap(price=ref * 15)  # 18.10. TSI: +1430 % in one quote
+    clock[0] += 120
+    t.manage()
+    mk.snaps[MINT] = snap(price=ref * 1.05)
+    clock[0] += 5
+    assert t.manage() == 0  # no trail 30 % under a high nobody could sell at
+    assert conn.execute("SELECT high_price_sol FROM brain_positions").fetchone()[0] < ref * 2
+    conn.execute("UPDATE brain_positions SET kind='pool', max_hold_min=45, opened_at=?", (int(clock[0]) - 46 * 60,))
+    assert t.manage() == 1
+    assert conn.execute("SELECT exit_reason FROM brain_positions").fetchone()[0] == "time"
