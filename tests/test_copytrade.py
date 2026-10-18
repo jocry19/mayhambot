@@ -1162,3 +1162,17 @@ def test_staged_pump_exits_once_the_high_is_past(env, monkeypatch):
     st.update()  # 15 min past the high: out before the drain
     p = conn.execute("SELECT status, exit_reason FROM ct_positions WHERE id=?", (pid,)).fetchone()
     assert tuple(p) == ("closed", "staged")
+
+
+def test_whale_decisions_go_to_the_opportunity_table_with_our_result(env):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    assert st.on_whale_buy(whale_buy(sol=0.1)) is None  # under every minimum: still an opportunity
+    pid = st.on_whale_buy(chain.Swap("sigOpp", W, int(time.time()) - 5, "buy", MINT, 5 / 3e-6, 5.0, 3e-6))
+    rows = {r["ref"]: r for r in conn.execute("SELECT * FROM opportunities WHERE source='strategy'")}
+    assert rows["sigW"]["source_action"] == "passed" and rows["sigW"]["source_reason"] == "unter der Kopier-Grenze"
+    assert rows["sigOpp"]["source_action"] == "took" and rows["sigOpp"]["liq_usd"] == 80_000
+    p = conn.execute("SELECT * FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    assert st.close(p, state["snap"], "manual")
+    r = conn.execute("SELECT source_result FROM opportunities WHERE ref='sigOpp'").fetchone()
+    assert r[0] is not None and r[0] < 0  # sold at once: the round trip's cost

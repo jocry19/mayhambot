@@ -106,6 +106,7 @@ class Strategy:
         self.exs = executors
         self._missing: dict[int, int] = {}
         self._noroute: dict[int, float] = {}  # last 'no sell route' alarm per live position
+        self._opp: dict | None = None  # the whale decision in progress, reported to brain.opportunities
         self._staged: dict[str, tuple[float, bool]] = {}  # mint -> (checked at, staged pump pattern)
         self._high_ts: dict[int, float] = {}  # position -> when its high was last raised (this process)
         self._pending: list[tuple[float, Swap]] = []  # whale buys waiting for the learned entry delay
@@ -210,6 +211,9 @@ class Strategy:
         return info, None
 
     def _skip(self, strategy: str, mint: str, why: str, snap=None, **data) -> None:
+        if self._opp is not None and strategy == "whale":
+            self._opp["why"] = self._opp["why"] or why
+            self._opp["snap"] = snap or self._opp["snap"]
         sym = snap.symbol if snap else ""
         store.event(self.conn, "skip", f"[{strategy}] {sym or mint[:6] + '…'}: {why}",
                     data={"strategy": strategy, "mint": mint, "symbol": sym, "reason": why, **data})
@@ -230,6 +234,8 @@ class Strategy:
     def _count_small(self, swap: Swap) -> None:
         """Buys under the copy minimum end without a skip line; one summary every SMALL_SUMMARY_S says how many
         (17.10.: 99 tracked buys gave 27 decisions, the other 72 were these and left no trace)."""
+        if self._opp is not None:
+            self._opp["why"] = "unter der Kopier-Grenze"
         sm = self._small
         sm[0] += 1
         sm[1] += swap.sol_amount
@@ -243,7 +249,43 @@ class Strategy:
 
     def on_whale_buy(self, swap: Swap, deferred: bool = False) -> int | None:
         """Copy a whale buy into the strict account (the live rules) and/or the exploration account. The returned id
-        is the strict position if there is one."""
+        is the strict position if there is one. Every decision, taken or not, goes to the shared opportunity table
+        (brain.opportunities, source 'strategy', ref = the whale's signature)."""
+        self._opp = {"snap": None, "draw": None, "why": None, "wait": False}
+        try:
+            res = self._on_whale_buy(swap, deferred)
+        finally:
+            opp, self._opp = self._opp, None
+        if not opp["wait"]:
+            self._report_whale(swap, opp, res)
+        return res
+
+    def _report_whale(self, swap: Swap, opp: dict, pid: int | None) -> None:
+        try:
+            from brain.opportunities import report
+
+            snap, draw = opp["snap"], opp["draw"] or {}
+            rank = ranking.wallet_rank(self.conn, swap.wallet)
+            f = {"delay_s": time.time() - swap.block_time, "inflow_sol": swap.sol_amount,
+                 "wallet_tier": store.wallet_info(self.conn, swap.wallet).get("tier") or "none",
+                 "wallet_score": rank["score"] * 100 if rank else None,
+                 "strategy.rank_samples": rank["samples"] if rank else 0,
+                 "strategy.thompson_draw": draw.get("draw"), "strategy.thompson_mean": draw.get("mean"),
+                 "strategy.thompson_sd": draw.get("sd"), "strategy.p_pos": draw.get("p_pos"),
+                 "strategy.stake_mult": draw.get("size_factor"), "copytrade.block0": swap.wallet in tracker.BLOCK0}
+            if snap:
+                f.update({"mc_usd": snap.fdv, "liq_usd": snap.depth_usd, "dex": snap.dex_id, "buys_5m": snap.buys_m5,
+                          "pc_5m": snap.change_m5, "pc_1h": snap.change_h1, "vol_5m_usd": snap.volume_m5,
+                          "age_s": snap.age_hours * 3600 if snap.pair_created_ms else None})
+            report(self.conn, "strategy", swap.signature, swap.mint, time.time(), f, symbol=snap.symbol if snap else "",
+                   src_ts=swap.block_time, price_sol=snap.price_sol if snap else swap.price_sol,
+                   price_usd=snap.price_usd if snap else None, mcap_usd=snap.fdv if snap else None,
+                   liq_usd=snap.depth_usd if snap else None, source_score=draw.get("mean"),
+                   source_action="took" if pid else "passed", source_reason=None if pid else opp["why"])
+        except Exception as e:  # the table is for learning: it must never stop a copy
+            log.debug("opportunity report %s failed: %s", swap.signature[:8], e)
+
+    def _on_whale_buy(self, swap: Swap, deferred: bool) -> int | None:
         s = self.s
         m = control.mode(self.conn, "whale")
         if m == "off":
@@ -257,6 +299,7 @@ class Strategy:
         if lp and not deferred and m != "manual" and lp.get("delay_s", 0) > age + 5:
             # learned: entering a bit after the whale beats entering at once for this whale / mode
             self._pending.append((swap.block_time + lp["delay_s"], swap))
+            self._opp["wait"] = True  # reported when the deferred decision is made
             store.event(self.conn, "wait", f"[whale] {swap.mint[:6]}…: warte {lp['delay_s'] - age:.0f}s "
                                            f"(gelernte Einstiegs-Verzögerung)", data={"wallet": swap.wallet})
             return None
@@ -274,6 +317,7 @@ class Strategy:
         if s.thompson:
             edge = learn.wallet_edge(self.conn, swap.wallet)
             draw = learn.thompson(self.conn, edge, swap.signature)
+            self._opp["draw"] = draw
             wdata = {"edge": edge, "thompson": draw}
             if draw["draw"] <= 0:
                 why = (f"gezogener Vorteil {draw['draw']:+.1%} (Erwartung {draw['mean']:+.1%} ± {draw['sd']:.1%} aus "
@@ -313,6 +357,7 @@ class Strategy:
                               wallet=swap.wallet)
 
         snap = market.snapshot(swap.mint, s)
+        self._opp["snap"] = snap
         if not snap or snap.price_sol <= 0:
             return self._skip("whale", swap.mint, "kein Marktpreis")
         liq = snap.depth_usd  # a pump.fun curve has no pool liquidity, its depth is the curve's
@@ -770,6 +815,7 @@ class Strategy:
                            snap.fdv if snap else None, json.dumps(meta), p["id"])):
             log.error("position %s was no longer 'closing' when its sale was booked", p["id"])
             return False
+        self._report_result(p, pct)
         store.event(self.conn, "sell", f"VERKAUF [{p['strategy']}/{p['mode']}] {p['symbol']} {pct:+.1%} "
                                        f"({pnl:+.3f} SOL), Grund: {EXIT_NAMES.get(reason, reason)}",
                     data={"position": p["id"], "reason": reason})
@@ -909,6 +955,22 @@ class Strategy:
                 if org:
                     org.drop(p["id"])
         self.conn.commit()
+
+    def _report_result(self, p, pct: float) -> None:
+        """Our own net result of a whale copy back to the opportunity table: the strict copy's, the exploration
+        copy's only when no strict copy of that whale buy exists."""
+        try:
+            sig = p["whale_sig"] if p["strategy"] == "whale" else None
+            if not sig or p["mode"] not in PAPER_MODES:
+                return
+            if p["mode"] == "explore" and self.conn.execute(
+                    "SELECT 1 FROM ct_positions WHERE whale_sig=? AND mode='paper'", (sig,)).fetchone():
+                return
+            from brain.opportunities import source_result
+
+            source_result(self.conn, "strategy", sig, pct, (time.time() - p["opened_at"]) / 60)
+        except Exception as e:
+            log.debug("opportunity result %s failed: %s", p["id"], e)
 
     def _staged_pump(self, mint: str, snap, now: float) -> bool:
         """Safety's 'staged' check confirmed a staged pump (>= 250 k$ within 30 min of the launch on a pool of
