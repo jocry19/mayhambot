@@ -39,7 +39,9 @@ class SniperSettings:
     ws_url2: str = field(default_factory=lambda: _s("SNIPER_WS_URL2", "wss://solana-rpc.publicnode.com"))
     # bonk (Raydium LaunchLab): one program-wide stream of its trade events (price, side, size, fee; no trader) and
     # the trader of the first trades of each launch from getTransaction on bonk_rpc_url. "" = no bonk stream
-    bonk_ws_url: str = field(default_factory=lambda: _s("SNIPER_BONK_WS_URL", "wss://solana-rpc.publicnode.com"))
+    # off by default: a second program subscription on publicnode starved stream 2 there (18.10.: 60 s silence and
+    # rate limits after every connect), and bonk brings about one launch per 5 minutes. Set a third RPC to turn it on
+    bonk_ws_url: str = field(default_factory=lambda: _s("SNIPER_BONK_WS_URL", ""))
     bonk_rpc_url: str = field(default_factory=lambda: _s("SNIPER_BONK_RPC_URL", "https://solana-rpc.publicnode.com"))
     bonk_wallets_per_launch: int = field(default_factory=lambda: _i("SNIPER_BONK_WALLETS_PER_LAUNCH", 30))
     bonk_wallets_per_min: int = field(default_factory=lambda: _i("SNIPER_BONK_WALLETS_PER_MIN", 60))

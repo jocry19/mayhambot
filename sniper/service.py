@@ -53,8 +53,12 @@ class Service:
         self.logs_bonk = rpcws.LogStream(cfg.bonk_ws_url, self._on_bonk_trade, 1, parser=rpcws.parse_launchlab,
                                          name="RPC-Bonk-Datenstrom", mode="program", program=rpcws.LAUNCHLAB_PROGRAM,
                                          stale_sec=cfg.stale_sec) \
-            if cfg.bonk_ws_url and rpcws.bonk_pool(rpcws.WSOL_MINT) else None
-        if cfg.bonk_ws_url and not self.logs_bonk:
+            if cfg.bonk_ws_url and cfg.bonk_ws_url not in (cfg.ws_url, cfg.ws_url2) and rpcws.bonk_pool(rpcws.WSOL_MINT) \
+            else None
+        if cfg.bonk_ws_url in (cfg.ws_url, cfg.ws_url2) and cfg.bonk_ws_url:
+            log.warning("Bonk-Datenstrom aus: SNIPER_BONK_WS_URL ist schon der pump-Datenstrom (ein zweites "
+                        "Programm-Abo auf demselben RPC legt beide lahm)")
+        elif cfg.bonk_ws_url and not self.logs_bonk:
             log.warning("Bonk-Datenstrom aus: Paket 'solders' fehlt (pip install -r requirements.txt), "
                         "bonk-Launches bleiben no_stream")
         try:

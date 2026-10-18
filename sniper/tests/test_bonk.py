@@ -139,3 +139,11 @@ def test_low_start_pump_curves_are_decoded():
     assert base_floor(None) == 27.9 and base_floor(0.01) == 2.0   # dust curves stay untradable
     # garbage stays out: a token side that is not pump.fun's
     assert not rpcws.curve_ok(5.0, 900e6, 0.1, 100e6) and not rpcws.curve_ok(0.0, 900e6, 0.0, 620.1e6)
+
+
+def test_bonk_stream_never_shares_the_pump_rpc(tmp_path):
+    from sniper.service import Service
+    assert Service(cfg(bonk_ws_url=""), db_path=str(tmp_path / "a.db")).logs_bonk is None
+    c = cfg()
+    c.bonk_ws_url = c.ws_url2 or c.ws_url
+    assert Service(c, db_path=str(tmp_path / "b.db")).logs_bonk is None
