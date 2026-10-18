@@ -289,6 +289,10 @@ class Trader:
             model = self.pm
             st = dataclasses.replace(st, min_size_sol=self.s.learn_size_sol, explore_share=0.0, no_explore="")
         d = decide.choose(model, kind, feats, st, self.rng, equity=self.equity())
+        if kind == "pool" and not d.enter and row["source_action"] == "alerted":
+            # a real call (1-3 a day): the learning account always takes it at the learning stake, so the pattern
+            # gets cases of its own; the hard gates (rug, liquidity) still decide (signals thread 18.10.)
+            d.enter, d.explore, d.size_sol, d.why_not = True, True, self.s.learn_size_sol, ""
         if pocket:
             raw["pocket"], raw["trust"] = pocket, trust
         block = None
