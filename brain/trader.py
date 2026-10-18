@@ -934,8 +934,8 @@ class Trader:
         return True
 
     def _lab_carries(self, kind: str) -> list:
-        """Hypotheses of the lab's last report with verdict 'traegt' that name this kind (the report is re-read once a
-        minute; missing or unreadable: none)."""
+        """Hypotheses of the lab's last report with verdict 'traegt' for this kind (its brain_kind, else the kind in
+        the name; the report is re-read once a minute; missing or unreadable: none)."""
         now = self.clock()
         if now - self._lab[0] >= RECORD_EVERY_S:
             res = []
@@ -946,12 +946,13 @@ class Trader:
                 from core.config import ROOT
 
                 path = Path(os.getenv("LAB_DIR") or ROOT / "data" / "lab") / "report.json"
-                res = [r.get("hyp", "") for r in json.loads(path.read_text()).get("results", [])
+                res = [(r.get("hyp", ""), r.get("brain_kind")) for r in json.loads(path.read_text()).get("results", [])
                        if r.get("verdict") == "traegt"]
             except Exception:
                 res = []
             self._lab = (now, res)
-        return [h for h in self._lab[1] if kind in h.lower()]
+        # the report names the kind a hypothesis stands for (brain_kind); older reports only in the name
+        return [h for h, k in self._lab[1] if (k == kind if k else kind in h.lower())]
 
     def _name_copy(self, mint: str, symbol: str) -> str | None:
         """A coin named like another one that rugged or was dumped in the last hours: the same scam again (18.10.: two
