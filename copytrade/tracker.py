@@ -14,7 +14,7 @@ import time
 from collections import OrderedDict, deque
 from pathlib import Path
 
-from . import chain, market, store
+from . import chain, market, opportunity, store
 from .config import Settings
 
 log = logging.getLogger("copytrade.tracker")
@@ -69,6 +69,7 @@ def record_detection(conn, sw: chain.Swap, source: str, notified_at: float | Non
     LAG.append((source, sw.side, lag, now))
     if sw.wallet in BLOCK0:
         LAG.append(("block0", sw.side, lag, now))  # the group's own lag (its edge is the first seconds)
+    opportunity.emit(conn, sw, source, lag, notified_at, sol_usd)  # the shared opportunity table (plan 18.10.)
     try:
         usd = sol_usd or 0.0
         conn.execute("INSERT OR IGNORE INTO ct_detect(sig, wallet, side, source, block_ts, notified_at, detected_at,"

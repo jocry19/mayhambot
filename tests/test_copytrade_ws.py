@@ -968,3 +968,51 @@ def test_block0_group_is_resolved_watched_first_and_never_pruned_as_bots(env):
     assert tracker.lag_summary(0)["block0"]["n"] == 1
     tracker.LAG.clear()
     tracker.BLOCK0.clear()
+
+
+def test_every_recognised_buy_is_offered_as_an_opportunity_with_feed_features(env):
+    from copytrade import opportunity
+
+    s, conn, ex, state = env
+    got = []
+    opportunity.set_sink(lambda c, f: got.append(f))
+    try:
+        store.add_wallets(conn, [W], "manual")
+        conn.execute("INSERT INTO ct_wallet_rank(address, samples, hit_rate, expected_value, score) "
+                     "VALUES (?, 12, 0.4, 0.08, 0.6)", (W,))
+        sw = chain.Swap("sigO", W, int(time.time()) - 3, "buy", "m", 1000.0, 0.5, 0.0005, dex="pump", mcap_sol=300.0)
+        tracker.record_detection(conn, sw, "ws", notified_at=time.time() - 1, sol_usd=100.0)
+        f = got[0]
+        assert f["kind"] == "whale_buy" and f["detect_path"] == "ws" and 2.5 < f["lag_s"] < 30
+        assert f["group"] == "manual" and f["usd"] == 50.0 and f["mcap_usd"] == 30000.0 and f["dex"] == "pump"
+        assert f["rank_samples"] == 12 and f["rank_ev"] == 0.08
+        tracker.record_detection(conn, chain.Swap("sigS", W, int(time.time()), "sell", "m", 1.0, 0.5, 0.5), "ws")
+        assert len(got) == 1  # sells are not opportunities
+
+        def broken(c, f):
+            raise RuntimeError("table missing")
+
+        opportunity.set_sink(broken)
+        tracker.record_detection(conn, chain.Swap("sigX", W, int(time.time()), "buy", "m", 1.0, 0.5, 0.5), "ws")
+    finally:
+        opportunity.set_sink(None)
+
+
+def test_buys_land_in_the_brains_opportunity_table(env):
+    from copytrade import opportunity
+
+    s, conn, ex, state = env
+    opportunity.set_sink("auto")
+    try:
+        tracker.BLOCK0.add(W)
+        sw = chain.Swap("sigQ", W, int(time.time()) - 4, "buy", "m", 1000.0, 0.005, 0.000005, dex="pump", mcap_sol=50.0)
+        tracker.record_detection(conn, sw, "ws", sol_usd=100.0)
+        tracker.record_detection(conn, sw, "ws", sol_usd=100.0)  # a repeat is ignored
+        rows = conn.execute("SELECT source, ref, mint, src_ts, mcap_usd, features FROM opportunities").fetchall()
+        assert len(rows) == 1 and rows[0]["source"] == "copytrade" and rows[0]["ref"] == f"sigQ:{W}"
+        f = json.loads(rows[0]["features"])
+        assert f["dex"] == "pumpfun" and f["copytrade.block0"] is True and f["copytrade.group"] == "block0"
+        assert f["mc_usd"] == 5000.0 and 3 < f["delay_s"] < 30 and f["copytrade.size_sol"] == 0.005
+    finally:
+        tracker.BLOCK0.discard(W)
+        opportunity.set_sink(None)
