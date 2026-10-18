@@ -647,3 +647,65 @@ def honest(conn, since: float = 0, evaluated_since: float = 0) -> dict:
         "by_delay": by_delay,
         "by_liq": by_liq,
     }
+
+
+def _ranks(xs: list) -> list:
+    order = sorted(range(len(xs)), key=lambda i: xs[i])
+    r = [0.0] * len(xs)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and xs[order[j + 1]] == xs[order[i]]:
+            j += 1
+        for k in range(i, j + 1):
+            r[order[k]] = (i + j) / 2
+        i = j + 1
+    return r
+
+
+def label_skill(conn, lo: float, hi: float | None = None) -> dict | None:
+    """Does the pool model rank the opportunities? Rows labelled in [lo, hi) with a prediction, the first per source
+    and coin only (copytrade/strategy reported one coin up to 413 times): rank correlation of pred_mean with
+    label_ret60 (after costs, rug -100 %), and the mean label_ret60 of the top and bottom tenth by pred_mean."""
+    try:
+        rows = conn.execute("SELECT source, mint, pred_mean, label_ret60, label_max60, label_outcomes FROM "
+                            "opportunities WHERE label_at>=? AND "
+                            "label_at<? AND pred_mean IS NOT NULL AND label_ret60 IS NOT NULL ORDER BY ts, id",
+                            (int(lo), int(hi if hi is not None else 2 ** 40))).fetchall()
+    except Exception:
+        return None
+    seen, xs, ys, extra = set(), [], [], []
+    for src, mint, p, y, m60, outs in rows:
+        if (src, mint) not in seen:
+            seen.add((src, mint))
+            xs.append(float(p))
+            ys.append(float(y))
+            try:
+                o = json.loads(outs or "{}")
+            except (TypeError, ValueError):
+                o = {}
+            extra.append((m60, o))
+    n = len(xs)
+    if n < 20:
+        return {"n": n}
+    rx, ry = _ranks(xs), _ranks(ys)
+    mx, my = sum(rx) / n, sum(ry) / n
+    cov = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    vx, vy = sum((a - mx) ** 2 for a in rx), sum((b - my) ** 2 for b in ry)
+    rho = cov / (vx * vy) ** 0.5 if vx and vy else 0.0
+    order = sorted(range(n), key=lambda i: xs[i])
+    k = max(1, n // 10)
+    top, bottom = order[-k:], order[:k]
+    m60 = [extra[i][0] for i in top if extra[i][0] is not None]
+    plans: dict = {}
+    for i in top:
+        for name, v in extra[i][1].items():
+            if v is not None:
+                plans.setdefault(name, []).append(float(v))
+    # the top tenth three ways: held 60 min (no exit), its best price (the ceiling), and the best plan's net on
+    # average (an exit chosen after the fact: an upper bound, not a result)
+    best = max(plans.items(), key=lambda kv: sum(kv[1]) / len(kv[1]), default=None)
+    return {"n": n, "rho": round(rho, 3), "top": round(sum(ys[i] for i in top) / k, 4),
+            "bottom": round(sum(ys[i] for i in bottom) / k, 4),
+            "top_max60": round(sum(m60) / len(m60), 4) if m60 else None,
+            "top_plan": (best[0], round(sum(best[1]) / len(best[1]), 4)) if best else None}

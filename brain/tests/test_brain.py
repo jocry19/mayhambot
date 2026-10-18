@@ -320,6 +320,7 @@ def test_late_whale_buys_are_still_decided(conn, s):
     t.scan()
     add_whale_buy(conn, "late", ts=time.time() - 200)  # the tracker lagged behind (RPC rate limits)
     add_whale_buy(conn, "toolate", mint="Mint9" + "9" * 39, ts=time.time() - 400)
+    conn.execute("INSERT INTO ct_detect(sig, wallet) VALUES ('toolate', ?)", (WHALE,))  # seen live
     t.scan()
     o = conn.execute("SELECT features FROM brain_opps WHERE ref='late'").fetchone()
     assert json.loads(o["features"])["delay"] == ">90s"
@@ -1590,3 +1591,69 @@ def test_the_learning_account_buys_only_its_best_draws(conn, s):
     assert t._top_draw(-1.0)
     s.pool_sample = 0.0
     assert not t._top_draw(9.0)
+
+
+def test_a_near_call_is_always_a_learning_buy(conn, s):
+    from brain import opportunities as O
+    s.pool_sample = 0.0
+    mk = Market()
+    t, _ = _pool_trader(conn, s, mk, src="signals")
+    for i, near in enumerate((False, True)):
+        m = f"Near{i:040d}"[:44]
+        mk.snaps[m] = snap(mint=m)
+        O.report(conn, "signals", f"n{i}", m, time.time(), {"signals.near_call": near})
+    assert t.scan() == 1
+    assert conn.execute("SELECT ref FROM opportunities WHERE position_id IS NOT NULL").fetchone()[0] == "n1"
+
+
+def test_a_row_supplemented_while_its_first_decision_waits_for_a_price_is_decided_twice(conn, s):
+    from brain import opportunities as O
+    s.pool_trade = "shadow"
+    mk = Market()
+    clock = [time.time()]
+    t, _ = _pool_trader(conn, s, mk, clock=lambda: clock[0])
+    O.report(conn, "sniper", MINT, MINT, clock[0], {"buyers": 12}, source_action="queued")
+    t.scan()  # no DexScreener pair yet: waits
+    clock[0] += 2
+    O.supplement(conn, "sniper", MINT, {"buyers": 30}, ts=clock[0])
+    t.scan()
+    clock[0] += 31
+    mk.snaps[MINT] = snap()
+    t.scan()
+    t.scan()
+    assert sorted(r[0] for r in conn.execute("SELECT ref FROM brain_opps")) == ["opp1", "opp1+"]
+
+
+def test_backfilled_whale_buys_are_not_counted_as_too_late(conn, s):
+    set_tier(conn, WHALE, "ultra")
+    mk = Market()
+    t = make_trader(conn, s, trained(), mk)
+    conn.execute("CREATE TABLE IF NOT EXISTS ct_detect (sig TEXT, wallet TEXT, side TEXT, source TEXT, block_ts "
+                 "INTEGER, notified_at REAL, detected_at REAL, sol REAL, PRIMARY KEY (sig, wallet))")
+    t.scan()
+    add_whale_buy(conn, "backfill", ts=time.time() - 7200)  # tracker.backfill: history, never seen live
+    add_whale_buy(conn, "livelate", mint="Mint9" + "9" * 39, ts=time.time() - 400)
+    conn.execute("INSERT INTO ct_detect(sig, wallet) VALUES ('livelate', ?)", (WHALE,))
+    t.scan()
+    assert t.too_late == 1
+
+
+def test_label_skill_ranks_one_row_per_source_and_coin(conn, s):
+    from brain import opportunities as O
+    now = time.time()
+    for i in range(40):
+        O.report(conn, "sniper", f"k{i}", f"Coin{i:040d}"[:44], now + i, {"buyers": i})
+    for i in range(30):  # one coin reported again and again: counted once
+        O.report(conn, "copytrade", f"d{i}", MINT, now + 100 + i, {"wallets_n": 3})
+    conn.execute("UPDATE opportunities SET label_at=?, pred_mean=CAST(substr(ref, 2) AS REAL) / 100, "
+                 "label_ret60=CAST(substr(ref, 2) AS REAL) / 100 - 0.1", (int(now),))
+    conn.execute("UPDATE opportunities SET label_max60=0.5, label_outcomes=?", (json.dumps({PLANS[0].name: 0.2}),))
+    sk = learner.label_skill(conn, now - 10)
+    assert sk["n"] == 41 and sk["rho"] > 0.9 and sk["top"] > 0 > sk["bottom"]
+    assert sk["top_max60"] == 0.5 and sk["top_plan"] == (PLANS[0].name, 0.2)
+    from brain.service import Service
+    sv = Service(s, conn, snapshots=Market(), executor=Paper(), safety_check=ok_safety,
+                 staged_check=lambda c, m: False, curve_now=lambda c, m, n: None)
+    line = sv._labelled(now - 10)
+    assert "skill rho +" in line and "max60 +50.0%" in line and "(n 41 coins)" in line, line
+    assert store.get(conn, "label_skill_hist")[-1][1] == 41
