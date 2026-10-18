@@ -55,3 +55,21 @@ def test_research_incomplete_history_is_none(monkeypatch):
     monkeypatch.setattr(rpc, "call", lambda m, p: [{"signature": f"s{i}"} for i in range(5)])
     monkeypatch.setattr(rpc, "get_tx", lambda sig: (_ for _ in ()).throw(RuntimeError("429")))
     assert rpc.wallet_trades("W") is None
+
+
+@pytest.mark.parametrize("err", ["credits", "429 Too Many Requests", "401 Unauthorized", "403 Forbidden"])
+def test_refused_helius_falls_back_to_public_rpc(monkeypatch, err):
+    from core import http
+    from core.config import settings
+    monkeypatch.setattr(settings, "helius_api_key", "k", raising=False)
+    monkeypatch.setattr(http, "credits_left_today", lambda service=None: None)
+    calls = []
+
+    def rpc(wallet, limit, url=None):
+        calls.append(url)
+        if url != wh.PUBLIC_RPC:
+            raise http.CreditsExhausted("no credits") if err == "credits" else RuntimeError(err)
+        return ["T"]
+    monkeypatch.setattr(wh, "_rpc_wallet_trades", rpc)
+    assert wh.wallet_trades("W", 10, enhanced_fallback=False, helius_rpc=True) == ["T"]
+    assert calls[-1] == wh.PUBLIC_RPC and len(calls) == 2
