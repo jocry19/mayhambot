@@ -2453,7 +2453,7 @@ def _brain_pockets(conn, st):
         row = {k: x.get(k) for k in ("key", "label", "source", "n", "n_first_half", "n_second_half", "released_at", "demoted_at")}
         for k in ("mean", "lower95", "mean_first_half", "lower95_first_half", "mean_second_half", "lower95_second_half", "last50_mean"):
             row[k] = _f(x.get(k), 4)
-        row["released"] = bool(x.get("released"))
+        row["released"] = bool(x["released"]) if x.get("released") is not None else None
         row["label"] = row["label"] or row["key"]
         row["source_label"] = BRAIN_SOURCE.get(x.get("source"), x.get("source") or "–")
         row["reason"] = _redact(str(x.get("reason") or ""))[:300]
@@ -2461,6 +2461,98 @@ def _brain_pockets(conn, st):
     rule = {**BRAIN_POCKET_RULE, **(raw.get("rule") if isinstance(raw.get("rule"), dict) else {})}
     return {"rule": rule, "at": raw.get("at"), "rows": out[:300], "released": sum(1 for r in out if r["released"]),
             "positive": sum(1 for r in out if (r["lower95"] or 0) > 0)}
+
+
+BRAIN_OPPS_GOAL = 5000  # plan 18.10. "Richtung neu": scored opportunities per day
+BRAIN_CAL_CAP = (-1.0, 10.0)  # one coin at x10 000 (unit error or real) would swamp every decile mean
+
+
+def _ranks(xs):
+    """Average ranks (ties share their mean rank)."""
+    order = sorted(range(len(xs)), key=lambda i: xs[i])
+    r = [0.0] * len(xs)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and xs[order[j + 1]] == xs[order[i]]:
+            j += 1
+        for k in range(i, j + 1):
+            r[order[k]] = (i + j) / 2
+        i = j + 1
+    return r
+
+
+def _spearman(a, b):
+    if len(a) < 10:
+        return None
+    ra, rb = _ranks(a), _ranks(b)
+    ma, mb = sum(ra) / len(ra), sum(rb) / len(rb)
+    va = sum((x - ma) ** 2 for x in ra)
+    vb = sum((y - mb) ** 2 for y in rb)
+    return sum((x - ma) * (y - mb) for x, y in zip(ra, rb)) / math.sqrt(va * vb) if va and vb else None
+
+
+def _calibration(pairs, bins=10):
+    """Deciles by prediction: (mean predicted, mean realized capped, n) and the n-weighted mean gap."""
+    pairs = sorted(pairs)
+    if len(pairs) < bins * 5:
+        return [], None
+    out, gap = [], 0.0
+    for b in range(bins):
+        part = pairs[b * len(pairs) // bins:(b + 1) * len(pairs) // bins]
+        p = sum(x for x, _ in part) / len(part)
+        y = sum(y for _, y in part) / len(part)
+        out.append({"decile": b + 1, "pred": _f(p, 4), "real": _f(y, 4), "n": len(part)})
+        gap += abs(p - y) * len(part)
+    return out, gap / len(pairs)
+
+
+def _brain_learning(conn, now, days):
+    """Learning curve (plan 18.10., "Richtung neu"): does the decider get better day by day, without flattering itself.
+    Per UTC decision day: rank correlation of the prediction made at decision time with the outcome measured later
+    (out of sample by construction: brain_opps.pred_mean is written before realized_plan exists), calibration gap,
+    opportunities seen and scored, the account's closed trades (net per trade, 7-day mean with a 95 % interval) and
+    the day factor. Plus the decile table over the last 7 days. Reads brain_opps until the shared opportunity table
+    exists."""
+    t_end = now - now % 86400 + 86400
+    lo = t_end - BRAIN_DAYS * 86400
+    day = lambda ts: int(ts) - int(ts) % 86400  # noqa: E731
+    cap = lambda y: min(BRAIN_CAL_CAP[1], max(BRAIN_CAL_CAP[0], y))  # noqa: E731
+    out = {lo + k * 86400: {"ts": lo + k * 86400, "n_opps": 0, "n_scored": 0} for k in range(BRAIN_DAYS)}
+    for r in rows(conn, "SELECT ts / 86400 * 86400 d, COUNT(*) n FROM brain_opps WHERE ts>=? GROUP BY d", (lo,)):
+        if r["d"] in out:
+            out[r["d"]]["n_opps"] = r["n"]
+    pairs = defaultdict(list)
+    for r in rows(conn, "SELECT ts, pred_mean, realized_plan FROM brain_opps WHERE ts>=? AND pred_mean IS NOT NULL "
+                        "AND realized_plan IS NOT NULL", (lo,)):
+        pairs[day(r["ts"])].append((float(r["pred_mean"]), cap(float(r["realized_plan"]))))
+    for d, ps in pairs.items():
+        if d in out:
+            _, gap = _calibration(ps)
+            out[d].update(n_scored=len(ps), rank_ic=_f(_spearman([p for p, _ in ps], [y for _, y in ps]), 4),
+                          cal_gap=_f(gap, 4))
+    trades = defaultdict(list)
+    if has(conn, "brain_positions"):
+        for r in rows(conn, "SELECT closed_at, pnl_pct FROM brain_positions WHERE status='closed' AND closed_at>=? "
+                            "AND pnl_pct IS NOT NULL", (lo - 6 * 86400,)):
+            trades[day(r["closed_at"])].append(float(r["pnl_pct"]))
+    mult = {d["ts"]: d.get("mult") for d in days}
+    for d, x in out.items():
+        x["n_trades"] = len(trades.get(d, []))
+        x["trade_mean"] = _f(_mean(trades.get(d, [])), 4)
+        w = [v for k in range(7) for v in trades.get(d - k * 86400, [])]
+        m = _mean(w)
+        half = 1.96 * statistics.stdev(w) / math.sqrt(len(w)) if len(w) >= 2 else None
+        x.update(n_trades_7d=len(w), trade_mean_7d=_f(m, 4),
+                 trade_lo_7d=_f(m - half, 4) if half is not None else None,
+                 trade_hi_7d=_f(m + half, 4) if half is not None else None, mult=mult.get(d))
+    recent = [p for d, ps in pairs.items() if d >= t_end - 7 * 86400 for p in ps]
+    deciles, gap = _calibration(recent)
+    series = [out[k] for k in sorted(out)]
+    last = next((x for x in reversed(series) if x.get("rank_ic") is not None), None)
+    return {"days": series, "deciles": deciles, "cal_gap_7d": _f(gap, 4), "n_7d": len(recent),
+            "rank_ic": last.get("rank_ic") if last else None, "opps_goal": BRAIN_OPPS_GOAL,
+            "cap": list(BRAIN_CAL_CAP), "source": "brain_opps"}
 
 
 def brain_view(conn, kind=None, show="all", limit=60, now=None):
@@ -2588,6 +2680,7 @@ def brain_view(conn, kind=None, show="all", limit=60, now=None):
         },
         "alpha": _f(h.get("alpha"), 4),
         "pockets": _brain_pockets(conn, st),
+        "learning": _brain_learning(conn, now, days),
         "open": open_, "closed": closed[:40], "decisions": decisions, "diary": diary, "equity": eq,
         "plans": [{"name": k, **v} for k, v in plans.items()],
     }

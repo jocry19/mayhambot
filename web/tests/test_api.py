@@ -735,6 +735,16 @@ def test_learning_progress(demo):
     assert any(r["gate"] for r in d["rows"] if r["account"] == "paper")
 
 
+def test_spearman_and_calibration():
+    from web import queries as Q
+
+    assert Q._spearman(list(range(12)), [x * x for x in range(12)]) == 1.0
+    assert abs(Q._spearman(list(range(12)), list(range(12, 0, -1))) + 1) < 1e-9 and Q._spearman([1, 2], [2, 1]) is None
+    assert Q._ranks([3, 1, 3]) == [1.5, 0.0, 1.5]
+    dec, gap = Q._calibration([(i / 100, i / 100) for i in range(100)])
+    assert len(dec) == 10 and gap == 0 and Q._calibration([(0, 0)] * 10) == ([], None)
+
+
 def test_local_day0():
     import time as _t
     from web import queries as Q
@@ -775,6 +785,12 @@ def test_brain_view(demo, empty, tmp_path):
     pk = d["pockets"]  # pockets: n, mean, 95 % lower bound per half, released (brain_state "pockets")
     assert pk["rule"]["min_n"] == 100 and pk["rows"] and pk["released"] == sum(1 for x in pk["rows"] if x["released"])
     assert all(x["n"] >= 100 and x["lower95"] > 0 for x in pk["rows"] if x["released"]) and all(x["label"] and x["reason"] for x in pk["rows"])
+    lc = d["learning"]  # learning curve: rank correlation, calibration, opportunities, net per trade over 7 days
+    assert len(lc["days"]) == 14 and lc["opps_goal"] == 5000 and lc["source"] == "brain_opps"
+    assert any(x.get("rank_ic") is not None for x in lc["days"]) and all(-1 <= x["rank_ic"] <= 1 for x in lc["days"] if x.get("rank_ic") is not None)
+    assert sum(x["n_opps"] for x in lc["days"]) >= sum(x["n_scored"] for x in lc["days"]) > 0
+    assert all(x["trade_lo_7d"] <= x["trade_mean_7d"] <= x["trade_hi_7d"] for x in lc["days"] if x.get("trade_lo_7d") is not None)
+    assert len(lc["deciles"]) == 10 and sum(x["n"] for x in lc["deciles"]) == lc["n_7d"] and lc["cal_gap_7d"] >= 0
     held = d["open"] + d["closed"]
     assert {p["exit_mode"] for p in held} <= {"organic", "plan"}
     for p in d["open"]:
@@ -792,6 +808,7 @@ def test_brain_view(demo, empty, tmp_path):
     v = Q.brain_view(conn)
     assert v["available"] and v["decisions"] == [] and v["account"]["equity_sol"] == 5.0 and v["honest"]["n"] == 0
     assert v["pockets"]["rows"] == [] and v["pockets"]["rule"]["min_n"] == 100 and v["pockets"]["at"] is None
+    assert v["learning"]["deciles"] == [] and v["learning"]["rank_ic"] is None and all(x["n_opps"] == 0 for x in v["learning"]["days"])
     assert v["goal"]["today"] is None and v["hours"] == [] and v["exits"]["by_exit"] == [] and v["segments"]["by_delay"] == [] and v["regimes"] == []
     from cli.report import brain_line
 

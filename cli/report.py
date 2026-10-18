@@ -217,6 +217,9 @@ def brain_line(b: dict | None) -> str:
     if g.get("today") is not None:
         lo, hi = (g.get("mult") or (2, 4))[:2]
         head += f", Tagesfaktor heute {_c('×' + n(g['today'], 2), 'green' if g['today'] >= lo else 'red' if g['today'] < 1 else '')} (Ziel ×{lo}–{hi})"
+    lc = b.get("learning") or {}
+    if lc.get("rank_ic") is not None:
+        head += f", Lernkurve: Rangkorrelation {_c(n(lc['rank_ic'], 2), tone(lc['rank_ic']))}"
     if not h.get("n"):
         return head + " · noch nichts nachgeprüft"
     return (head + f" · ehrlich: genommen Ø {_c(pct(h.get('taken_mean'), 1, True), tone(h.get('taken_mean')))}"

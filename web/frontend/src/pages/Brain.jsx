@@ -200,29 +200,29 @@ const ExitMode = ({ r }) => (r.exit_mode === "organic"
 const halfCell = (m, lo, k) => (m == null ? <span className="dim">–</span>
   : <span title={`${n(k)} Fälle, Untergrenze ${pctSigned(lo, 1)}`}><span className={sign(m)}>{pctSigned(m, 1)}</span> <span className={`dim ${lo > 0 ? "up" : ""}`}>({pctSigned(lo, 0)})</span></span>);
 
-/** Pockets (plan 18.10., step 5): stake only where the 95 % lower bound is above zero in both halves of the window. */
+/** Patterns (plan 18.10., "Richtung neu"): estimate and uncertainty per pattern; the release badge only while brain still sends one. */
 function Pockets({ p }) {
   const r = p.rule || {};
   const status = (x) => (x.released ? <span className="badge good">freigegeben</span>
     : x.demoted_at ? <span className="badge bad" title={`zurückgestuft ${dt(x.demoted_at)}`}>zurückgestuft</span>
       : (x.n || 0) < (r.min_n || 100) ? <span className="badge">sammelt</span> : <span className="badge warn">nicht frei</span>);
   return (
-    <Card flush title="Taschen" sub={`Muster je Quelle, netto nach Kosten über ${n(r.window_days)} Tage. Einsatz nur, wenn ab ${n(r.min_n)} Fällen die ${pct(r.conf)}-Untergrenze in beiden Hälften über 0 liegt und die letzten ${n(r.last_n)} im Plus sind.${p.at ? ` Stand ${ago(p.at)}.` : ""}`}
-      actions={<span className="dim" style={{ fontSize: 12 }}>{n(p.released)} freigegeben · {n(p.positive)} mit Untergrenze &gt; 0</span>}>
+    <Card flush title="Muster" sub={`Verteilung des Netto-Ergebnisses je Muster und Quelle nach Kosten${r.window_days ? ` über ${n(r.window_days)} Tage` : ""}: Schätzung und ${pct(r.conf ?? 0.95)}-Untergrenze, getrennt nach älterer und neuerer Hälfte. Kein Tor mehr: das Modell lernt aus allen Fällen, wenig Wissen heißt kleiner Einsatz.${p.at ? ` Stand ${ago(p.at)}.` : ""}`}
+      actions={<span className="dim" style={{ fontSize: 12 }}>{n(p.rows?.length)} Muster · {n(p.positive)} mit Untergrenze &gt; 0</span>}>
       <Table rows={p.rows} rowKey={(x) => x.key} initialSort={{ k: "lower95", d: "desc" }}
-        empty="Noch keine Tasche mit genug Fällen (sie erscheinen ab 50, das Hirn rechnet alle 10 Minuten)"
+        empty="Noch keine Muster berechnet (der Entscheider rechnet sie alle 10 Minuten)"
         expand={(x) => <div className="col" style={{ gap: 4 }}><span>{x.reason || "keine Begründung"}</span>
           {x.released_at && <span className="dim">freigegeben {dt(x.released_at)}</span>}{x.demoted_at && <span className="dim">zurückgestuft {dt(x.demoted_at)}</span>}
           <span className="dim mono">{x.key}</span></div>}
         cols={[
-          { k: "label", l: "Tasche", fmt: (x) => <span><b>{x.label}</b> <span className="dim">{x.source_label}</span></span> },
+          { k: "label", l: "Muster", fmt: (x) => <span><b>{x.label}</b> <span className="dim">{x.source_label}</span></span> },
           { k: "n", l: "Fälle", r: true, fmt: (x) => n(x.n) },
           { k: "mean", l: "Ø netto", r: true, fmt: (x) => <b className={sign(x.mean)}>{pctSigned(x.mean, 1)}</b> },
           { k: "lower95", l: "Untergrenze 95 %", r: true, fmt: (x) => <span className={x.lower95 > 0 ? "up b" : "dim"}>{pctSigned(x.lower95, 1)}</span> },
           { k: "mean_first_half", l: "1. Hälfte", r: true, fmt: (x) => halfCell(x.mean_first_half, x.lower95_first_half, x.n_first_half) },
           { k: "mean_second_half", l: "2. Hälfte", r: true, fmt: (x) => halfCell(x.mean_second_half, x.lower95_second_half, x.n_second_half) },
           { k: "last50_mean", l: `Letzte ${n(r.last_n)}`, r: true, fmt: (x) => <span className={sign(x.last50_mean)}>{pctSigned(x.last50_mean, 1)}</span> },
-          { k: "released", l: "Status", fmt: status },
+          ...(p.rows?.some((x) => x.released != null) ? [{ k: "released", l: "Status", fmt: status }] : []),
         ]} />
     </Card>
   );
@@ -278,6 +278,82 @@ function Diary({ items }) {
         </div>
       ))}
     </div>
+  );
+}
+
+/** Learning curve (plan 18.10., "Richtung neu"): is the decider getting better day by day, measured out of sample. */
+function Learning({ L, days }) {
+  const ds = L.days || [];
+  const sc = ds.filter((x) => x.n_scored > 0);
+  const last = sc[sc.length - 1] || ds[ds.length - 1] || {};
+  const ic = ds.filter((x) => x.rank_ic != null);
+  const tr = ds.filter((x) => x.trade_mean_7d != null);
+  const lastTr = tr[tr.length - 1];
+  const dl = (x) => dayLabel(x.ts);
+  return (
+    <Card title="Lernkurve" sub={`Wird der Entscheider besser? Jede Zahl vergleicht die Vorhersage zum Zeitpunkt der Entscheidung mit dem später gemessenen Ergebnis, also außerhalb der Trainingsdaten. Quelle: ${L.source === "brain_opps" ? "Gelegenheiten des Entscheiders (bis die gemeinsame Tabelle aller Quellen steht)" : L.source}.`}>
+      <div className="tiles wrap-sub" style={{ marginBottom: 12 }}>
+        <Tile label="Rangkorrelation" value={L.rank_ic == null ? "–" : n(L.rank_ic, 2)} cls={sign(L.rank_ic)}
+          sub="Vorhersage gegen Ergebnis, letzter Tag mit ≥ 10 Fällen; 0 = rät, 1 = perfekte Reihenfolge" />
+        <Tile label="Netto je Trade, 7 Tage" value={pctSigned(lastTr?.trade_mean_7d, 1)} cls={sign(lastTr?.trade_mean_7d)}
+          sub={lastTr ? `95 %: ${pctSigned(lastTr.trade_lo_7d, 1)} bis ${pctSigned(lastTr.trade_hi_7d, 1)} · ${n(lastTr.n_trades_7d)} Trades` : "noch kein Trade abgeschlossen"} />
+        <Tile label="Kalibrierung, 7 Tage" value={L.cal_gap_7d == null ? "–" : `±${pct(L.cal_gap_7d, 1)}`}
+          sub={`Ø Abstand Vorhersage zu Ergebnis je Zehntel · ${n(L.n_7d)} Fälle`} />
+        <Tile label={last.ts ? `Bewertet am ${dayLabel(last.ts)}` : "Bewertet je Tag"} value={`${n(last.n_scored)} / ${n(L.opps_goal)}`}
+          sub={<LoadBar v={Math.min(1, (last.n_scored || 0) / (L.opps_goal || 1))} />} title={`${n(last.n_opps)} Gelegenheiten an diesem Tag gesehen; das Ergebnis steht erst nach dem längsten Plan fest. Ziel ${n(L.opps_goal)} bewertete am Tag`} />
+      </div>
+      <div className="grid g2">
+        <div>
+          <div className="help">Rangkorrelation je Entscheidungstag</div>
+          {ic.length ? <EChart height={180} deps={[L]} ariaLabel="Rangkorrelation je Tag"
+            build={(c) => baseOption(c, {
+              tooltip: { ...baseOption(c).tooltip, axisPointer: { type: "shadow" },
+                formatter: (ps) => { const x = ic[ps[0].dataIndex]; return `<b>${dl(x)}</b>${tipRow(x.rank_ic >= 0 ? c.good : c.bad, "Rangkorrelation", n(x.rank_ic, 3))}${tipRow("transparent", "Fälle", n(x.n_scored))}`; } },
+              xAxis: catAxis(c, ic.map(dl)), yAxis: valueAxis(c, (v) => n(v, 1), { min: (v) => Math.min(-0.2, v.min), max: (v) => Math.max(0.4, v.max) }),
+              series: [{ type: "bar", barMaxWidth: 22, data: ic.map((x) => ({ value: x.rank_ic, itemStyle: { color: x.rank_ic >= 0 ? c.good : c.bad, borderRadius: x.rank_ic >= 0 ? [4, 4, 0, 0] : [0, 0, 4, 4] } })) }],
+            })} /> : <Empty>Noch kein Tag mit 10 nachgeprüften Vorhersagen</Empty>}
+        </div>
+        <div>
+          <div className="help">Netto je Trade des Kontos, gleitend 7 Tage, mit 95 %-Band</div>
+          {tr.length ? <EChart height={180} deps={[L]} ariaLabel="Netto je Trade, 7-Tage-Mittel mit Unsicherheit"
+            build={(c) => baseOption(c, {
+              tooltip: { ...baseOption(c).tooltip, formatter: (ps) => { const x = tr[ps[0].dataIndex]; return `<b>${dl(x)}</b>${tipRow(c.s[0], "Ø 7 Tage", pctSigned(x.trade_mean_7d, 1))}${tipRow("transparent", "95 %", `${pctSigned(x.trade_lo_7d, 1)} bis ${pctSigned(x.trade_hi_7d, 1)}`)}${tipRow("transparent", "Trades", `${n(x.n_trades_7d)} (an diesem Tag ${n(x.n_trades)})`)}`; } },
+              xAxis: catAxis(c, tr.map(dl), { boundaryGap: false }), yAxis: valueAxis(c, (v) => pctSigned(v, 0)),
+              series: [
+                { type: "line", stack: "band", symbol: "none", lineStyle: { opacity: 0 }, data: tr.map((x) => x.trade_lo_7d ?? x.trade_mean_7d) },
+                { type: "line", stack: "band", symbol: "none", lineStyle: { opacity: 0 }, areaStyle: { color: c.s[0], opacity: 0.15 }, data: tr.map((x) => (x.trade_hi_7d ?? x.trade_mean_7d) - (x.trade_lo_7d ?? x.trade_mean_7d)) },
+                { type: "line", symbolSize: 8, lineStyle: { width: 2, color: c.s[0] }, itemStyle: { color: c.s[0] }, data: tr.map((x) => x.trade_mean_7d),
+                  markLine: { silent: true, symbol: "none", lineStyle: { color: c.muted, type: "dashed", width: 1 }, label: { color: c.muted, formatter: "0", position: "insideEndTop" }, data: [{ yAxis: 0 }] } },
+              ],
+            })} /> : <Empty>Noch kein abgeschlossener Trade</Empty>}
+        </div>
+        <div>
+          <div className="help">Kalibrierung je Zehntel der Vorhersage, letzte 7 Tage (Ergebnis gedeckelt bei {pctSigned(L.cap?.[1], 0)})</div>
+          {L.deciles?.length ? <><EChart height={180} deps={[L]} ariaLabel="Vorhergesagtes gegen tatsächliches Netto je Zehntel"
+            build={(c) => baseOption(c, {
+              tooltip: { ...baseOption(c).tooltip, formatter: (ps) => { const x = L.deciles[ps[0].dataIndex]; return `<b>${x.decile}. Zehntel</b>${tipRow(c.s[0], "vorhergesagt", pctSigned(x.pred, 1))}${tipRow(c.s[1], "tatsächlich", pctSigned(x.real, 1))}${tipRow("transparent", "Fälle", n(x.n))}`; } },
+              xAxis: catAxis(c, L.deciles.map((x) => `${x.decile}.`), { boundaryGap: false }), yAxis: valueAxis(c, (v) => pctSigned(v, 0)),
+              series: [["pred", "vorhergesagt"], ["real", "tatsächlich"]].map(([k, l], i) => ({ name: l, type: "line", symbolSize: 8, lineStyle: { width: 2, color: c.s[i] }, itemStyle: { color: c.s[i] }, data: L.deciles.map((x) => x[k]) })),
+            })} />
+            <div className="legend-row">{["vorhergesagt", "tatsächlich"].map((l, i) => <span key={l}><i style={{ background: `var(--series-${i + 1})` }} />{l}</span>)}</div></>
+            : <Empty>Erst ab 50 nachgeprüften Vorhersagen in 7 Tagen</Empty>}
+        </div>
+        <div>
+          <div className="help">Gelegenheiten je Tag: gesehen und mit Ergebnis bewertet (log, Ziel {n(L.opps_goal)})</div>
+          <EChart height={180} deps={[L]} ariaLabel="Gelegenheiten je Tag"
+            build={(c) => baseOption(c, {
+              tooltip: { ...baseOption(c).tooltip, axisPointer: { type: "shadow" }, formatter: (ps) => { const x = ds[ps[0].dataIndex]; return `<b>${dl(x)}</b>${tipRow(c.s[0], "gesehen", n(x.n_opps))}${tipRow(c.s[1], "bewertet", n(x.n_scored))}${tipRow("transparent", "Tagesfaktor", fx(x.mult))}`; } },
+              xAxis: catAxis(c, ds.map(dl)), yAxis: valueAxis(c, (v) => n(v), { type: "log", min: 1, max: (v) => Math.max((L.opps_goal || 1) * 1.5, v.max) }),
+              series: [
+                { name: "gesehen", type: "bar", barMaxWidth: 10, barGap: "20%", data: ds.map((x) => (x.n_opps > 0 ? x.n_opps : null)), itemStyle: { color: c.s[0], borderRadius: [3, 3, 0, 0] } },
+                { name: "bewertet", type: "bar", barMaxWidth: 10, data: ds.map((x) => (x.n_scored > 0 ? x.n_scored : null)), itemStyle: { color: c.s[1], borderRadius: [3, 3, 0, 0] },
+                  markLine: { silent: true, symbol: "none", lineStyle: { color: c.good, width: 1 }, label: { color: c.good, formatter: `Ziel ${n(L.opps_goal)}`, position: "insideEndTop" }, data: [{ yAxis: L.opps_goal }] } },
+              ],
+            })} />
+          <div className="legend-row">{["gesehen", "bewertet"].map((l, i) => <span key={l}><i style={{ background: `var(--series-${i + 1})` }} />{l}</span>)}</div>
+        </div>
+      </div>
+    </Card>
   );
 }
 
@@ -340,6 +416,7 @@ export default function Brain() {
         </Card>
       </div>
 
+      {d.learning && <Learning L={d.learning} days={d.days} />}
       {d.pockets && <Pockets p={d.pockets} />}
 
       <div className="grid g2">
