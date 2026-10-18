@@ -83,6 +83,36 @@ def first_cross(pts, p0, target, stop):
     return None
 
 
+def _staged(conn, mint):
+    """safety's staged-pump finding (checks['staged'].data.pattern): >= $250k mcap within 30 min on a thin pool,
+    25 of 34 such coins drained within 60 min after the high (safety 15784c6). An exit signal, not an entry veto."""
+    try:
+        from safety import engine as safety_engine
+        a = safety_engine.get(conn, mint)
+    except Exception:  # noqa: BLE001 - safety/ absent or not set up
+        return False
+    st = (getattr(a, "checks", None) or {}).get("staged") if a else None
+    return bool(st and (st.get("data") or {}).get("pattern"))
+
+
+def check_staged(conn, now=None):
+    """Calls still followed whose coin turned out to be a staged pump: one exit alert each."""
+    now = now or int(time.time())
+    out = []
+    for s in conn.execute("SELECT id, ts, mint, symbol, price_usd, call_no, kind FROM signals WHERE ts>? AND staged_ts IS NULL "
+                          "AND target_hit_ts IS NULL AND stop_hit_ts IS NULL", (now - FOLLOW_HOURS * 3600,)).fetchall():
+        if not _staged(conn, s["mint"]):
+            continue
+        conn.execute("UPDATE signals SET staged_ts=? WHERE id=?", (now, s["id"]))
+        p = conn.execute("SELECT price_usd FROM tokens WHERE mint=?", (s["mint"],)).fetchone()
+        p = p[0] if p and p[0] else s["price_usd"]
+        out.append(dict(kind="staged", ts=now, ret=(p / s["price_usd"] - 1) if s["price_usd"] else 0.0,
+                        minutes=round((now - s["ts"]) / 60), symbol=s["symbol"], mint=s["mint"], price=p,
+                        call_no=s["call_no"], signal_kind=s["kind"] or "v1"))
+    conn.commit()
+    return out
+
+
 def check_levels(conn, now=None):
     """Store the first target / stop crossing of the calls of the last FOLLOW_HOURS; return the fresh ones as
     dicts for the follow-up alert."""

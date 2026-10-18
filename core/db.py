@@ -113,6 +113,7 @@ MIGRATIONS = [
     ("signals", "lag_first_s", "INTEGER"),          # seconds from the first smart buy in the window to the call
     ("signals", "lag_last_s", "INTEGER"),           # seconds from the newest smart buy to the call (data + cycle lag)
     ("signals", "kind", "TEXT"),
+    ("signals", "staged_ts", "INTEGER"),            # safety found the staged-pump pattern after the call (exit alert sent)
     # signal_shadow: market state at the rejection, so momentum / dip / venue can be checked as a later signal type
     ("signal_shadow", "dex", "TEXT"),
     ("signal_shadow", "mcap_usd", "REAL"),

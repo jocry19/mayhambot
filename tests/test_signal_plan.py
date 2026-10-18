@@ -225,3 +225,16 @@ def test_token_refresh_keeps_watch_flags(tmp_path, monkeypatch):
     r = {x["mint"]: x for x in c.execute("SELECT * FROM tokens")}
     assert r["S"]["tracked"] == 0 and r["W"]["tracked"] == 1 and r["W"]["txns_m5"] == 40 and r["S"]["last_updated"] > 0
     assert r["F"]["last_updated"] <= int(__import__('time').time())    # stamped 52 min ahead: pulled back
+
+
+def test_staged_pump_exit_alert_once(tmp_path, monkeypatch):
+    c = conn(tmp_path)
+    now = 60_000
+    c.execute("INSERT INTO signals(ts, mint, symbol, score, price_usd) VALUES (?,?,?,?,?)", (now - 900, "P", "PMP", 40, 1.0))
+    c.execute("INSERT INTO tokens(mint, price_usd) VALUES ('P', 1.8)")
+    c.commit()
+    monkeypatch.setattr(plan, "_staged", lambda conn, mint: mint == "P")
+    ev = plan.check_staged(c, now)
+    assert [(e["kind"], round(e["ret"], 2), e["minutes"]) for e in ev] == [("staged", 0.8, 15)]
+    assert "inszenierter Pump" in notifier.format_followup(ev[0])
+    assert plan.check_staged(c, now + 60) == []

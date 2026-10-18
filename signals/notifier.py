@@ -106,7 +106,10 @@ def notify(conn, signals):
 def format_followup(e) -> str:
     name = html.escape(e["symbol"] or e["mint"][:6]) + (" (v2)" if e.get("signal_kind") == "v2" else "")
     call = f" (Call Nr. {e['call_no']})" if (e.get("call_no") or 1) > 1 else ""
-    if e["kind"] == "target":
+    if e["kind"] == "staged":
+        head = f"⚠️ <b>{name}{call}: inszenierter Pump erkannt</b> ({e['ret'] * 100:+.0f} % seit Call, nach {e['minutes']} min)"
+        tail = "Muster: 3 von 4 solcher Coins waren binnen 60 min nach dem Hoch leer. Gewinne sichern."
+    elif e["kind"] == "target":
         head = f"🎯 <b>{name}{call}: Ziel {e['ret'] * 100:+.0f} % erreicht</b> nach {e['minutes']} min"
         tail = "Gewinn sichern oder Stopp nachziehen."
     else:

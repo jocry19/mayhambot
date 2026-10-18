@@ -291,7 +291,7 @@ def cycle(conn, i):
     except Exception:  # noqa: BLE001
         log.exception("signal shadow update failed")
     try:
-        notifier.notify_followups(plan.check_levels(conn))  # target / stop reached: follow-up alert for manual trading
+        notifier.notify_followups(plan.check_levels(conn) + plan.check_staged(conn))  # target / stop reached: follow-up alert for manual trading
     except Exception:  # noqa: BLE001 - follow-ups must never stop signals
         log.exception("signal follow-up check failed")
     if funnel.report_due():  # after evaluate, so last_cycle is filled; due by the file's age, not process uptime
