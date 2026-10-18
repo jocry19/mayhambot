@@ -177,7 +177,9 @@ plan/gelegenheiten_schema.md). Das Hirn liest sie per Cursor (`cursor_pool`, nur
 `BRAIN_MAX_POOL_AGE_S`), bildet aus den Rohwerten generische Stufen (halbe Zehnerpotenzen, Text, ja/nein) und
 schickt sie als Art `pool` durch dieselbe Entscheidung: Ziehung aus der vorhergesagten Verteilung je Ausstiegsplan,
 gekauft wird, was die Ziehung über die Kosten bringt. Ohne Tor, ohne Quote. Der Einsatz einer Ziehung ist das
-Lernkonto (`BRAIN_LEARN_SIZE_SOL`, 0,03 SOL); ist das Modell sicher, rechnet Kelly mit seiner Unsicherheit.
+Lernkonto (`BRAIN_LEARN_SIZE_SOL`, 0,03 SOL); ist das Modell sicher, rechnet Kelly mit seiner Unsicherheit. Das Lernkonto
+hat eine eigene technische Obergrenze offener Positionen (`BRAIN_POOL_MAX_OPEN`, 40), damit es die eigenen Quellen
+nie verdrängt (je Kauf ~4 RPC-Aufrufe Rug-Prüfung), und bekommt höchstens die Hälfte der Kerzen-Downloads je Runde.
 
 Das Modell (`pool.py`) hält je Merkmal und Plan eine eigene Normalverteilung (Assumed Density Filtering), damit
 Tausende Merkmale möglich sind; jedes Merkmal steht einmal quellenübergreifend und einmal mit Quelle im Modell.

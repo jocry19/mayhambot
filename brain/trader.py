@@ -345,9 +345,14 @@ class Trader:
                 return f"Wal verkauft meist sofort wieder ({fl['share']:.0%} seiner Käufe binnen 2 min)"
         # paper has no budget (user, 10/2026): no daily loss stop, no exploration quota, no balance check (the paper
         # balance may go below zero). Each stays available as a setting (0 = off); max_open is a technical ceiling only
-        n_open = c.execute("SELECT COUNT(*) FROM brain_positions WHERE status='open'").fetchone()[0]
-        if self.s.max_open and n_open >= self.s.max_open:
-            return f"technische Obergrenze: {n_open} Positionen offen"
+        # the learning account (pool) has its own ceiling, so hundreds of small learning buys never crowd out the
+        # brain's own sources; a technical limit for the rug checks (~4 RPC calls per buy) and the price polling
+        pool = kind == "pool"
+        n_open = c.execute("SELECT COUNT(*) FROM brain_positions WHERE status='open' AND (kind='pool')=?",
+                           (int(pool),)).fetchone()[0]
+        cap = self.s.pool_max_open if pool else self.s.max_open
+        if cap and n_open >= cap:
+            return f"technische Obergrenze: {n_open} {'Lernkonto-' if pool else ''}Positionen offen"
         t0 = store.day_start(self.clock())
         if self.s.max_daily_loss_sol:
             lost = c.execute("SELECT COALESCE(SUM(pnl_sol),0) FROM brain_positions WHERE status='closed' "
@@ -521,6 +526,10 @@ class Trader:
             return ("no_market" if now - (p["last_seen"] or p["opened_at"]) > NO_MARKET_S else None), False
         entry = _ref_price(p)
         px = snap.price_sol
+        meta = _meta(p)
+        if meta.get("exit_mode") != "organic":  # the guards below are part of the organic exit: book them there
+            meta["exit_mode"] = "organic"
+            self.conn.execute("UPDATE brain_positions SET meta=? WHERE id=?", (json.dumps(meta), p["id"]))
         if p["entry_liq_usd"] and snap.liquidity_usd < (1 - RUG_LIQ_DROP) * p["entry_liq_usd"]:
             return "rug", False
         if px <= entry * (1 - exits.CRASH_STOP):
@@ -537,7 +546,6 @@ class Trader:
             return None, False
         if not self.live.due(p["id"], now):
             return None, False
-        meta = _meta(p)
         ago = self.live.price_ago(p["id"], now, 60)
         vpeak = self.live.vpeak.get(p["id"], 0.0)
         o = self.conn.execute("SELECT features FROM brain_opps WHERE id=?", (p["opp_id"],)).fetchone()
@@ -556,9 +564,6 @@ class Trader:
                             (snap.volume_m5 or 0) / vpeak if vpeak > 0 else None, held, whale,
                             exits.smart_flow(swaps, p["opened_at"], now, p["wallet"]))
         act, mean, pp = exits.advise(self.xm, toks, self.s, bool(meta.get("partial_sol")), px / entry - 1)
-        if meta.get("exit_mode") != "organic":
-            meta["exit_mode"] = "organic"
-            self.conn.execute("UPDATE brain_positions SET meta=? WHERE id=?", (json.dumps(meta), p["id"]))
         if act == "sell":
             log.info("organic exit %s: next %d min %+.1f%%, P(up) %.0f%%", p["symbol"] or p["mint"][:6],
                      exits.FWD_MIN, mean * 100, pp * 100)
