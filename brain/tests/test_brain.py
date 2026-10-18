@@ -901,9 +901,12 @@ def test_challenge_explores_side_sources_with_account_stakes_and_pauses_after_lo
     for i in range(2, 12):
         m = f"Mint{i:040d}"[:44]
         mk.snaps[m] = snap(dex="pumpswap", mint=m)
-        add_shadow(conn, i, mint=m)
+        add_shadow(conn, i, mint=m, reason="momentum" if i % 2 else "no_smart")
         bought += t.scan()
     assert bought >= 1
+    # coins without smart money lost -69 % in the 3 h before 07:23 on 18.10.: only a convinced buy there
+    assert not conn.execute("SELECT 1 FROM brain_opps WHERE kind='market' AND explore=1 AND decision='enter' "
+                            "AND features LIKE '%no_smart%'").fetchone()
     o = conn.execute("SELECT * FROM brain_opps WHERE decision='enter'").fetchone()
     assert o["kind"] == "market" and o["explore"] == 1
     assert o["size_sol"] == pytest.approx(max(s.min_size_sol, s.challenge_explore_share * 5.0), abs=0.02)
@@ -1503,3 +1506,14 @@ def test_a_paused_learning_account_predicts_and_writes_back_but_buys_nothing(con
     row = conn.execute("SELECT * FROM opportunities").fetchone()
     assert row["decision"] == "skip" and row["pred_mean"] is not None
     assert json.loads(conn.execute("SELECT raw FROM brain_opps").fetchone()[0])["gate"] == "Lernkonto pausiert"
+
+
+def test_one_coin_reported_again_by_the_same_source_is_decided_once(conn, s):
+    from brain import opportunities as O
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    t, _ = _pool_trader(conn, s, mk)
+    for i in range(5):  # the sniper reports a coin it keeps passing again and again
+        O.report(conn, "sniper", f"{MINT}:{i}", MINT, time.time(), {"buyers": 12}, source_action="passed")
+        t.scan()
+    assert conn.execute("SELECT COUNT(*) FROM brain_opps WHERE kind='pool'").fetchone()[0] == 1
