@@ -50,6 +50,50 @@ def trust(xs: list[float]) -> float:
     return 0.5 * (1 + math.erf(m / se / math.sqrt(2)))
 
 
+def rank_corr(xs: list[float], ys: list[float]) -> float | None:
+    """Spearman rank correlation (ties averaged)."""
+    n = len(xs)
+    if n < 3:
+        return None
+
+    def ranks(v):
+        order = sorted(range(n), key=lambda i: v[i])
+        r = [0.0] * n
+        i = 0
+        while i < n:
+            j = i
+            while j + 1 < n and v[order[j + 1]] == v[order[i]]:
+                j += 1
+            for k in range(i, j + 1):
+                r[order[k]] = (i + j) / 2
+            i = j + 1
+        return r
+    a, b = ranks(xs), ranks(ys)
+    ma, mb = sum(a) / n, sum(b) / n
+    cov = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    va = math.sqrt(sum((x - ma) ** 2 for x in a))
+    vb = math.sqrt(sum((y - mb) ** 2 for y in b))
+    return cov / (va * vb) if va > 0 and vb > 0 else None
+
+
+DISC_MIN_N = 30
+DISC_FULL = 0.2  # a rank correlation of 0.2 out of sample lets trust size a trade fully
+
+
+def discrimination(conn, now: float) -> dict:
+    """{kind: (n, rank correlation of the prediction made back then with the result after costs)}, last 7 days."""
+    rows = conn.execute("SELECT kind, features, pred_mean, realized_plan FROM brain_opps WHERE realized_plan IS NOT "
+                        "NULL AND pred_mean IS NOT NULL AND evaluated_at>=?", (int(now - WINDOW_S),)).fetchall()
+    by: dict[str, tuple[list, list]] = {}
+    for kind, f, pm, r in rows:
+        if kind == "signal" and '"sig": "v2"' in (f or ""):
+            kind = "signal_v2"
+        xs, ys = by.setdefault(kind, ([], []))
+        xs.append(pm)
+        ys.append(r)
+    return {k: (len(xs), rank_corr(xs, ys)) for k, (xs, ys) in by.items()}
+
+
 def keys(kind: str, feats: dict) -> list[str]:
     out = [kind]
     for k, v in sorted(feats.items()):
@@ -130,6 +174,7 @@ class Book:
         self._at = -1e18
         self.live: set[str] = set()
         self.trust: dict[str, float] = {}
+        self.disc: dict[str, tuple[int, float | None]] = {}
 
     def refresh(self) -> set[str]:
         now = self.clock()
@@ -148,12 +193,27 @@ class Book:
                 r["released_at"] = int(now)
             if p.get("released") and not r["released"]:
                 r["demoted_at"] = int(now)
+        try:
+            self.disc = discrimination(self.conn, now)
+        except Exception:
+            pass
         self.live = {k for k, v in res.items() if v["released"]}
         self.trust = {k: v["trust"] for k, v in res.items()}
         rows = sorted(res.values(), key=lambda r: -r["trust"])
         store.put(self.conn, "pockets", {"at": int(now), "live": sorted(self.live), "checked": len(res),
-                                         "rows": rows[:300]})
+                                         "rows": rows[:300],
+                                         "discrimination": {k: {"n": n, "rank_corr": None if rc is None else round(rc, 4)}
+                                                            for k, (n, rc) in self.disc.items()}})
         return self.live
+
+    def sharpness(self, kind: str) -> float:
+        """0..1: how far the brain's predictions for this source have shown they separate winners from losers (rank
+        correlation out of sample, full at DISC_FULL). Until there are DISC_MIN_N results it is 0."""
+        self.refresh()
+        n, rc = self.disc.get(kind, (0, None))
+        if n < DISC_MIN_N or rc is None:
+            return 0.0
+        return max(0.0, min(1.0, rc / DISC_FULL))
 
     def match(self, kind: str, feats: dict) -> tuple[str | None, float]:
         """(pattern, trust) of the most trusted pattern this opportunity belongs to; (None, 0.5) if none has data."""

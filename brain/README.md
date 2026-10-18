@@ -189,3 +189,14 @@ Das Hirn schreibt in jede Zeile zurück: `model`, `pred_mean`, `pred_sd`, `pred_
 (learn/perform/skip), Einsatz und Position, später `outcome_net` nach Kosten mit dem gewählten Plan (Rug −100 %),
 `outcomes` je Plan und `rug`. Rug-Prüfung vor jedem Kauf bleibt Pflicht. `BRAIN_POOL_TRADE=off` schaltet nur das
 Lesen ab.
+
+## Zweite Bremse: Trennschärfe je Quelle, Rug- und Pump-Ausstieg
+
+Der Einsatz gleitet nur dann über 3 % des Kontos, wenn zusätzlich die Vorhersagen dieser Quelle Gewinner von
+Verlierern trennen: Rangkorrelation Vorhersage gegen Ergebnis nach Kosten der letzten 7 Tage, ab 30 Fällen, voll ab
+0,2 (`pockets.discrimination`, in `brain_state.pockets.discrimination`). Heute (−0,01) bleibt jede Quelle beim kleinen
+Einsatz, egal wie gut ein Muster aussieht.
+
+Ausstieg vor dem Preis-Stopp: fällt die Liquidität (Curve-Coins: Tiefe der Bonding Curve, `curve_liq_usd`) 60 % unter
+den Kauf, verkauft das Hirn als „rug“. Meldet die Rug-Prüfung einen bestätigten inszenierten Pump (Check `staged`,
+`data.pattern`), verkauft es 10 % unter dem Hoch oder 15 min nach dem Hoch („staged“), in allen Konten.
