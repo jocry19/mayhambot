@@ -1257,6 +1257,9 @@ def test_curve_coins_are_marked_and_exited_at_the_live_curve_price(conn, s):
     assert t.manage_curves() == 1
     p = conn.execute("SELECT * FROM brain_positions").fetchone()
     assert p["exit_reason"] == "stop" and p["pnl_pct"] < -0.4
+    import dataclasses
+    deep = dataclasses.replace(mk.snaps[MINT], curve_liq_usd=40_000)
+    assert t.mark({MINT: deep})[MINT].curve_liq_usd == pytest.approx(40_000 * 0.25 ** 0.5)
     curve["complete"] = True  # migrated: the curve price is no market any more
     assert t.mark({MINT: mk.snaps[MINT]})[MINT].price_sol == 2e-6
 
