@@ -2432,7 +2432,9 @@ def _brain_honest(conn):
 
 
 BRAIN_POCKET_RULE = {"min_n": 100, "conf": 0.95, "last_n": 50, "window_days": 7}
-BRAIN_SOURCE = {"whale": "Wal-Kauf", "signal": "Signal", "signal_v2": "Signal v2", "launch": "Launch", "market": "Markt"}
+BRAIN_SOURCE = {"whale": "Wal-Kauf", "signal": "Signal", "signal_v2": "Signal v2", "launch": "Launch", "market": "Markt",
+                "sniper": "Sniper", "copytrade": "Copy-Trading", "signals": "Signale", "signals_v2": "Signale v2",
+                "wallet_model": "Wallet-Modell", "strategy": "Strategie"}
 
 
 def _brain_pockets(conn, st):
@@ -2451,7 +2453,7 @@ def _brain_pockets(conn, st):
         if not isinstance(x, dict) or not x.get("key"):
             continue
         row = {k: x.get(k) for k in ("key", "label", "source", "n", "n_first_half", "n_second_half", "released_at", "demoted_at")}
-        for k in ("mean", "lower95", "mean_first_half", "lower95_first_half", "mean_second_half", "lower95_second_half", "last50_mean"):
+        for k in ("trust", "mean", "lower95", "mean_first_half", "lower95_first_half", "mean_second_half", "lower95_second_half", "last50_mean"):
             row[k] = _f(x.get(k), 4)
         row["released"] = bool(x["released"]) if x.get("released") is not None else None
         row["label"] = row["label"] or row["key"]
@@ -2459,7 +2461,8 @@ def _brain_pockets(conn, st):
         row["reason"] = _redact(str(x.get("reason") or ""))[:300]
         out.append(row)
     rule = {**BRAIN_POCKET_RULE, **(raw.get("rule") if isinstance(raw.get("rule"), dict) else {})}
-    return {"rule": rule, "at": raw.get("at"), "rows": out[:300], "released": sum(1 for r in out if r["released"]),
+    out.sort(key=lambda r: -(r["trust"] if r["trust"] is not None else -1))
+    return {"rule": rule, "at": raw.get("at"), "rows": out[:300], "trusted": sum(1 for r in out if (r["trust"] or 0) >= 0.8), "released": sum(1 for r in out if r["released"]),
             "positive": sum(1 for r in out if (r["lower95"] or 0) > 0)}
 
 
@@ -2519,13 +2522,19 @@ def _brain_learning(conn, now, days):
     day = lambda ts: int(ts) - int(ts) % 86400  # noqa: E731
     cap = lambda y: min(BRAIN_CAL_CAP[1], max(BRAIN_CAL_CAP[0], y))  # noqa: E731
     out = {lo + k * 86400: {"ts": lo + k * 86400, "n_opps": 0, "n_scored": 0} for k in range(BRAIN_DAYS)}
-    for r in rows(conn, "SELECT ts / 86400 * 86400 d, COUNT(*) n FROM brain_opps WHERE ts>=? GROUP BY d", (lo,)):
+    # the shared table of every source once it has rows (brain/opportunities, plan/gelegenheiten_schema.md), else brain's own
+    shared = has(conn, "opportunities") and scalar(conn, "SELECT COUNT(*) FROM opportunities WHERE ts>=?", (lo,))
+    seen_t = "opportunities" if shared else "brain_opps"
+    for r in rows(conn, f"SELECT ts / 86400 * 86400 d, COUNT(*) n FROM {seen_t} WHERE ts>=? GROUP BY d", (lo,)):
         if r["d"] in out:
             out[r["d"]]["n_opps"] = r["n"]
+    scored = shared and scalar(conn, "SELECT COUNT(*) FROM opportunities WHERE ts>=? AND pred_mean IS NOT NULL "
+                                     "AND outcome_net IS NOT NULL", (lo,))
+    q = ("SELECT ts, pred_mean p, outcome_net y FROM opportunities" if scored else
+         "SELECT ts, pred_mean p, realized_plan y FROM brain_opps")
     pairs = defaultdict(list)
-    for r in rows(conn, "SELECT ts, pred_mean, realized_plan FROM brain_opps WHERE ts>=? AND pred_mean IS NOT NULL "
-                        "AND realized_plan IS NOT NULL", (lo,)):
-        pairs[day(r["ts"])].append((float(r["pred_mean"]), cap(float(r["realized_plan"]))))
+    for r in rows(conn, q + " WHERE ts>=? AND pred_mean IS NOT NULL AND y IS NOT NULL", (lo,)):
+        pairs[day(r["ts"])].append((float(r["p"]), cap(float(r["y"]))))
     for d, ps in pairs.items():
         if d in out:
             _, gap = _calibration(ps)
@@ -2552,7 +2561,30 @@ def _brain_learning(conn, now, days):
     last = next((x for x in reversed(series) if x.get("rank_ic") is not None), None)
     return {"days": series, "deciles": deciles, "cal_gap_7d": _f(gap, 4), "n_7d": len(recent),
             "rank_ic": last.get("rank_ic") if last else None, "opps_goal": BRAIN_OPPS_GOAL,
-            "cap": list(BRAIN_CAL_CAP), "source": "brain_opps"}
+            "cap": list(BRAIN_CAL_CAP), "source": "opportunities" if scored else "brain_opps", "seen_source": seen_t,
+            "sources": _opp_sources(conn, now) if shared else []}
+
+
+def _opp_sources(conn, now):
+    """Per reporting source in the shared table: opportunities seen (24 h, 7 days), how many have an honest result,
+    their mean net after costs (capped as above), the source's own result and how many brain took."""
+    cap = lambda y: min(BRAIN_CAL_CAP[1], max(BRAIN_CAL_CAP[0], y))  # noqa: E731
+    out = {}
+    for r in rows(conn, "SELECT source, ts, outcome_net, source_result, decision FROM opportunities WHERE ts>=?",
+                  (now - 7 * 86400,)):
+        x = out.setdefault(r["source"], {"source": r["source"], "n_7d": 0, "n_24h": 0, "n_eval": 0, "taken": 0, "_y": [], "_s": []})
+        x["n_7d"] += 1
+        x["n_24h"] += r["ts"] >= now - 86400
+        x["taken"] += r["decision"] in ("learn", "perform")
+        if r["outcome_net"] is not None:
+            x["n_eval"] += 1
+            x["_y"].append(cap(float(r["outcome_net"])))
+        if r["source_result"] is not None:
+            x["_s"].append(cap(float(r["source_result"])))
+    for x in out.values():
+        x["label"] = BRAIN_SOURCE.get(x["source"], x["source"])
+        x["mean_net"], x["mean_source"], x["n_source"] = _f(_mean(x.pop("_y")), 4), _f(_mean(x["_s"]), 4), len(x.pop("_s"))
+    return sorted(out.values(), key=lambda x: -x["n_7d"])
 
 
 def brain_view(conn, kind=None, show="all", limit=60, now=None):

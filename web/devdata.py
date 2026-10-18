@@ -205,13 +205,36 @@ def _brain_demo(conn, r, tokens, now):
         lo = m - abs(r.gauss(0.04, 0.01)) * (100 / n_) ** 0.5
         h1, h2 = m + r.gauss(0, 0.02), m + r.gauss(0, 0.02)
         rel = n_ >= 100 and lo > 0 and h1 - 0.03 > 0 and h2 - 0.03 > 0
-        pk.append({"key": key, "label": label, "source": src, "n": n_, "mean": m, "lower95": lo, "n_first_half": n_ // 2, "mean_first_half": h1,
+        se = (m - lo) / 1.96
+        tr = 0.5 * (1 + math.erf(m / se / 2 ** 0.5)) if se > 0 else 0.5
+        pk.append({"key": key, "label": label, "source": src, "n": n_, "mean": m, "lower95": lo, "trust": round(tr, 4), "n_first_half": n_ // 2, "mean_first_half": h1,
                    "lower95_first_half": h1 - 0.03, "n_second_half": n_ - n_ // 2, "mean_second_half": h2, "lower95_second_half": h2 - 0.03,
                    "last50_mean": m + r.gauss(0, 0.02), "released": rel, "released_at": now - 7200 if rel else None, "demoted_at": None,
                    "reason": "Untergrenze in beiden Hälften über 0 und die letzten 50 im Plus." if rel else
                    ("Noch keine 100 Fälle." if n_ < 100 else "Untergrenze nicht in beiden Hälften über 0.")})
-    pk.sort(key=lambda x: -x["lower95"])
+    pk.sort(key=lambda x: -x["trust"])
     store.put(conn, "pockets", {"rule": {"min_n": 100, "conf": 0.95, "last_n": 50, "window_days": 7}, "at": now - 240, "pockets": pk})
+    # the shared opportunity table of every source (brain/opportunities.py), the model getting better day by day
+    from brain import opportunities as bo
+
+    bo.ensure(conn)
+    srcs = (("sniper", 900), ("copytrade", 250), ("signals", 120), ("signals_v2", 60), ("market", 300), ("whale", 80))
+    opp = []
+    for d in range(7, -1, -1):
+        skill = 0.02 + 0.03 * (7 - d)  # how much of the outcome the prediction knows on that day
+        for src, per_day in srcs:
+            for k in range(int(per_day * r.uniform(0.7, 1.1)) if d else per_day // 6):
+                ts = now - d * 86400 - r.randint(0, 86000 if d else 4 * 3600)
+                y = max(-1.0, r.gauss(-0.04, 0.25)) if r.random() > 0.04 else -1.0
+                pred = skill * y + (1 - skill) * r.gauss(-0.04, 0.12)
+                done = ts < now - 5 * 3600
+                dec = "perform" if pred > 0.06 else "learn" if pred + r.gauss(0, 0.1) > 0 else "skip"
+                opp.append((src, f"{src}-{d}-{k}", f"Demo{src}{d}{k}", ts, ts - r.randint(1, 30), ts, json.dumps({"mc_usd": r.randint(5000, 400000)}),
+                            r.choice(("took", "passed", "passed")), round(pred, 4), round(abs(r.gauss(0.1, 0.03)), 4), dec,
+                            ts + 600 * 25 if done else None, round(y, 4) if done else None,
+                            round(y + r.gauss(0, 0.05), 4) if src == "sniper" and done else None))
+    conn.executemany("INSERT OR IGNORE INTO opportunities(source, ref, mint, ts, src_ts, reported_at, features, source_action, "
+                     "pred_mean, pred_sd, decision, evaluated_at, outcome_net, source_result) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", opp)
     store.put(conn, "regime_history", [{"at": now - 3 * 86400 + 5000, "n": 31, "err": -0.042, "z": -3.1},
                                        {"at": now - 20000, "n": 27, "err": 0.035, "z": 2.7}])
     conn.executemany("INSERT OR REPLACE INTO brain_equity(ts, balance_sol, open_value_sol, equity_sol) VALUES (?,?,?,?)",

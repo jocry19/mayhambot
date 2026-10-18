@@ -207,22 +207,24 @@ function Pockets({ p }) {
     : x.demoted_at ? <span className="badge bad" title={`zurückgestuft ${dt(x.demoted_at)}`}>zurückgestuft</span>
       : (x.n || 0) < (r.min_n || 100) ? <span className="badge">sammelt</span> : <span className="badge warn">nicht frei</span>);
   return (
-    <Card flush title="Muster" sub={`Verteilung des Netto-Ergebnisses je Muster und Quelle nach Kosten${r.window_days ? ` über ${n(r.window_days)} Tage` : ""}: Schätzung und ${pct(r.conf ?? 0.95)}-Untergrenze, getrennt nach älterer und neuerer Hälfte. Kein Tor mehr: das Modell lernt aus allen Fällen, wenig Wissen heißt kleiner Einsatz.${p.at ? ` Stand ${ago(p.at)}.` : ""}`}
-      actions={<span className="dim" style={{ fontSize: 12 }}>{n(p.rows?.length)} Muster · {n(p.positive)} mit Untergrenze &gt; 0</span>}>
-      <Table rows={p.rows} rowKey={(x) => x.key} initialSort={{ k: "lower95", d: "desc" }}
-        empty="Noch keine Muster berechnet (der Entscheider rechnet sie alle 10 Minuten)"
-        expand={(x) => <div className="col" style={{ gap: 4 }}><span>{x.reason || "keine Begründung"}</span>
+    <Card flush title="Muster" sub={`Verteilung des Netto-Ergebnisses je Muster und Quelle nach Kosten${r.window_days ? ` über ${n(r.window_days)} Tage` : ""}: Schätzung und ${pct(r.conf ?? 0.95)}-Untergrenze, getrennt nach älterer und neuerer Hälfte. Vertrauen = Wahrscheinlichkeit, dass der Schnitt über 0 liegt; der Einsatz gleitet damit, ein Tor gibt es nicht mehr.${p.at ? ` Stand ${ago(p.at)}.` : ""}`}
+      actions={<span className="dim" style={{ fontSize: 12 }}>{n(p.rows?.length)} Muster · {n(p.trusted)} mit Vertrauen ≥ 80 %</span>}>
+      <Table rows={p.rows} rowKey={(x) => x.key} initialSort={{ k: "trust", d: "desc" }}
+        empty="Noch keine Muster berechnet (sie erscheinen ab 20 Fällen, der Entscheider rechnet alle 10 Minuten)"
+        expand={(x) => <div className="col" style={{ gap: 4 }}><span>{x.reason || "keine Begründung"}</span>{x.released != null && <span>Etikett: {status(x)}</span>}
           {x.released_at && <span className="dim">freigegeben {dt(x.released_at)}</span>}{x.demoted_at && <span className="dim">zurückgestuft {dt(x.demoted_at)}</span>}
           <span className="dim mono">{x.key}</span></div>}
         cols={[
           { k: "label", l: "Muster", fmt: (x) => <span><b>{x.label}</b> <span className="dim">{x.source_label}</span></span> },
+          { k: "trust", l: "Vertrauen", r: true, fmt: (x) => (x.trust == null ? <span className="dim">–</span>
+            : <span className="row" style={{ gap: 8, justifyContent: "flex-end" }} title="Wahrscheinlichkeit, dass der Schnitt nach Kosten über 0 liegt (neuere Hälfte doppelt gewichtet); der Einsatz gleitet damit">
+              <span style={{ width: 56, height: 6, borderRadius: 3, background: "var(--border)", overflow: "hidden", display: "inline-block" }}><span style={{ display: "block", height: "100%", width: `${x.trust * 100}%`, background: "var(--series-1)" }} /></span><b className={x.trust >= 0.8 ? "up" : x.trust < 0.5 ? "down" : ""}>{pct(x.trust, 0)}</b></span>) },
           { k: "n", l: "Fälle", r: true, fmt: (x) => n(x.n) },
           { k: "mean", l: "Ø netto", r: true, fmt: (x) => <b className={sign(x.mean)}>{pctSigned(x.mean, 1)}</b> },
           { k: "lower95", l: "Untergrenze 95 %", r: true, fmt: (x) => <span className={x.lower95 > 0 ? "up b" : "dim"}>{pctSigned(x.lower95, 1)}</span> },
           { k: "mean_first_half", l: "1. Hälfte", r: true, fmt: (x) => halfCell(x.mean_first_half, x.lower95_first_half, x.n_first_half) },
           { k: "mean_second_half", l: "2. Hälfte", r: true, fmt: (x) => halfCell(x.mean_second_half, x.lower95_second_half, x.n_second_half) },
           { k: "last50_mean", l: `Letzte ${n(r.last_n)}`, r: true, fmt: (x) => <span className={sign(x.last50_mean)}>{pctSigned(x.last50_mean, 1)}</span> },
-          ...(p.rows?.some((x) => x.released != null) ? [{ k: "released", l: "Status", fmt: status }] : []),
         ]} />
     </Card>
   );
@@ -291,7 +293,7 @@ function Learning({ L, days }) {
   const lastTr = tr[tr.length - 1];
   const dl = (x) => dayLabel(x.ts);
   return (
-    <Card title="Lernkurve" sub={`Wird der Entscheider besser? Jede Zahl vergleicht die Vorhersage zum Zeitpunkt der Entscheidung mit dem später gemessenen Ergebnis, also außerhalb der Trainingsdaten. Quelle: ${L.source === "brain_opps" ? "Gelegenheiten des Entscheiders (bis die gemeinsame Tabelle aller Quellen steht)" : L.source}.`}>
+    <Card title="Lernkurve" sub={`Wird der Entscheider besser? Jede Zahl vergleicht die Vorhersage zum Zeitpunkt der Entscheidung mit dem später gemessenen Ergebnis, also außerhalb der Trainingsdaten. Quelle: ${L.source === "opportunities" ? "gemeinsame Gelegenheits-Tabelle aller Quellen" : L.seen_source === "opportunities" ? "Vorhersagen des Entscheiders (die gemeinsame Tabelle hat noch keine bewerteten Vorhersagen)" : "Gelegenheiten des Entscheiders"}.`}>
       <div className="tiles wrap-sub" style={{ marginBottom: 12 }}>
         <Tile label="Rangkorrelation" value={L.rank_ic == null ? "–" : n(L.rank_ic, 2)} cls={sign(L.rank_ic)}
           sub="Vorhersage gegen Ergebnis, letzter Tag mit ≥ 10 Fällen; 0 = rät, 1 = perfekte Reihenfolge" />
@@ -353,6 +355,21 @@ function Learning({ L, days }) {
           <div className="legend-row">{["gesehen", "bewertet"].map((l, i) => <span key={l}><i style={{ background: `var(--series-${i + 1})` }} />{l}</span>)}</div>
         </div>
       </div>
+      {L.sources?.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div className="help">Gelegenheiten je Quelle, letzte 7 Tage (Netto nach Kosten, ehrlich nachgespielt, Rug = −100 %)</div>
+          <Table rows={L.sources} rowKey={(x) => x.source} initialSort={{ k: "n_7d", d: "desc" }}
+            cols={[
+              { k: "label", l: "Quelle", fmt: (x) => <b>{x.label}</b> },
+              { k: "n_24h", l: "24 h", r: true, fmt: (x) => n(x.n_24h) },
+              { k: "n_7d", l: "7 Tage", r: true, fmt: (x) => n(x.n_7d) },
+              { k: "n_eval", l: "mit Ergebnis", r: true, fmt: (x) => n(x.n_eval) },
+              { k: "mean_net", l: "Ø netto", r: true, fmt: (x) => <b className={sign(x.mean_net)}>{pctSigned(x.mean_net, 1)}</b> },
+              { k: "mean_source", l: "eigene Messung", r: true, fmt: (x) => (x.n_source ? <span className={sign(x.mean_source)} title={`${n(x.n_source)} Fälle, von der Quelle selbst gemessen`}>{pctSigned(x.mean_source, 1)}</span> : <span className="dim">–</span>) },
+              { k: "taken", l: "gekauft", r: true, fmt: (x) => n(x.taken) },
+            ]} />
+        </div>
+      )}
     </Card>
   );
 }
