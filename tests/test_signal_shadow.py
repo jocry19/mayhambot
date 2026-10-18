@@ -61,3 +61,18 @@ def test_momentum_and_venue_features_recorded(tmp_path):
     g = shadow.groups(c.execute("SELECT * FROM signal_shadow").fetchall())
     assert g["dex pumpswap"]["n"] == 1 and g["dip >= 20 % in 15 min before"]["n"] == 1
     assert g["txns 5 min >= 2x hour pace"]["n"] == 1
+
+
+def test_every_candidate_is_an_opportunity_for_the_brain(tmp_path):
+    import json
+    c = db.connect(str(tmp_path / "o.db"))
+    c.execute("INSERT INTO tokens(mint, symbol, dex, mcap_usd, price_change_m5) VALUES ('O','OPP','pumpswap',8e5,6.5)")
+    c.commit()
+    m = dict(entities=1, net_usd=300, net_sol=2.0, score=35, liquidity_usd=40000, safety=dict(risk=20, factor=1.0))
+    assert shadow.record(c, "O", "few_entities", m, 1.0, NOW)
+    shadow.record(c, "O", "no_smart", dict(entities=0, smart_buyers=0, net_usd=0), 1.0, NOW)
+    rows = c.execute("SELECT source, source_reason, source_action, features FROM opportunities ORDER BY id").fetchall()
+    assert [(r[0], r[1], r[2]) for r in rows] == [("signals", "few_entities", "passed"), ("signals", "no_smart", "passed")]
+    f = json.loads(rows[0][3])
+    assert f["wallets_n"] == 1 and f["inflow_usd"] == 300 and f["dex"] == "pumpswap" and f["pc_5m"] == 6.5
+    assert f["risk"] == 20 and f["signals.reason"] == "few_entities"

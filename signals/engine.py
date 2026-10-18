@@ -694,6 +694,8 @@ def evaluate(conn, mints, cfg=settings, now=None):
              lvk["target"], lvk["stop"], now - m["smart_first_ts"] if m.get("smart_first_ts") else None,
              now - m["smart_last_ts"] if m.get("smart_last_ts") else None, kind))
         new.append(conn.execute("SELECT * FROM signals WHERE id=?", (cur.lastrowid,)).fetchone())
+        shadow.report_opportunity(conn, "signals", f"signal:{cur.lastrowid}", mint, now, tok["price_usd"] if tok else None,
+                                  m, None, "alerted", kind)
     conn.commit()
     f["model"] = model_guard.stats()
     model_guard.check(conn)

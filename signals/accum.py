@@ -285,6 +285,9 @@ def evaluate(conn, cfg=settings, now=None):
              json.dumps(sp.get("reasons") or [], ensure_ascii=False), reason, call_no, lv["target"], lv["stop"],
              now - m["first_ts"], now - m["last_ts"], KIND))
         new.append(conn.execute("SELECT * FROM signals WHERE id=?", (cur.lastrowid,)).fetchone())
+        from signals import shadow
+        shadow.report_opportunity(conn, "signals_v2", f"signal:{cur.lastrowid}", mint, now, tok["price_usd"], m, None,
+                                  "alerted", KIND)
         log.info("signal v2 %s: %d holders, net $%.0f over %.0f min", tok["symbol"], m["holders"], m["net_usd"],
                  m["span_min"])
     conn.commit()

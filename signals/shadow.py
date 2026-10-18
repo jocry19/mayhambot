@@ -13,17 +13,69 @@ it earns its keep.
 """
 import argparse
 import json
+import logging
 import sqlite3
 import time
 
 from signals.backtest import DEAD_RET, confirmed, price_near
 
+log = logging.getLogger("mayhambot.signals.shadow")
 EVERY_S = 3600
 ENTRY_DELAY_S = 60
 DEAD_LIQ_USD = 1000.0
 SKIP = ()  # no_smart kept too: the big runners had at most one smart buyer (winner study 17.10.)
 KEEP_DAYS = 14
 
+
+
+def _market(conn, mint, price, now):
+    """tokens row (DexScreener) + the own 15 min move before now."""
+    t = conn.execute("SELECT dex, mcap_usd, pair_created_at, price_change_m5, price_change_h1, txns_m5, txns_h1, "
+                     "volume_h1, symbol FROM tokens WHERE mint=?", (mint,)).fetchone()
+    before = price_near(_points(conn, mint, now - 1500, now - 300), now - 900, 300)
+    created = t[2] if t else None
+    if created and created > now * 10:  # DexScreener gives milliseconds
+        created /= 1000
+    return t, before, created
+
+
+def report_opportunity(conn, source, ref, mint, now, price, m, reason=None, action="passed", kind="v1", mkt=None):
+    """One row in the brain's shared opportunities table (brain.opportunities.report): raw values under the shared
+    names, everything else as signals.<name>; the funnel's verdict is a feature (source_reason), not a gate."""
+    try:
+        from brain.opportunities import report
+    except Exception:  # noqa: BLE001 - brain/ absent
+        return False
+    t, before, created = mkt or _market(conn, mint, price, now)
+    sp = m.get("safety") or {}
+    try:
+        from signals import plan
+        staged = plan._staged(conn, mint)
+    except Exception:  # noqa: BLE001
+        staged = None
+    f = {"wallets_n": m.get("entities", m.get("smart_buyers")), "inflow_usd": m.get("net_usd"),
+         "inflow_sol": m.get("net_sol"), "mc_usd": t[1] if t else None, "liq_usd": m.get("liquidity_usd"),
+         "dex": t[0] if t else None, "pc_5m": t[3] if t else None, "pc_1h": t[4] if t else None,
+         "risk": sp.get("risk"), "staged": staged, "age_s": now - created if created else None,
+         "signals.kind": kind, "signals.reason": reason or action, "signals.entities": m.get("entities"),
+         "signals.move_15m": price / before - 1 if before and price else None, "signals.score": m.get("score"),
+         "signals.score_raw": m.get("score_raw"), "signals.min_score": m.get("min_score"),
+         "signals.min_net": m.get("min_net"), "signals.n_ultra": m.get("n_ultra"), "signals.n_smart": m.get("n_smart"),
+         "signals.sellers": m.get("sellers", m.get("n_sellers")), "signals.avg_quality": m.get("avg_quality"),
+         "signals.model_exp_net": m.get("model_exp_net"), "signals.prediction": m.get("prediction"),
+         "signals.safety_factor": sp.get("factor"), "signals.wash": bool(sp.get("red_flags")),
+         "signals.txns_m5": t[5] if t else None, "signals.txns_h1": t[6] if t else None,
+         "signals.volume_h1": t[7] if t else None, "signals.holders": m.get("holders"),
+         "signals.hold_share": m.get("share"), "signals.span_min": m.get("span_min"),
+         "signals.receivers": m.get("n_receivers"),
+         "signals.lag_last_s": now - m["smart_last_ts"] if m.get("smart_last_ts") else None}
+    try:
+        return report(conn, source, ref, mint, now, f, symbol=(t[8] if t else "") or "", price_usd=price,
+                      mcap_usd=t[1] if t else None, liq_usd=m.get("liquidity_usd"), source_score=m.get("score"),
+                      source_action=action, source_reason=reason)
+    except Exception as e:  # noqa: BLE001 - reporting must never stop signals
+        log.debug("opportunity report %s failed: %s", mint[:6], e)
+        return False
 
 
 def record(conn, mint, reason, m, price, now, kind="v1"):
@@ -33,13 +85,9 @@ def record(conn, mint, reason, m, price, now, kind="v1"):
                     (mint, reason, kind, now - EVERY_S)).fetchone():
         return False
     sp = m.get("safety") or {}
-    t = conn.execute("SELECT dex, mcap_usd, pair_created_at, price_change_m5, price_change_h1, txns_m5, txns_h1, "
-                     "volume_h1 FROM tokens WHERE mint=?", (mint,)).fetchone()
-    before = price_near(_points(conn, mint, now - 1500, now - 300), now - 900, 300)
-    created = t[2] if t else None
-    if created and created > now * 10:  # DexScreener gives milliseconds
-        created /= 1000
-    conn.execute("INSERT INTO signal_shadow(ts, mint, kind, reason, entities, net_usd, score, min_net, min_score, "
+    mkt = _market(conn, mint, price, now)
+    t, before, created = mkt
+    cur = conn.execute("INSERT INTO signal_shadow(ts, mint, kind, reason, entities, net_usd, score, min_net, min_score, "
                  "safety_risk, liquidity_usd, price_usd, model_exp_net, dex, mcap_usd, age_min, pc_m5, pc_h1, txns_m5, "
                  "txns_h1, volume_h1, ret_15m_before) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (now, mint, kind, reason, m.get("entities", m.get("smart_buyers")), m.get("net_usd"), m.get("score"),
@@ -48,6 +96,8 @@ def record(conn, mint, reason, m, price, now, kind="v1"):
                   (now - created) / 60 if created else None, t[3] if t else None, t[4] if t else None,
                   t[5] if t else None, t[6] if t else None, t[7] if t else None,
                   price / before - 1 if before else None))
+    report_opportunity(conn, "signals_v2" if kind == "v2" else "signals", f"shadow:{cur.lastrowid}", mint, now, price, m,
+                       reason, "passed", kind, mkt)
     return True
 
 
