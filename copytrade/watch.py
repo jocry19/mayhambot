@@ -25,6 +25,8 @@ ENTRY_LOCK = threading.Lock()
 
 
 def handle_swap(strat, sw) -> None:
+    if sw.signature in tracker.B0_REPEAT:
+        return  # a block-0 bot buying the same coin again: stored and learned from, not decided again
     if sw.side == "buy":
         with ENTRY_LOCK:
             strat.on_whale_buy(sw)
@@ -34,6 +36,8 @@ def handle_swap(strat, sw) -> None:
         strat.on_whale_sell(sw)
 
 
+HELIUS_NOISY = 60  # notifications per wallet in 10 min on the Helius stream before it is benched
+HELIUS_BENCH_S = 1800
 HELIUS_WS_CREDITS_PER_100KB = 2.0  # Helius billing for standard websockets (helius.dev/docs/billing/credits, 10/2026)
 
 
@@ -144,6 +148,7 @@ class Watcher:
         self.skipped_catchups = 0
         self.lean = 0  # notifications without a swap venue: read on the public pool only
         self._caught: dict[str, float] = {}
+        self.benched: dict[str, float] = {}  # wallet -> off the Helius stream until
         self._kicked_at: dict[str, float] = {}
         self._last_watchdog = 0.0
         self._last_verify = 0.0
@@ -168,11 +173,32 @@ class Watcher:
             st.stop()
 
     def _for(self, st, wallets) -> list[str]:
-        """The Helius stream bills every byte: never the block-0 launch bots (their flood stays on the free
-        public streams) and nothing while paused."""
+        """The Helius stream bills every byte: nothing while paused, and no wallet that is benched for flooding
+        it (block-0 launch bots ride it like everyone else until they do)."""
         if st is not self.helius:
             return list(wallets)
-        return [] if self.helius_paused else [w for w in wallets if w not in tracker.BLOCK0]
+        now = time.time()
+        return [] if self.helius_paused else [w for w in wallets if self.benched.get(w, 0) <= now]
+
+    def bench_noisy(self, now: float | None = None) -> list[str]:
+        """Wallets with more than HELIUS_NOISY notifications on the Helius stream in 10 minutes (a bot repeating
+        the same buy hundreds of times, 18.10.) leave it for 30 minutes; the free public streams keep them."""
+        h = self.helius
+        if h is None:
+            return []
+        now = now or time.time()
+        n = collections.Counter(w for t, w in list(h.notes) if t > now - 600)
+        new = [w for w, k in n.items() if k > HELIUS_NOISY and self.benched.get(w, 0) <= now]
+        for w in new:
+            self.benched[w] = now + HELIUS_BENCH_S
+            log.info("wallet %s off the Helius stream for %d min: %d notifications in 10 min", w[:6],
+                     HELIUS_BENCH_S // 60, n[w])
+        back = [w for w, until in self.benched.items() if until <= now]
+        for w in back:
+            del self.benched[w]
+        if new or back:
+            h.set_wallets(self._for(h, self._wallets))
+        return new
 
     def set_wallets(self, wallets) -> None:
         self._wallets = list(wallets)
@@ -230,6 +256,7 @@ class Watcher:
                      + (", dropped " + ", ".join(f"{k} {n}" for k, n in self.events.dropped.most_common())
                         if self.events.dropped else "")
                      + (f", Helius stream {self.helius.bytes / 1e6:.1f} MB = {self.helius_credits:.0f} credits"
+                        + (f", {len(self.benched)} noisy wallets benched" if self.benched else "")
                         + (f" (paused: {self.helius_paused})" if self.helius_paused else "") if self.helius else ""))
         v = tracker.VERIFY
         why = ", ".join(f"{k} {n}" for k, n in chain.LOG_STATS.most_common())
@@ -273,6 +300,7 @@ class Watcher:
                 if time.time() - self._last_watchdog > 30:
                     self._last_watchdog = time.time()
                     self.watchdog()
+                    self.bench_noisy()
                     self.meter()
                 continue
             self._decide(strat, sw)

@@ -8,6 +8,7 @@ Wallets whose history proves bad (enough samples, negative score) are deactivate
 """
 from __future__ import annotations
 
+import collections
 import logging
 import threading
 import time
@@ -67,9 +68,21 @@ def record_detection(conn, sw: chain.Swap, source: str, notified_at: float | Non
     now = time.time()
     lag = max(0.0, now - sw.block_time) if sw.block_time else float("nan")
     LAG.append((source, sw.side, lag, now))
+    repeat = False
     if sw.wallet in BLOCK0:
-        LAG.append(("block0", sw.side, lag, now))  # the group's own lag (its edge is the first seconds)
-    opportunity.emit(conn, sw, source, lag, notified_at, sol_usd)  # the shared opportunity table (plan 18.10.)
+        if sw.side == "buy":
+            last_at, last_sig = _B0_LAST.get((sw.wallet, sw.mint), (0.0, ""))
+            _B0_LAST[(sw.wallet, sw.mint)] = (now, sw.signature)
+            # the same bot buying the same coin again (437x, 18.10.); the same signature twice is no repeat
+            repeat = sw.signature != last_sig and now - last_at < B0_REPEAT_S
+            if repeat:
+                B0_REPEAT[sw.signature] = None
+                while len(B0_REPEAT) > 5000:
+                    B0_REPEAT.popitem(last=False)
+        if not repeat:
+            LAG.append(("block0", sw.side, lag, now))  # the group's own lag (its edge is the first seconds)
+    if not repeat:
+        opportunity.emit(conn, sw, source, lag, notified_at, sol_usd)  # the shared opportunity table (plan 18.10.)
     try:
         usd = sol_usd or 0.0
         conn.execute("INSERT OR IGNORE INTO ct_detect(sig, wallet, side, source, block_ts, notified_at, detected_at,"
@@ -108,6 +121,9 @@ def load_manual(conn, s: Settings) -> int:
     return n
 
 
+B0_REPEAT_S = 1800  # a block-0 wallet's further buys of a coin within this window: no decision, no opportunity
+B0_REPEAT: "collections.OrderedDict[str, None]" = collections.OrderedDict()
+_B0_LAST: dict = {}
 BLOCK0: set[str] = set()  # resolved block-0 wallets (detection lag is reported for them separately)
 _BLOCK0_FOUND: dict[str, str] = {}  # pattern -> address (a search over all swaps runs at most hourly)
 _BLOCK0_TRIED = {"at": 0.0}

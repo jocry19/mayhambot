@@ -1011,6 +1011,8 @@ def test_buys_land_in_the_brains_opportunity_table(env):
 
     s, conn, ex, state = env
     opportunity.set_sink("auto")
+    tracker._B0_LAST.clear()
+    tracker.B0_REPEAT.clear()
     try:
         tracker.BLOCK0.add(W)
         sw = chain.Swap("sigQ", W, int(time.time()) - 4, "buy", "m", 1000.0, 0.005, 0.000005, dex="pump", mcap_sol=50.0)
@@ -1022,11 +1024,23 @@ def test_buys_land_in_the_brains_opportunity_table(env):
         assert f["dex"] == "pumpfun" and f["copytrade.block0"] is True and f["copytrade.group"] == "block0"
         assert f["mc_usd"] == 5000.0 and 3 < f["delay_s"] < 30 and f["copytrade.size_sol"] == 0.005
         # a buy the polling net found minutes later is history, not an opportunity: not sent
-        old = chain.Swap("sigOld", W, int(time.time()) - 900, "buy", "m", 1000.0, 0.005, 0.000005, dex="pump")
+        old = chain.Swap("sigOld", W, int(time.time()) - 900, "buy", "m2", 1000.0, 0.005, 0.000005, dex="pump")
         stale = opportunity.SKIPPED["stale"]
         tracker.record_detection(conn, old, "gap", sol_usd=100.0)
         assert opportunity.SKIPPED["stale"] == stale + 1
         assert conn.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0] == 1
+        # the same block-0 bot buying the same coin again: stored, but neither decided nor offered again
+        again = chain.Swap("sigQ2", W, int(time.time()) - 2, "buy", "m", 1000.0, 0.005, 0.000005, dex="pump")
+        tracker.record_detection(conn, again, "ws", sol_usd=100.0)
+        assert "sigQ2" in tracker.B0_REPEAT and "sigQ" not in tracker.B0_REPEAT
+        assert conn.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0] == 1
+        from copytrade import watch
+
+        class Strat:
+            def on_whale_buy(self, sw):
+                raise AssertionError("a repeat must not reach the strategy")
+
+        watch.handle_swap(Strat(), again)
     finally:
         tracker.BLOCK0.discard(W)
         opportunity.set_sink(None)
@@ -1067,7 +1081,7 @@ def test_whale_notifications_jump_ahead_and_venueless_traffic_is_never_read(monk
         watch.EventLanes().get(timeout=0.05)
 
 
-def test_block0_wallets_never_ride_the_paid_helius_stream(tmp_path, monkeypatch):
+def test_noisy_wallets_leave_the_paid_helius_stream_for_a_while(tmp_path, monkeypatch):
     from copytrade import watch
 
     B0 = "B0bot1111111111111111111111111111111111111"
@@ -1077,7 +1091,19 @@ def test_block0_wallets_never_ride_the_paid_helius_stream(tmp_path, monkeypatch)
     w.helius = w.streams[0].__class__(s, url="ws://helius", events=w.events, name="wallet-ws-helius")
     w.streams.append(w.helius)
     w.set_wallets([W, B0])
-    assert w.streams[0]._wanted == [W, B0] and w.helius._wanted == [W]
+    assert w.helius._wanted == [W, B0]  # block-0 rides Helius like everyone else
+    now = time.time()
+    for i in range(watch.HELIUS_NOISY + 1):
+        w.helius.notes.append((now - i, B0))
+    w.helius.notes.append((now, W))
+    assert w.bench_noisy(now) == [B0]
+    assert w.streams[0]._wanted == [W, B0] and w.helius._wanted == [W]  # the public stream keeps it
+    assert "1 noisy wallets benched" in w.status()
+    w.set_wallets([W, B0])
+    assert w.helius._wanted == [W]
+    w.helius.notes.clear()
+    w.bench_noisy(now + watch.HELIUS_BENCH_S + 1)
+    assert not w.benched
     w.helius_paused = "x"
     w.set_wallets([W, B0])
     assert w.helius._wanted == []
