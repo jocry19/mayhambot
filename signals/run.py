@@ -125,10 +125,10 @@ def fetch_trades(conn, watch, budget=None):
     return total
 
 
-# Backfill may take the paid lane only while more than this share of today's Helius credits is left (18.10.: at 0.2
-# it ate 3183 credits/day while 0 signals fired; the rest of the share is for live checks and the learning account).
-HELIUS_RESERVE = float(os.getenv("SIGNALS_HELIUS_RESERVE", 0.6))
-BACKFILL_REFRESH_S = int(float(os.getenv("BACKFILL_REFRESH_HOURS", 72)) * 3600)  # a wallet's history again after
+# Backfill may take the paid lane only while more than this share of today's Helius credits is left. 0 = always
+# (18.10.: the user watches the Helius quota himself; per-second limits and 429 handling stay in core/http.py).
+HELIUS_RESERVE = float(os.getenv("SIGNALS_HELIUS_RESERVE", 0))
+BACKFILL_REFRESH_S = int(float(os.getenv("BACKFILL_REFRESH_HOURS", 6)) * 3600)  # a wallet's history again after
 
 
 def helius_ok():
