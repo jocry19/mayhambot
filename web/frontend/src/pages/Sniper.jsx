@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { LoadBar } from "./System.jsx";
-import { EChart, baseOption, timeAxis, tipRow, valueAxis } from "../chart.jsx";
+import { EChart, baseOption, catAxis, timeAxis, tipRow, valueAxis } from "../chart.jsx";
 import { ago, dt, dur, n, pct, pctSigned, sign, sol, solSigned, usd, usePoll } from "../lib.js";
 import { Callout, Card, Delta, Empty, Icon, Seg, Table, Tabs, Tile } from "../ui.jsx";
 
@@ -99,6 +99,52 @@ function streamState(s) {
   if (s.source === "heartbeat") return s.connected ? ["verbunden", "up"] : ["Dienst läuft, Websocket getrennt", "down"];
   if (s.source === "stale") return ["Dienst steht", "down"];
   return ["Dienst läuft nicht", "down"];
+}
+
+const POOL_LABEL = { pump: "pump.fun", bonk: "bonk (LetsBonk)" };
+
+/** Stream coverage (plan 18.10.): share of launches with at least one trade at the decision and of migrations whose
+ *  trades we saw, against the 90 % goal; per hour, per pool, and live for the last hour from the service. */
+function Coverage({ c, live, hours }) {
+  if (!c) return null;
+  const tgt = c.target ?? 0.9;
+  const cls = (v) => (v == null ? "" : v >= tgt ? "up" : v >= tgt - 0.15 ? "warn-ink" : "down");
+  const hs = (c.hourly || []).filter((x) => x.launch_rate != null || x.migration_rate != null);
+  const hh = (ts) => { const d = new Date(ts * 1000); return `${String(d.getHours()).padStart(2, "0")}:00`; };
+  const pools = Object.entries(c.by_pool || {}).map(([k, v]) => ({ k, label: POOL_LABEL[k] || k, ...v }));
+  return (
+    <Card title="Datenstrom-Abdeckung" sub={`Sehen wir die Trades? Ziel: mindestens ${pct(tgt)} · ${hours < 168 ? `letzte ${hours} h` : "7 Tage"}, ohne GeckoTerminal-Pools`}>
+      <div className="tiles wrap-sub">
+        <Tile label="Launches mit Trade beim Entscheid" value={<span className={cls(c.launch_rate)}>{pct(c.launch_rate)}</span>}
+          sub={`${n(c.launches_with_trade)} von ${n(c.launches)}${live?.decide?.share != null ? ` · letzte Stunde live ${pct(live.decide.share)} aus ${n(live.decide.n)}` : ""}`} />
+        <Tile label="Migrationen mit Trades" value={<span className={cls(c.migration_rate)}>{pct(c.migration_rate)}</span>}
+          sub={`${n(c.migrations_with_trade)} von ${n(c.migrations)}${live?.migrate?.share != null ? ` · letzte Stunde live ${pct(live.migrate.share)} aus ${n(live.migrate.n)}` : ""}`} />
+      </div>
+      {hs.length > 1 ? (
+        <>
+          <EChart height={190} deps={[c]} ariaLabel="Abdeckung je Stunde"
+            build={(ch) => baseOption(ch, {
+              tooltip: { ...baseOption(ch).tooltip, formatter: (ps) => { const x = hs[ps[0].dataIndex]; return `<b>${hh(x.ts)}</b>${tipRow(ch.s[0], "Launches mit Trade", `${pct(x.launch_rate)} aus ${n(x.launches)}`)}${tipRow(ch.s[1], "Migrationen mit Trades", `${pct(x.migration_rate)} aus ${n(x.migrations)}`)}`; } },
+              xAxis: catAxis(ch, hs.map((x) => hh(x.ts)), { boundaryGap: false }), yAxis: valueAxis(ch, (v) => pct(v), { min: 0, max: 1 }),
+              series: [
+                { name: "Launches", type: "line", connectNulls: true, showSymbol: false, lineStyle: { width: 2, color: ch.s[0] }, itemStyle: { color: ch.s[0] }, data: hs.map((x) => x.launch_rate),
+                  markLine: { silent: true, symbol: "none", lineStyle: { color: ch.good, width: 1 }, label: { color: ch.good, formatter: `Ziel ${pct(tgt)}`, position: "insideEndTop" }, data: [{ yAxis: tgt }] } },
+                { name: "Migrationen", type: "line", connectNulls: true, symbolSize: 6, lineStyle: { width: 2, color: ch.s[1] }, itemStyle: { color: ch.s[1] }, data: hs.map((x) => x.migration_rate) },
+              ],
+            })} />
+          <div className="legend-row"><span><i style={{ background: "var(--series-1)" }} />Launches mit Trade</span><span><i style={{ background: "var(--series-2)" }} />Migrationen mit Trades</span></div>
+        </>
+      ) : <Empty>Noch zu wenige Stunden für eine Kurve</Empty>}
+      {pools.length > 1 && (
+        <div className="kvs" style={{ marginTop: 10 }}>
+          {pools.map((p) => (
+            <div key={p.k}><div className="dim">{p.label}</div><b className={cls(p.launch_rate)}>{pct(p.launch_rate)}</b>
+              <span className="dim"> von {n(p.launches)} Launches{p.migrations ? ` · Migrationen ${pct(p.migration_rate)} von ${n(p.migrations)}` : ""}</span></div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
 }
 
 function Stream({ s }) {
@@ -202,6 +248,7 @@ export default function Sniper() {
         <Tile label="Gewinner-Quote" value={pp.n_closed ? pct(pp.win_rate) : "–"} sub={pp.n_closed ? `bester ${pctSigned(pp.best_pct, 0)} · schlechtester ${pctSigned(pp.worst_pct, 0)}` : ""} />
       </div>
       <Stream s={d.stream} />
+      <Coverage c={st.coverage} live={d.stream?.coverage_1h} hours={hours} />
 
       <div className="grid g-wide-left">
         <Card title="Papier-Bilanz über Zeit" sub={`Start ${sol(d.paper_start_sol, 1)} plus Ergebnis jedes abgeschlossenen Trades · ${sol(d.settings.size_sol)} je Kauf`}>

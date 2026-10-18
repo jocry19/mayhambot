@@ -284,11 +284,15 @@ def test_sniper_page(demo, empty, capsys):
     c = _client(demo)
     d = c.get("/api/sniper?hours=24").json()
     assert d["available"] and d["launches"] and d["positions"] and d["balance_curve"]
-    assert {x["source_label"] for x in d["launches"]} <= {"pump.fun", "Migration", "neuer Pool"}
+    assert {x["source_label"] for x in d["launches"]} <= {"pump.fun", "pump.fun → migriert", "Migration", "neuer Pool"}
     ft = d["stats"]["filter_total"]
     assert ft["measured"] > 0 and abs(ft["without_sol"] - ((ft["with_sol"] or 0) + ft["skipped_sol"])) < 1e-3
     assert any(f.get("filter_value_sol") is not None for f in d["stats"]["filters"])
     assert 0.05 < ft["cost_pct"] < 0.3  # skipped launches pay the same round-trip costs as paper trades
+    cv = d["stats"]["coverage"]  # stream coverage against the 90 % goal (sniper.analytics.coverage)
+    assert cv["target"] == 0.9 and cv["launches"] > 0 and 0 <= cv["launch_rate"] <= 1 and cv["hourly"]
+    assert sum(p["launches"] for p in cv["by_pool"].values()) == cv["launches"]
+    assert d["stream"]["coverage_1h"]["decide"]["share"] is not None
     mint = d["launches"][0]["mint"]
     assert c.get(f"/api/sniper/{mint}").status_code == 200
     o = c.get("/api/overview").json()["sniper"]

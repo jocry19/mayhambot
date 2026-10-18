@@ -1657,7 +1657,8 @@ def sniper_stream(conn, now=None):
                    launches_per_min=hb.get("launches_per_min"),
                    launch_sources=[{"source": k, **v}
                                    for k, v in (hb.get("launch_sources") or {}).items() if isinstance(v, dict)],
-                   rpc_ws_max_subs=getattr(cfg, "ws_max_subs", None) or SNIPER_RPC_WS_MAX_SUBS)
+                   rpc_ws_max_subs=getattr(cfg, "ws_max_subs", None) or SNIPER_RPC_WS_MAX_SUBS,
+                   coverage_1h=hb.get("coverage_1h") if isinstance(hb.get("coverage_1h"), dict) else None)
         if out["launch_sources"]:  # two launch streams (PumpPortal + RPC logs): connected when either delivers
             out["connected"] = out["connected"] or any(x.get("connected") for x in out["launch_sources"])
         rates = _sniper_rates(hb["ts"], hb.get("counters"))
@@ -1809,6 +1810,11 @@ def sniper_view(conn, hours=24, limit=300):
     st["filter_total"] = {"with_sol": _f(paper.get("pnl_sol"), 4), "skipped_sol": _f(without, 4),
                           "without_sol": _f((paper.get("pnl_sol") or 0) + without, 4), "size_sol": size,
                           "measured": measured, "cost_pct": _f(cost, 4)}
+    try:  # stream coverage (plan 18.10.: >= 90 % of launches with a trade at the decision, of migrations with trades)
+        from sniper.analytics import coverage as _coverage  # type: ignore
+        st["coverage"] = _coverage(conn, hours=hours or 24, now=now)
+    except Exception:
+        st["coverage"] = None
     launches = sniper.recent(conn, limit=limit)
     for x in launches:
         x["source_label"] = SNIPER_SOURCE.get(x.get("source"), x.get("source") or "–")

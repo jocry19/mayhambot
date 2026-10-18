@@ -505,6 +505,11 @@ def _sniper_demo(conn, r, now):
                       size + pnl, "closed", closed, reason, pnl, round(pnl / size, 4), "{}",
                       json.dumps([{"ts": t + 2, "kind": "buy", "sol": size}, {"ts": closed, "kind": "sell", "reason": reason, "sol": size + pnl}])))
     conn.execute("INSERT OR REPLACE INTO sniper_state VALUES ('paper_balance_sol', ?)", (str(round(bal, 4)),))
+    # stream coverage (sniper.analytics.coverage): most launches had a trade at the decision, a few migrated
+    for (mint, dts) in conn.execute("SELECT mint, decided_ts FROM sniper_launches WHERE source='pumpportal'").fetchall():
+        mig = r.random() < 0.03
+        conn.execute("UPDATE sniper_launches SET n_trades=?, migrated=?, migrated_ts=? WHERE mint=?",
+                     (r.randint(1, 40) if r.random() < 0.86 else 0, int(mig), (dts or 0) + r.randint(600, 3000) if mig else None, mint))
     # heartbeat as sniper/service.py writes it every 10 s (counters are totals since the service started)
     conn.execute("INSERT OR REPLACE INTO sniper_state VALUES ('service_status', ?)", (json.dumps({
         "ts": int(now), "connected": True, "ws_msgs": 412_877, "subscribed": 38, "in_memory": 640, "queue": 2, "open_positions": 3,
@@ -514,7 +519,7 @@ def _sniper_demo(conn, r, now):
                            "rpc": {"enabled": True, "connected": True, "per_min": 11.2, "first_per_min": 4.2, "last_ts": int(now) - 5}},
         "active_launch_source": "pumpportal", "launches_per_min": 11.6, "trade_source": "rpc", "rpc_ws_connected": True, "rpc_ws_subs": 112, "rpc_ws_msgs": 88_410,
         "counters": {"creates": 27_480, "trades": 391_200, "migrations": 212, "stage1": 9_870, "stage2": 3_310, "entries": 604},
-        "pump_api_ok": True}),))
+        "pump_api_ok": True, "coverage_1h": {"decide": {"n": 690, "share": 0.874}, "migrate": {"n": 9, "share": 0.778}}}),))
     conn.commit()
 
 
