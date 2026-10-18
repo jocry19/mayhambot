@@ -372,6 +372,9 @@ class Trader:
                 # pool model learns the opportunities themselves from their replays
                 d.enter, d.why_not = False, f"Lernkonto-Stichprobe: nur {self.s.pool_sample:.0%} der Ziehungen"
                 raw["gate"] = "Lernkonto-Stichprobe"
+            if d.enter and self.s.pool_trade == "shadow":
+                d.enter, d.why_not = False, "Lernkonto pausiert (nur Vorhersage, Labels lernen weiter)"
+                raw["gate"] = "Lernkonto pausiert"
         if pocket:
             raw["pocket"], raw["trust"] = pocket, trust
         block = None

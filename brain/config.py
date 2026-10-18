@@ -69,7 +69,10 @@ class Settings:
     max_whale_delay_s: float = field(default_factory=lambda: _f("BRAIN_MAX_WHALE_DELAY_S", 300))
     max_signal_age_s: float = field(default_factory=lambda: _f("BRAIN_MAX_SIGNAL_AGE_S", 180))
     # the shared opportunities table (every source): its learning buys stake this much, the rest by Kelly
-    pool_trade: str = field(default_factory=lambda: _s("BRAIN_POOL_TRADE", "on").lower())
+    # on: the learning account buys; shadow: every pooled row is still predicted, decided and written back, but
+    # nothing is bought (18.10. 07:10: paused until its booking is proven on fresh cases; the labels teach meanwhile);
+    # off: pooled rows are not read at all
+    pool_trade: str = field(default_factory=lambda: _s("BRAIN_POOL_TRADE", "shadow").lower())
     learn_size_sol: float = field(default_factory=lambda: _f("BRAIN_LEARN_SIZE_SOL", 0.03))
     max_pool_age_s: float = field(default_factory=lambda: _f("BRAIN_MAX_POOL_AGE_S", 180))
     pool_max_open: int = field(default_factory=lambda: int(_f("BRAIN_POOL_MAX_OPEN", 120)))
