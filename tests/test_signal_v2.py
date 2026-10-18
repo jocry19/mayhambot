@@ -144,3 +144,41 @@ def test_bonding_curve_coins_are_not_called(c):
     trade(c, "S3", "buy", 900, 20)
     assert accum.evaluate(c, now=NOW) == [] and accum.last_funnel["bonding_curve"] == 1
     assert engine._reason(dict(smart_buyers=2, dex="pumpfun", net_usd=1e4, score=90), None) == "bonding_curve"
+
+
+def test_inflow_band_fires_as_own_class_without_the_score():
+    m = dict(smart_buyers=2, entities=2, net_usd=900, score=20)
+    assert engine.in_band(m) and not engine.in_band(dict(m, net_usd=3000)) and not engine.in_band(dict(m, entities=1))
+    assert "low_score" in engine.BAND_OVERRIDES and "thin_liq" not in engine.BAND_OVERRIDES
+    row = dict(kind="band", symbol="B", mint="M" * 32, score=20, mcap_usd=1e6, price_usd=1.0, net_usd=900, net_sol=6,
+               n_ultra=0, n_smart=2, n_good=0, avg_quality=70, wallets_json="[]", smart_buyers=2)
+    assert "Zufluss (Band" in notifier.format_signal(type("R", (dict,), {"keys": dict.keys})(row))
+
+
+def test_band_call_through_evaluate(tmp_path, monkeypatch):
+    import dataclasses
+    import time as _t
+    from core import scoring
+    from core.config import settings
+    from core.models import Token, Trade
+    monkeypatch.setattr(engine, "_safety", None)
+    conn = db.connect(str(tmp_path / "b.db"))
+    now = int(_t.time())
+
+    def T(sig, w, mint, side, ts, usd, price):
+        return Trade(sig, w, mint, side, ts, usd / price, usd / 150, usd, price, "test")
+    tr = []
+    for k, w in enumerate(["SMART1", "SMART2", "SMART3"]):
+        for j, mm in enumerate(["OLD1", "OLD2", "OLD3"]):
+            t0 = now - 86400 + j * 3600
+            tr += [T(f"b{w}{mm}", w, mm, "buy", t0, 200, 0.001), T(f"s{w}{mm}", w, mm, "sell", t0 + 1800, 200 * (3 + k), 0.001 * (3 + k))]
+    for k, w in enumerate(["SMART1", "SMART2", "SMART3"]):
+        tr.append(T(f"n{w}", w, "NEW", "buy", now - 300 + k, 300, 0.0002))      # $900 net: inside the band
+    db.insert_trades(conn, tr)
+    db.upsert_tokens(conn, [Token(mint=m, symbol=m, price_usd=p, liquidity_usd=50000, pool_address="x", dex="pumpswap")
+                            for m, p in [("OLD1", 0.003), ("OLD2", 0.003), ("OLD3", 0.003), ("NEW", 0.0002)]])
+    scoring.rescore_all(conn)
+    cfg = dataclasses.replace(settings, signal_min_score=99.0)              # score alone would block it
+    sigs = engine.evaluate(conn, ["NEW"], cfg=cfg, now=now)
+    assert len(sigs) == 1 and sigs[0]["kind"] == "band" and "Zufluss-Band" in sigs[0]["reason"]
+    assert engine.evaluate(conn, ["NEW"], cfg=cfg, now=now + 60) == []        # shares the v1 cooldown

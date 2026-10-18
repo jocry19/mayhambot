@@ -219,6 +219,9 @@ def write_report(conn, path=None, now=None):
     from signals import exits  # exit rules replayed on the calls; switch only once verdict() says it is decidable
     rep["exits_7d"] = exits.compare(conn, 7, now, kind="v1")
     rep["exits_verdict_14d"] = exits.verdict(conn, 14, now, kind="v1")
+    # inflow band class: goal >= +5 % net over 50 paper cases with the trail from +100 % (plan 18.10.)
+    rep.update(outcomes_band_7d=outcomes(conn, 168, now=now, kind="band"), exits_band_14d=exits.compare(conn, 14, now, kind="band"),
+               plan_next_band=plan.levels(conn, now, kind="band"))
     from signals import shadow  # rejected coins by reason and what they did next (calls: outcomes_* above)
     rep.update(shadow_24h=shadow.summary(conn, 24, now), shadow_7d=shadow.summary(conn, 168, now),
                shadow_v2_7d=shadow.summary(conn, 168, now, kind="v2"))

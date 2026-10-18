@@ -49,7 +49,9 @@ def format_signal(s) -> str:
     wallets = json.loads(s["wallets_json"] or "[]")
     keys = s.keys()
     v2 = "kind" in keys and s["kind"] == "v2"
-    head = "🟣 <b>Smart-Money-Akkumulation (v2)" if v2 else "🟢 <b>Smart Money"
+    band = "kind" in keys and s["kind"] == "band"
+    head = ("🟣 <b>Smart-Money-Akkumulation (v2)" if v2 else "🔵 <b>Smart-Money-Zufluss (Band, Test)" if band
+            else "🟢 <b>Smart Money")
     lines = [
         f"{head}: {html.escape(s['symbol'] or s['mint'][:6])}</b>  Score <b>{s['score']:.0f}</b>",
         f"MCap beim Signal {_usd(s['mcap_usd'])} · Preis {s['price_usd'] or 0:.8g} $",

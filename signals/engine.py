@@ -164,6 +164,18 @@ def explain(m, cfg=settings):
 # 28 % and -6.5 % once migrated to pumpswap (n 449; all signal_metrics snapshots of ~44 h, data thread 17.10.)
 SKIP_DEX = {d.strip() for d in os.getenv("SIGNAL_SKIP_DEX", "pumpfun").split(",") if d.strip()}
 MODEL_MIN_EXP_NET = float(os.getenv("SIGNAL_MODEL_MIN_EXP_NET", 0.0))
+# inflow band as its own class (plan "Hundertmal besser" 18.10.): 2+ independent smart groups with $500-2000 net
+# reached +50 % in 6 of 9 cases (+12 % net after costs). Fires when only the score or the model EV holds it back;
+# every veto (safety, wash, thin pool, bonding curve, cooldown) still applies. Rated as kind 'band' on paper.
+BAND = os.getenv("SIGNAL_BAND", "true").lower() not in ("0", "false", "off", "no")
+BAND_MIN_ENTITIES = int(os.getenv("SIGNAL_BAND_MIN_ENTITIES", 2))
+BAND_NET_USD = (float(os.getenv("SIGNAL_BAND_NET_MIN", 500)), float(os.getenv("SIGNAL_BAND_NET_MAX", 2000)))
+BAND_OVERRIDES = ("low_score", "low_ev")
+
+
+def in_band(m):
+    return BAND and m.get("entities", m["smart_buyers"]) >= BAND_MIN_ENTITIES and \
+        BAND_NET_USD[0] <= m["net_usd"] <= BAND_NET_USD[1]
 MIN_LIQ_USD = float(os.getenv("SIGNAL_MIN_LIQ_USD", 3000))  # ~2 % price impact for a 0.5 SOL buy
 
 
@@ -618,12 +630,21 @@ def evaluate(conn, mints, cfg=settings, now=None):
         f["max_score"] = max(f["max_score"], m["score"])
         f["min_score"] = m.get("min_score", cfg.signal_min_score)
         why = _reason(m, cfg)
+        kind = "v1"
+        if why in BAND_OVERRIDES and in_band(m):  # own class: the inflow band fires on entities + net, not the score
+            kind, why = "band", None
+            f["band"] = f.get("band", 0) + 1
         if why:
             f[why] += 1
             _shadow(conn, mint, why, m, tok, now)
             continue
         m = check_before_signal(conn, mint, m)
-        if _reason(m, cfg, strict=True):
+        strict = _reason(m, cfg, strict=True)
+        if kind == "band":  # the score no longer carries the rug penalty here, so the safety factor vetoes directly
+            sp = m.get("safety") or {}
+            if sp.get("checked") is False or sp.get("factor", 1.0) < EV_MIN_SAFETY_FACTOR:
+                strict = "safety_drop"
+        if strict and not (kind == "band" and strict in BAND_OVERRIDES):
             f["safety_drop"] += 1
             _shadow(conn, mint, "safety_drop", m, tok, now)
             log.info("signal %s dropped by safety check: %s", mint[:6], (m.get("safety") or {}).get("reasons"))
@@ -631,7 +652,7 @@ def evaluate(conn, mints, cfg=settings, now=None):
         contrib = json.dumps(m["contributions"])
         sp = m.get("safety") or {}
         last = conn.execute("SELECT ts, score, price_usd, wallets_json, model_version FROM signals WHERE mint=? "
-                            "AND COALESCE(kind,'v1')='v1' ORDER BY ts DESC LIMIT 1", (mint,)).fetchone()
+                            "AND COALESCE(kind,'v1') IN ('v1','band') ORDER BY ts DESC LIMIT 1", (mint,)).fetchone()
         fresh = fresh_buyers(m, last)
         # +15 points only means "much stronger" on the same scale: a model score (P x 100) and a heuristic score are not
         same_scale = bool(last) and (last["model_version"] or "").startswith("model-") == (m.get("model_version") or "").startswith("model-")
@@ -640,7 +661,7 @@ def evaluate(conn, mints, cfg=settings, now=None):
             f["cooldown"] += 1
             continue
         f["fired"] += 1
-        call_no = 1 + conn.execute("SELECT COUNT(*) FROM signals WHERE mint=? AND COALESCE(kind,'v1')='v1' AND ts>?",
+        call_no = 1 + conn.execute("SELECT COUNT(*) FROM signals WHERE mint=? AND COALESCE(kind,'v1') IN ('v1','band') AND ts>?",
                                    (mint, now - 86400)).fetchone()[0]
         reason = explain(m, cfg)
         if last and call_no > 1:
@@ -648,24 +669,30 @@ def evaluate(conn, mints, cfg=settings, now=None):
             reason += (f". Call Nr. {call_no} auf diesen Coin: letzter vor {(now - last['ts']) // 60} min"
                        + (f", Preis seitdem {(p_now / p_last - 1) * 100:+.0f} %" if p_now and p_last else "")
                        + (f", {fresh} neue Smart-Käufer seitdem" if fresh else ""))
-        if lv is None:
-            lv = plan.levels(conn, now)
+        if kind == "band":
+            reason = ("Zufluss-Band: " + reason + f". Eigene Klasse ({BAND_MIN_ENTITIES}+ Smart-Gruppen, netto "
+                      f"${BAND_NET_USD[0]:,.0f}-{BAND_NET_USD[1]:,.0f}): feuert unabhängig vom Score, wird getrennt bewertet")
+            lvk = plan.levels(conn, now, kind="band")
+        elif lv is None:
+            lv = lvk = plan.levels(conn, now)
+        else:
+            lvk = lv
         f["recalls"] = f.get("recalls", 0) + (call_no > 1)
         cur = conn.execute(
             """INSERT INTO signals(ts, mint, symbol, score, net_usd, buy_usd, smart_buyers, avg_quality, price_usd,
                                    mcap_usd, wallets_json, buy_sol, net_sol, liquidity_usd, n_ultra, n_smart, n_good,
                                    prediction, prediction_label, contributions_json, model_version,
                                    score_raw, safety_factor, safety_risk, safety_level, safety_reasons_json,
-                                   ev, ev_n, reason, call_no, target_ret, stop_ret, lag_first_s, lag_last_s)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                   ev, ev_n, reason, call_no, target_ret, stop_ret, lag_first_s, lag_last_s, kind)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (now, mint, tok["symbol"] if tok else "", m["score"], m["net_usd"], m["buy_usd"], m["smart_buyers"],
              m["avg_quality"], tok["price_usd"] if tok else None, tok["mcap_usd"] if tok else None,
              json.dumps(m["wallets"]), m["buy_sol"], m["net_sol"], tok["liquidity_usd"] if tok else None,
              m["n_ultra"], m["n_smart"], m["n_good"], pred, pred_label, contrib, m["model_version"],
              m.get("score_raw", m["score"]), sp.get("factor"), sp.get("risk"), sp.get("level"),
              json.dumps(sp.get("reasons") or [], ensure_ascii=False), m.get("ev"), m.get("ev_n"), reason, call_no,
-             lv["target"], lv["stop"], now - m["smart_first_ts"] if m.get("smart_first_ts") else None,
-             now - m["smart_last_ts"] if m.get("smart_last_ts") else None))
+             lvk["target"], lvk["stop"], now - m["smart_first_ts"] if m.get("smart_first_ts") else None,
+             now - m["smart_last_ts"] if m.get("smart_last_ts") else None, kind))
         new.append(conn.execute("SELECT * FROM signals WHERE id=?", (cur.lastrowid,)).fetchone())
     conn.commit()
     f["model"] = model_guard.stats()

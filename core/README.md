@@ -252,3 +252,10 @@ The hourly report carries `shadow_24h`, `shadow_7d`, `shadow_v2_7d`: per reason 
 share, plus near misses ("few_entities: 1 owner, net >= min", "low_net: net >= half the min", safety by risk). A gate
 is loosened only when its near misses beat the calls out of sample. Read-only retro from signal_metrics (last ~3 days)
 for a DB without shadow rows: `python -m signals.shadow --retro --db data/mayhambot.db --hours 72`.
+
+## Inflow band class (kind 'band')
+
+2+ independent smart groups with $500-2000 net inflow fire as their own class when only the score or the model EV
+holds them back (`SIGNAL_BAND`, `SIGNAL_BAND_MIN_ENTITIES`, `SIGNAL_BAND_NET_MIN/MAX`). All vetoes stay (safety factor
+< 0.6 or unchecked, wash, thin pool, bonding curve, v1 cooldown). Report: `outcomes_band_7d`, `exits_band_14d` (incl.
+"sl-30, trail 30 % from +100"), `plan_next_band`. Goal from the plan of 18.10.: >= +5 % net over 50 paper cases.

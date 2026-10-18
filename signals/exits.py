@@ -35,6 +35,8 @@ RULES = {
     "half at +50, half at +150": rule(sl=-0.35, partial=[(0.5, 0.5), (1.5, 0.5)]),
     "tp+100 sl-35": rule(tp=1.0, sl=-0.35),
     "hold 1 h (no exits)": rule(hold_min=60),
+    # winner study 17.10.: no fixed target under +100 %, trail 30 % once +100 %, stop -30 % (band class goal)
+    "sl-30, trail 30 % from +100": rule(sl=-0.3, trail=(1.0, 0.3)),
 }
 
 
