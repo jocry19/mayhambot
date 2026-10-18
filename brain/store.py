@@ -67,6 +67,9 @@ def connect(db_path: str | None = None) -> sqlite3.Connection:
 
 def init(conn) -> None:
     conn.executescript(SCHEMA)
+    from . import opportunities
+
+    opportunities.ensure(conn)
 
 
 def has(conn, table: str) -> bool:
