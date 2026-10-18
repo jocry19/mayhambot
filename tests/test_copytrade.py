@@ -1195,7 +1195,10 @@ def test_strict_copy_follows_the_thompson_draw(env, monkeypatch):
     monkeypatch.setattr(learn, "thompson", lambda c, e, seed: draw)
     assert st.on_whale_buy(whale_buy(sol=1.0)) is None  # 1 SOL: under the old 2 SOL minimum, the draw decides
     assert any("gezogener Vorteil" in r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'"))
-    draw.update(draw=0.045, size_factor=1.5)
+    draw.update(draw=0.045, size_factor=0.25, probe=True)  # a lucky draw on a losing belief: no strict copy
+    assert st.on_whale_buy(chain.Swap("sigT1", W, int(time.time()) - 5, "buy", MINT, 1.0 / 3e-6, 1.0, 3e-6)) is None
+    assert any("ohne eigenen Nachweis" in r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'"))
+    draw.update(draw=0.045, mean=0.01, size_factor=1.5, probe=False)
     pid = st.on_whale_buy(chain.Swap("sigT2", W, int(time.time()) - 5, "buy", MINT, 1.0 / 3e-6, 1.0, 3e-6))
     p = conn.execute("SELECT mode, size_sol FROM ct_positions WHERE id=?", (pid,)).fetchone()
     assert p["mode"] == "paper" and p["size_sol"] == pytest.approx(control.preset(conn, "whale").size_sol * 1.5)

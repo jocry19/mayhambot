@@ -358,6 +358,9 @@ class Strategy:
             if draw["draw"] <= 0:
                 why = (f"gezogener Vorteil {draw['draw']:+.1%} (Erwartung {draw['mean']:+.1%} ± {draw['sd']:.1%} aus "
                        f"{edge['n']} Käufen, Chance {draw['p_pos']:.0%}; nur mitgemessen)")
+            elif draw["mean"] <= 0:  # 10/18: 66 strict copies -7 %, no wallet rank separates forward (v12/v13)
+                why = (f"Wallet ohne eigenen Nachweis (Erwartung {draw['mean']:+.1%} aus {edge['n']} Käufen); "
+                       f"Probe nur in der Erkundung")
             else:
                 size *= draw["size_factor"]
         elif rank is None or rank["samples"] < s.min_wallet_samples:
