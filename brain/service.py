@@ -1,7 +1,9 @@
 """The brain as its own service (`python -m brain run`, started by mayham.py as "brain")."""
 from __future__ import annotations
 
+import json
 import logging
+import re
 import threading
 import time
 
@@ -43,6 +45,28 @@ class Service:
         self.trader = Trader(self.conn, self.s, self.model, notify=notify, on_close=self._learn_trade,
                              exit_model=self.xm, pool_model=self.pm, **trader_kw)
         self.dirty = False
+        self.learn_s: list[float] = []  # seconds per learning round this hour (the loop waits for them)
+        self.max_gap = 0.0  # longest gap between two loop rounds this hour
+        self._alarm_hour = None
+        self._want: dict[tuple, None] = {}  # candle windows the learning round asked for, fetched by _fetch_loop
+        self._want_lock = threading.Lock()
+
+    def alarm(self, eq: dict, now: float) -> bool:
+        """One "brain alarm:" line an hour (and a Telegram note where trades are sent) while the brain's own account
+        is under BRAIN_EQUITY_ALARM_SOL; the learning account is named beside it, it does not count."""
+        lim = self.s.equity_alarm_sol
+        hour = int(now) // HEARTBEAT_S
+        if not lim or eq["equity_sol"] >= lim or self._alarm_hour == hour:
+            return False
+        self._alarm_hour = hour
+        text = (f"equity {eq['equity_sol']:.3f} SOL under {lim:.2f} (brain's own account; learning account "
+                f"{eq.get('learn_equity_sol', 0.0):+.3f} SOL apart)")
+        log.warning("brain alarm: %s", text)
+        try:
+            self.trader.notify(f"🧠 Alarm: {text}")
+        except Exception:
+            pass
+        return True
 
     def _learn_trade(self, pos) -> None:
         if learner.learn_trade(self.conn, self.model, self.s, pos, pool=self.pm):
@@ -83,7 +107,29 @@ class Service:
                 f"model {self.model.d - 1} tokens / {self.model.n:.0f} outcomes, exit model {self.xm.n:.0f} minutes "
                 f"(organic exits {'on' if self.trader.organic_on(time.time()) else 'off'}, "
                 f"replays {exits.verdict(c)['n']}), pool model {self.pm.d - 1} tokens / {self.pm.n:.0f} outcomes, "
-                f"{self._pooled(since)}, {self._labelled(since)}")
+                f"{self._pooled(since)}, {self._labelled(since)}, {self._gates(since)}, {self._pace()}")
+
+    def _pace(self) -> str:
+        ls, gap = self.learn_s, self.max_gap
+        self.learn_s, self.max_gap = [], 0.0
+        if not ls:
+            return f"learning rounds 0, longest loop gap {gap:.0f} s"
+        return (f"learning rounds {len(ls)} ({sum(ls):.0f} s in all, longest {max(ls):.0f} s), "
+                f"longest loop gap {gap:.0f} s")
+
+    def _gates(self, since: float) -> str:
+        """The gates that held wanted buys back this hour, most frequent first (numbers stripped)."""
+        by: dict[str, int] = {}
+        for (raw,) in self.conn.execute("SELECT raw FROM brain_opps WHERE ts>=? AND decision='skip' "
+                                        "AND (wanted=1 OR explore=1)", (int(since),)):
+            try:
+                g = json.loads(raw or "{}").get("gate")
+            except (TypeError, ValueError):
+                g = None
+            g = re.split(r"[(:\d$]", g or "no gate recorded", maxsplit=1)[0].strip() or "?"
+            by[g] = by.get(g, 0) + 1
+        top = sorted(by.items(), key=lambda kv: -kv[1])[:4]
+        return "gates " + (", ".join(f"{k} {n}" for k, n in top) or "none")
 
     def _labelled(self, since: float) -> str:
         try:
@@ -105,6 +151,37 @@ class Service:
         # reported / decided / bought: reported but undecided = too old when read (BRAIN_MAX_POOL_AGE_S), the brain's
         # own sources, or the same coin from the same source within 6 h
         return "pooled reported/decided/bought " + (", ".join(f"{r[0]} {r[1]}/{r[2]}/{r[3]}" for r in rows) or "none")
+
+    def _candles(self, conn, mint: str, lo: int, hi: int, allow_net: bool = True) -> list:
+        """The learning round's candles: from the caches only; a window that is missing goes to the fetch thread
+        and the replay tries again later. GeckoTerminal (4 s a call, shared) held the 2-s loop for most of every
+        minute, so whale buys were read minutes late (18.10.: brain lag 289-331 s on top of the tracker's)."""
+        rows = learner._default_candles(conn, mint, lo, hi, allow_net=False)
+        if rows or not allow_net:
+            return rows
+        with self._want_lock:
+            if len(self._want) < 200:
+                self._want.setdefault((mint, int(lo), int(hi)), None)
+        return []
+
+    def _fetch_loop(self, stop: threading.Event) -> None:
+        try:
+            conn = store.connect(self.s.db_path)
+        except Exception as e:
+            log.exception("candle fetch: %s", e)
+            return
+        while not stop.is_set():
+            with self._want_lock:
+                job = next(iter(self._want), None)
+                if job is not None:
+                    del self._want[job]
+            if job is None:
+                stop.wait(2)
+                continue
+            try:
+                learner._default_candles(conn, *job, allow_net=True)  # stored in ct_candles for the next round
+            except Exception as e:
+                log.debug("candles %s: %s", job[0][:6], e)
 
     def _label_loop(self, stop: threading.Event) -> None:
         """labels.py in its own thread and connection: its DexScreener batches must not hold up the 2-s loop."""
@@ -165,11 +242,15 @@ class Service:
         except Exception as e:
             log.exception("warm start failed: %s", e)
         self.save()
+        threading.Thread(target=self._fetch_loop, args=(stop,), name="brain-candles", daemon=True).start()
         if self.s.labels != "off":
             threading.Thread(target=self._label_loop, args=(stop,), name="brain-labels", daemon=True).start()
+        prev = time.time()
         last = {"price": 0.0, "learn": time.time(), "save": time.time(), "eq": 0.0, "diary": 0.0}
         while not stop.is_set():
             now = time.time()
+            self.max_gap = max(self.max_gap, now - prev)
+            prev = now
             self.hour_line(now)
             try:
                 self.trader.scan()
@@ -180,10 +261,12 @@ class Service:
                     self.trader.manage_curves()
                 if now - last["eq"] >= EQUITY_EVERY_S:
                     last["eq"] = now
-                    self.trader.equity_snapshot()
+                    self.alarm(self.trader.equity_snapshot(), now)
                 if now - last["learn"] >= self.s.learn_every_s:
                     last["learn"] = now
-                    r = self.learn()
+                    t0 = time.time()
+                    r = self.learn(self._candles)
+                    self.learn_s.append(time.time() - t0)
                     if r["prior"] or r["evaluated"]:
                         log.info("learned: %d prior, %d replayed opportunities", r["prior"], r["evaluated"])
                 if now - last["diary"] >= 300:
