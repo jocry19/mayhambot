@@ -75,7 +75,8 @@ def test_evaluate_needs_all_thirds_and_enough_coins():
                          "liq": 1e6, "kind": "market", "gross": 0.12 + rng.normal(0, 0.1, n)})
     late = good.assign(hyp="spaet", gross=np.where(np.arange(n) < 200, -0.3, 0.2))
     res = {r["hyp"]: r for r in pruefstand.evaluate(pruefstand.net_of_costs(pd.concat([good, late])))}
-    assert res["gut"]["verdict"] == "traegt"
+    assert res["gut"]["verdict"] == "traegt" and res["gut"]["brain_kind"] == "market"
+    assert pruefstand.brain_kind("label_sniper_hold60") == "pool" and pruefstand.brain_kind("launch_mc30-50_halten") == "launch"
     assert res["spaet"]["verdict"] == "kandidat" and res["spaet"]["thirds"][0] < 0
 
 

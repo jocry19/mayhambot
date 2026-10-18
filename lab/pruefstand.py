@@ -45,6 +45,17 @@ def net_of_costs(E: pd.DataFrame, stake_sol: float = STAKE_SOL) -> pd.DataFrame:
     return E
 
 
+def brain_kind(hyp: str) -> str:
+    """The brain's opportunity kind a pocket stands for (brain/trader.py frees main-account buys per kind):
+    label_* rows are the pool's opportunities, launch_* the sniper's launches, the price-panel and migration families
+    coins the market kind sees."""
+    if hyp.startswith("label_"):
+        return "pool"
+    if hyp.startswith("launch_"):
+        return "launch"
+    return "market"
+
+
 def evaluate(E: pd.DataFrame) -> list[dict]:
     out = []
     for hyp, g in E.groupby("hyp"):
@@ -63,7 +74,9 @@ def evaluate(E: pd.DataFrame) -> list[dict]:
             verdict = "kandidat"
         else:
             verdict = "traegt nicht"
-        out.append({"hyp": hyp, "n": n, "coins": int(coins), "gross": round(float(g.gross.mean()), 4),
+        out.append({"hyp": hyp, "brain_kind": brain_kind(hyp),
+                    "source": hyp[6:].rsplit("_", 1)[0] if hyp.startswith("label_") else None,
+                    "n": n, "coins": int(coins), "gross": round(float(g.gross.mean()), 4),
                     "cost": round(float(g.cost.mean()), 4), "net": round(float(g.net.mean()), 4),
                     "net_per_coin": round(mean_c, 4), "se": round(se, 4) if se == se else None,
                     "t": round(t, 2) if t == t else None, "thirds": [round(x, 4) for x in thirds],
