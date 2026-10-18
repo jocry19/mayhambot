@@ -1176,6 +1176,11 @@ def test_thompson_prior_weight_is_measured_from_the_wallet_spread(env, monkeypat
     assert unknown["k"] == pytest.approx(sp["k"], abs=0.05) and unknown["sd"] == pytest.approx(
         sp["sd_within"] / sp["k"] ** 0.5)
     assert unknown["p_pos"] < 0.15  # tried less often than with the fixed weight 6 (about 0.19)
+    probes = [learn.thompson(conn, {"n": 0, "n_eff": 0, "mean": 0.0}, f"p{i}") for i in range(300)]
+    drawn = [d for d in probes if d["draw"] > 0]
+    assert drawn and all(d["probe"] and d["size_factor"] == learn.THOMPSON_PROBE_SIZE for d in drawn)
+    winner = learn.thompson(conn, {"n": 40, "n_eff": 40, "mean": 0.12}, "w")
+    assert winner["mean"] > 0 and not winner["probe"] and winner["size_factor"] > learn.THOMPSON_PROBE_SIZE
 
 
 def test_strict_copy_follows_the_thompson_draw(env, monkeypatch):

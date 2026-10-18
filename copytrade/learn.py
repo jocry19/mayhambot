@@ -527,6 +527,7 @@ THOMPSON_SD_MIN = 0.05
 # the population (rho +0.02..+0.13), adding the stored context buckets made it worse (rho -0.03..-0.14)
 THOMPSON_K_MIN_WALLET_N, THOMPSON_K_MIN_WALLETS = 5, 20
 THOMPSON_K_RANGE = (3.0, 50.0)
+THOMPSON_PROBE_SIZE = 0.25  # stake factor while the wallet's expected edge is not above zero
 _POP_CACHE: dict = {}
 POP_CACHE_S = 600
 
@@ -600,8 +601,11 @@ def thompson(conn, edge: dict, seed: str) -> dict:
     sd = (pop.get("sd_within") or pop["sd"]) / math.sqrt(k + n)
     draw = random.Random(seed).gauss(mean, sd)
     p_pos = 0.5 * (1 + math.erf(mean / (sd * math.sqrt(2))))
+    size = max(0.25, min(1.5, draw / EDGE_SIZE_UNIT)) if draw > 0 else 0.0
+    if mean <= 0:  # a lucky draw on a belief that still expects a loss is a probe: smallest size, it buys knowledge
+        size = min(size, THOMPSON_PROBE_SIZE)  # 10/18: strict copies at 1.5x on wallets the belief put below zero
     return {"draw": draw, "mean": mean, "sd": sd, "p_pos": p_pos, "prior": pop["mean"], "k": round(k, 1),
-            "size_factor": max(0.25, min(1.5, draw / EDGE_SIZE_UNIT)) if draw > 0 else 0.0}
+            "size_factor": size, "probe": mean <= 0 and draw > 0}
 
 
 def rollback(conn) -> list[int]:
