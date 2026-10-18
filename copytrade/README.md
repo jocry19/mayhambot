@@ -205,7 +205,7 @@ Kosten keine der 1296 Varianten im Plus. Daher:
 - `CT_EXPLORE_UNRANKED=false`: unbewertete Wale werden nur mitgemessen (ct_buy_outcomes → ct_evals), nicht gekauft.
 - Zwei Papierkonten: **`paper` (streng)** folgt genau den Regeln, die später live gelten, und kann darum stundenlang
   nichts kaufen. **`explore` (Erkundung)** kopiert jeden Kauf ≥ `CT_EXPLORE_MIN_SOL` (0,5) eines Wals mit Stufe aus
-  `CT_EXPLORE_TIERS` (ultra,smart) im Einstiegsfenster, mit fester Größe `CT_EXPLORE_SIZE_SOL` (0,1), eigenem Guthaben
+  `CT_EXPLORE_TIERS` (all: jede Wallet, bewertet oder nicht; oder eine Liste wie ultra,smart) im Einstiegsfenster, mit fester Größe `CT_EXPLORE_SIZE_SOL` (0,1), eigenem Guthaben
   (`CT_EXPLORE_START_BALANCE_SOL`, 5 SOL, Zustand `explore_balance_sol`) und eigener PnL (`ct_positions.mode='explore'`,
   `ct_equity.mode='explore'`). Rug-Prüfung, Markt-, Wash- und Cluster-Filter gelten auch hier, der gelernte Filter
   nicht (sonst könnte ihn nie ein neuer Trade widerlegen); höchstens `CT_EXPLORE_MAX_OPEN` (5) offen. Nie live.

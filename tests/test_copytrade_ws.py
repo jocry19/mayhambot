@@ -259,11 +259,15 @@ def test_every_active_wallet_is_watched_live_best_first(env):
     others = [f"Aaaa{i:040d}"[:44] for i in range(5)]
     store.add_wallets(conn, others, "auto")
     store.add_wallets(conn, [W], "manual")
-    conn.execute("INSERT OR REPLACE INTO wallets(address, tier) VALUES (?, 'ultra')", (others[3],))
+    conn.execute("INSERT OR REPLACE INTO wallets(address, tier) VALUES (?, 'ultra')", (others[0],))
+    now = int(time.time())
+    conn.executemany("INSERT INTO ct_swaps(sig, wallet, mint, side, ts) VALUES (?, ?, 'm', 'buy', ?)",
+                     [(f"b{i}", others[3], now - 60 * i) for i in range(3)] + [("old", others[1], now - 2 * 86400)])
     store._winfo_cache.clear()
     got = tracker.ws_wallets(conn, s)
-    assert got[0] == W and got[1] == others[3] and len(got) == 6  # not only "hot" wallets any more
-    s2 = Settings(db_path=s.db_path, ws_max_wallets=2)
+    # manual first, then the most buys in 24 h; the ultra tier earns no place (it predicts nothing, v13)
+    assert got[0] == W and got[1] == others[3] and got[2] == others[1] and len(got) == 6
+    s2 = Settings(db_path=s.db_path, explore_tiers="ultra,smart", ws_max_wallets=2)
     assert tracker.ws_wallets(conn, s2) == [W, others[3]]
 
 
@@ -279,7 +283,7 @@ def test_watcher_copies_from_its_own_thread_and_dedupes_two_streams(env, monkeyp
     monkeypatch.setattr(strat_mod.Strategy, "on_whale_buy", lambda self, sw, deferred=False: seen.append(sw.signature))
     a, b = FakeNode(), FakeNode()
     stop = threading.Event()
-    s2 = Settings(db_path=s.db_path, ws_urls=[f"ws://127.0.0.1:{a.port}", f"ws://127.0.0.1:{b.port}"], ws_parallel=2)
+    s2 = Settings(db_path=s.db_path, explore_tiers="ultra,smart", ws_urls=[f"ws://127.0.0.1:{a.port}", f"ws://127.0.0.1:{b.port}"], ws_parallel=2)
     w = watch.Watcher(s2, rpc, {"paper": ex}, stop).start([W])
     try:
         assert _wait(lambda: W in w.covered() and all(W in st.covered() for st in w.streams))
@@ -446,7 +450,7 @@ def test_watcher_copies_a_pump_buy_without_any_rpc_call_and_verifies_later(env, 
     for b in full_tx["meta"]["preTokenBalances"] + full_tx["meta"]["postTokenBalances"]:
         b.update(owner=WHALE, mint=PMINT)
     rpc = _NoTxRpc(full_tx)
-    w = watch.Watcher(Settings(db_path=s.db_path, ws_urls=["off"]), rpc, {}, threading.Event())
+    w = watch.Watcher(Settings(db_path=s.db_path, explore_tiers="ultra,smart", ws_urls=["off"]), rpc, {}, threading.Event())
     t0 = time.time()
     sw = w.handle(conn, Strat(), WHALE, "sigFast", t0, _logs(_trade_log(2.0, 40e6)))
     assert sw and seen == [sw] and rpc.reads == [] and time.time() - t0 < 0.5 and w.fast == 1
@@ -974,7 +978,7 @@ def test_block0_group_is_resolved_watched_first_and_never_pruned_as_bots(env):
     rows = dict(conn.execute("SELECT address, source FROM ct_wallets WHERE source='block0'").fetchall())
     assert set(rows) == {full, seen}
     store._winfo_cache.clear()
-    assert set(tracker.ws_wallets(conn, s)[:2]) == {full, seen}  # watched right after manual/Ultra
+    assert set(tracker.ws_wallets(conn, s)[:2]) == {full, seen}  # watched right after manual
     # a block-0 wallet trades in bursts: it must not be switched off as a bot or by the ranking prune
     class Burst:
         def signatures(self, w, limit=80, **kw):

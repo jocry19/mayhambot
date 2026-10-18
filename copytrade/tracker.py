@@ -20,6 +20,7 @@ from .config import Settings
 
 log = logging.getLogger("copytrade.tracker")
 WALLETS_FILE = Path(__file__).with_name("wallets.txt")
+SEEDS_FILE = Path(__file__).resolve().parent.parent / "research" / "seed_wallets.txt"
 
 # signatures already handled (websocket and polling both see the same transaction: act once)
 _seen: OrderedDict[str, None] = OrderedDict()
@@ -236,7 +237,8 @@ def load_watch(conn, s: Settings) -> int:
     CT_WATCH_SLOTS (the copy wallets fill CT_MAX_ACTIVE_WALLETS and left it at 3+3 on 18.10.; the research 'good'
     tier when the model's stats are missing); fills WATCH with every active watch_* wallet."""
     added = 0
-    have = conn.execute("SELECT COUNT(*) FROM ct_wallets WHERE active=1 AND source LIKE 'watch%'").fetchone()[0]
+    have = conn.execute("SELECT COUNT(*) FROM ct_wallets WHERE active=1 AND source LIKE 'watch%' "
+                        "AND source != 'watch_user'").fetchone()[0]
     room = max(0, s.watch_slots - have)
     if room and s.watch_good_limit > 0:
         n = min(room, s.watch_good_limit)
@@ -255,6 +257,34 @@ def load_watch(conn, s: Settings) -> int:
     if added:
         log.info("learning universe: %d 'good' wallets added, %d watched only", added, len(WATCH))
     return added
+
+
+def load_user_seeds(conn, s: Settings, path: Path | None = None) -> int:
+    """The user's own wallets from research/seed_wallets.txt (lines whose comment starts with one of
+    CT_USER_SEED_TAGS) as source 'watch_user': watched live like every wallet, explored, offered to the brain, and
+    judged by strict under the same rule as everyone (the user's choice "wie alle anderen", 18.10.; strategy lifts the
+    learning-universe lock for exactly this source). Manual and block-0 wallets keep their source."""
+    path = path or SEEDS_FILE
+    tags = tuple(t.strip() for t in s.user_seed_tags.split(",") if t.strip())
+    if not tags or not path.exists():
+        return 0
+    addrs = []
+    for line in path.read_text().splitlines():
+        addr, _, note = line.partition("#")
+        addr, note = addr.strip().split()[0] if addr.strip() else "", note.strip()
+        if 32 <= len(addr) <= 44 and note.startswith(tags):
+            addrs.append(addr)
+    if not addrs:
+        return 0
+    n = store.add_wallets(conn, addrs, "watch_user")
+    # taken over once; after that they live like every wallet (a bot or prune rule may switch them off again)
+    conn.executemany("UPDATE ct_wallets SET source='watch_user', active=CASE WHEN COALESCE(label, '') IN "
+                     "('bot','volume bot') THEN active ELSE 1 END WHERE address=? "
+                     "AND source NOT IN ('manual','block0','watch_user')", [(a,) for a in addrs])
+    conn.commit()
+    if n:
+        log.info("user wallets: %d added from %s (%d listed)", n, path.name, len(addrs))
+    return n
 
 
 def load_core_smart(conn, limit: int = 30) -> int:
@@ -342,17 +372,19 @@ def poll_interval(s: Settings, last_swap: int | None, now: float, manual: bool =
     return s.poll_cold_seconds
 
 
-def ws_wallets(conn, s: Settings) -> list[str]:
-    """Wallets for real-time websocket watching: every active wallet, manual and Ultra/Smart first, then the
-    whale ranking, then the most recently active; at most CT_WS_MAX_WALLETS."""
+def ws_wallets(conn, s: Settings, now: float | None = None) -> list[str]:
+    """Wallets for real-time websocket watching: every active wallet, manual and block-0 first, then the most buys
+    in the last 24 h (more opportunities for the stream's credits), then the most recently active; at most
+    CT_WS_MAX_WALLETS. No tier or score order: neither predicts a copy's result (wallet research v12/v13, 18.10.)."""
+    now = now or time.time()
     rows = conn.execute(
-        """SELECT w.address, w.source, r.score, (SELECT MAX(ts) FROM ct_swaps x WHERE x.wallet=w.address) AS last_swap
-           FROM ct_wallets w LEFT JOIN ct_wallet_rank r ON r.address = w.address WHERE w.active = 1""").fetchall()
+        """SELECT w.address, w.source, (SELECT MAX(ts) FROM ct_swaps x WHERE x.wallet=w.address) AS last_swap
+           FROM ct_wallets w WHERE w.active = 1""").fetchall()
+    buys = dict(conn.execute("SELECT wallet, COUNT(*) FROM ct_swaps WHERE side='buy' AND ts>=? GROUP BY wallet",
+                             (int(now - 86400),)).fetchall())
 
     def key(r):
-        tier = store.wallet_info(conn, r["address"]).get("tier")
-        return (r["source"] != "manual", 1 if r["source"] == "block0" else {"ultra": 0, "smart": 1}.get(tier, 2),
-                -(r["score"] if r["score"] is not None else -1), -(r["last_swap"] or 0))
+        return (r["source"] != "manual", r["source"] != "block0", -buys.get(r["address"], 0), -(r["last_swap"] or 0))
 
     return [r["address"] for r in sorted(rows, key=key)][: s.ws_max_wallets]
 

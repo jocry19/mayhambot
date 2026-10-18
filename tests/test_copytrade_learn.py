@@ -449,3 +449,25 @@ def test_watch_candidates_pick_broad_independent_active_wallets(env):
     assert {r[0] for r in conn.execute("SELECT source FROM ct_wallets")} == {"watch_model"}
     conn.execute("DROP TABLE model_wallet_stats")
     tracker.WATCH.clear()
+
+
+def test_user_wallets_from_the_seed_file_are_tracked_like_everyone(env, tmp_path):
+    from copytrade import store, tracker
+    s, conn, ex, state = env
+    u1, u2, old, man = "U1" * 22, "U2" * 22, "OL" * 22, "MA" * 22
+    f = tmp_path / "seed_wallets.txt"
+    f.write_text(f"# header\n{u1} # user 2026-10-18\n{u2} label # user 2026-10-18\n{old} # user 2026-10-16\n"
+                 f"{man} # user 2026-10-18\n")
+    store.add_wallets(conn, [man], "manual")
+    s2 = dataclasses.replace(s, user_seed_tags="user 2026-10-18", watch_slots=0)
+    assert tracker.load_user_seeds(conn, s2, f) == 2
+    src = dict(conn.execute("SELECT address, source FROM ct_wallets").fetchall())
+    assert src[u1] == src[u2] == "watch_user" and src[man] == "manual" and old not in src
+    tracker.load_watch(conn, s2)  # no watch slots, yet the user wallets stay: they do not use them
+    assert {u1, u2} <= tracker.WATCH  # strategy decides strict for source 'watch_user' like for everyone
+    # a later bot rule switching one off is not undone on the next load
+    conn.execute("UPDATE ct_wallets SET active=0, label='bot' WHERE address=?", (u1,))
+    tracker.load_user_seeds(conn, s2, f)
+    assert conn.execute("SELECT active FROM ct_wallets WHERE address=?", (u1,)).fetchone()[0] == 0
+    assert tracker.load_user_seeds(conn, dataclasses.replace(s2, user_seed_tags=""), f) == 0
+    tracker.WATCH.clear()

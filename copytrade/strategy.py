@@ -263,6 +263,8 @@ class Strategy:
         if swap.sol_amount < s.explore_min_sol:
             return False
         tiers = {t.strip() for t in s.explore_tiers.split(",") if t.strip()}
+        if "all" in tiers:
+            return True
         return (store.wallet_info(self.conn, swap.wallet).get("tier") or "none") in tiers
 
     def _count_small(self, swap: Swap) -> None:

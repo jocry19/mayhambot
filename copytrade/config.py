@@ -68,6 +68,8 @@ class Settings:
     watch_good_limit: int = field(default_factory=lambda: _i("CT_WATCH_GOOD_LIMIT", 150))
     # the learning universe's own slots, beside the copy wallets' CT_MAX_ACTIVE_WALLETS
     watch_slots: int = field(default_factory=lambda: _i("CT_WATCH_SLOTS", 60))
+    # the user's wallets in research/seed_wallets.txt, by the comment they carry there (source 'watch_user')
+    user_seed_tags: str = field(default_factory=lambda: os.getenv("CT_USER_SEED_TAGS", "user 2026-10-18"))
     # volume bots: never block-0, never watched (9ZYMMX, 18.10.: 851 buys of 3 coins, 90 % of the inflow)
     volume_bots: list[str] = field(default_factory=lambda: [w.strip() for w in os.getenv(
         "CT_VOLUME_BOTS", "9ZYMMXvVPSfq6JdUjXBv9yCo1J1XbphPQMbWS5oDThJ").split(",") if w.strip()])
@@ -148,7 +150,8 @@ class Settings:
     explore_max_open: int = field(default_factory=lambda: _i("CT_EXPLORE_MAX_OPEN", 5))
     explore_start_balance_sol: float = field(default_factory=lambda: _f("CT_EXPLORE_START_BALANCE_SOL", 5.0))
     explore_min_liq_usd: float = field(default_factory=lambda: _f("CT_EXPLORE_MIN_LIQ_USD", 5000))
-    explore_tiers: str = field(default_factory=lambda: os.getenv("CT_EXPLORE_TIERS", "ultra,smart"))
+    # "all": every wallet, rated or not (wallet research v13, 18.10.: no tier predicts a copy's result)
+    explore_tiers: str = field(default_factory=lambda: os.getenv("CT_EXPLORE_TIERS", "all"))
     # copy a ranked whale only if its past buys (ct_evals, our current exits, calibrated costs) made money
     require_edge: bool = field(default_factory=lambda: _b("CT_REQUIRE_EDGE", True))
     # strict whale copies decided by a draw from each wallet's edge belief (learn.thompson) instead of the
