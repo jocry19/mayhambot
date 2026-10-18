@@ -34,11 +34,12 @@ def refresh_watchlist(conn, cycle):
                                        (int(time.time()) - plan.FOLLOW_HOURS * 3600,)) if r[0] not in hot]
     tracked = [r[0] for r in conn.execute("SELECT mint FROM tokens WHERE tracked=1")]
     infos = market.token_info(list(dict.fromkeys(tracked + hot)))
+    dense = dense_mints(conn, infos)
     # 18.10.: cycles 14-19 failed on "database is locked" here (TokenRefresher and research write tokens too)
     db.retry_locked(conn, lambda: db.upsert_tokens(conn, [t for t in infos if t.mint in set(hot)], tracked=True,
-                                                   snap_every=SNAP_EVERY_S, dense=followed_mints(conn)))
+                                                   snap_every=SNAP_EVERY_S, dense=dense))
     db.retry_locked(conn, lambda: db.upsert_tokens(conn, [t for t in infos if t.mint not in set(hot)], tracked=None,
-                                                   snap_every=SNAP_EVERY_S, dense=followed_mints(conn)))
+                                                   snap_every=SNAP_EVERY_S, dense=dense))
     # drop dead tokens from the watchlist
     db.retry_locked(conn, lambda: (conn.execute(
         "UPDATE tokens SET tracked=0 WHERE tracked=1 AND (liquidity_usd < ? OR last_updated < ?)",
@@ -205,19 +206,34 @@ class Backfiller:
             time.sleep(max(5, self.every - (time.time() - t0)))
 
 
-# token_prices: with SNAP_EVERY_S > 0 every minute only for coins whose outcome signals measures (calls, shadow rows:
-# 4 h), the rest every SNAP_EVERY_S (18.10.: ~930k rows/day). 0 = every refresh, as before: intel/, safety/ and market/
-# read these series too, so the default stays until their needed resolution is agreed.
-SNAP_EVERY_S = int(os.getenv("TOKEN_SNAPSHOT_SECONDS", 0))
+# token_prices (Betrieb 18.10., all four readers agreed): a 60 s row for followed coins (call or shadow row in 4 h, open
+# copytrade / brain positions) and coins under 60 min (safety's staged check), the rest at most every SNAP_EVERY_S unless
+# price or liquidity moved 3 % (core.db.upsert_tokens). Was ~930k rows/day from 60 s rows of ~900 watched coins.
+SNAP_EVERY_S = int(os.getenv("TOKEN_SNAPSHOT_SECONDS", 300))
+YOUNG_S = 3600
+
+
+def dense_mints(conn, infos, now=None):
+    now = now or int(time.time())
+    out = followed_mints(conn, now)
+    for t in infos:
+        c = t.pair_created_at or 0
+        c = c / 1000 if c > now * 10 else c  # DexScreener gives ms
+        if c and now - c < YOUNG_S:
+            out.add(t.mint)
+    return out
 
 
 def followed_mints(conn, now=None):
     now = now or int(time.time())
     out = {r[0] for r in conn.execute("SELECT DISTINCT mint FROM signals WHERE ts > ?", (now - plan.FOLLOW_HOURS * 3600,))}
-    try:
-        out |= {r[0] for r in conn.execute("SELECT DISTINCT mint FROM signal_shadow WHERE ts > ?", (now - 4 * 3600,))}
-    except Exception:  # noqa: BLE001 - table absent in old DBs
-        pass
+    for q, args in (("SELECT DISTINCT mint FROM signal_shadow WHERE ts > ?", (now - 4 * 3600,)),
+                    ("SELECT DISTINCT mint FROM ct_positions WHERE status='open'", ()),     # held: exits need minutes
+                    ("SELECT DISTINCT mint FROM brain_positions WHERE status='open'", ())):
+        try:
+            out |= {r[0] for r in conn.execute(q, args)}
+        except Exception:  # noqa: BLE001 - table absent (service not installed / old DB)
+            pass
     return out
 
 
@@ -234,7 +250,7 @@ def refresh_tokens(conn, now=None):
                                          (now - plan.FOLLOW_HOURS * 3600,))]
     mints = list(dict.fromkeys(mints))[:TOKEN_REFRESH_MAX]
     infos = market.token_info(mints)
-    dense = followed_mints(conn, now)
+    dense = dense_mints(conn, infos, now)
     db.retry_locked(conn, lambda: db.upsert_tokens(conn, infos, tracked=False, snap_every=SNAP_EVERY_S, dense=dense))
     # a row stamped ahead of the clock (17.10.: one 52 min in the future, writer unknown) would pass every freshness
     # filter as "just updated" until then: pulled back to now, logged so the writer can be found

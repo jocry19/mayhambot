@@ -102,13 +102,21 @@ def test_backfill_leaves_helius_reserve(monkeypatch):
 
 
 def test_snapshots_thinned_except_followed(tmp_path, monkeypatch):
+    import time as _t
     from core import db
     from core.models import Token
     conn = db.connect(str(tmp_path / "p.db"))
-    toks = [Token(mint=m, symbol=m, price_usd=1.0, liquidity_usd=1e4, pool_address="x", dex="d") for m in ("A", "B")]
-    db.upsert_tokens(conn, toks, tracked=False)
-    conn.execute("UPDATE token_prices SET ts=ts-60")
-    db.upsert_tokens(conn, toks, tracked=False, snap_every=300, dense={"A"})
+    now = [3_000_000_000]
+    monkeypatch.setattr(_t, "time", lambda: now[0])
+    conn.execute("INSERT INTO signals(ts, mint, score, price_usd) VALUES (?, 'A', 50, 1.0)", (now[0] - 600,))
+    young = Token(mint="Y", symbol="Y", price_usd=1.0, liquidity_usd=100, pool_address="x", dex="d",
+                  pair_created_at=(now[0] - 600) * 1000)
+    assert run.dense_mints(conn, [young], now[0]) == {"A", "Y"}
+    for _ in range(3):
+        toks = [Token(mint=m, symbol=m, price_usd=1.0, liquidity_usd=100, pool_address="x", dex="d")
+                for m in ("A", "B")]
+        db.upsert_tokens(conn, toks + [young], tracked=False, snap_every=300,
+                         dense=run.dense_mints(conn, toks + [young], now[0]))
+        now[0] += 60
     n = dict(conn.execute("SELECT mint, COUNT(*) FROM token_prices GROUP BY mint").fetchall())
-    assert n == {"A": 2, "B": 1}
-    assert conn.execute("SELECT COUNT(*) FROM tokens").fetchone()[0] == 2
+    assert n == {"A": 3, "B": 1, "Y": 3}
