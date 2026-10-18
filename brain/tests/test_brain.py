@@ -1179,6 +1179,7 @@ def test_the_learning_account_has_its_own_ceiling(conn, s):
     from brain import opportunities as O
     from brain.pool import Pool
     s.pool_max_open = 1
+    s.pool_per_hour = 0
     mk = Market()
     pm = Pool(len(PLANS))
     for _ in range(50):
@@ -1737,10 +1738,13 @@ def test_labels_carry_exit_rules_and_the_best_rule_is_judged_out_of_sample(conn,
         good = i % 10 == 9
         conn.execute("UPDATE opportunities SET label_at=?, pred_mean=?, label_outcomes='{}', label_rules=? WHERE "
                      "ref=?", (int(now), 0.1 if good else 0.0,
-                               json.dumps({"hold60": -0.05, "trail30@0.2": 0.2 if good else -0.1}), f"x{i}"))
+                               json.dumps({"hold60": -0.05, "trail30@0.2": 0.2 if good else -0.1,
+                                          **({"dip15": 0.5} if good else {})}), f"x{i}"))
     ex = learner.exit_skill(conn, now - 10)
     assert ex["rule"] == "trail30@0.2" and ex["oos_mean"] == pytest.approx(0.2) and ex["oos_n"] == 10
     assert ex["same"] == 0 and ex["thin"] == 1.0  # every rule differs; no row has its point count
+    assert ex["rule"] != "dip15" and ex["dip15"] == {"entered": 1.0, "mean": 0.5, "median": 0.5}
+    assert ex["top50_n"] == 2 and ex["top50_mean"] == pytest.approx(0.2)
     from brain.service import Service
     sv = Service(s, conn, snapshots=Market(), executor=Paper(), safety_check=ok_safety,
                  staged_check=lambda c, m: False, curve_now=lambda c, m, n: None)
@@ -1919,3 +1923,67 @@ def test_one_stray_quote_is_no_high_and_learning_trades_keep_their_plan_time(con
     conn.execute("UPDATE brain_positions SET kind='pool', max_hold_min=45, opened_at=?", (int(clock[0]) - 46 * 60,))
     assert t.manage() == 1
     assert conn.execute("SELECT exit_reason FROM brain_positions").fetchone()[0] == "time"
+
+
+def test_the_learning_account_sells_by_the_exit_rule_that_won_out_of_sample(conn, s):
+    from brain import opportunities as O
+    from brain.pool import Pool
+    s.organic_exit = "on"
+    mk = Market()
+    mk.snaps[MINT] = snap(dex="pumpswap")
+    pm = Pool(len(PLANS))
+    for _ in range(50):
+        pm.update(tokens("pool", {"src": "sniper", "buyers": "1e1"}), {i: 0.3 for i in range(len(PLANS))})
+    clock = [time.time()]
+    t = make_trader(conn, s, trained(), mk, pool_model=pm, clock=lambda: clock[0])
+    store.put(conn, "exit_skill_hist", [[int(clock[0]) - 600, {"rule": "trail30@0.2", "oos_mean": -0.02,
+                                                               "oos_n": 50, "all_mean": -0.17}]])
+    t.scan()
+    O.report(conn, "sniper", "L1", MINT, clock[0], {"buyers": 12})
+    assert t.scan() == 1
+    p = conn.execute("SELECT * FROM brain_positions WHERE kind='pool'").fetchone()
+    assert json.loads(p["meta"])["exit_rule"] == "trail30@0.2"
+    assert p["trail_activate"] == 0.2 and p["trail_drawdown"] == 0.3 and p["max_hold_min"] == 60
+    ref = json.loads(p["meta"])["ref_price"]
+    mk.snaps[MINT] = snap(dex="pumpswap", price=ref * 1.5)
+    clock[0] += 120
+    assert t.manage() == 0
+    mk.snaps[MINT] = snap(dex="pumpswap", price=ref * 1.0)  # 33 % under the high: the rule's trail, not the model
+    clock[0] += 5
+    assert t.manage() == 1
+    assert conn.execute("SELECT exit_reason FROM brain_positions").fetchone()[0] == "trail"
+    t._rule_at = (-1e18, None)
+    store.put(conn, "exit_skill_hist", [[int(clock[0]), {"rule": "trail30@0.2", "oos_mean": -0.2, "oos_n": 50,
+                                                         "all_mean": -0.17}]])
+    assert t._pool_rule(clock[0]) is None  # no better than all rows: organic exit
+
+
+def test_labels_measure_a_pullback_entry(conn, s):
+    from brain import labels
+    t0 = 1_000_000
+    # up 10 %, back 20 % under the first price at minute 10, then a run to +100 % from there and a 30 % drop
+    pts = [[t0, 1.0], [t0 + 120, 1.1], [t0 + 600, 0.8]] + [[t0 + 600 + 60 * i, 0.8 * (1 + 0.1 * i)] for i in range(1, 11)]
+    pts += [[t0 + 1300 + 60 * i, 1.6 * (1 - 0.05 * i)] for i in range(1, 10)]
+    lab = labels.label(pts, 0.02)
+    rules = json.loads(lab["label_rules"])
+    assert "dip30" not in rules and rules["dip15"] > 0.2  # bought at 0.8 after the dip, out on the trail near +40 %
+    assert rules["dip15"] > rules["trail30@0.2"]
+
+
+def test_the_learning_account_buys_at_most_its_hourly_number(conn, s):
+    from brain import opportunities as O
+    from brain.pool import Pool
+    s.pool_per_hour = 1
+    mk = Market()
+    pm = Pool(len(PLANS))
+    for _ in range(50):
+        pm.update(tokens("pool", {"src": "sniper"}), {i: 0.3 for i in range(len(PLANS))})
+    t = make_trader(conn, s, trained(), mk, pool_model=pm)
+    t.scan()
+    now = time.time()
+    for i in range(2):
+        m = f"Hour{i:040d}"[:44]
+        mk.snaps[m] = snap(mint=m)
+        O.report(conn, "sniper", f"H{i}", m, now, {"buyers": 12})
+    assert t.scan() == 1
+    assert "Obergrenze 1" in conn.execute("SELECT note FROM brain_opps WHERE decision='skip'").fetchone()[0]

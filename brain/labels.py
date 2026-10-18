@@ -58,6 +58,16 @@ def _rules() -> dict:
     return out
 
 
+DIPS = (0.15, 0.30)
+DIP_WAIT_S = 30 * 60
+
+
+def _dip_exit():
+    from copytrade import sim
+
+    return sim.Variant(0, 1e9, 0.5, 0.2, 0.3, 60, 0)
+
+
 def cost(s) -> float:
     from copytrade import sim
 
@@ -131,6 +141,13 @@ def label(pts: list, c: float) -> dict | None:
         r = sim.simulate(cs, t0, v, cost=c)
         if r is not None:
             rules[name] = -1.0 if rug and name == "hold60" else round(min(CAP, r[0]), 5)
+    # pullback entries (signals 18.10.: calls often run 1.5-10x, the loss is the entry at a local high): buy only after
+    # the price fell DIP below the first price within 30 min, then the 30 % trail from +20 %; no dip, no trade (no key)
+    for d in DIPS:
+        hit = next((t for t, px in pts if t - t0 <= DIP_WAIT_S and px <= p0 * (1 - d)), None)
+        r = sim.simulate(cs, hit, _dip_exit(), cost=c) if hit is not None else None
+        if r is not None:
+            rules[f"dip{d * 100:.0f}"] = round(min(CAP, r[0]), 5)
     return {"label_horizon_min": round((pts[-1][0] - t0) / 60, 1), "label_n": len(pts), "label_entry_sol": p0,
             "label_max15": round(min(CAP, max(in15) / p0 - 1 - c), 5),
             "label_max60": round(min(CAP, max(px for _, px in pts) / p0 - 1 - c), 5),
