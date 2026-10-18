@@ -454,9 +454,15 @@ class Service:
             from core import http as core_http
             if cost > 0:
                 core_http._charge(cost, force=True)
+            # ahead of the calendar (ratio > 1): stream 2 steps back first, so whale detection and the rug check keep
+            # Helius to the month's end; back on Helius below 0.95 (hysteresis)
+            pace = core_http.plan_pace() if hasattr(core_http, "plan_pace") else None
+            if pace and pace.get("ratio", 0) > (0.95 if self.helius_paused else 1.0):
+                why = (f"Helius-Monat vor dem Kalender ({pace['used']:.0f} Credits, Plan bis heute "
+                       f"{pace['on_pace']:.0f}, {pace['ratio']:.2f})")
             st = core_http.credits_status()
             reserve = float(os.getenv("HELIUS_CREDITS_RESERVE_PCT") or 10) / 100
-            if st.get("limit") and st.get("used", 0) >= (1 - reserve) * st["limit"]:
+            if not why and st.get("limit") and st.get("used", 0) >= (1 - reserve) * st["limit"]:
                 why = f"Helius-Monat bei {st['used']:.0f} von {st['limit']:.0f} Credits (Reserve erreicht)"
         except Exception:  # noqa: BLE001  (no core ledger: only the day cap applies)
             pass

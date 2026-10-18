@@ -252,6 +252,7 @@ def test_stream_2_goes_to_helius_first_and_leaves_it_at_the_reserve(tmp_path, mo
     booked, used = [], {"used": 0, "limit": 1000}
     monkeypatch.setattr(core_http, "_charge", lambda c, force=False: booked.append((c, force)))
     monkeypatch.setattr(core_http, "credits_status", lambda: dict(used))
+    monkeypatch.setattr(core_http, "plan_pace", lambda: {"used": 0, "on_pace": 1, "ratio": 0.0}, raising=False)
     l2.bytes = 250_000
     svc.helius_meter()
     assert booked == [(5.0, True)] and not svc.helius_paused and l2.url == svc.helius_ws
@@ -262,6 +263,16 @@ def test_stream_2_goes_to_helius_first_and_leaves_it_at_the_reserve(tmp_path, mo
     used["used"] = 100
     svc.helius_meter()
     assert not svc.helius_paused and svc.helius_ws not in l2.skip
+    pace = {"used": 100, "on_pace": 100, "ratio": 1.05}  # ahead of the calendar: step back, return below 0.95
+    monkeypatch.setattr(core_http, "plan_pace", lambda: dict(pace), raising=False)
+    svc.helius_meter()
+    assert "Kalender" in svc.helius_paused
+    pace["ratio"] = 0.97
+    svc.helius_meter()
+    assert svc.helius_paused
+    pace["ratio"] = 0.9
+    svc.helius_meter()
+    assert not svc.helius_paused
     monkeypatch.setenv("HELIUS_API_KEY", "")
     assert not service.Service(cfg(), db_path=str(tmp_path / "n.db")).logs2.url.startswith("wss://mainnet.helius")
 
