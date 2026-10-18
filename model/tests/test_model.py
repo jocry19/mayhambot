@@ -491,3 +491,21 @@ def test_wallet_features_for_the_opportunity_table(market):
     assert empty["w_known"] == 0 and empty["w_score_max"] is None
     flagged = [w for w, r in rows.items() if r["flag"]]
     assert all(rows[w]["tier"] is None for w in flagged)
+
+
+def test_stored_predictions_are_reported_as_opportunities(market, monkeypatch):
+    import types
+    conn, truth, now, vid = market
+    got = []
+    fake = types.ModuleType("brain.opportunities")
+    fake.report = lambda conn, source, ref, mint, ts, features, **kw: got.append((source, ref, mint, features, kw)) or True
+    monkeypatch.setitem(sys.modules, "brain.opportunities", fake)
+    mint = conn.execute("SELECT mint FROM trades GROUP BY mint ORDER BY COUNT(*) DESC LIMIT 1").fetchone()[0]
+    ts = conn.execute("SELECT MAX(ts) FROM trades WHERE mint=?", (mint,)).fetchone()[0]
+    r = score_token(mint, now=ts, conn=conn, store=True)
+    assert r is not None and len(got) == 1
+    source, ref, m, feats, kw = got[0]
+    assert source == "wallet_model" and ref.startswith("pred:") and m == mint
+    assert kw["source_action"] == "scored" and 0 <= kw["source_score"] <= 1
+    assert "wallet_model.w_known" in feats and "wallet_model.p_1h" in feats and "mc_usd" in feats
+    assert all(isinstance(v, (int, float, str, bool)) for v in feats.values())

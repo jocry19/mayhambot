@@ -182,3 +182,9 @@ wallets behind one opportunity into flat numbers (`WALLET_FEATURE_NAMES`, all pr
 flagged and one-hit counts, best and mean score, and the top-scored wallet's evidence, net result and
 components. Tiers are inputs here, not gates; the decision model learns their weight. Block-0 launch wallets
 are flagged `launch_bot` (no tier) and appear as `w_n_flagged` with their score.
+
+Every stored prediction (`score_token(..., store=True)`, so every coin `score_many` scores) is also reported to
+`brain.opportunities.report` as source `wallet_model`, ref `pred:<prediction id>`, with shared names (`mc_usd`,
+`wallet_score`, `wallet_tier`, `wallets_n`, `inflow_sol`) plus `wallet_model.<coin feature>`,
+`wallet_model.p_<h>` / `p_win_net_<h>` / `exp_net_<h>` and `wallet_model.w_*` for all buyers in the window.
+Skipped silently while `brain/opportunities.py` does not exist; errors there never break scoring.

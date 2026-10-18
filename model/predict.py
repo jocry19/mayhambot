@@ -1,12 +1,16 @@
 """Live coin prediction with explainable weights + the coin's signal history."""
 import json
+import logging
 import time
 
 from model import learn
 from model.config import msettings
-from model.tiers import tier_map
+from model.tiers import tier_map, wallet_features
 from research import data, events as ev
 from research.store import connect, ensure_schema
+
+
+log = logging.getLogger(__name__)
 
 
 class ModelNotTrained(RuntimeError):
@@ -104,8 +108,49 @@ def score_token(mint, now=None, conn=None, store=False, tiers=None, shared=None)
              horizons.get("1h", {}).get("exp_max_ret"), price, res["mcap_usd"],
              tiers_out["ultra"]["wallets"], tiers_out["smart"]["wallets"], tiers_out["good"]["wallets"],
              sum(t["net_sol"] for t in tiers_out.values()), *_compact(f, contribs, wallets)))
+        pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.commit()
+        buyers = [t.wallet for t in ds.window(mint, now - W, now) if t.side == "buy"]
+        report_opportunity(conn, res, buyers, f"pred:{pid}")
     return res
+
+
+def opportunity_features(res, buyers, conn):
+    """Flat raw features of one scored coin for the shared opportunity table (brain/opportunities.py):
+    shared names where they exist, the model's coin features, its predictions per horizon and the wallet
+    features of every buyer in the window (tiered or not, see model.tiers.wallet_features)."""
+    wf = wallet_features(buyers, conn)
+    best = max((w for w in res["wallets"] if w.get("tier")), key=lambda w: w.get("score") or 0, default=None)
+    out = {"mc_usd": res.get("mcap_usd"), "wallet_score": wf["w_score_max"],
+           "wallet_tier": best["tier"] if best else "none",
+           "wallets_n": sum(t["wallets"] for t in res["tiers"].values()),
+           "inflow_sol": sum(t["net_sol"] for t in res["tiers"].values())}
+    for k, v in res["features"].items():
+        out[f"wallet_model.{k}"] = v
+    for h, d in res["horizons"].items():
+        out[f"wallet_model.p_{h}"] = d.get("p_pump")
+        out[f"wallet_model.p_win_net_{h}"] = d.get("p_win_net")
+        out[f"wallet_model.exp_net_{h}"] = d.get("exp_net_ret")
+    for k, v in wf.items():
+        out[f"wallet_model.{k}"] = v
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def report_opportunity(conn, res, buyers, ref):
+    """Every stored prediction is an opportunity for the brain, also the low-scored ones (source wallet_model)."""
+    try:
+        from brain.opportunities import report
+    except ImportError:
+        return False
+    try:
+        main = "1h" if "1h" in res["horizons"] else next(iter(res["horizons"]))
+        sc = res["horizons"][main].get("p_win_net", res["horizons"][main]["p_pump"])
+        return report(conn, "wallet_model", ref, res["mint"], res["ts"], opportunity_features(res, buyers, conn),
+                      symbol=res.get("symbol") or "", price_usd=res.get("price_usd"), mcap_usd=res.get("mcap_usd"),
+                      source_score=sc, source_action="scored")
+    except Exception:  # noqa: BLE001  (the brain's table must never break scoring)
+        log.exception("reporting opportunity %s failed", ref)
+        return False
 
 
 CONTRIB_KEEP = {"1h": 10}  # other horizons keep 5: what the dashboard shows, not the whole vector
