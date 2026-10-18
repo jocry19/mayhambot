@@ -240,7 +240,7 @@ def test_api_usage(demo, tmp_path, monkeypatch, capsys):
     assert ("sniper", "helius") in rows and rows[("sniper", "helius")]["stale"]  # share but no process yet
     tot = c.get("/api/system").json()["api_usage"]["credits"]
     assert tot["used"] == 820000 and tot["limit"] == 1000000 and tot["load"] == 0.82
-    assert "cap_at" in tot and "cap_at_no_stream" in tot  # when the plan runs out at today's rate (None after midnight's first hour)
+    assert "cap_at" in tot and "cap_at_no_stream" in tot and "rate_per_h" in tot  # when the plan runs out at today's rate (None after midnight's first hour)
     assert rows[("research", "helius")]["stale"] and rows[("research", "helius")]["load"] is None
     assert rows[("safety", "api.dexscreener.com")]["load"] is None
     from cli.report import api_line
@@ -804,6 +804,7 @@ def test_brain_view(demo, empty, tmp_path):
     assert d["available"] and d["decisions"] and d["equity"] and len(d["plans"]) == 6
     a = d["account"]
     assert abs(a["equity_sol"] - (a["balance_sol"] + a["open_value_sol"])) < 1e-3 and a["start_sol"] == 5.0
+    assert all("capped_from" in x for x in d["decisions"])
     dec = d["decisions"][0]
     assert 2 <= len(dec["note"]) <= 6 and dec["verdict"] and dec["kind_label"] in ("Wal-Kauf", "Signal", "Launch")
     h = d["honest"]

@@ -268,7 +268,7 @@ function Decision({ d }) {
         <span>Plan <b>{d.plan_label || "–"}</b></span>
         <span>erwartet <b className={sign(d.pred_mean)}>{pctSigned(d.pred_mean, 1)}</b></span>
         <span>sicher zu <b>{pct(d.pred_p)}</b></span>
-        {d.size_sol != null && d.decision === "enter" && <span>Einsatz <b>{sol(d.size_sol, 2)}</b></span>}
+        {d.size_sol != null && d.decision === "enter" && <span>Einsatz <b>{sol(d.size_sol, 2)}</b>{d.capped_from != null && d.capped_from > d.size_sol && <span className="dim" title="Hauptkonto: höchstens 3 % des Kontos je Trade"> (gekappt von {sol(d.capped_from, 2)})</span>}</span>}
       </div>
       {shown.length > 0 && (
         <ul className="dec-note" onClick={() => setOpen(!open)}>

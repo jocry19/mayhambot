@@ -2292,6 +2292,7 @@ def api_usage(now=None):
             cs = chttp.credits_status() or {}
             total.update(key_fp=cs.get("key_fp") or None, key_changed_at=cs.get("key_changed_at"),
                          warn=cs.get("warn"), cap_at=cs.get("cap_at"), cap_at_no_stream=cs.get("cap_at_no_stream"),
+                         rate_per_h=cs.get("rate_per_h"),
                          history=[{k: h.get(k) for k in ("month", "key_fp", "used", "until", "reason")}
                                                       for h in (cs.get("history") or [])][::-1])
             if cs.get("used") is not None and cs.get("limit"):
@@ -2772,6 +2773,8 @@ def brain_view(conn, kind=None, show="all", limit=60, now=None):
             verdict = ("Wollte, Grenze stoppte", "warn")
         else:
             verdict = ("Ausgelassen", "")
+        raw = _j(r.get("raw"), {})
+        raw = raw if isinstance(raw, dict) else {}
         decisions.append({
             "id": r["id"], "ts": r["ts"], "kind": r["kind"], "kind_label": BRAIN_KIND.get(r["kind"], r["kind"]),
             "mint": r["mint"], "symbol": r["symbol"], "wallet": r["wallet"], "decision": r["decision"],
@@ -2779,6 +2782,7 @@ def brain_view(conn, kind=None, show="all", limit=60, now=None):
             "plan": r["plan"], "plan_label": (plans.get(r["plan"]) or {}).get("label", r["plan"]),
             "pred_mean": _f(r.get("pred_mean"), 4), "pred_std": _f(r.get("pred_std"), 4), "pred_p": _f(r.get("pred_p"), 3),
             "size_sol": _f(r.get("size_sol"), 4),
+            "capped_from": _f(raw.get("capped_from"), 4),  # stake before the main account's 3 % cap
             "note": [_redact(x)[:400] for x in (r.get("note") or "").splitlines() if x.strip()][:6],
             "evaluated": r.get("evaluated_at") is not None, "realized_plan": _f(r.get("realized_plan"), 4),
             "realized_base": _f(r.get("realized_base"), 4), "realized_best": _f(r.get("realized_best"), 4),

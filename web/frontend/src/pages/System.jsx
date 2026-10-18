@@ -25,14 +25,14 @@ function CreditBar({ used, cap, v, share }) {
   );
 }
 
-/** When the month's plan runs out at today's rate (core.http.cap_forecast), with and without the sniper's stream. */
+/** When the month's plan runs out at the current rate (core.http.cap_forecast), with and without the sniper's stream. */
 export function CapForecast({ t }) {
   if (!t || (t.cap_at === undefined && t.cap_at_no_stream === undefined)) return null;
   const when = (x) => (x ? dt(x) : "nicht mehr in diesem Monat");
   const soon = t.cap_at && t.cap_at - Date.now() / 1000 < 3 * 86400;
   return (
-    <span className={soon ? "t2 down" : "t2"} title="Hochgerechnet aus dem Verbrauch des heutigen UTC-Tags; danach lehnt Helius ab und die Dienste gehen aufs öffentliche RPC">
-      Kappe bei heutiger Rate: <b>{when(t.cap_at)}</b> (ohne Sniper-Strom 2: {when(t.cap_at_no_stream)})
+    <span className={soon ? "t2 down" : "t2"} title="Hochgerechnet aus der Rate der letzten 6 Stunden (vorher dem Tagesmittel); danach lehnt Helius ab und die Dienste gehen aufs öffentliche RPC">
+      {t.rate_per_h != null && <>{n(t.rate_per_h)} Credits je Stunde · </>}Kappe bei aktueller Rate: <b>{when(t.cap_at)}</b> (ohne Sniper-Strom 2: {when(t.cap_at_no_stream)})
     </span>
   );
 }
