@@ -70,7 +70,7 @@ class Settings:
     pool_trade: str = field(default_factory=lambda: _s("BRAIN_POOL_TRADE", "on").lower())
     learn_size_sol: float = field(default_factory=lambda: _f("BRAIN_LEARN_SIZE_SOL", 0.03))
     max_pool_age_s: float = field(default_factory=lambda: _f("BRAIN_MAX_POOL_AGE_S", 180))
-    pool_max_open: int = field(default_factory=lambda: int(_f("BRAIN_POOL_MAX_OPEN", 40)))
+    pool_max_open: int = field(default_factory=lambda: int(_f("BRAIN_POOL_MAX_OPEN", 120)))
     max_launch_age_s: float = field(default_factory=lambda: _f("BRAIN_MAX_LAUNCH_AGE_S", 60))
     min_liquidity_usd: float = field(default_factory=lambda: _f("BRAIN_MIN_LIQ_USD", 3000))
     # pump.fun bonding curve: DexScreener reports no pool liquidity there, the curve itself is the market
