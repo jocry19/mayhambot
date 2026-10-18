@@ -1,12 +1,13 @@
 """Main loop: discover whales -> rank them -> watch them -> copy -> sell into the first pump."""
 from __future__ import annotations
 
+import json
 import logging
 import signal
 import threading
 import time
 
-from . import chain, learn, ranking, store, tracker, watch, ws
+from . import chain, learn, ranking, stats, store, tracker, watch, ws
 from .config import Settings
 from .execution import make_executors
 from .strategy import Strategy
@@ -61,6 +62,14 @@ class Engine:
             log.info("learning: %s", {k: v for k, v in res.items() if k != "tuned"})
         except Exception as e:
             log.warning("learning failed: %s", e)
+        if time.time() - float(store.get_state(c, "last_bookkeeping") or 0) >= stats.LEDGER_EVERY_S:
+            store.set_state(c, "last_bookkeeping", str(int(time.time())))
+            try:
+                line = stats.bookkeeping_line(c, s)
+                (log.warning if "DIFF" in line else log.info)(line)
+                store.set_state(c, "bookkeeping", json.dumps({"ledger": stats.ledger(c, s), "costs": stats.costs(c)}))
+            except Exception as e:
+                log.warning("bookkeeping check failed: %s", e)
 
     # ------------------------------------------------------------------ watching
     def poll_round(self) -> int:

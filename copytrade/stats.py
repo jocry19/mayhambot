@@ -244,3 +244,74 @@ def detection_summary(conn, hours: float = 24) -> pd.DataFrame:
     out["within_10s"] = g.apply(lambda x: (x <= 10).mean()).values
     out["within_30s"] = g.apply(lambda x: (x <= 30).mean()).values
     return out
+
+
+LEDGER_EVERY_S = 3600
+LEDGER_TOLERANCE_SOL = 1e-6
+
+
+def ledger(conn, s: Settings) -> dict:
+    """Paper balances against their ledger: start - cost of every bought position + proceeds of every sold one.
+    A difference is money booked twice or lost between a balance change and its position (10/2026 audit)."""
+    from . import store
+
+    out = {}
+    for mode, key, start in (("paper", "paper_balance_sol", s.paper_start_balance_sol),
+                             ("explore", "explore_balance_sol", s.explore_start_balance_sol)):
+        bal = store.get_state(conn, key)
+        if bal is None:
+            continue
+        cost, proceeds, n = conn.execute(
+            "SELECT COALESCE(SUM(entry_cost_sol), 0), COALESCE(SUM(CASE WHEN status='closed' THEN proceeds_sol END), 0),"
+            " COUNT(*) FROM ct_positions WHERE mode=? AND status IN ('open', 'closing', 'closed')", (mode,)).fetchone()
+        expected = start - cost + proceeds
+        out[mode] = {"balance": float(bal), "expected": expected, "diff": float(bal) - expected, "positions": n}
+    return out
+
+
+def _median(xs):
+    return statistics.median(xs) if xs else None
+
+
+def costs(conn, days: float = 7) -> dict:
+    """Measured trading costs per account and source (strategy) on closed positions: booked fill against the market
+    price at that moment. entry = fill / mid at the buy - 1, exit = 1 - fill / mid at the sale (the last polled price
+    for sales booked before exit_mid_sol was stored), lag = our fill / the whale's price - 1 (whale copies)."""
+    import json
+
+    rows = conn.execute(
+        "SELECT mode, strategy, entry_price_sol, exit_price_sol, last_price_sol, whale_price_sol, meta FROM ct_positions "
+        "WHERE status='closed' AND closed_at > ? AND entry_price_sol > 0", (int(time.time() - days * 86400),)).fetchall()
+    acc: dict = {}
+    for r in rows:
+        try:
+            m = json.loads(r["meta"] or "{}")
+        except (TypeError, ValueError):
+            m = {}
+        d = acc.setdefault(f"{r['mode']}/{r['strategy']}", {"entry": [], "exit": [], "lag": [], "n": 0})
+        d["n"] += 1
+        if m.get("mid_sol"):
+            d["entry"].append(r["entry_price_sol"] / m["mid_sol"] - 1)
+        mid = m.get("exit_mid_sol") if "exit_mid_sol" in m else r["last_price_sol"]
+        if mid and r["exit_price_sol"] and m.get("exit_source") != "no_route":  # a 0 fill is a rug, not a cost
+            d["exit"].append(1 - r["exit_price_sol"] / mid)
+        if r["whale_price_sol"]:
+            d["lag"].append(r["entry_price_sol"] / r["whale_price_sol"] - 1)
+    return {k: {"n": d["n"], "entry": _median(d["entry"]), "n_entry": len(d["entry"]), "exit": _median(d["exit"]),
+                "n_exit": len(d["exit"]), "lag": _median(d["lag"])} for k, d in sorted(acc.items())}
+
+
+def bookkeeping_line(conn, s: Settings) -> str:
+    """One log line: ledger check per paper account and the measured costs per source."""
+    def pct(x):
+        return "?" if x is None else f"{x:+.1%}"
+
+    parts = []
+    for mode, d in ledger(conn, s).items():
+        ok = abs(d["diff"]) <= LEDGER_TOLERANCE_SOL
+        parts.append(f"{mode} balance {d['balance']:.4f} = start - costs + proceeds {d['expected']:.4f}"
+                     + (" ok" if ok else f" DIFF {d['diff']:+.4f} SOL") + f" ({d['positions']} positions)")
+    for k, d in costs(conn).items():
+        parts.append(f"cost {k}: n {d['n']}, entry {pct(d['entry'])} (n {d['n_entry']}), exit {pct(d['exit'])}"
+                     f" (n {d['n_exit']}), whale lag {pct(d['lag'])}")
+    return "bookkeeping: " + "; ".join(parts or ["no paper account yet"])

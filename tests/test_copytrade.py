@@ -1067,3 +1067,18 @@ def test_ranking_evaluates_buys_from_the_exploration_minimum(env, monkeypatch):
     monkeypatch.setattr(market, "minute_candles", lambda *a, **k: [])
     assert ranking.evaluate_pending(conn, s) == 2  # 0.6 and 3 SOL: a wallet's 0.5-2 SOL buys count as samples
     assert {r[0] for r in conn.execute("SELECT sig FROM ct_buy_outcomes")} == {"sig0.6", "sig3.0"}
+
+
+def test_ledger_check_and_measured_costs(env):
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    pid = st.on_whale_buy(whale_buy())
+    p = conn.execute("SELECT * FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    assert st.close(p, state["snap"], "manual")
+    d = stats.ledger(conn, s)["paper"]
+    assert abs(d["diff"]) < 1e-9 and d["positions"] == 1
+    ex.adjust_balance(conn, 0.25)  # a sale credited twice
+    assert stats.ledger(conn, s)["paper"]["diff"] == pytest.approx(0.25)
+    assert "DIFF +0.2500" in stats.bookkeeping_line(conn, s)
+    c = stats.costs(conn)["paper/whale"]
+    assert c["n_entry"] == 1 and c["entry"] > 0 and c["n_exit"] == 1 and c["exit"] > 0

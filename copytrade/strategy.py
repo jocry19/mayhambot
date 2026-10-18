@@ -642,7 +642,8 @@ class Strategy:
                 whale, meta, score, inflow, version) -> int:
         safe = (meta or {}).get("safety") or {}
         meta = {**(meta or {}), "fill_source": fill.source, "impact": fill.price_impact,
-                "liq_usd": snap.liquidity_usd, "fdv": snap.fdv, "dex": snap.dex_id}
+                "liq_usd": snap.liquidity_usd, "fdv": snap.fdv, "dex": snap.dex_id,
+                "mid_sol": snap.price_sol}  # market price at the buy: booked fill / mid = measured entry cost
         if ex.mode in PAPER_MODES:
             from .execution import paper_adverse
 
@@ -730,12 +731,18 @@ class Strategy:
         pct = pnl / p["entry_cost_sol"] if p["entry_cost_sol"] else 0
         # proceeds and 'closed' in one commit: a crash or lock in between must not credit a sale that the start-up
         # recovery then reopens and sells again (10/2026 audit: reproduced as a double credit)
+        try:
+            meta = json.loads((p["meta"] if "meta" in p.keys() else None) or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        meta["exit_mid_sol"] = snap.price_sol if snap else None  # market price at the sale (stats.costs)
+        meta["exit_source"] = fill.source
         if not _book_hard(self.conn, ex, fill.sol,
                           """UPDATE ct_positions SET status='closed', closed_at=?, exit_price_sol=?, proceeds_sol=?,
-                               pnl_sol=?, pnl_pct=?, exit_reason=?, exit_tx=?, exit_mcap_usd=? WHERE id=?
+                               pnl_sol=?, pnl_pct=?, exit_reason=?, exit_tx=?, exit_mcap_usd=?, meta=? WHERE id=?
                                AND status='closing'""",
                           (int(time.time()), fill.price_sol, fill.sol, pnl, pct, reason, fill.tx,
-                           snap.fdv if snap else None, p["id"])):
+                           snap.fdv if snap else None, json.dumps(meta), p["id"])):
             log.error("position %s was no longer 'closing' when its sale was booked", p["id"])
             return False
         store.event(self.conn, "sell", f"VERKAUF [{p['strategy']}/{p['mode']}] {p['symbol']} {pct:+.1%} "
