@@ -1388,3 +1388,50 @@ def test_insiders_leaving_close_the_position(conn, s):
     clock[0] += 900  # a coin three hours old: every 15 min
     assert t.manage() == 1
     assert conn.execute("SELECT exit_reason FROM brain_positions").fetchone()[0] == "exit_risk"
+
+
+def test_the_hour_line_names_the_gates_and_the_alarm_names_the_account(conn, s, caplog):
+    from brain.service import Service
+    mk = Market()
+    sv = Service(s, conn, snapshots=mk, executor=Paper(), safety_check=ok_safety,
+                 staged_check=lambda c, m: False, curve_now=lambda c, m, n: None)
+    set_tier(conn, WHALE, "ultra")
+    sv.trader.model = trained()
+    sv.trader.scan()
+    add_whale_buy(conn, "g1")  # no market price: the gate holds the wanted buy back
+    for _ in range(2):
+        sv.trader.pending = {k: (r, e, t - 60) for k, (r, e, t) in sv.trader.pending.items()}
+        sv.trader.scan()
+    line = sv.heartbeat(time.time() - 3600)
+    assert "gates kein Marktpreis 1" in line and "longest loop gap" in line
+    caplog.set_level("INFO", logger="brain")
+    eq = {"equity_sol": 3.2, "learn_equity_sol": -0.5}
+    assert sv.alarm(eq, time.time()) and not sv.alarm(eq, time.time())
+    assert "brain's own account" in [r.message for r in caplog.records if "brain alarm" in r.message][0]
+    assert not sv.alarm({"equity_sol": 4.0}, time.time() + 3600)
+
+
+def test_the_learning_round_never_waits_for_the_network(conn, s, monkeypatch):
+    import threading
+    from brain.service import Service
+    sv = Service(s, conn, snapshots=Market(), executor=Paper(), safety_check=ok_safety,
+                 staged_check=lambda c, m: False, curve_now=lambda c, m, n: None)
+    calls = []
+
+    def fake(c, mint, lo, hi, allow_net=True):
+        calls.append(allow_net)
+        return [(lo, 1, 1, 1, 1, 0)] if mint == "cached" else []
+    monkeypatch.setattr(learner, "_default_candles", fake)
+    assert sv._candles(conn, "cached", 0, 600)
+    assert sv._candles(conn, "new", 0, 600) == [] and sv._candles(conn, "new", 0, 600) == []
+    assert calls == [False, False, False] and list(sv._want) == [("new", 0, 600)]
+    stop = threading.Event()
+    th = threading.Thread(target=sv._fetch_loop, args=(stop,))
+    th.start()
+    for _ in range(200):
+        if not sv._want and True in calls:
+            break
+        time.sleep(0.01)
+    stop.set()
+    th.join(5)
+    assert calls[-1] is True and not sv._want  # fetched once in the background

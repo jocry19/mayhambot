@@ -24,6 +24,8 @@ def _s(name: str, default: str) -> str:
 class Settings:
     db_path: str = field(default_factory=lambda: _s("MAYHAM_DB_PATH", str(ROOT / "data" / "mayhambot.db")))
     start_balance_sol: float = field(default_factory=lambda: _f("BRAIN_START_SOL", 5.0))
+    # the brain's own account (learning account apart) under this: one "brain alarm:" line an hour (0 = off)
+    equity_alarm_sol: float = field(default_factory=lambda: _f("BRAIN_EQUITY_ALARM_SOL", 3.5))
     min_size_sol: float = field(default_factory=lambda: _f("BRAIN_MIN_SIZE_SOL", 0.1))
     max_size_sol: float = field(default_factory=lambda: _f("BRAIN_MAX_SIZE_SOL", 0.5))
     # convinced buys: a quarter of the Kelly stake of the current account (0 = the fixed min..max size above), at

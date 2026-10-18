@@ -374,6 +374,7 @@ class Trader:
             block = self._gate(kind, row["mint"], snap, d, row, raw)
         if block:
             d.enter = False
+            raw["gate"] = block  # the hour line counts the gates that held wanted buys back
             fl = raw.get("flip") or {}
             if not block.startswith("Nebenquelle"):
                     log.info("PASS %s %s plan=%s%s: %s", kind, symbol or row["mint"][:6], d.plan,

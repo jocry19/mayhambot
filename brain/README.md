@@ -212,3 +212,9 @@ den Kauf, verkauft das Hirn als „rug“. Meldet die Rug-Prüfung einen bestät
 ## Feste Labels für jede Gelegenheit (`labels.py`)
 
 Jede Zeile in `opportunities` wird ab ihrer Meldung eine Stunde verfolgt, ob gekauft oder nicht: Curve-Coins zum Live-Kurs des Snipers (`curve_now`, aus der DB), alle anderen per DexScreener in 30er-Bündeln, je Coin alle 3 min, höchstens 10 Abrufe je Minute. Danach stehen in der Zeile (nur ergänzte Spalten) `label_max15`, `label_max60`, `label_ret60`, `label_min60` (alle nach Kosten), `label_rug` (Tief unter 10 % des Einstiegs, dann `label_ret60` = −100 %), `label_outcomes` (Netto je Plan auf diesem Pfad), `label_n`, `label_entry_sol`, `label_horizon_min`, `label_at`. Das Pool-Modell lernt jede gelabelte Zeile mit Gewicht 0,5 (`learner.learn_labels`), mit den Merkmalen der Hirn-Entscheidung, sonst denen der Quelle. Läuft in eigenem Thread (`BRAIN_LABELS=off` schaltet ab); die Stundenzeile nennt geschriebene und verfolgte Labels.
+
+## Takt, Gates und Alarm (18.10., Lesung 06:24)
+
+- **Kerzen im Hintergrund.** Die Lernrunde liest Kerzen nur noch aus den Caches; fehlt ein Fenster, holt es der Thread `brain-candles` (GeckoTerminal, 4 s je Abruf, geteilt) und die Nachspielung versucht es in einer späteren Runde. Vorher hielt die Lernrunde den 2-s-Takt den größten Teil jeder Minute auf, Wal-Käufe wurden Minuten zu spät gelesen.
+- **Stundenzeile** nennt zusätzlich die häufigsten Gates, die gewollte Käufe aufhielten (`brain_opps.raw.gate`), die Lernrunden der Stunde (Anzahl, Sekunden, längste) und die längste Lücke zwischen zwei Schleifenrunden.
+- **Alarm.** Liegt das eigene Konto (ohne Lernkonto) unter `BRAIN_EQUITY_ALARM_SOL` (3,5), kommt einmal je Stunde `brain alarm: equity … under …` ins Log und, wo Trades gemeldet werden, nach Telegram.
