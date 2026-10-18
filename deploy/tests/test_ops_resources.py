@@ -1,3 +1,4 @@
+import json
 import os
 import types
 import sqlite3
@@ -152,6 +153,7 @@ def test_backup_logs_table_sizes(tmp_path, monkeypatch):
     assert ops.log_db_sizes(tmp_path / "data" / "mayhambot.db") is None     # next one only after 6 h
     assert "Einmal-Wallets" in ops.log_db_sizes(tmp_path / "data" / "mayhambot.db", profile=True, every_h=0)
     assert (tmp_path / "data" / "db_sizes.json").exists()
+    assert json.loads((tmp_path / "data" / "db_sizes.json").read_text())[-1]["file_mb"] is not None
 
 
 def test_retention_counts_only_when_switched_off(tmp_path, monkeypatch):

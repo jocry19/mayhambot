@@ -98,6 +98,7 @@ def log_sizes(conn, path: Path, now: float | None = None) -> tuple:
         log = []
     sizes, fstats = table_sizes(conn), file_stats(conn)
     entry = {"day": time.strftime("%Y-%m-%d %H", time.localtime(now)), "ts": int(now), "file": fstats,
+             "file_mb": round(fstats["bytes"] / 1e6, 1), "free_mb": round(fstats["free_bytes"] / 1e6, 1),
              "tables": {t: [v["rows"], v["bytes"], v.get("recent")] for t, v in sizes.items()}}
     kept, days = [], set()
     for e in reversed([e for e in log if e.get("day") != entry["day"]] + [entry]):   # newest first
