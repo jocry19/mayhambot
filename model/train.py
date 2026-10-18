@@ -33,9 +33,18 @@ def run_once(conn=None, now=None, write_files=True):
         log.warning("no trades in the database yet")
         return None
     bt = backtest.run(ds, msettings)
-    # production weights: all wallet buys whose outcome is known by now, learned on profit after costs
-    known = [(we["comps"], we["win"]) for we in bt["wallet_events"] if we["ts"] + we["sec"] <= now]
-    weights, winfo = learn.learn_wallet_weights(known)
+    # production weights: all wallet buys whose outcome is known by now, learned on the target whose ranking made
+    # the most net money walk-forward (net after costs, excess over the coin's other buyers, pumped, prior)
+    known = [we for we in bt["wallet_events"] if we["ts"] + we["sec"] <= now]
+    chosen = learn.pick_weight_variant(bt.get("wallet_rank") or {})
+    targets = dict(net="win", excess="ex", pumped="y")
+    if chosen == "prior":
+        weights, winfo = learn.wallet_weight_variants(known)["prior"], dict(n=len(known))
+    else:
+        weights, winfo = learn.learn_wallet_weights([(we["comps"], we[targets[chosen]]) for we in known
+                                                     if we.get(targets[chosen]) is not None],
+                                                    cap=0 if chosen == "pumped" else None)
+    winfo["variant"] = chosen
     st, _ = wallet_stats.compute(ds, now + 1)
     tiers = tier_all(st, weights)
     champ = {}

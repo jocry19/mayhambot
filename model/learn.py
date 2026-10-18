@@ -58,6 +58,34 @@ def learn_wallet_weights(wallet_events, prior_n=None, cap=None):
     return w, dict(info, learned=learned, coef=coef, lam=lam)
 
 
+WEIGHT_TARGETS = ("net", "excess", "pumped", "prior")
+
+
+def wallet_weight_variants(wallet_events):
+    """Competing wallet weightings, each learned on a different outcome of the wallets' next buys:
+    net = profit after costs, excess = better than the other tracked buys of the same coin (removes the market
+    move that hits every buyer alike), pumped = the old target without a cap, prior = fixed start weights."""
+    ex = [(we["comps"], we["ex"]) for we in wallet_events if we.get("ex") is not None]
+    return dict(net=learn_wallet_weights([(we["comps"], we["win"]) for we in wallet_events])[0],
+                excess=learn_wallet_weights(ex)[0],
+                pumped=learn_wallet_weights([(we["comps"], we["y"]) for we in wallet_events], cap=0)[0],
+                prior=dict(PRIOR_WALLET_WEIGHTS))
+
+
+def pick_weight_variant(wallet_rank, min_n=200, default="net"):
+    """The weighting whose top-fifth wallets made the most net money walk-forward so far (wallet_rank lists of
+    net results per variant); the default until every candidate has min_n results."""
+    best, best_mu = default, None
+    for name in WEIGHT_TARGETS:
+        nets = wallet_rank.get(name) or []
+        if len(nets) < min_n:
+            continue
+        mu = sum(nets) / len(nets)
+        if best_mu is None or mu > best_mu:
+            best, best_mu = name, mu
+    return best
+
+
 def cap_weights(w, cap):
     """Normalized weights with no entry above `cap`; the excess goes to the others in proportion to their size."""
     if not cap or cap * len(w) < 1:

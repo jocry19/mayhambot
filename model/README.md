@@ -22,7 +22,10 @@ Wallet score (0-100) = weighted sum of the components (each 0..1) x evidence fac
 Component weights start from a prior and are re-learned on every retrain from which components
 predicted that copying a wallet's *next* buys made money after our round-trip costs (`win`, not `pumped`),
 blended with the prior by amount of evidence. No component may exceed `MODEL_WALLET_WEIGHT_CAP` (0.25) of the
-total. The backtest's `wallet_rank` metric checks this walk-forward: mean net (with 95 % lower bound) of the
+total. Four weightings compete (learn.wallet_weight_variants): learned on net, on `excess` (the buy beat the
+median of the other tracked buys of the same coin, which removes the market move that hits every buyer), on
+pumped (old, uncapped) and the fixed prior; production uses the one whose top fifth made the most net money
+walk-forward (learn.pick_weight_variant, net until each has 200 results). The backtest's `wallet_rank` metric checks this walk-forward: mean net (with 95 % lower bound) of the
 top fifth of wallets by score under the net-learned weights, the old uncapped pump-learned weights and the prior.
 Tier = first rule that matches (all configurable in `.env`, see `model/config.py`):
 

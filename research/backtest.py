@@ -50,7 +50,13 @@ def _wallet_events(ds, stats_k, a, b, h_name, horizons, limit=4000, rng=None):
         if lab is None:
             continue
         out.append(dict(ts=ts, sec=hz[0][1], comps=stats_k[w]["components"], n_tokens=stats_k[w]["n_tokens"],
-                        y=lab["pumped"], win=lab["win"], net=lab["net"]))
+                        y=lab["pumped"], win=lab["win"], net=lab["net"], mint=mint))
+    by = {}
+    for we in out:
+        by.setdefault(we["mint"], []).append(we["net"])
+    for we in out:  # better than the other tracked buys of the same coin in this window (needs >= 3 of them)
+        nets = by[we["mint"]]
+        we["ex"] = int(we["net"] > stats.median(nets)) if len(nets) >= 3 else None
     return out
 
 
@@ -107,9 +113,10 @@ def run(ds, ms=msettings, max_points=24):
         nxt = bounds[k + 1]
         st, _ = wallet_stats.compute(ds, c, use_flags=False)
         done = [we for we in res["wallet_events"] if we["ts"] + we["sec"] <= c]
-        weights, winfo = learn.learn_wallet_weights([(we["comps"], we["win"]) for we in done])
-        variants = dict(net=weights, prior=None,
-                        pumped=learn.learn_wallet_weights([(we["comps"], we["y"]) for we in done], cap=0)[0])
+        variants = learn.wallet_weight_variants(done)
+        chosen = learn.pick_weight_variant(res["wallet_rank"])
+        weights = variants[chosen]
+        winfo = dict(variant=chosen, n=len(done))
         tiers = tier_all(st, weights)
         keep = [w for w, (t, sc, s) in tiers.items() if t or sc >= ms.event_min_score]
         cl = wallet_stats.clusters(ds, keep, c)

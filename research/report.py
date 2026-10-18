@@ -149,6 +149,10 @@ def paper_vs_signals(conn):
     return out
 
 
+VARIANT_LABELS = dict(net="Gewichte auf Netto", excess="Gewichte auf Vorsprung vor anderen Käufern",
+                      pumped="Gewichte auf Pump (alt)", prior="feste Startgewichte")
+
+
 def build(conn, version_id, bt, tiers_now, weights, weight_info, models, prev=None):
     ms = msettings
     main = "1h" if any(h[0] == "1h" for h in ms.horizons) else ms.horizons[0][0]
@@ -235,7 +239,8 @@ def render(d):
                  f"{fu['wallets_in_shared']} Tier-Wallets teilen sich mit anderen einen Absender "
                  f"({fu['shared_groups']} Gruppen) und zählen im Modell als eine Gruppe.\n")
     L.append("\n**Wallet-Score-Gewichte** (gelernt aus den Folge-Käufen, gemischt mit der Startannahme "
-             f"zu {100 * (d['weight_info'].get('lam') or 0):.0f} % gelernt, {d['weight_info'].get('n', 0)} Beispiele):\n")
+             f"zu {100 * (d['weight_info'].get('lam') or 0):.0f} % gelernt, {d['weight_info'].get('n', 0)} Beispiele, "
+             f"Ziel: {VARIANT_LABELS.get(d['weight_info'].get('variant'), d['weight_info'].get('variant') or 'Netto')}):\n")
     L.append(" · ".join(f"{COMPONENT_LABELS[k]} {100 * d['weights'][k]:.0f} %" for k in COMPONENTS) + "\n")
     tf = d["tier_forward"]
     if tf:
@@ -364,7 +369,7 @@ def render(d):
                          + f"; unterstes Fünftel nach Pump-Score Ø {_pct(nm.get('mean_net_bottom_pump'))}\n")
         wr = d.get("wallet_rank") or {}
         if wr.get("all"):
-            names = dict(all="alle Käufe", net="Gewichte auf Netto", pumped="Gewichte auf Pump (alt)", prior="feste Startgewichte")
+            names = dict(VARIANT_LABELS, all="alle Käufe")
             L.append("Wallet-Rangfolge vorwärts (oberstes Fünftel der Wallets nach Score, nächster Kauf, netto): " + " · ".join(
                 f"{names.get(k, k)} Ø {_pct(v['mean_net'])} (Untergrenze {_pct(v['ci_low'])}, Median {_pct(v['median_net'])}, n {v['n']})"
                 for k, v in wr.items()) + "\n")

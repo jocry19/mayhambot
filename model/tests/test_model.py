@@ -470,7 +470,7 @@ def test_backtest_reports_walk_forward_net_of_wallet_ranking(market):
     conn, truth, now, vid = market
     m = json.loads(conn.execute("SELECT metrics_json FROM model_versions WHERE id=?", (vid,)).fetchone()[0])
     wr = m["wallet_rank"]
-    assert {"all", "net", "pumped", "prior"} <= set(wr)
+    assert {"all", "net", "excess", "pumped", "prior"} <= set(wr)
     assert all(v["n"] > 0 and v["ci_low"] <= v["mean_net"] for v in wr.values())
     assert wr["net"]["mean_net"] >= wr["all"]["mean_net"]  # skilled wallets in the fixture: ranking must help
 
@@ -548,3 +548,14 @@ def test_report_shows_bands_and_wallet_rank(market):
     if md is None:
         pytest.skip("no stored report")
     assert "Score-Bänder 1h" in md[0] and "Wallet-Rangfolge vorwärts" in md[0]
+
+
+def test_weight_variant_is_picked_by_walk_forward_net():
+    from model import learn
+    assert learn.pick_weight_variant({}) == "net"
+    wr = dict(net=[-0.2] * 300, excess=[-0.05] * 300, pumped=[-0.1] * 300, prior=[-0.3] * 300, all=[0.5] * 300)
+    assert learn.pick_weight_variant(wr) == "excess"  # "all" is the baseline, never a candidate
+    assert learn.pick_weight_variant(dict(excess=[0.1] * 50, net=[-0.2] * 300)) == "net"  # too few results
+    evs = [dict(comps={"win": 0.5}, win=1, y=1, ex=None)] * 3
+    v = learn.wallet_weight_variants(evs)
+    assert set(v) == set(learn.WEIGHT_TARGETS)
