@@ -45,6 +45,7 @@ TRAIL_MIN_HOLD_S = 60  # the trail arms after a minute: the first quotes after a
 PRICE_RETRY_S = 30  # a coin without a DexScreener pair yet gets this long to show one before it is decided
 FLIP_MAX = 0.6
 RAN_5M_MAX = 0.05  # 10/2026: whale copies after >5 % in the 5 min before lost 9-20 % on average, flat ones about 0  # wallets that sell this share of their buys within FLIP_S are gone before a copy can follow
+POOL_RULE_MIN_N = 30  # top-tenth rows out of sample before the learning account follows a labels exit rule
 HIGH_JUMP = 3.0  # see _manage: a single price this far above the last one is not a high yet
 NO_MARKET_S = 15 * 60  # an open position without any price this long is closed as "kein Markt"
 RUG_LIQ_DROP = 0.6  # pool (curve: curve depth) 60 % under the buy: LP pulled, before the price stop sees it
@@ -171,6 +172,7 @@ class Trader:
         self.notify = notify or (lambda text: None)
         self.on_close = on_close or (lambda pos: None)
         self.rng = rng or random.Random()
+        self._rule_at = (-1e18, None)
         self.clock = clock
         self._safe = None  # the rug verdict of the opportunity being decided
         self.too_late = 0  # whale buys the tracker delivered after max_whale_delay_s
@@ -493,6 +495,27 @@ class Trader:
             (opportunities_model(self.pm), round(d.mean, 5), round(d.std, 5), round(q10, 5), round(d.sample, 5),
              dec, None if not pid else dec, d.size_sol if pid else None, int(self.clock()), pid, oid))
 
+    def _pool_rule(self, now: float):
+        """(name, labels rule) the learning account sells by: the latest 'exit 6h' rule when it is a labels rule
+        (not a plan), at most 3 h old, judged on at least POOL_RULE_MIN_N top-tenth rows out of sample and better
+        there than over all rows; else None (organic exit)."""
+        at, val = self._rule_at
+        if now - at < 60:
+            return val
+        val = None
+        try:
+            from . import labels
+            hist = store.get(self.conn, "exit_skill_hist") or []
+            ts, ex = hist[-1] if hist else (0, {})
+            rules = labels._rules()
+            if (ex.get("rule") in rules and now - ts <= 3 * 3600 and (ex.get("oos_n") or 0) >= POOL_RULE_MIN_N
+                    and (ex.get("oos_mean") or -1) > (ex.get("all_mean") if ex.get("all_mean") is not None else 1)):
+                val = (ex["rule"], rules[ex["rule"]])
+        except Exception as e:
+            log.debug("pool rule: %s", e)
+        self._rule_at = (now, val)
+        return val
+
     def _history(self, mint: str, snap=None) -> str | None:
         """None when the coin has a price history before the buy: its pool (DexScreener pair_created) at least
         HIST_POOL_AGE_S old, or our own record in token_prices (HIST_MIN_POINTS in 6 h, the first at least
@@ -597,6 +620,11 @@ class Trader:
         cap = self.s.pool_max_open if pool else self.s.max_open
         if cap and n_open >= cap:
             return f"technische Obergrenze: {n_open} {'Lernkonto-' if pool else ''}Positionen offen"
+        if pool and self.s.pool_per_hour:
+            n_h = c.execute("SELECT COUNT(*) FROM brain_positions WHERE kind='pool' AND opened_at>=?",
+                            (int(self.clock()) - 3600,)).fetchone()[0]
+            if n_h >= self.s.pool_per_hour:
+                return f"Lernkonto: {n_h} Käufe in der letzten Stunde, Obergrenze {self.s.pool_per_hour}"
         t0 = store.day_start(self.clock())
         if self.s.max_daily_loss_sol:
             lost = c.execute("SELECT COALESCE(SUM(pnl_sol),0) FROM brain_positions WHERE status='closed' "
@@ -635,6 +663,15 @@ class Trader:
         p = BY_NAME[d.plan]
         now = int(self.clock())
         src_ts = row["ts"] if kind == "whale" else None
+        meta = {"fill_source": fill.source, "impact": fill.price_impact, "ref_price": snap.price_sol}
+        rule = self._pool_rule(now) if kind == "pool" else None
+        if rule:
+            # the learning account sells by the exit rule that won out of sample on the labels (hour line "exit 6h"),
+            # so its real trades test that rule rather than a fixed plan
+            meta["exit_rule"] = rule[0]
+            p = dataclasses.replace(p, take_profit=rule[1].take_profit, stop_loss=rule[1].stop_loss,
+                                    trail_activate=rule[1].trail_activate, trail_drawdown=rule[1].trail_drawdown,
+                                    max_hold_min=rule[1].max_hold_min, inflow_exit=0)
         cur = c.execute(
             """INSERT INTO brain_positions(opp_id, kind, mint, symbol, wallet, src_ts, opened_at, entry_price_sol,
                    size_sol, tokens, decimals, plan, take_profit, stop_loss, trail_activate, trail_drawdown, max_hold_min,
@@ -645,7 +682,7 @@ class Trader:
              fill.price_sol, fill.sol, fill.tokens, fill.decimals, p.name, p.take_profit, p.stop_loss,
              p.trail_activate, p.trail_drawdown, p.max_hold_min, p.inflow_exit, int(kind == "whale"),
              _depth(snap), snap.price_sol, snap.price_sol, now, snap.buys_m5, note,
-             json.dumps({"fill_source": fill.source, "impact": fill.price_impact, "ref_price": snap.price_sol})))
+             json.dumps(meta)))
         pid = cur.lastrowid
         self._book(kind, -fill.sol)
         c.execute("UPDATE brain_opps SET position_id=? WHERE id=?", (pid, opp_id))
@@ -687,7 +724,7 @@ class Trader:
         for p in rows:
             snap = snaps.get(p["mint"])
             half = False
-            if organic:
+            if organic and not (p["kind"] == "pool" and '"exit_rule"' in (p["meta"] or "")):
                 reason, half = self._organic(p, snap, now)
             else:
                 reason = self._exit_reason(p, snap, now)

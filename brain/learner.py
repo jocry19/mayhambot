@@ -777,7 +777,7 @@ def exit_skill(conn, lo: float, hi: float | None = None) -> dict | None:
             continue
         seen.add((src, mint))
         try:
-            rv = {round(float(v), 4) for v in json.loads(rules or "{}").values()}
+            rv = {round(float(v), 4) for k_, v in json.loads(rules or "{}").items() if not k_.startswith("dip")}
         except (TypeError, ValueError, AttributeError):
             rv = set()
         few = (npts or 0) < 4
@@ -811,10 +811,19 @@ def exit_skill(conn, lo: float, hi: float | None = None) -> dict | None:
 
     t1, t2 = top(halves[0]), top(halves[1])
     names = {k for _, nets in data for k in nets}
-    scored = [(mean(t1, k)[0], k) for k in names if mean(t1, k)]
+    # dip rules trade only the rows that dipped (no key otherwise): reported apart, never picked as the exit
+    scored = [(mean(t1, k)[0], k) for k in names if not k.startswith("dip") and mean(t1, k)]
+    for k in sorted(n_ for n_ in names if n_.startswith("dip")):
+        m = mean(t2, k)
+        agree[k] = {"entered": round(m[2] / max(1, len(t2)), 3), "mean": round(m[0], 4),
+                    "median": round(m[1], 4)} if m else None
     if not scored:
         return {"n": n, **agree}
     best = max(scored)[1]
     oos, every = mean(t2, best), mean(halves[1], best)
+    k50 = max(1, len(halves[1]) // 50)  # the top fiftieth: where a ranking with rho +0.3 should pay first
+    f50 = mean(sorted(halves[1], key=lambda r: r[0])[-k50:], best)
     return {"n": n, "rule": best, "in_sample": round(max(scored)[0], 4), "oos_mean": round(oos[0], 4),
-            "oos_median": round(oos[1], 4), "oos_n": oos[2], "all_mean": round(every[0], 4) if every else None, **agree}
+            "oos_median": round(oos[1], 4), "oos_n": oos[2], "all_mean": round(every[0], 4) if every else None,
+            "top50_mean": round(f50[0], 4) if f50 else None, "top50_median": round(f50[1], 4) if f50 else None,
+            "top50_n": f50[2] if f50 else 0, **agree}

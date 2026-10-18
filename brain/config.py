@@ -79,6 +79,9 @@ class Settings:
     learn_size_sol: float = field(default_factory=lambda: _f("BRAIN_LEARN_SIZE_SOL", 0.03))
     max_pool_age_s: float = field(default_factory=lambda: _f("BRAIN_MAX_POOL_AGE_S", 180))
     pool_max_open: int = field(default_factory=lambda: int(_f("BRAIN_POOL_MAX_OPEN", 120)))
+    # learning-account buys per hour (0 = no limit): the labels teach from every row, these trades only measure
+    # execution; 18.10. 21:30 the sniper's third stream shifted the top-5 % draw threshold and the rate went 3 -> 90/h
+    pool_per_hour: int = field(default_factory=lambda: int(_f("BRAIN_POOL_PER_HOUR", 15)))
     labels: str = field(default_factory=lambda: _s("BRAIN_LABELS", "on").lower())  # labels.py: follow every row 1 h
     # the learning account buys a positive draw only when it is among this share of the best recent draws (calls and
     # band candidates always)
