@@ -931,3 +931,40 @@ def test_notifications_without_a_swap_venue_never_spend_main_credits(env, monkey
     calls.clear()
     w.fetch(conn, W, "sigS", time.time(), plain + ["Program 6EF8rrDYGrSquN2vUbW2kH7JMLtQFZyD3J4bLy1F2uY3 invoke [1]"])
     assert "main" in calls and w.lean == 1
+
+
+def test_block0_group_is_resolved_watched_first_and_never_pruned_as_bots(env):
+    s, conn, ex, state = env
+    full = "52bZXsA9XHvWP5JYgmt1r8GQJ5bse3FK5ALf6j3pVu4e"
+    seen = "3dy8rcQbtuyi5KHDM69oVuFsUwsw98xopsRsRF3Qabcd"
+    twin_a, twin_b = "9ZYMMXaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa11", "9ZYMMXbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb22"
+    conn.executemany("INSERT INTO ct_swaps(sig, wallet, mint, side, ts) VALUES (?, ?, 'm', 'buy', 1)",
+                     [("s1", seen), ("s2", twin_a), ("s3", twin_b), ("s4", "3dY8rcLowerCaseMustNotMatchxxxxxxxxxxxxxxxx")])
+    store.add_wallets(conn, [f"Aaaa{i:040d}"[:44] for i in range(3)], "auto")
+    tracker._BLOCK0_FOUND.clear()
+    tracker._BLOCK0_TRIED["at"] = 0.0
+    s.block0_wallets = [full, "3dy8rc…abcd", "9ZYMMX", "AopdiF…Qtke"]
+    got = tracker.load_block0(conn, s)
+    assert got == [full, seen]  # 9ZYMMX is ambiguous, AopdiF unseen: both wait
+    assert tracker.BLOCK0 == {full, seen}
+    rows = dict(conn.execute("SELECT address, source FROM ct_wallets WHERE source='block0'").fetchall())
+    assert set(rows) == {full, seen}
+    store._winfo_cache.clear()
+    assert set(tracker.ws_wallets(conn, s)[:2]) == {full, seen}  # watched right after manual/Ultra
+    # a block-0 wallet trades in bursts: it must not be switched off as a bot or by the ranking prune
+    class Burst:
+        def signatures(self, w, limit=80, **kw):
+            return [{"signature": f"x{i}", "blockTime": 2000 - i} for i in range(limit)]  # 80 tx in 80 s, newest first
+
+    tracker.backfill(conn, s, Burst(), full)
+    plain = f"Aaaa{0:040d}"[:44]
+    tracker.backfill(conn, s, Burst(), plain)
+    act = dict(conn.execute("SELECT address, active FROM ct_wallets").fetchall())
+    assert act[full] == 1 and act[plain] == 0
+    # the group's detection lag is reported on its own
+    tracker.LAG.clear()
+    sw = chain.Swap("sigB0", full, int(time.time()) - 2, "buy", "m", 1.0, 0.01, 0.01)
+    tracker.record_detection(conn, sw, "ws")
+    assert tracker.lag_summary(0)["block0"]["n"] == 1
+    tracker.LAG.clear()
+    tracker.BLOCK0.clear()

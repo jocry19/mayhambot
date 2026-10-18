@@ -92,6 +92,12 @@ class Settings:
     # subscriptions; Helius bills 2 credits per 0.1 MB streamed and pauses below the same reserve
     ws_helius: bool = field(default_factory=lambda: _b("CT_WS_HELIUS", True))
     ws_helius_max: int = field(default_factory=lambda: _i("CT_WS_HELIUS_MAX", 150))
+    # the "block 0" group (Erkenntnisse 17.10., 1d): tiny buys in a coin's very first moment, together within 5 s.
+    # Watched live and kept active (never pruned as bots); "prefix…suffix" or a bare prefix is resolved against the
+    # wallets the bot has seen (unique match only), full addresses are taken as they are
+    block0_wallets: list[str] = field(default_factory=lambda: [w.strip() for w in os.getenv(
+        "CT_BLOCK0_WALLETS", "52bZXsA9XHvWP5JYgmt1r8GQJ5bse3FK5ALf6j3pVu4e,5kGadrQbtuyi5KHDM69oVuFsUwsw98xopsRsRF3QnuFR,"
+        "3dy8rc,2XMRHn,9ZYMMX,7nZn5L,Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA,AopdiF…Qtke").split(",") if w.strip()])
     discover_every_s: float = field(default_factory=lambda: _f("CT_DISCOVER_EVERY_SECONDS", 1800))
     poll_warm_seconds: float = field(default_factory=lambda: _f("CT_POLL_WARM_SECONDS", 60))
     poll_cold_seconds: float = field(default_factory=lambda: _f("CT_POLL_COLD_SECONDS", 300))

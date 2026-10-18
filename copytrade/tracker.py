@@ -67,6 +67,8 @@ def record_detection(conn, sw: chain.Swap, source: str, notified_at: float | Non
     now = time.time()
     lag = max(0.0, now - sw.block_time) if sw.block_time else float("nan")
     LAG.append((source, sw.side, lag, now))
+    if sw.wallet in BLOCK0:
+        LAG.append(("block0", sw.side, lag, now))  # the group's own lag (its edge is the first seconds)
     try:
         usd = sol_usd or 0.0
         conn.execute("INSERT OR IGNORE INTO ct_detect(sig, wallet, side, source, block_ts, notified_at, detected_at,"
@@ -83,7 +85,7 @@ def record_detection(conn, sw: chain.Swap, source: str, notified_at: float | Non
 def lag_summary(since: float = 0.0, side: str | None = "buy") -> dict:
     """{source: {n, p50, p90, max}} of block-time -> recognition lags (seconds) since `since`."""
     out: dict = {}
-    for src in ("wslog", "ws", "poll", "gap"):
+    for src in ("wslog", "ws", "poll", "gap", "block0"):
         xs = sorted(x for s_, sd, x, t in list(LAG) if s_ == src and t >= since and (side is None or sd == side)
                     and x == x)
         if xs:
@@ -103,6 +105,58 @@ def load_manual(conn, s: Settings) -> int:
     conn.executemany("UPDATE ct_wallets SET source='manual', active=1 WHERE address=?", [(a,) for a in addrs])
     conn.commit()
     return n
+
+
+BLOCK0: set[str] = set()  # resolved block-0 wallets (detection lag is reported for them separately)
+_BLOCK0_FOUND: dict[str, str] = {}  # pattern -> address (a search over all swaps runs at most hourly)
+_BLOCK0_TRIED = {"at": 0.0}
+
+
+def load_block0(conn, s: Settings) -> list[str]:
+    """Resolve and watch the block-0 group: full addresses as given; "prefix" or "prefix…suffix" only when exactly
+    one wallet the bot has seen (tracked or in any swap) matches. Unresolved ones are logged and tried again."""
+    _B58 = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+    out, missing = [], []
+    for pat in s.block0_wallets:
+        pre, _, suf = pat.replace("...", "…").partition("…")
+        if not pre or not set(pre + suf) <= _B58:
+            continue
+        if not suf and len(pre) >= 32:
+            out.append(pre)
+            continue
+        if pat in _BLOCK0_FOUND:
+            out.append(_BLOCK0_FOUND[pat])
+            continue
+        if time.time() - _BLOCK0_TRIED["at"] < 3600:
+            continue
+        like = pre + "*" + suf  # GLOB: case-sensitive like base58, and it can use the wallet indexes
+        hits = set()
+        for q in ("SELECT address FROM ct_wallets WHERE address GLOB ?",
+                  "SELECT DISTINCT wallet FROM ct_swaps WHERE wallet GLOB ?",
+                  "SELECT DISTINCT wallet FROM trades WHERE wallet GLOB ?"):
+            try:
+                hits |= {r[0] for r in conn.execute(q, (like,)).fetchall()
+                         if r[0].startswith(pre) and r[0].endswith(suf) and 32 <= len(r[0]) <= 44}
+            except Exception:
+                continue  # table missing in a fresh database
+        if len(hits) == 1:
+            _BLOCK0_FOUND[pat] = hits.pop()
+            out.append(_BLOCK0_FOUND[pat])
+        else:
+            missing.append(f"{pat} ({len(hits)} matches)")
+    if any(p not in _BLOCK0_FOUND and not (len(p) >= 32 and "…" not in p) for p in s.block0_wallets) \
+            and time.time() - _BLOCK0_TRIED["at"] >= 3600:
+        _BLOCK0_TRIED["at"] = time.time()
+    if out:
+        store.add_wallets(conn, out, "block0", label="block0")
+        conn.executemany("UPDATE ct_wallets SET source='block0', active=1 WHERE address=? AND source!='manual'",
+                         [(a,) for a in out])
+        conn.commit()
+    if missing:
+        log.info("block-0 wallets not resolved yet: %s", ", ".join(missing))
+    BLOCK0.clear()
+    BLOCK0.update(out)
+    return out
 
 
 def load_core_smart(conn, limit: int = 30) -> int:
@@ -192,7 +246,7 @@ def ws_wallets(conn, s: Settings) -> list[str]:
 
     def key(r):
         tier = store.wallet_info(conn, r["address"]).get("tier")
-        return (r["source"] != "manual", {"ultra": 0, "smart": 1}.get(tier, 2),
+        return (r["source"] != "manual", 1 if r["source"] == "block0" else {"ultra": 0, "smart": 1}.get(tier, 2),
                 -(r["score"] if r["score"] is not None else -1), -(r["last_swap"] or 0))
 
     return [r["address"] for r in sorted(rows, key=key)][: s.ws_max_wallets]
@@ -238,8 +292,8 @@ def backfill(conn, s: Settings, rpc: chain.Rpc, wallet: str, limit: int = 80) ->
     if len(sigs) >= limit:
         span = (sigs[0].get("blockTime") or 0) - (sigs[-1].get("blockTime") or 0)
         if 0 <= span < 15 * 60:  # >80 tx in 15 min: MEV/bot, not a whale to copy
-            conn.execute("UPDATE ct_wallets SET active=0, label='bot' WHERE address=? AND source!='manual'",
-                         (wallet,))
+            conn.execute("UPDATE ct_wallets SET active=0, label='bot' WHERE address=? AND source NOT IN "
+                         "('manual','block0')", (wallet,))
             conn.execute("UPDATE ct_wallets SET backfilled_at=? WHERE address=?", (int(time.time()), wallet))
             conn.commit()
             return 0
@@ -508,7 +562,7 @@ DETECT_KEEP_DAYS = 14
 def prune(conn, s: Settings) -> int:
     conn.execute("DELETE FROM ct_detect WHERE detected_at < ?", (time.time() - DETECT_KEEP_DAYS * 86400,))
     cur = conn.execute(
-        """UPDATE ct_wallets SET active=0 WHERE source NOT IN ('manual') AND address IN
+        """UPDATE ct_wallets SET active=0 WHERE source NOT IN ('manual','block0') AND address IN
            (SELECT address FROM ct_wallet_rank WHERE samples >= ? AND score < 0)""",
         (s.min_wallet_samples * 2,),
     )

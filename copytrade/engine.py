@@ -31,6 +31,10 @@ class Engine:
         s, c = self.s, self.conn
         tracker.load_manual(c, s)
         tracker.load_core_smart(c)
+        try:
+            tracker.load_block0(c, s)
+        except Exception as e:
+            log.warning("block-0 wallets failed: %s", e)
         last_disc = float(store.get_state(c, "last_discover") or 0)
         if discover and (time.time() - last_disc >= s.discover_every_s or not tracker.active_wallets(c)):
             store.set_state(c, "last_discover", str(int(time.time())))
