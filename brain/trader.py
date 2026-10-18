@@ -473,6 +473,10 @@ class Trader:
         high = max(p["high_price_sol"] or entry, px)
         if high / entry - 1 >= exits.RUNNER_UP and px <= high * (1 - exits.RUNNER_TRAIL):
             return "trail", False  # a doubled coin keeps a 30 % trail from its high (winner study)
+        # the model judges a coin only after the grace minutes and a minute of its own observation: right after the
+        # buy (or a restart, with empty history) its features hold no price path and the spread reads as a loss
+        if held < exits.GRACE_MIN or self.live.seen_for(p["id"], now) < exits.HIST_S:
+            return None, False
         if not self.live.due(p["id"], now):
             return None, False
         meta = _meta(p)

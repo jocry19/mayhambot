@@ -29,6 +29,8 @@ MAX_HOLD_MIN = 240
 RUNNER_UP = 1.0  # winner study 17.10.: once a coin doubled, a 30 % trail from the high took +123 % on the 3x coins
 RUNNER_TRAIL = 0.30
 CHECK_S = 60  # one decision a minute, like the candles it learned from
+GRACE_MIN = 3  # no model decision in the first minutes: at t+0 the spread is the only move (18.10.: sold after 0-2 s at -6..-8 %)
+HIST_S = 60  # live: the model decides only once the trader itself watched the coin a minute (after a restart too)
 SAMPLE_W = 0.25  # minute-samples of one coin are correlated: each counts a quarter
 MIN_N = 400  # weighted samples before the model may decide anything
 VERDICT_MIN = 30  # finished out-of-sample replays before the organic exit may take over live
@@ -194,6 +196,8 @@ def replay(xm, cs, t0, kind, liq, wallet, swaps, whale_sells, s, cost: float) ->
             return got + left * (c / entry) - 1 - cost, m, "time"
         if high / entry - 1 >= RUNNER_UP and c <= high * (1 - RUNNER_TRAIL):
             return got + left * (c / entry) - 1 - cost, m, "trail"
+        if m < GRACE_MIN:
+            continue
         act, _, _ = advise(xm, toks, s, left < 1.0, c / entry - 1)
         if act == "sell":
             return got + left * (c / entry) - 1 - cost, m, "organic"
@@ -244,6 +248,10 @@ class Live:
             if ts <= now - secs:
                 best = px
         return best
+
+    def seen_for(self, pid: int, now: float) -> float:
+        h = self.hist.get(pid)
+        return now - h[0][0] if h else 0.0
 
     def due(self, pid: int, now: float) -> bool:
         if now - self.checked.get(pid, 0) >= CHECK_S:

@@ -106,7 +106,9 @@ dem Kauf, Abstand zum Hoch, letzte Minute und letzte 5 Minuten, ob das Volumen t
 der kopierte Wal verkauft hat, ob die übrigen Smart Wallets zu- oder abfließen. Gefragt wird: was macht der Kurs in
 den nächsten 10 Minuten? Halten, die Hälfte verkaufen (im Plus ≥ `BRAIN_EXIT_HALF_MIN_UP`, P(steigt) < `BRAIN_EXIT_HALF_P`)
 oder den Rest verkaufen (P < `BRAIN_EXIT_SELL_P`). Harte Grenzen bleiben: Crash-Stop −30 %, Rug-Prüfung, max. 4 h, und nach einer Verdopplung ein Trailing-Stop von 30 %
-unter dem Hoch (Gewinner-Studie 17.10.).
+unter dem Hoch (Gewinner-Studie 17.10.). Das Modell urteilt frühestens nach `GRACE_MIN` (3) Minuten und erst, wenn
+der laufende Prozess den Coin selbst eine Minute beobachtet hat (auch nach einem Neustart): direkt nach dem Kauf ist
+der Spread die einzige Bewegung (18.10.: Verkäufe nach 0–2 s mit −6 bis −8 %). Die Replays halten dieselbe Frist ein.
 
 Gelernt wird aus jeder nachgespielten Gelegenheit (jede Minute ein Beispiel, dieselben Minutenkerzen wie die
 Plan-Replays) und einmalig aus den schon fertigen (`backfill_exits`). Jede fertige Gelegenheit wird zusätzlich mit
