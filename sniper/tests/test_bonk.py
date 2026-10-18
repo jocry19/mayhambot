@@ -563,7 +563,8 @@ def test_trade_before_its_create_is_kept_and_replayed(tmp_path):
 def test_third_stream_on_its_own_host_and_first_arrivals_counted(tmp_path):
     from sniper import service
     from sniper.tests.test_sniper import Curve
-    svc = service.Service(cfg(), db_path=str(tmp_path / "s3.db"))
+    assert service.Service(cfg(), db_path=str(tmp_path / "off.db")).logs3 is None   # off by default
+    svc = service.Service(cfg(ws_url3="wss://solana.drpc.org"), db_path=str(tmp_path / "s3.db"))
     assert svc.logs3 and svc.logs3.url == "wss://solana.drpc.org" and svc.logs3 in svc._streams()
     assert svc.logs3.url not in [svc.logs.url, *svc.logs2.urls]
     cv = Curve("THREE")

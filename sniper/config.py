@@ -42,7 +42,7 @@ class SniperSettings:
     ws_url2_fallbacks: str = field(default_factory=lambda: _s("SNIPER_WS_URL2_FALLBACKS", ""))
     # a third program-wide stream on yet another public RPC (18.10. evening: without Helius both public streams
     # lose trades, 1002 drops on stream 1, overlap down to ~20 %); empty = off. Never the same host as 1 or 2.
-    ws_url3: str = field(default_factory=lambda: _s("SNIPER_WS_URL3", "wss://solana.drpc.org"))
+    ws_url3: str = field(default_factory=lambda: _s("SNIPER_WS_URL3", ""))
     # stream 2 on the Helius standard websocket when HELIUS_API_KEY is set (the user's call, 18.10.: as much as
     # needed, they watch the plan): ws_url2 and the fallbacks follow it. The data is billed (2 credits / 0.1 MB) and
     # booked on the shared ledger; the stream leaves Helius when the plan's month reaches its reserve
