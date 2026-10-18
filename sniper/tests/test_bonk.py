@@ -455,6 +455,8 @@ def test_launch_block_buyers_from_the_chain():
     txs = {"C": create, "S": setup, "L": later}
 
     def rpc(method, params):
+        if method == "getTransaction" and params[1].get("maxSupportedTransactionVersion", -1) < 1:
+            raise RuntimeError("-32015 Transaction version (1) is not supported")   # what the RPC answers for v1
         return sigs if method == "getSignaturesForAddress" else txs[params[0]]
     rows = launchblock.block_buyers(rpc, "MASCHE", 100, exclude=("DEV",))
     assert [(r["wallet"], r["role"], round(r["sol"]), round(r["tokens"] / 1e6, 1)) for r in rows] == \
@@ -470,3 +472,18 @@ def test_only_launches_that_migrate_at_once_get_a_block_read(tmp_path):
         st.migrated, st.migrated_ts, st.decided_ts = True, mig, T0 + 75
         eng.launches[st.mint] = st
     assert [s.mint for s in eng.block_due(T0 + 1000)] == ["F"] and eng.block_due(T0 + 1000) == []
+
+
+def test_coverage_line_runs_by_the_clock_and_survives_a_restart(tmp_path, caplog):
+    import logging
+    from sniper import service
+    assert service.until_hour(3600 * 10 + 60) == 360                      # 10:01 -> 10:07
+    assert service.until_hour(3600 * 10 + 7 * 60) == 3600                  # at :07 -> next hour
+    assert service.until_hour(3600 * 10 + 30 * 60) == 37 * 60               # 10:30 -> 11:07
+    svc = service.Service(cfg(), db_path=str(tmp_path / "c.db"))
+    now = svc.started + 1320                                                 # deploy 22 min ago
+    svc.engine.cover["decide"].extend([(now - 600, True), (now - 500, False)])
+    with caplog.at_level(logging.INFO, logger="sniper"):
+        svc.coverage_round(now)
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Abdeckung")]
+    assert lines and lines[0].startswith("Abdeckung (22 min seit Start): Launches mit Trades beim Entscheid 50 % von 2")

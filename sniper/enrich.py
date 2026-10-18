@@ -15,6 +15,7 @@ import time
 from collections import deque
 
 from core import http
+from sniper.launchblock import TX_VERSION
 from safety import checks as safety_checks
 from safety.config import settings as safety_settings
 from safety.sources import BudgetExceeded, Fetcher
@@ -306,7 +307,7 @@ class Enricher:
             elif s["signature"] != st.create_sig:
                 unseen.append(s)
         for s in unseen[: self.cfg.bundle_txs_fetched]:
-            tx = f.rpc("getTransaction", [s["signature"], {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
+            tx = f.rpc("getTransaction", [s["signature"], {"encoding": "jsonParsed", "maxSupportedTransactionVersion": TX_VERSION}])
             e = parse_rpc_tx(tx, st.mint)
             if e:
                 e["sig"] = s["signature"]

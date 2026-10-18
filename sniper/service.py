@@ -10,6 +10,7 @@ import threading
 import time
 
 from core import http
+from sniper.launchblock import TX_VERSION
 from sniper import feed, rpcws, store
 from sniper.engine import Engine
 from sniper.enrich import Budget, Enricher
@@ -24,6 +25,12 @@ def helius_ws_url(cfg):
     """Helius standard websocket for stream 2, or "" (no key, or SNIPER_WS_HELIUS=0). Never logged with the key."""
     key = os.getenv("HELIUS_API_KEY", "").strip()
     return f"wss://mainnet.helius-rpc.com/?api-key={key}" if key and cfg.ws_helius else ""
+
+
+def until_hour(now, minute=7):
+    """Seconds until the next hh:07 (local clock minute, UTC offsets are whole or half hours)."""
+    nxt = now - now % 3600 + minute * 60
+    return nxt - now if nxt > now + 30 else nxt + 3600 - now
 
 
 class Service:
@@ -174,7 +181,7 @@ class Service:
 
     def _signer(self, sig):
         j = http.post_json(self.cfg.bonk_rpc_url, {"jsonrpc": "2.0", "id": 1, "method": "getTransaction", "params": [
-            sig, {"encoding": "json", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}]}, retries=0)
+            sig, {"encoding": "json", "maxSupportedTransactionVersion": TX_VERSION, "commitment": "confirmed"}]}, retries=0)
         tx = (j or {}).get("result")
         if not tx:
             return None
@@ -679,15 +686,20 @@ class Service:
         return {"launch_sources": rates, "active_launch_source": active,
                 "launches_per_min": round(sum(r["first_per_min"] for r in rates.values()), 1)}
 
-    def coverage_round(self):
-        """Hourly: how much of the market the trade stream sees (plan 18.10.: goal 90 % for both)."""
-        c = self.engine.coverage(time.time())
+    def coverage_round(self, now=None):
+        """Hourly at :07 by the clock, so a restart (every deploy) no longer pushes the line out by an hour: how
+        much of the market the trade stream sees (plan 18.10.: goal 90 % for both). Shortly after a start the
+        window is the time since then, and the line says so."""
+        now = now or time.time()
+        c = self.engine.coverage(now)
+        up = now - self.started
+        span = "1 h" if up >= 3600 else f"{up / 60:.0f} min seit Start"
         pct = lambda v: "?" if v["share"] is None else f"{100 * v['share']:.0f} %"  # noqa: E731
-        log.info("Abdeckung (1 h): Launches mit Trades beim Entscheid %s von %d, Migrationen mit Trades %s von %d "
+        log.info(f"Abdeckung ({span}): Launches mit Trades beim Entscheid %s von %d, Migrationen mit Trades %s von %d "
                  "(Ziel je 90 %%)", pct(c["decide"]), c["decide"]["n"], pct(c["migrate"]), c["migrate"]["n"])
         lt = c.get("late") or {}
         if lt.get("zero"):
-            log.info("Abdeckung (1 h, Entscheide ≥ 5 min alt): %d ohne Trade beim Entscheid, davon %d binnen 5 min "
+            log.info(f"Abdeckung ({span}, Entscheide ≥ 5 min alt): %d ohne Trade beim Entscheid, davon %d binnen 5 min "
                      "doch gehandelt und %d nie | von allen Launches mit Trades binnen 5 min sahen wir beim Entscheid %s",
                      lt["zero"], lt["late_5m"], lt["never_5m"],
                      "?" if lt["share_of_traded"] is None else f"{100 * lt['share_of_traded']:.0f} %")
@@ -822,7 +834,7 @@ class Service:
                  asyncio.create_task(self.every(600, self.tiers_round, 600)),
                  asyncio.create_task(self.every(3600, self.prune_round, 120)),
                  asyncio.create_task(self.every(3600, self.research_round, 300)),
-                 asyncio.create_task(self.every(3600, self.coverage_round, 3600)),
+                 asyncio.create_task(self.every(3600, self.coverage_round, until_hour(time.time()))),
                  asyncio.create_task(self.every(300 if duration is None else 60, self.report, 60))]
         if self.cfg.use_geckoterminal:
             tasks.append(asyncio.create_task(self.every(self.cfg.gt_every_sec, self.gt_round, 30)))

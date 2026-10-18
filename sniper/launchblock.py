@@ -8,6 +8,9 @@ import logging
 log = logging.getLogger("sniper.launchblock")
 SLOTS, MAX_TX, PAGES = 3, 15, 4
 MIN_SOL = 0.01
+# highest transaction version getTransaction returns: v1 transactions exist on mainnet, and an RPC answers -32015
+# for any transaction above this, so the newest (often exactly the pump AMM setup buys) would be missing
+TX_VERSION = 1
 
 
 def _owner_deltas(meta, mint):
@@ -61,7 +64,7 @@ def block_buyers(rpc, mint, create_slot=None, slots=SLOTS, max_tx=MAX_TX, exclud
     s0 = create_slot or sigs[0]["slot"]
     rows = {}
     for s in [s for s in sigs if s0 <= s["slot"] < s0 + slots][:max_tx]:
-        tx = rpc("getTransaction", [s["signature"], {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
+        tx = rpc("getTransaction", [s["signature"], {"encoding": "jsonParsed", "maxSupportedTransactionVersion": TX_VERSION}])
         for w, tokens, sol in tx_buyers(tx, mint, exclude):
             r = rows.setdefault(w, {"wallet": w, "role": "launch_block", "slot": s["slot"], "ts": s.get("blockTime"),
                                     "tokens": 0.0, "sol": 0.0})
