@@ -196,6 +196,22 @@ def _brain_demo(conn, r, tokens, now):
                 meta["partial_sol"] = round(r.uniform(0.04, 0.12), 4)
                 conn.execute("UPDATE brain_positions SET tokens=? WHERE id=?", (tok * 0.5, pid))
             conn.execute("UPDATE brain_positions SET meta=? WHERE id=?", (json.dumps(meta), pid))
+    # pockets as brain writes them every 10 min (brain_state "pockets", brain/pockets.py)
+    pk = []
+    for key, label, src, n_ in (("whale|tier=ultra", "Wal-Kauf eines Ultra-Wals", "whale", 164), ("market|dex=pumpswap", "Coin auf PumpSwap", "market", 231),
+                                ("signal|wallets=6+", "Signal mit 6+ Smart Wallets", "signal", 118), ("launch|bundle=no", "Launch ohne Bundle", "launch", 412),
+                                ("whale|delay=<5s", "Wal erkannt in unter 5 s", "whale", 73), ("signal_v2", "Signal v2", "signal_v2", 58)):
+        m = r.gauss(0.01, 0.04)
+        lo = m - abs(r.gauss(0.04, 0.01)) * (100 / n_) ** 0.5
+        h1, h2 = m + r.gauss(0, 0.02), m + r.gauss(0, 0.02)
+        rel = n_ >= 100 and lo > 0 and h1 - 0.03 > 0 and h2 - 0.03 > 0
+        pk.append({"key": key, "label": label, "source": src, "n": n_, "mean": m, "lower95": lo, "n_first_half": n_ // 2, "mean_first_half": h1,
+                   "lower95_first_half": h1 - 0.03, "n_second_half": n_ - n_ // 2, "mean_second_half": h2, "lower95_second_half": h2 - 0.03,
+                   "last50_mean": m + r.gauss(0, 0.02), "released": rel, "released_at": now - 7200 if rel else None, "demoted_at": None,
+                   "reason": "Untergrenze in beiden Hälften über 0 und die letzten 50 im Plus." if rel else
+                   ("Noch keine 100 Fälle." if n_ < 100 else "Untergrenze nicht in beiden Hälften über 0.")})
+    pk.sort(key=lambda x: -x["lower95"])
+    store.put(conn, "pockets", {"rule": {"min_n": 100, "conf": 0.95, "last_n": 50, "window_days": 7}, "at": now - 240, "pockets": pk})
     store.put(conn, "regime_history", [{"at": now - 3 * 86400 + 5000, "n": 31, "err": -0.042, "z": -3.1},
                                        {"at": now - 20000, "n": 27, "err": 0.035, "z": 2.7}])
     conn.executemany("INSERT OR REPLACE INTO brain_equity(ts, balance_sol, open_value_sol, equity_sol) VALUES (?,?,?,?)",

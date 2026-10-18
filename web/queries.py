@@ -2431,6 +2431,38 @@ def _brain_honest(conn):
         return None
 
 
+BRAIN_POCKET_RULE = {"min_n": 100, "conf": 0.95, "last_n": 50, "window_days": 7}
+BRAIN_SOURCE = {"whale": "Wal-Kauf", "signal": "Signal", "signal_v2": "Signal v2", "launch": "Launch", "market": "Markt"}
+
+
+def _brain_pockets(conn, st):
+    """Pockets (plan 18.10., step 5): patterns per source with n, mean net after costs, 95 % lower bound in both
+    halves of the window, and whether brain released them for stake. brain.pockets.table when present, else the
+    brain_state key it reads ("pockets", written by brain every 10 min); read-only, empty until brain writes it."""
+    raw = None
+    try:
+        from brain import pockets as bp  # type: ignore
+        raw = bp.table(conn)
+    except Exception:
+        raw = st.get("pockets")
+    raw = raw if isinstance(raw, dict) else {}
+    out = []
+    for x in raw.get("pockets") or []:
+        if not isinstance(x, dict) or not x.get("key"):
+            continue
+        row = {k: x.get(k) for k in ("key", "label", "source", "n", "n_first_half", "n_second_half", "released_at", "demoted_at")}
+        for k in ("mean", "lower95", "mean_first_half", "lower95_first_half", "mean_second_half", "lower95_second_half", "last50_mean"):
+            row[k] = _f(x.get(k), 4)
+        row["released"] = bool(x.get("released"))
+        row["label"] = row["label"] or row["key"]
+        row["source_label"] = BRAIN_SOURCE.get(x.get("source"), x.get("source") or "–")
+        row["reason"] = _redact(str(x.get("reason") or ""))[:300]
+        out.append(row)
+    rule = {**BRAIN_POCKET_RULE, **(raw.get("rule") if isinstance(raw.get("rule"), dict) else {})}
+    return {"rule": rule, "at": raw.get("at"), "rows": out[:300], "released": sum(1 for r in out if r["released"]),
+            "positive": sum(1 for r in out if (r["lower95"] or 0) > 0)}
+
+
 def brain_view(conn, kind=None, show="all", limit=60, now=None):
     """The learning decider at a glance, read-only on brain's own tables (brain.status/balance would write the
     start balance, so this reads the tables itself). Empty tables are fine: every number may be None."""
@@ -2555,6 +2587,7 @@ def brain_view(conn, kind=None, show="all", limit=60, now=None):
             "by_liq": [{"key": k, "label": "Bonding-Curve" if k == "curve" else "Pool", **seg(x)} for k, x in (h.get("by_liq") or {}).items() if isinstance(x, dict)],
         },
         "alpha": _f(h.get("alpha"), 4),
+        "pockets": _brain_pockets(conn, st),
         "open": open_, "closed": closed[:40], "decisions": decisions, "diary": diary, "equity": eq,
         "plans": [{"name": k, **v} for k, v in plans.items()],
     }

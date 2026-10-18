@@ -772,6 +772,9 @@ def test_brain_view(demo, empty, tmp_path):
     assert any(x.get("alpha") is not None for x in d["days"]) and any(x.get("capture_organic") is not None for x in d["days"])
     assert d["exits"]["replays"]["n"] > 0 and {e["mode"] for e in d["exits"]["by_exit"]} <= {"organic", "plan"}
     assert d["segments"]["by_liq"] and d["regimes"] and any(x.get("regimes") for x in d["days"])
+    pk = d["pockets"]  # pockets: n, mean, 95 % lower bound per half, released (brain_state "pockets")
+    assert pk["rule"]["min_n"] == 100 and pk["rows"] and pk["released"] == sum(1 for x in pk["rows"] if x["released"])
+    assert all(x["n"] >= 100 and x["lower95"] > 0 for x in pk["rows"] if x["released"]) and all(x["label"] and x["reason"] for x in pk["rows"])
     held = d["open"] + d["closed"]
     assert {p["exit_mode"] for p in held} <= {"organic", "plan"}
     for p in d["open"]:
@@ -788,6 +791,7 @@ def test_brain_view(demo, empty, tmp_path):
     conn.row_factory = sqlite3.Row
     v = Q.brain_view(conn)
     assert v["available"] and v["decisions"] == [] and v["account"]["equity_sol"] == 5.0 and v["honest"]["n"] == 0
+    assert v["pockets"]["rows"] == [] and v["pockets"]["rule"]["min_n"] == 100 and v["pockets"]["at"] is None
     assert v["goal"]["today"] is None and v["hours"] == [] and v["exits"]["by_exit"] == [] and v["segments"]["by_delay"] == [] and v["regimes"] == []
     from cli.report import brain_line
 

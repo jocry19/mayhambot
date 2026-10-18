@@ -197,6 +197,37 @@ const ExitMode = ({ r }) => (r.exit_mode === "organic"
   ? <span className="badge good" title="Ausstieg nach dem Zustand des Coins, gelernt aus jeder nachgespielten Minute">organisch</span>
   : <span className="badge" title="Ausstieg nach den festen Regeln des Plans">Plan</span>);
 
+const halfCell = (m, lo, k) => (m == null ? <span className="dim">–</span>
+  : <span title={`${n(k)} Fälle, Untergrenze ${pctSigned(lo, 1)}`}><span className={sign(m)}>{pctSigned(m, 1)}</span> <span className={`dim ${lo > 0 ? "up" : ""}`}>({pctSigned(lo, 0)})</span></span>);
+
+/** Pockets (plan 18.10., step 5): stake only where the 95 % lower bound is above zero in both halves of the window. */
+function Pockets({ p }) {
+  const r = p.rule || {};
+  const status = (x) => (x.released ? <span className="badge good">freigegeben</span>
+    : x.demoted_at ? <span className="badge bad" title={`zurückgestuft ${dt(x.demoted_at)}`}>zurückgestuft</span>
+      : (x.n || 0) < (r.min_n || 100) ? <span className="badge">sammelt</span> : <span className="badge warn">nicht frei</span>);
+  return (
+    <Card flush title="Taschen" sub={`Muster je Quelle, netto nach Kosten über ${n(r.window_days)} Tage. Einsatz nur, wenn ab ${n(r.min_n)} Fällen die ${pct(r.conf)}-Untergrenze in beiden Hälften über 0 liegt und die letzten ${n(r.last_n)} im Plus sind.${p.at ? ` Stand ${ago(p.at)}.` : ""}`}
+      actions={<span className="dim" style={{ fontSize: 12 }}>{n(p.released)} freigegeben · {n(p.positive)} mit Untergrenze &gt; 0</span>}>
+      <Table rows={p.rows} rowKey={(x) => x.key} initialSort={{ k: "lower95", d: "desc" }}
+        empty="Noch keine Tasche mit genug Fällen (sie erscheinen ab 50, das Hirn rechnet alle 10 Minuten)"
+        expand={(x) => <div className="col" style={{ gap: 4 }}><span>{x.reason || "keine Begründung"}</span>
+          {x.released_at && <span className="dim">freigegeben {dt(x.released_at)}</span>}{x.demoted_at && <span className="dim">zurückgestuft {dt(x.demoted_at)}</span>}
+          <span className="dim mono">{x.key}</span></div>}
+        cols={[
+          { k: "label", l: "Tasche", fmt: (x) => <span><b>{x.label}</b> <span className="dim">{x.source_label}</span></span> },
+          { k: "n", l: "Fälle", r: true, fmt: (x) => n(x.n) },
+          { k: "mean", l: "Ø netto", r: true, fmt: (x) => <b className={sign(x.mean)}>{pctSigned(x.mean, 1)}</b> },
+          { k: "lower95", l: "Untergrenze 95 %", r: true, fmt: (x) => <span className={x.lower95 > 0 ? "up b" : "dim"}>{pctSigned(x.lower95, 1)}</span> },
+          { k: "mean_first_half", l: "1. Hälfte", r: true, fmt: (x) => halfCell(x.mean_first_half, x.lower95_first_half, x.n_first_half) },
+          { k: "mean_second_half", l: "2. Hälfte", r: true, fmt: (x) => halfCell(x.mean_second_half, x.lower95_second_half, x.n_second_half) },
+          { k: "last50_mean", l: `Letzte ${n(r.last_n)}`, r: true, fmt: (x) => <span className={sign(x.last50_mean)}>{pctSigned(x.last50_mean, 1)}</span> },
+          { k: "released", l: "Status", fmt: status },
+        ]} />
+    </Card>
+  );
+}
+
 function Decision({ d }) {
   const [open, setOpen] = useState(false);
   const lines = d.note || [];
@@ -308,6 +339,8 @@ export default function Brain() {
           )}
         </Card>
       </div>
+
+      {d.pockets && <Pockets p={d.pockets} />}
 
       <div className="grid g2">
         <Card title="Auswahl-Vorsprung je Tag" sub="Ø netto des Genommenen minus Ø netto von allem, nachgeprüft am Tag des Ergebnisses">
