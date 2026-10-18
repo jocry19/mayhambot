@@ -355,6 +355,24 @@ function Learning({ L, days }) {
           <div className="legend-row">{["gesehen", "bewertet"].map((l, i) => <span key={l}><i style={{ background: `var(--series-${i + 1})` }} />{l}</span>)}</div>
         </div>
       </div>
+      {L.discrimination?.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div className="help">Trennschärfe je Quelle und der Einsatzfaktor daraus: der Entscheider setzt nur so viel, wie seine Vorhersagen für diese Quelle über 7 Tage Gewinner von Verlierern getrennt haben (ab {n(L.disc_rule?.min_n)} Ergebnissen, voll ab einer Rangkorrelation von {n(L.disc_rule?.full, 1)}; bei 0 bleibt der kleine Einsatz)</div>
+          <Table rows={L.discrimination} rowKey={(x) => x.kind} initialSort={{ k: "n", d: "desc" }}
+            cols={[
+              { k: "label", l: "Quelle", fmt: (x) => <b>{x.label}</b> },
+              { k: "n", l: "Ergebnisse", r: true, fmt: (x) => n(x.n) },
+              { k: "rank_corr", l: "Rangkorrelation", r: true, fmt: (x) => <b className={sign(x.rank_corr)}>{x.rank_corr == null ? "–" : n(x.rank_corr, 2)}</b> },
+              { k: "factor", l: "Einsatzfaktor", r: true, fmt: (x) => (
+                <span className="row" style={{ gap: 8, justifyContent: "flex-end" }} title={x.factor > 0 ? `Einsatz zu ${pct(x.factor, 0)} aus dem Vertrauen` : x.n < (L.disc_rule?.min_n || 30) ? "noch zu wenige Ergebnisse: kleiner Einsatz" : "trennt noch nicht: kleiner Einsatz"}>
+                  <span style={{ width: 56, height: 6, borderRadius: 3, background: "var(--border)", overflow: "hidden", display: "inline-block" }}><span style={{ display: "block", height: "100%", width: `${x.factor * 100}%`, background: "var(--series-1)" }} /></span>
+                  <b>{pct(x.factor, 0)}</b></span>) },
+              { k: "why", l: "", fmt: (x) => <span className="dim">{x.factor >= 1 ? "voller Einsatz möglich" : x.factor > 0 ? "Einsatz gedrosselt" : x.n < (L.disc_rule?.min_n || 30) ? "sammelt noch, kleiner Einsatz" : "trennt nicht, kleiner Einsatz"}</span> },
+              { k: "shared_rank_ic", l: "gemeinsame Tabelle", r: true, fmt: (x) => (x.shared_rank_ic == null ? <span className="dim">–</span>
+                : <span className={sign(x.shared_rank_ic)} title={`${n(x.shared_n)} Fälle in der Gelegenheits-Tabelle`}>{n(x.shared_rank_ic, 2)}</span>) },
+            ]} />
+        </div>
+      )}
       {L.sources?.length > 0 && (
         <div style={{ marginTop: 12 }}>
           <div className="help">Gelegenheiten je Quelle, letzte 7 Tage (Netto nach Kosten, ehrlich nachgespielt, Rug = −100 %)</div>
@@ -366,6 +384,7 @@ function Learning({ L, days }) {
               { k: "n_eval", l: "mit Ergebnis", r: true, fmt: (x) => n(x.n_eval) },
               { k: "mean_net", l: "Ø netto", r: true, fmt: (x) => <b className={sign(x.mean_net)}>{pctSigned(x.mean_net, 1)}</b> },
               { k: "mean_source", l: "eigene Messung", r: true, fmt: (x) => (x.n_source ? <span className={sign(x.mean_source)} title={`${n(x.n_source)} Fälle, von der Quelle selbst gemessen`}>{pctSigned(x.mean_source, 1)}</span> : <span className="dim">–</span>) },
+              { k: "rank_ic", l: "Rangkorrelation", r: true, fmt: (x) => (x.rank_ic == null ? <span className="dim">–</span> : <span className={sign(x.rank_ic)} title={`${n(x.n_pred)} Vorhersagen mit Ergebnis`}>{n(x.rank_ic, 2)}</span>) },
               { k: "taken", l: "gekauft", r: true, fmt: (x) => n(x.taken) },
             ]} />
         </div>

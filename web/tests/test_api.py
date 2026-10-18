@@ -787,6 +787,9 @@ def test_brain_view(demo, empty, tmp_path):
     assert all(x["n"] >= 100 and x["lower95"] > 0 for x in pk["rows"] if x["released"]) and all(x["label"] and x["reason"] for x in pk["rows"])
     lc = d["learning"]  # learning curve: rank correlation, calibration, opportunities, net per trade over 7 days
     assert len(lc["days"]) == 14 and lc["opps_goal"] == 5000 and lc["source"] == lc["seen_source"] == "opportunities"
+    disc = {x["kind"]: x for x in lc["discrimination"]}  # brain's sharpness per source and the stake factor from it
+    assert disc["whale"]["factor"] == 0.7 and disc["signal"]["factor"] == 0 and disc["signal_v2"]["factor"] == 0  # < 0 / < 30 results
+    assert disc["whale"]["shared_n"] and -1 <= disc["whale"]["shared_rank_ic"] <= 1 and lc["disc_rule"] == {"min_n": 30, "full": 0.2}
     assert {x["source"] for x in lc["sources"]} >= {"sniper", "copytrade"} and all(x["n_7d"] >= x["n_eval"] for x in lc["sources"])
     assert [x["trust"] for x in pk["rows"]] == sorted((x["trust"] for x in pk["rows"]), reverse=True) and pk["trusted"] >= 0
     assert any(x.get("rank_ic") is not None for x in lc["days"]) and all(-1 <= x["rank_ic"] <= 1 for x in lc["days"] if x.get("rank_ic") is not None)
@@ -810,7 +813,7 @@ def test_brain_view(demo, empty, tmp_path):
     v = Q.brain_view(conn)
     assert v["available"] and v["decisions"] == [] and v["account"]["equity_sol"] == 5.0 and v["honest"]["n"] == 0
     assert v["pockets"]["rows"] == [] and v["pockets"]["rule"]["min_n"] == 100 and v["pockets"]["at"] is None
-    assert v["learning"]["source"] == "brain_opps" and v["learning"]["sources"] == []
+    assert v["learning"]["source"] == "brain_opps" and v["learning"]["sources"] == [] and v["learning"]["discrimination"] == []
     assert v["learning"]["deciles"] == [] and v["learning"]["rank_ic"] is None and all(x["n_opps"] == 0 for x in v["learning"]["days"])
     assert v["goal"]["today"] is None and v["hours"] == [] and v["exits"]["by_exit"] == [] and v["segments"]["by_delay"] == [] and v["regimes"] == []
     from cli.report import brain_line

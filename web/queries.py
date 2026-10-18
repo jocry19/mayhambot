@@ -2510,13 +2510,14 @@ def _calibration(pairs, bins=10):
     return out, gap / len(pairs)
 
 
-def _brain_learning(conn, now, days):
+def _brain_learning(conn, now, days, st=None):
     """Learning curve (plan 18.10., "Richtung neu"): does the decider get better day by day, without flattering itself.
     Per UTC decision day: rank correlation of the prediction made at decision time with the outcome measured later
     (out of sample by construction: brain_opps.pred_mean is written before realized_plan exists), calibration gap,
     opportunities seen and scored, the account's closed trades (net per trade, 7-day mean with a 95 % interval) and
     the day factor. Plus the decile table over the last 7 days. Reads brain_opps until the shared opportunity table
     exists."""
+    st = st or {}
     t_end = now - now % 86400 + 86400
     lo = t_end - BRAIN_DAYS * 86400
     day = lambda ts: int(ts) - int(ts) % 86400  # noqa: E731
@@ -2555,6 +2556,7 @@ def _brain_learning(conn, now, days):
         x.update(n_trades_7d=len(w), trade_mean_7d=_f(m, 4),
                  trade_lo_7d=_f(m - half, 4) if half is not None else None,
                  trade_hi_7d=_f(m + half, 4) if half is not None else None, mult=mult.get(d))
+    srcs = _opp_sources(conn, now) if shared else []
     recent = [p for d, ps in pairs.items() if d >= t_end - 7 * 86400 for p in ps]
     deciles, gap = _calibration(recent)
     series = [out[k] for k in sorted(out)]
@@ -2562,7 +2564,30 @@ def _brain_learning(conn, now, days):
     return {"days": series, "deciles": deciles, "cal_gap_7d": _f(gap, 4), "n_7d": len(recent),
             "rank_ic": last.get("rank_ic") if last else None, "opps_goal": BRAIN_OPPS_GOAL,
             "cap": list(BRAIN_CAL_CAP), "source": "opportunities" if scored else "brain_opps", "seen_source": seen_t,
-            "sources": _opp_sources(conn, now) if shared else []}
+            "sources": srcs, "discrimination": _brain_discrimination(st, srcs),
+            "disc_rule": {"min_n": BRAIN_DISC_MIN_N, "full": BRAIN_DISC_FULL}}
+
+
+BRAIN_DISC_MIN_N, BRAIN_DISC_FULL = 30, 0.2  # brain/pockets.py: sharpness = rank corr / 0.2, from 30 results, 0..1
+
+
+def _brain_discrimination(st, sources):
+    """Per source the brain's own sharpness (brain_state "pockets" -> "discrimination": rank correlation of its
+    predictions with the results over 7 days) and the stake factor that follows (0 until 30 results or at <= 0:
+    the small stake stays), next to the rank correlation the shared table shows for the same source."""
+    disc = ((st.get("pockets") or {}) if isinstance(st.get("pockets"), dict) else {}).get("discrimination") or {}
+    own = {x["source"]: x for x in sources}
+    alias = {"signal": "signals", "signal_v2": "signals_v2"}
+    out = []
+    for k, v in disc.items():
+        if not isinstance(v, dict):
+            continue
+        nn, rc = v.get("n") or 0, v.get("rank_corr")
+        f = 0.0 if nn < BRAIN_DISC_MIN_N or rc is None else max(0.0, min(1.0, rc / BRAIN_DISC_FULL))
+        o = own.get(k) or own.get(alias.get(k, k)) or {}
+        out.append({"kind": k, "label": BRAIN_SOURCE.get(k, BRAIN_KIND.get(k, k)), "n": nn, "rank_corr": _f(rc, 4),
+                    "factor": round(f, 3), "shared_rank_ic": o.get("rank_ic"), "shared_n": o.get("n_pred")})
+    return sorted(out, key=lambda x: -x["n"])
 
 
 def _opp_sources(conn, now):
@@ -2570,19 +2595,23 @@ def _opp_sources(conn, now):
     their mean net after costs (capped as above), the source's own result and how many brain took."""
     cap = lambda y: min(BRAIN_CAL_CAP[1], max(BRAIN_CAL_CAP[0], y))  # noqa: E731
     out = {}
-    for r in rows(conn, "SELECT source, ts, outcome_net, source_result, decision FROM opportunities WHERE ts>=?",
+    for r in rows(conn, "SELECT source, ts, outcome_net, source_result, decision, pred_mean FROM opportunities WHERE ts>=?",
                   (now - 7 * 86400,)):
-        x = out.setdefault(r["source"], {"source": r["source"], "n_7d": 0, "n_24h": 0, "n_eval": 0, "taken": 0, "_y": [], "_s": []})
+        x = out.setdefault(r["source"], {"source": r["source"], "n_7d": 0, "n_24h": 0, "n_eval": 0, "taken": 0, "_y": [], "_s": [], "_p": []})
         x["n_7d"] += 1
         x["n_24h"] += r["ts"] >= now - 86400
         x["taken"] += r["decision"] in ("learn", "perform")
         if r["outcome_net"] is not None:
             x["n_eval"] += 1
             x["_y"].append(cap(float(r["outcome_net"])))
+            if r["pred_mean"] is not None:
+                x["_p"].append((float(r["pred_mean"]), float(r["outcome_net"])))
         if r["source_result"] is not None:
             x["_s"].append(cap(float(r["source_result"])))
     for x in out.values():
         x["label"] = BRAIN_SOURCE.get(x["source"], x["source"])
+        ps = x.pop("_p")
+        x["n_pred"], x["rank_ic"] = len(ps), _f(_spearman([p for p, _ in ps], [y for _, y in ps]), 4)
         x["mean_net"], x["mean_source"], x["n_source"] = _f(_mean(x.pop("_y")), 4), _f(_mean(x["_s"]), 4), len(x.pop("_s"))
     return sorted(out.values(), key=lambda x: -x["n_7d"])
 
@@ -2712,7 +2741,7 @@ def brain_view(conn, kind=None, show="all", limit=60, now=None):
         },
         "alpha": _f(h.get("alpha"), 4),
         "pockets": _brain_pockets(conn, st),
-        "learning": _brain_learning(conn, now, days),
+        "learning": _brain_learning(conn, now, days, st),
         "open": open_, "closed": closed[:40], "decisions": decisions, "diary": diary, "equity": eq,
         "plans": [{"name": k, **v} for k, v in plans.items()],
     }

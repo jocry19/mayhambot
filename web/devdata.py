@@ -213,7 +213,9 @@ def _brain_demo(conn, r, tokens, now):
                    "reason": "Untergrenze in beiden Hälften über 0 und die letzten 50 im Plus." if rel else
                    ("Noch keine 100 Fälle." if n_ < 100 else "Untergrenze nicht in beiden Hälften über 0.")})
     pk.sort(key=lambda x: -x["trust"])
-    store.put(conn, "pockets", {"rule": {"min_n": 100, "conf": 0.95, "last_n": 50, "window_days": 7}, "at": now - 240, "pockets": pk})
+    store.put(conn, "pockets", {"rule": {"min_n": 100, "conf": 0.95, "last_n": 50, "window_days": 7}, "at": now - 240, "pockets": pk,
+                                "discrimination": {"whale": {"n": 212, "rank_corr": 0.14}, "launch": {"n": 96, "rank_corr": 0.03},
+                                                   "signal": {"n": 61, "rank_corr": -0.05}, "signal_v2": {"n": 18, "rank_corr": 0.31}}})
     # the shared opportunity table of every source (brain/opportunities.py), the model getting better day by day
     from brain import opportunities as bo
 
