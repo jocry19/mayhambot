@@ -48,3 +48,6 @@ DWF8CK6ur4r4bXcAXGPpkSSwrswLMA6KRTNc85NLe1Kz  setup  Setup/Dump in den 6 Masche-
 3hDAFWWiRrXzE28XPqXTGWxP3YEuYoaPKEzFxkJTvDT7  setup  Dumper der Masche-Coins vom 18.10.
 Bent1LWi2QfNmGmvtttxiDDHa5o6w4joF1h1c9wBzuBQ  setup  Launch-Block-Käufer in 5 Masche-Coins (773 SOL), Backup 18.10.
 6NFXPh7z8byXPj9rEHAgfX8C4RWM1Pdmuan9vtucNQvT  setup  Launch-Block-Käufer in 3 Masche-Coins (15.003 SOL), Backup 18.10.
+7dL5UMwdE5ncphgN5XQc2L2bZ9Nbszm51HM8WKWnVVuX  setup  Launch-Block Meta ALV222 18.10. 07:54 (149,9 SOL, einziger Käufer), 299,8 SOL in 2 Coins
+JAw63BKsupFM7CLkqnkP9XtWwfP5P6fbyg4E4Kqf5vZU  setup  Launch-Block PEPETO BcXeFM 18.10. (879,9 SOL)
+CDvBjgJLimQFWgeobydxVTZks2qivLY5woujau1qg9sF  sniper0  Staub-Käufer in 17 Masche-Coins (von 20 gehandelten, Rest unbekannt), Launch-Block Gemini AI und FOMO
