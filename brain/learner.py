@@ -712,3 +712,52 @@ def label_skill(conn, lo: float, hi: float | None = None) -> dict | None:
             "bottom": round(sum(ys[i] for i in bottom) / k, 4),
             "top_max60": round(sum(m60) / len(m60), 4) if m60 else None,
             "top_plan": (best[0], round(sum(best[1]) / len(best[1]), 4)) if best else None}
+
+
+def exit_skill(conn, lo: float, hi: float | None = None) -> dict | None:
+    """Which exit makes the pool model's top tenth pay? Labelled rows in [lo, hi), the first per source and coin,
+    split in two halves by report time. In each half the top tenth by pred_mean; the rule (plan or labels rule) with
+    the best top-tenth mean in the first half is then judged on the second half only (out of sample): its mean and
+    median there, and the same rule over all rows of the second half. None while there are too few rows."""
+    try:
+        rows = conn.execute("SELECT source, mint, ts, pred_mean, label_outcomes, label_rules FROM opportunities WHERE "
+                            "label_at>=? AND label_at<? AND pred_mean IS NOT NULL AND label_rules IS NOT NULL "
+                            "ORDER BY ts, id", (int(lo), int(hi if hi is not None else 2 ** 40))).fetchall()
+    except Exception:
+        return None
+    seen, data = set(), []
+    for src, mint, ts, p, outs, rules in rows:
+        if (src, mint) in seen:
+            continue
+        seen.add((src, mint))
+        nets = {}
+        for blob in (outs, rules):
+            try:
+                nets.update({k: min(labels.CAP, float(v)) for k, v in json.loads(blob or "{}").items()
+                             if isinstance(v, (int, float))})
+            except (TypeError, ValueError):
+                pass
+        if nets:
+            data.append((float(p), nets))
+    n = len(data)
+    if n < 100:
+        return {"n": n}
+    halves = data[: n // 2], data[n // 2:]
+
+    def top(rows_):
+        k = max(1, len(rows_) // 10)
+        return sorted(rows_, key=lambda r: r[0])[-k:]
+
+    def mean(rows_, rule):
+        vs = [r[1][rule] for r in rows_ if rule in r[1]]
+        return (sum(vs) / len(vs), sorted(vs)[len(vs) // 2], len(vs)) if vs else None
+
+    t1, t2 = top(halves[0]), top(halves[1])
+    names = {k for _, nets in data for k in nets}
+    scored = [(mean(t1, k)[0], k) for k in names if mean(t1, k)]
+    if not scored:
+        return {"n": n}
+    best = max(scored)[1]
+    oos, every = mean(t2, best), mean(halves[1], best)
+    return {"n": n, "rule": best, "in_sample": round(max(scored)[0], 4), "oos_mean": round(oos[0], 4),
+            "oos_median": round(oos[1], 4), "oos_n": oos[2], "all_mean": round(every[0], 4) if every else None}

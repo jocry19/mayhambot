@@ -24,6 +24,7 @@ log = logging.getLogger("brain.trader")
 DEDUP_S = 6 * 3600  # one opportunity per (whale entity or kind, coin) in this window: repeat buys are no new idea
 POOL_DRAWS = 3000  # the learning account's draws its quantile is taken over
 POOL_DRAWS_MIN = 200
+NAME_COPY_S = 6 * 3600  # a scam's name copies come within hours
 RECORD_N = 30  # the brain's own trades of a kind its exploring is judged on
 RECORD_MIN_N = 20
 RECORD_EVERY_S = 60
@@ -500,6 +501,12 @@ class Trader:
         if c.execute("SELECT 1 FROM brain_positions WHERE mint=? AND exit_reason='rug' AND closed_at>=?",
                      (mint, int(self.clock() - RUG_BAN_S))).fetchone():
             return "Coin als Rug verkauft, 24 h gesperrt"  # 18.10.: DOPE bought again 3 min after its rug sale
+        born = (getattr(snap, "pair_created_ms", 0) or 0) / 1000
+        young = not born or self.clock() - born <= NAME_COPY_S  # an old coin is the original, not the copy
+        copy_of = young and self._name_copy(mint, (snap.symbol if snap else "") or (
+            (row["symbol"] if row is not None and "symbol" in row.keys() else "") or ""))
+        if copy_of:
+            return copy_of
         if c.execute("SELECT 1 FROM brain_positions WHERE mint=? AND (opened_at>=? OR closed_at>=?)",
                      (mint, int(self.clock() - REENTRY_S), int(self.clock() - REENTRY_S))).fetchone():
             return "Coin in den letzten 6 h schon gehandelt"
@@ -898,6 +905,27 @@ class Trader:
         except Exception as e:
             log.exception("learning from trade %s failed: %s", p["id"], e)
         return True
+
+    def _name_copy(self, mint: str, symbol: str) -> str | None:
+        """A coin named like another one that rugged or was dumped in the last hours: the same scam again (18.10.: two
+        'Glow' copies of one creator after the Glow launch, one -0.099 SOL rug)."""
+        sym = symbol.strip().lower()
+        if not sym:
+            return None
+        c, since = self.conn, int(self.clock() - NAME_COPY_S)
+        if c.execute("SELECT 1 FROM brain_positions WHERE lower(symbol)=? AND mint!=? AND exit_reason='rug' AND "
+                     "closed_at>=? LIMIT 1", (sym, mint, since)).fetchone():
+            return f"Namenskopie: {symbol} wurde in den letzten Stunden schon als Rug verkauft"
+        if store.has(c, "sniper_launches"):
+            try:
+                hit = c.execute("SELECT 1 FROM sniper_launches WHERE created_ts>=? AND lower(symbol)=? AND mint!=? AND "
+                                "(rugged=1 OR COALESCE(known_bad,0)>0 OR COALESCE(dev_sold_pct,0)>=90) LIMIT 1",
+                                (since, sym, mint)).fetchone()
+            except Exception:
+                hit = None
+            if hit:
+                return f"Namenskopie: ein anderer {symbol} wurde in den letzten Stunden gerugged oder abverkauft"
+        return None
 
     def _record(self, kind: str):
         """(mean net, n) of the kind's last RECORD_N closed trades when they lost on average, else None."""

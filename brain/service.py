@@ -17,6 +17,7 @@ log = logging.getLogger("brain")
 
 SAVE_EVERY_S = 600
 EQUITY_EVERY_S = 60
+EXIT_SKILL_S = 6 * 3600  # the exit check looks at the labels of the last 6 h
 HEARTBEAT_S = 3600  # one "brain hour:" log line per hour (ops can watch it for stalls)
 
 
@@ -107,7 +108,8 @@ class Service:
                 f"model {self.model.d - 1} tokens / {self.model.n:.0f} outcomes, exit model {self.xm.n:.0f} minutes "
                 f"(organic exits {'on' if self.trader.organic_on(time.time()) else 'off'}, "
                 f"replays {exits.verdict(c)['n']}), pool model {self.pm.d - 1} tokens / {self.pm.n:.0f} outcomes, "
-                f"{self._pooled(since)}, {self._labelled(since)}, {self._gates(since)}, {self._pace()}")
+                f"{self._main_buys(since)}, {self._pooled(since)}, {self._labelled(since)}, {self._gates(since)}, "
+                f"{self._pace()}")
 
     def _pace(self) -> str:
         ls, gap = self.learn_s, self.max_gap
@@ -138,7 +140,7 @@ class Service:
             follow = len((store.get(self.conn, "label_track") or {}).get("rows") or {})
         except Exception:
             return "labels none"
-        out = (f"labels {n} written ({rug} rugs, mean best-in-60-min {m60:+.1%} after costs, capped at +1000%), "
+        out = (f"labels {n} written ({rug} rugs, mean best-in-60-min {m60 or 0:+.1%} after costs, capped at +1000%), "
                f"{follow} followed"
                if n else f"labels 0 written, {follow} followed")
         sk = learner.label_skill(self.conn, since)
@@ -155,7 +157,29 @@ class Service:
                     + (f" max60 {sk['top_max60']:+.1%}" if sk.get("top_max60") is not None else "")
                     + (f" best plan {tp[0]} {tp[1]:+.1%}" if tp else "")
                     + f" bottom {sk['bottom']:+.1%} (n {sk['n']} coins)")
+        ex = learner.exit_skill(self.conn, since - EXIT_SKILL_S)
+        if ex and ex.get("rule"):
+            # the exit judged out of sample over the last 6 h: the top tenth's best rule of the first half, measured
+            # on the second; a median above 0 here for hours is the first edge (plan 'Hundertmal', lever 3)
+            out += (f", exit 6h best {ex['rule']} (in-sample {ex['in_sample']:+.1%}) top tenth out-of-sample mean "
+                    f"{ex['oos_mean']:+.1%} median {ex['oos_median']:+.1%} n {ex['oos_n']}, all {ex['all_mean']:+.1%}")
+            hist = (store.get(self.conn, "exit_skill_hist") or [])[-23:] + [[int(since), ex]]
+            store.put(self.conn, "exit_skill_hist", hist)
         return out
+
+    def _main_buys(self, since: float) -> str:
+        """The brain's own account by kind this hour: buys, and the trades closed with their net."""
+        try:
+            b = dict(self.conn.execute("SELECT kind, COUNT(*) FROM brain_positions WHERE kind!='pool' AND opened_at>=? "
+                                       "GROUP BY kind", (int(since),)).fetchall())
+            cl = {k: (n, s) for k, n, s in self.conn.execute(
+                "SELECT kind, COUNT(*), COALESCE(SUM(pnl_sol),0) FROM brain_positions WHERE kind!='pool' AND "
+                "status='closed' AND closed_at>=? GROUP BY kind", (int(since),)).fetchall()}
+        except Exception:
+            return "main none"
+        kinds = sorted(set(b) | set(cl))
+        return "main bought/closed/net " + (", ".join(
+            f"{k} {b.get(k, 0)}/{cl.get(k, (0, 0))[0]}/{cl.get(k, (0, 0.0))[1]:+.3f}" for k in kinds) or "none")
 
     def _pooled(self, since: float) -> str:
         try:
