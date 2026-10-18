@@ -1,5 +1,5 @@
 # Wallets that mark a coin as a rug risk when they launch it, fund its creator/holders or buy at launch.
-# address  role  note   (roles: launcher, bundle, insider, funder, sniper0). Exchange hot wallets
+# address  role  note   (roles: launcher, bundle, insider, funder, sniper0, setup). Exchange hot wallets
 # (exchanges.txt) are never listed: one exchange withdrawal funds thousands of strangers.
 # Runtime additions: python -m safety watch add <ADDRESS> <role> "note" (table safety_bad_wallets).
 
@@ -36,3 +36,15 @@ DzMiY3zQzfVcbySp1HsYQCUh6RqnVbS8C7WyhuhUcbRq  bundle  Bundle-/Dev-Wallet, finanz
 2esFAKMa26xnz1AHWCrxMh1KoSTFpCGgEvj2mPamdxPh  bundle  Bundle-/Dev-Wallet, finanziert von iGdFcQoy…
 iGdFcQoyR2MwbXMHQskhmNsqddZ6rinsipHc4TNSdwu  funder  finanzierte 2 Bundle-/Dev-Wallets
 27HFmP7ccLadGswvQfvea4o3juLw75cPF4V6jWpHM3MX  sniper0  Block-0-Käufer
+
+# 2026-10-18 Marken-Masche (Thread „Masche-Coins und ihre Käufer“, Chain-Daten vom Mac): Setup-Wallets kaufen im
+# Launch-Block 160-2.150 SOL und verkaufen später alles in einer Transaktion. Rolle setup = allein schon Sperre.
+4G9JAzftaydKjB2558MLnkYw175KMN6NGGgyxkeRuwwA  setup  56 Masche-Coins in 41 h, immer 160 SOL im Launch-Block, +5.814 SOL
+A8wfJdeQbnFCaNkqywVQZQRLiXLgTVyQRZ19AG517op7  setup  33 Masche-Coins, 167-168 SOL im Launch-Block, +3.955 SOL
+Fw85ECZMz8rJ3VkqjkSPtkRTm4fG9F8gU9bnC385fStx  setup  Setup/Dump in den 6 Masche-Coins vom 18.10.
+8f9mnkH9i1mWVAsGEvGgxURAXwU5PSHzbmseL25WP5om  setup  Setup/Dump in den 6 Masche-Coins vom 18.10., 3.489 SOL im Launch-Block
+DWF8CK6ur4r4bXcAXGPpkSSwrswLMA6KRTNc85NLe1Kz  setup  Setup/Dump in den 6 Masche-Coins vom 18.10.
+7Ud5vgBFoRNx9RSSNDDyk1ojawbXN2RcjiKDDajC6PAW  setup  Setup, gab Tokens an den Dumper 3hDAFW… weiter
+3hDAFWWiRrXzE28XPqXTGWxP3YEuYoaPKEzFxkJTvDT7  setup  Dumper der Masche-Coins vom 18.10.
+Bent1LWi2QfNmGmvtttxiDDHa5o6w4joF1h1c9wBzuBQ  setup  Launch-Block-Käufer in 5 Masche-Coins (773 SOL), Backup 18.10.
+6NFXPh7z8byXPj9rEHAgfX8C4RWM1Pdmuan9vtucNQvT  setup  Launch-Block-Käufer in 3 Masche-Coins (15.003 SOL), Backup 18.10.

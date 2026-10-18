@@ -1,4 +1,4 @@
-"""Known rug wallets: serial launchers, bundle/dev wallets, insiders, their funders and block-0 snipers.
+"""Known rug wallets: serial launchers, bundle/dev wallets, insiders, their funders, block-0 snipers and the setup wallets of the brand scam (alone a veto).
 
 Two sources, merged: the curated file safety/bad_wallets.txt (versioned, `address  role  note`) and the table
 safety_bad_wallets (runtime additions: `python -m safety watch add <ADDRESS> <role> "note"`). Exchange hot wallets
@@ -16,6 +16,7 @@ ROLES = {
     "insider": "Insider",
     "funder": "Geldgeber von Bundle-Wallets",
     "sniper0": "Block-0-Käufer",
+    "setup": "Setup-Wallet der Marken-Masche",
 }
 FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bad_wallets.txt")
 _cache = {"key": None, "file": {}}

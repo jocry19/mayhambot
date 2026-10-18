@@ -113,6 +113,9 @@ class SafetySettings:
     staged_band_lo: float = field(default_factory=lambda: _f("SAFETY_STAGED_BAND_LO", 0.10))
     staged_band_hi: float = field(default_factory=lambda: _f("SAFETY_STAGED_BAND_HI", 0.20))
     staged_max_mcap: float = field(default_factory=lambda: _f("SAFETY_STAGED_MAX_MCAP", 1500000))
+    # brand scam: creator buys the whole curve at create (check masche), holders spread by the creator (holders)
+    masche_dev_buy_pct: float = field(default_factory=lambda: _f("SAFETY_MASCHE_DEV_BUY_PCT", 75))
+    masche_spread_dev_pct: float = field(default_factory=lambda: _f("SAFETY_MASCHE_SPREAD_DEV_PCT", 50))
     bad_wallets_file: str = field(default_factory=lambda: os.getenv("SAFETY_BAD_WALLETS_FILE", ""))  # "" = safety/bad_wallets.txt
     use_rugcheck: bool = field(default_factory=lambda: _b("SAFETY_USE_RUGCHECK", True))
 

@@ -447,7 +447,14 @@ def check_holders(ctx):
     if wallets:
         r.add(ramp(top1, c.top1_warn_pct, c.top1_crit_pct, 20, 60),
               f"Eine einzelne Wallet ({short(wallets[0]['owner'])}) hält {top1:.1f} % des Supplies.")
-    if top10 < c.top10_warn_pct:
+    dev_buy = _dev_buy_pct(ctx)
+    if top10 < c.top10_warn_pct and dev_buy is not None and dev_buy >= c.masche_spread_dev_pct:
+        # the creator bought most of the supply at create and the top 10 still look spread: the holders came
+        # from the creator's own transfers (airdrops), not from buyers (brand scam, 18.10.)
+        r.data["spread_by_creator"] = True
+        r.add(40, f"Der Ersteller kaufte beim Start {dev_buy:.0f} % des Supplies, die Top-10 halten aber nur "
+                  f"{top10:.0f} %: die Holder stammen aus seiner eigenen Verteilung, nicht aus Käufen.")
+    elif top10 < c.top10_warn_pct:
         r.positives.append(f"Breit verteilt: Top-10-Holder halten {top10:.0f} %.")
     if burned >= 1:
         r.positives.append(f"{burned:.0f} % des Supplies sind verbrannt.")
@@ -940,7 +947,12 @@ def check_watchlist(ctx):
     for w, f, b in funded:
         r.add(40, f"{short(w)} wurde von {short(f)} finanziert, der auf der Rug-Liste steht ({watchlist.ROLES[b['role']]}).")
     serious = [h for h in hits if h[2]["role"] != "sniper0"]
-    if (creator and creator in bad) or len(serious) + len(funded) >= 2:
+    setup = [h for h in hits if h[2]["role"] == "setup"]
+    if setup and not (creator and creator in bad):
+        # a setup wallet buys hundreds of SOL in the launch block only to dump it in one transaction later
+        r.hard = True
+        r.add(90, f"Setup-Wallet {short(setup[0][0])} der Marken-Masche ist dabei: gesperrt.")
+    elif (creator and creator in bad) or len(serious) + len(funded) >= 2:
         r.hard = True
         if not (creator and creator in bad):
             r.add(80, f"{len(serious) + len(funded)} Wallets der Rug-Liste rund um diesen Launch: gesperrt.")
@@ -1055,6 +1067,45 @@ def check_staged(ctx):
             r.positives.append("Kein auffällig schneller Anstieg direkt nach dem Start.")
     return r.finish(cap=60)
 
+def _dev_buy_pct(ctx):
+    """Share of the supply the creator bought in the create transaction (sniper launch record), or None."""
+    try:
+        r = ctx.conn.execute("SELECT dev_buy_pct FROM sniper_launches WHERE mint=?", (ctx.mint,)).fetchone()
+    except Exception:  # noqa: BLE001 - sniper not installed
+        return None
+    return float(r[0]) if r and r[0] is not None else None
+
+
+def check_masche(ctx):
+    """Brand scam (no network, sniper launch record): a fresh creator buys the whole bonding curve in the create
+    transaction (dev_buy_pct 79.31 = all 793.1 M curve tokens), the coin migrates at once, a setup wallet buys
+    160-2,150 SOL in the same block, the creator airdrops his tokens to hundreds of wallets so the top 10 look
+    spread, bots push the price, and the setup wallet sells everything in one transaction (-90 %). A stop loss
+    does not help against a single-transaction dump. Backup 2026-10-18 05:10: 500 launches with dev_buy_pct >= 75
+    (486 at exactly 79.31, 466 migrated), the sniper labelled 69 % rugged (base ~10 %); of the 41 launches with a
+    confirmed market cap >= 1 M$ (liquidity >= 20 k$ and >= 2 % of MC, 3 snapshots), 8 were this pattern and all 8
+    ended at <= 2 % of their peak liquidity; none of the other 33 runners had a creator buy above 52 %. Hard veto."""
+    r = CheckResult("masche", "Marken-Masche (Curve-Komplettkauf)")
+    d = _dev_buy_pct(ctx)
+    if d is None:
+        r.status = "unknown"
+        return r.finish()
+    try:
+        row = ctx.conn.execute("SELECT migrated, migrated_ts, created_ts FROM sniper_launches WHERE mint=?",
+                               (ctx.mint,)).fetchone()
+    except Exception:  # noqa: BLE001
+        row = None
+    mig_after = int(row[1] - row[2]) if row and row[1] and row[2] else None
+    r.data.update(dev_buy_pct=round(d, 2), migrated=bool(row and row[0]), migrated_after_sec=mig_after)
+    if d >= ctx.cfg.masche_dev_buy_pct:
+        r.hard = True
+        r.add(95, f"Der Ersteller kaufte beim Start {d:.1f} % des Supplies, also die ganze Bonding-Curve: Muster "
+                  "der Marken-Masche (Setup-Kauf im selben Block, Airdrops an Hunderte Wallets, Abverkauf in einer "
+                  "Transaktion). In unseren Daten endeten alle 8 solchen Millionen-Läufe bei ≤ 2 % ihrer Liquidität: gesperrt.")
+    else:
+        r.positives.append(f"Ersteller kaufte beim Start {d:.1f} % des Supplies.")
+    return r.finish(cap=95)
+
 def check_exit(ctx):
     """Soft rug in progress, from the intel service's latest coin features (no network): insiders selling,
     liquidity leaving, smart buyers getting out. Most rugs of young coins with burned LP look like this."""
@@ -1092,5 +1143,5 @@ def check_exit(ctx):
 
 QUICK = [check_authorities, check_sell_sim, check_liquidity, check_lp, check_socials, check_wash,
          check_rugcheck, check_holders, check_exit, check_history, check_watchlist,
-         check_block0, check_staged]
+         check_block0, check_staged, check_masche]
 DEEP = [check_dev, check_insiders, check_bundles]

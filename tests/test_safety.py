@@ -819,3 +819,37 @@ def test_lp_zero_on_pumpswap_counts_only_unless_the_coin_graduated(monkeypatch):
     ctx = lambda m: SimpleNamespace(mint=m, conn=c)  # noqa: E731
     assert checks._pump_migrated(ctx("Abcpump")) and not checks._pump_migrated(ctx("Xyzpump"))
     assert not checks._pump_migrated(ctx("Abc")) and not checks._pump_migrated(ctx("Newpump"))
+
+
+def test_brand_scam_whole_curve_bought_at_create_is_vetoed_and_spread_holders_get_no_bonus():
+    c = conn()
+    c.execute("CREATE TABLE sniper_launches (mint TEXT, created_ts INTEGER, migrated INTEGER, migrated_ts INTEGER, "
+              "dev_buy_pct REAL)")
+    c.execute("INSERT INTO sniper_launches VALUES (?, ?, 1, ?, 79.31)", (MINT, NOW - 3600, NOW - 3599))
+    c.commit()
+    a = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
+    m = a.checks["masche"]
+    assert m["hard"] and a.blocked and m["data"]["dev_buy_pct"] == 79.31 and m["data"]["migrated_after_sec"] == 1
+    h = a.checks["holders"]
+    assert h["data"]["spread_by_creator"] and h["risk"] >= 40
+    assert not any("Breit verteilt" in p for p in a.positives)
+    # an ordinary launch: no veto, the spread counts as a plus again
+    c.execute("UPDATE sniper_launches SET dev_buy_pct=3.5, migrated=0, migrated_ts=NULL")
+    c.commit()
+    a = safety.assess(MINT, c, deep=False, fetcher=FakeFetcher(clean()), cfg=CFG, force=True)
+    assert not a.checks["masche"]["hard"] and not a.checks["holders"]["data"].get("spread_by_creator")
+
+
+def test_setup_wallet_of_the_brand_scam_blocks_alone(tmp_path):
+    from safety import watchlist
+    cfg = SafetySettings()
+    cfg.exchanges_file = CFG.exchanges_file
+    cfg.bad_wallets_file = str(tmp_path / "bad.txt")
+    (tmp_path / "bad.txt").write_text("SETUP1  setup  160 SOL im Launch-Block\n")
+    s = clean()
+    s["holders"] = [(POOL, 300_000_000), ("SETUP1", 10_000_000)] + [(f"Z{i}", 10_000_000) for i in range(10)]
+    a = safety.assess(MINT, conn(), deep=False, fetcher=FakeFetcher(s), cfg=cfg, force=True)
+    assert a.checks["watchlist"]["hard"] and a.blocked
+    shipped = watchlist.load(None, CFG)
+    assert shipped["4G9JAzftaydKjB2558MLnkYw175KMN6NGGgyxkeRuwwA"]["role"] == "setup"
+    assert "7FPqg7MpJwvGneBPvkBrCDjAvZhFnAvoiUw9LF91nsN" not in shipped   # the copycat is a victim, not a scammer
