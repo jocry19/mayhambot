@@ -68,6 +68,9 @@ def brain_report(conn, f: dict) -> None:
            src_ts=f["ts"], price_sol=f["price_sol"] or None, mcap_usd=f["mcap_usd"])
 
 
+STALE_S = 120  # older buys (polling net, gaps after a restart) are history, not opportunities to act on
+SKIPPED = {"stale": 0, "sent": 0}
+
 _SINK = {"fn": "auto"}  # "auto": brain_report when the brain package is there
 
 
@@ -87,6 +90,12 @@ def emit(conn, sw, source: str, lag_s: float | None, notified_at: float | None =
             fn = _SINK["fn"] = None
     if fn is None or sw.side != "buy":
         return
+    if lag_s is None or lag_s != lag_s or lag_s > STALE_S:
+        # the brain's whale lag (median 706 s on 18.10. 07:00) came from these: a gap find hours after the buy
+        # looked like a fresh opportunity that was "too late"
+        SKIPPED["stale"] += 1
+        return
+    SKIPPED["sent"] += 1
     try:
         fn(conn, features(conn, sw, source, lag_s, notified_at, sol_usd))
     except Exception as e:  # never let a reporting problem hold up detection

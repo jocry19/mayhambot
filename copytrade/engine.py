@@ -7,7 +7,7 @@ import signal
 import threading
 import time
 
-from . import chain, learn, ranking, stats, store, tracker, watch, ws
+from . import chain, learn, opportunity, ranking, stats, store, tracker, watch, ws
 from .config import Settings
 from .execution import make_executors
 from .strategy import Strategy
@@ -122,7 +122,10 @@ class Engine:
                 + f", helius {hel} ({', '.join(f'{k[7:]} {v}' for k, v in sorted(u.items(), key=lambda x: -x[1]) if k.startswith('helius:'))}"
                   f"; {tracker.MAIN_READS['early']} early websocket reads, "
                   f"{self.rpc.main_first_n} reads Helius-first), fallbacks "
-                  f"{self.rpc.fallbacks}, public bulk failures {self.rpc.bulk_failures}")
+                  f"{self.rpc.fallbacks}, public bulk failures {self.rpc.bulk_failures}"
+                + f"; opportunities to the brain {opportunity.SKIPPED['sent']} "
+                  f"({opportunity.SKIPPED['stale']} older than {opportunity.STALE_S} s not sent)")
+        opportunity.SKIPPED.update(sent=0, stale=0)
         tracker.DETECTED.update(wslog=0, ws=0, poll=0, gap=0)
         tracker.MAIN_READS["early"] = 0
         self.rpc.fallbacks = self.rpc.bulk_failures = self.rpc.main_first_n = 0

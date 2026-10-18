@@ -1021,6 +1021,12 @@ def test_buys_land_in_the_brains_opportunity_table(env):
         f = json.loads(rows[0]["features"])
         assert f["dex"] == "pumpfun" and f["copytrade.block0"] is True and f["copytrade.group"] == "block0"
         assert f["mc_usd"] == 5000.0 and 3 < f["delay_s"] < 30 and f["copytrade.size_sol"] == 0.005
+        # a buy the polling net found minutes later is history, not an opportunity: not sent
+        old = chain.Swap("sigOld", W, int(time.time()) - 900, "buy", "m", 1000.0, 0.005, 0.000005, dex="pump")
+        stale = opportunity.SKIPPED["stale"]
+        tracker.record_detection(conn, old, "gap", sol_usd=100.0)
+        assert opportunity.SKIPPED["stale"] == stale + 1
+        assert conn.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0] == 1
     finally:
         tracker.BLOCK0.discard(W)
         opportunity.set_sink(None)

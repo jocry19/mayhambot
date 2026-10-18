@@ -708,8 +708,12 @@ class Strategy:
             store.event(self.conn, "error", f"Kauf {snap.symbol} fehlgeschlagen: {fill.error}", "error")
             return None
         try:
-            return self._booked(pid, ex, fill, strategy, managed, mint, size, snap, tp, sl, trail, hold, reason,
-                                wallet, whale, meta, score, inflow, version)
+            pid = self._booked(pid, ex, fill, strategy, managed, mint, size, snap, tp, sl, trail, hold, reason,
+                               wallet, whale, meta, score, inflow, version)
+            # one line per entry, so the log alone counts them (mode, source, symbol, stake)
+            log.info("entry %s %s %s: %.4f SOL at %.3g (wallet %s, %s)", ex.mode, strategy, snap.symbol or mint[:6],
+                     size, fill.price_sol, (wallet or "-")[:6], str(reason or "")[:80])
+            return pid
         except Exception as e:  # swap is done: the position must not be lost, so write it with retries
             log.error("booking position %s after a filled buy failed: %s", pid, e)
             raise
