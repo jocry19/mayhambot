@@ -148,6 +148,7 @@ def test_backup_logs_table_sizes(tmp_path, monkeypatch):
     assert ops.backup(None) == 0
     log = (tmp_path / "logs" / "dbsize.log").read_text()
     assert "trades:" in log and "100 Zeilen" in log
+    assert "neueste 100k Zeilen nach Quelle: geckoterminal 100" in log
     assert ops.log_db_sizes(tmp_path / "data" / "mayhambot.db") is None     # next one only after 6 h
     assert "Einmal-Wallets" in ops.log_db_sizes(tmp_path / "data" / "mayhambot.db", profile=True, every_h=0)
     assert (tmp_path / "data" / "db_sizes.json").exists()

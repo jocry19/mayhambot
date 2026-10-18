@@ -766,6 +766,10 @@ def log_db_sizes(path: Path, profile=False, every_h: float | None = None) -> str
         try:
             sizes, fstats, grow = retention.log_sizes(c, ROOT / "data" / "db_sizes.json")
             text = retention.size_report(sizes, fstats, grow)
+            if "trades" in sizes:   # who writes the growth: newest rows by insertion order (cheap, rowid)
+                rec = c.execute("SELECT COALESCE(source, ''), COUNT(*) FROM (SELECT source FROM trades ORDER BY rowid "
+                                "DESC LIMIT 100000) GROUP BY 1 ORDER BY 2 DESC").fetchall()
+                text += "\ntrades, neueste 100k Zeilen nach Quelle: " + ", ".join(f"{s or '?'} {n}" for s, n in rec)
             if profile and "trades" in sizes:
                 text += "\n" + retention.profile_report(retention.trades_profile(c))
         finally:
