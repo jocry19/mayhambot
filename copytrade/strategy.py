@@ -253,6 +253,10 @@ class Strategy:
                     data={"strategy": strategy, "mint": mint, "symbol": sym, "reason": why, **data})
 
     # ------------------------------------------------------------------ mode 1: whales
+    def _user_wallet(self, wallet: str) -> bool:
+        r = self.conn.execute("SELECT source FROM ct_wallets WHERE address=?", (wallet,)).fetchone()
+        return bool(r) and r[0] == "watch_user"
+
     def _explore_ok(self, swap: Swap) -> bool:
         """The exploration account copies this buy: account on, whale buy big enough, wallet tier in CT_EXPLORE_TIERS."""
         s = self.s
@@ -382,7 +386,9 @@ class Strategy:
             why = f"Wal-Kauf zu klein ({swap.sol_amount:.2f} SOL)"
         if block0:  # exploration only: the plan's test is >= +5 % net over 100 copies before anything stricter
             why = why or "Block-0-Gruppe (nur Erkundung)"
-        elif swap.wallet in tracker.WATCH:  # the learning universe (18.10.): measured and explored, never strict
+        elif swap.wallet in tracker.WATCH and not self._user_wallet(swap.wallet):
+            # the learning universe (18.10.): measured and explored, never strict; the user's own tips (watch_user)
+            # go by the same rule as every wallet (decided 18.10. 21:52)
             why = why or "Lern-Universum (nur Erkundung)"
         # accounts that take this buy: the strict one when every wallet gate passed, exploration when eligible
         accounts = ([] if why else ["paper"]) + (["explore"] if expl else [])
