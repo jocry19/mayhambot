@@ -2329,7 +2329,8 @@ def market_summary(conn, now=None):
 # ====================================================================== brain (learning decider, brain/README.md)
 BRAIN_KIND = {"whale": "Wal-Kauf", "signal": "Signal", "signal_v2": "Signal v2", "launch": "Launch"}
 BRAIN_EXIT = {"organic": "organisch (Zustand des Coins)", "target": "Ziel erreicht", "stop": "Stop", "trail": "Trailing-Stop", "inflow_peak": "Ansturm vorbei",
-              "whale": "Wal hat verkauft", "time": "Haltezeit vorbei", "rug": "Liquidität weg", "no_market": "kein Markt mehr"}
+              "whale": "Wal hat verkauft", "time": "Haltezeit vorbei", "rug": "Liquidität weg", "no_market": "kein Markt mehr",
+              "exit_risk": "Insider ziehen ab (Risiko ≥ 60)", "staged": "inszenierter Pump"}
 BRAIN_TARGET = 100  # out-of-sample trades before the result counts (README: "100 nachgeprüfte Trades")
 BRAIN_GOAL_MULT = (2, 4)  # the user's goal (brain/journal.GOAL_MULT): paper account x2 to x4 every day
 BRAIN_DAYS = 14
@@ -2574,13 +2575,26 @@ def _brain_learning(conn, now, days, st=None):
                       f"{pre}n_trades_7d": len(w), f"{pre}trade_mean_7d": _f(m, 4),
                       f"{pre}trade_lo_7d": _f(m - half, 4) if half is not None else None,
                       f"{pre}trade_hi_7d": _f(m + half, 4) if half is not None else None})
-    srcs = _opp_sources(conn, now) if shared else []
+    # labels (brain/labels.py): every opportunity followed for 1 h after it was reported, bought or not, so the
+    # rank correlation covers all of them, not only the learning account's trades (outcome_net)
+    labels = shared and "label_ret60" in {c["name"] for c in rows(conn, "PRAGMA table_info(opportunities)")}
+    if labels:
+        lp = defaultdict(list)
+        for r in rows(conn, "SELECT ts, pred_mean, label_ret60 FROM opportunities WHERE ts>=? AND pred_mean IS NOT NULL "
+                            "AND label_ret60 IS NOT NULL", (lo,)):
+            lp[day(r["ts"])].append((float(r["pred_mean"]), cap(float(r["label_ret60"]))))
+        for d, ps in lp.items():
+            if d in out:
+                out[d].update(n_label=len(ps), label_ic=_f(_spearman([p for p, _ in ps], [y for _, y in ps]), 4))
+    srcs = _opp_sources(conn, now, labels) if shared else []
     recent = [p for d, ps in pairs.items() if d >= t_end - 7 * 86400 for p in ps]
     deciles, gap = _calibration(recent)
     series = [out[k] for k in sorted(out)]
     last = next((x for x in reversed(series) if x.get("rank_ic") is not None), None)
+    last_l = next((x for x in reversed(series) if x.get("label_ic") is not None), None)
     return {"days": series, "deciles": deciles, "cal_gap_7d": _f(gap, 4), "n_7d": len(recent),
-            "rank_ic": last.get("rank_ic") if last else None, "opps_goal": BRAIN_OPPS_GOAL,
+            "rank_ic": last.get("rank_ic") if last else None, "opps_goal": BRAIN_OPPS_GOAL, "labels": bool(labels),
+            "label_ic": last_l.get("label_ic") if last_l else None, "label_n": last_l.get("n_label") if last_l else None,
             "cap": list(BRAIN_CAL_CAP), "source": "opportunities" if scored else "brain_opps", "seen_source": seen_t,
             "sources": srcs, "discrimination": _brain_discrimination(st, srcs),
             "disc_rule": {"min_n": BRAIN_DISC_MIN_N, "full": BRAIN_DISC_FULL}}
@@ -2608,14 +2622,15 @@ def _brain_discrimination(st, sources):
     return sorted(out, key=lambda x: -x["n"])
 
 
-def _opp_sources(conn, now):
+def _opp_sources(conn, now, labels=False):
     """Per reporting source in the shared table: opportunities seen (24 h, 7 days), how many have an honest result,
     their mean net after costs (capped as above), the source's own result and how many brain took."""
     cap = lambda y: min(BRAIN_CAL_CAP[1], max(BRAIN_CAL_CAP[0], y))  # noqa: E731
     out = {}
-    for r in rows(conn, "SELECT source, ts, outcome_net, source_result, decision, pred_mean FROM opportunities WHERE ts>=?",
+    lab = ", label_ret60, label_rug" if labels else ", NULL label_ret60, NULL label_rug"
+    for r in rows(conn, "SELECT source, ts, outcome_net, source_result, decision, pred_mean" + lab + " FROM opportunities WHERE ts>=?",
                   (now - 7 * 86400,)):
-        x = out.setdefault(r["source"], {"source": r["source"], "n_7d": 0, "n_24h": 0, "n_eval": 0, "taken": 0, "_y": [], "_s": [], "_p": []})
+        x = out.setdefault(r["source"], {"source": r["source"], "n_7d": 0, "n_24h": 0, "n_eval": 0, "taken": 0, "_y": [], "_s": [], "_p": [], "_l": [], "_r": []})
         x["n_7d"] += 1
         x["n_24h"] += r["ts"] >= now - 86400
         x["taken"] += r["decision"] in ("learn", "perform")
@@ -2624,12 +2639,19 @@ def _opp_sources(conn, now):
             x["_y"].append(cap(float(r["outcome_net"])))
             if r["pred_mean"] is not None:
                 x["_p"].append((float(r["pred_mean"]), float(r["outcome_net"])))
+        if r["label_ret60"] is not None and r["pred_mean"] is not None:
+            x["_l"].append((float(r["pred_mean"]), float(r["label_ret60"])))
+        if r["label_rug"] is not None:
+            x["_r"].append(int(r["label_rug"]))
         if r["source_result"] is not None:
             x["_s"].append(cap(float(r["source_result"])))
     for x in out.values():
         x["label"] = BRAIN_SOURCE.get(x["source"], x["source"])
         ps = x.pop("_p")
         x["n_pred"], x["rank_ic"] = len(ps), _f(_spearman([p for p, _ in ps], [y for _, y in ps]), 4)
+        ls, rg = x.pop("_l"), x.pop("_r")
+        x["n_label"], x["label_ic"] = len(ls), _f(_spearman([p for p, _ in ls], [y for _, y in ls]), 4)
+        x["n_rug"], x["rug_rate"] = len(rg), _f(sum(rg) / len(rg), 4) if rg else None
         x["mean_net"], x["mean_source"], x["n_source"] = _f(_mean(x.pop("_y")), 4), _f(_mean(x["_s"]), 4), len(x.pop("_s"))
     return sorted(out.values(), key=lambda x: -x["n_7d"])
 

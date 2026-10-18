@@ -307,9 +307,10 @@ function Diary({ items }) {
 /** Learning curve (plan 18.10., "Richtung neu"): is the decider getting better day by day, measured out of sample. */
 function Learning({ L, days }) {
   const ds = L.days || [];
-  const sc = ds.filter((x) => x.n_scored > 0);
+  const scored = (x) => Math.max(x.n_scored || 0, x.n_label || 0);  // labels cover every opportunity, not only buys
+  const sc = ds.filter((x) => scored(x) > 0);
   const last = sc[sc.length - 1] || ds[ds.length - 1] || {};
-  const ic = ds.filter((x) => x.rank_ic != null);
+  const ic = ds.filter((x) => x.rank_ic != null || x.label_ic != null);
   const tr = ds.filter((x) => x.trade_mean_7d != null || x.learn_trade_mean_7d != null);
   const lastTr = tr[tr.length - 1];
   const dl = (x) => dayLabel(x.ts);
@@ -317,14 +318,15 @@ function Learning({ L, days }) {
     <Card title="Lernkurve" sub={`Wird der Entscheider besser? Jede Zahl vergleicht die Vorhersage zum Zeitpunkt der Entscheidung mit dem später gemessenen Ergebnis, also außerhalb der Trainingsdaten. Quelle: ${L.source === "opportunities" ? "gemeinsame Gelegenheits-Tabelle aller Quellen" : L.seen_source === "opportunities" ? "Vorhersagen des Entscheiders (die gemeinsame Tabelle hat noch keine bewerteten Vorhersagen)" : "Gelegenheiten des Entscheiders"}.`}>
       <div className="tiles wrap-sub" style={{ marginBottom: 12 }}>
         <Tile label="Rangkorrelation" value={L.rank_ic == null ? "–" : n(L.rank_ic, 2)} cls={sign(L.rank_ic)}
-          sub="Vorhersage gegen Ergebnis, letzter Tag mit ≥ 10 Fällen; 0 = rät, 1 = perfekte Reihenfolge" />
+          sub={<>Vorhersage gegen Ergebnis der Käufe, letzter Tag mit ≥ 10 Fällen; 0 = rät, 1 = perfekte Reihenfolge
+            {L.labels && <><br />Alle Gelegenheiten (1 h verfolgt): <b className={sign(L.label_ic)}>{L.label_ic == null ? "–" : n(L.label_ic, 2)}</b> · {n(L.label_n)} Fälle</>}</>} />
         <Tile label="Netto je Trade, 7 Tage" value={pctSigned(lastTr?.trade_mean_7d, 1)} cls={sign(lastTr?.trade_mean_7d)}
           sub={lastTr ? <>Leistungskonto, 95 %: {pctSigned(lastTr.trade_lo_7d, 1)} bis {pctSigned(lastTr.trade_hi_7d, 1)} · {n(lastTr.n_trades_7d)} Trades
             <br />Lernkonto: <span className={sign(lastTr.learn_trade_mean_7d)}>{pctSigned(lastTr.learn_trade_mean_7d, 1)}</span> · {n(lastTr.learn_n_trades_7d)} Trades</> : "noch kein Trade abgeschlossen"} />
         <Tile label="Kalibrierung, 7 Tage" value={L.cal_gap_7d == null ? "–" : `±${pct(L.cal_gap_7d, 1)}`}
           sub={`Ø Abstand Vorhersage zu Ergebnis je Zehntel · ${n(L.n_7d)} Fälle`} />
-        <Tile label={last.ts ? `Bewertet am ${dayLabel(last.ts)}` : "Bewertet je Tag"} value={`${n(last.n_scored)} / ${n(L.opps_goal)}`}
-          sub={<LoadBar v={Math.min(1, (last.n_scored || 0) / (L.opps_goal || 1))} />} title={`${n(last.n_opps)} Gelegenheiten an diesem Tag gesehen; das Ergebnis steht erst nach dem längsten Plan fest. Ziel ${n(L.opps_goal)} bewertete am Tag`} />
+        <Tile label={last.ts ? `Bewertet am ${dayLabel(last.ts)}` : "Bewertet je Tag"} value={`${n(scored(last))} / ${n(L.opps_goal)}`}
+          sub={<LoadBar v={Math.min(1, scored(last) / (L.opps_goal || 1))} />} title={`${n(last.n_opps)} Gelegenheiten an diesem Tag gesehen; das Ergebnis steht erst nach dem längsten Plan fest. Ziel ${n(L.opps_goal)} bewertete am Tag`} />
       </div>
       <div className="grid g2">
         <div>
@@ -332,10 +334,13 @@ function Learning({ L, days }) {
           {ic.length ? <EChart height={180} deps={[L]} ariaLabel="Rangkorrelation je Tag"
             build={(c) => baseOption(c, {
               tooltip: { ...baseOption(c).tooltip, axisPointer: { type: "shadow" },
-                formatter: (ps) => { const x = ic[ps[0].dataIndex]; return `<b>${dl(x)}</b>${tipRow(x.rank_ic >= 0 ? c.good : c.bad, "Rangkorrelation", n(x.rank_ic, 3))}${tipRow("transparent", "Fälle", n(x.n_scored))}`; } },
+                formatter: (ps) => { const x = ic[ps[0].dataIndex]; return `<b>${dl(x)}</b>${tipRow(c.s[0], "Käufe (Ergebnis)", `${x.rank_ic == null ? "–" : n(x.rank_ic, 3)} · ${n(x.n_scored)} Fälle`)}${L.labels ? tipRow(c.s[1], "alle Gelegenheiten (1 h)", `${x.label_ic == null ? "–" : n(x.label_ic, 3)} · ${n(x.n_label)} Fälle`) : ""}`; } },
               xAxis: catAxis(c, ic.map(dl)), yAxis: valueAxis(c, (v) => n(v, 1), { min: (v) => Math.min(-0.2, v.min), max: (v) => Math.max(0.4, v.max) }),
-              series: [{ type: "bar", barMaxWidth: 22, data: ic.map((x) => ({ value: x.rank_ic, itemStyle: { color: x.rank_ic >= 0 ? c.good : c.bad, borderRadius: x.rank_ic >= 0 ? [4, 4, 0, 0] : [0, 0, 4, 4] } })) }],
+              series: [["rank_ic", 0], ...(L.labels ? [["label_ic", 1]] : [])].map(([k, i]) => ({ type: "bar", barMaxWidth: 14, barGap: "20%",
+                data: ic.map((x) => ({ value: x[k], itemStyle: { color: c.s[i], borderRadius: (x[k] ?? 0) >= 0 ? [3, 3, 0, 0] : [0, 0, 3, 3] } })),
+                ...(i === 0 ? { markLine: { silent: true, symbol: "none", lineStyle: { color: c.muted, type: "dashed", width: 1 }, label: { show: false }, data: [{ yAxis: 0 }] } } : {}) })),
             })} /> : <Empty>Noch kein Tag mit 10 nachgeprüften Vorhersagen</Empty>}
+          {ic.length > 0 && L.labels && <div className="legend-row">{["Käufe (Ergebnis nach Verkauf)", "alle Gelegenheiten (1 h verfolgt)"].map((l, i) => <span key={l}><i style={{ background: `var(--series-${i + 1})` }} />{l}</span>)}</div>}
         </div>
         <div>
           <div className="help">Netto je Trade, gleitend 7 Tage: Leistungskonto mit 95 %-Band, Lernkonto getrennt</div>
@@ -368,11 +373,11 @@ function Learning({ L, days }) {
           <div className="help">Gelegenheiten je Tag: gesehen und mit Ergebnis bewertet (log, Ziel {n(L.opps_goal)})</div>
           <EChart height={180} deps={[L]} ariaLabel="Gelegenheiten je Tag"
             build={(c) => baseOption(c, {
-              tooltip: { ...baseOption(c).tooltip, axisPointer: { type: "shadow" }, formatter: (ps) => { const x = ds[ps[0].dataIndex]; return `<b>${dl(x)}</b>${tipRow(c.s[0], "gesehen", n(x.n_opps))}${tipRow(c.s[1], "bewertet", n(x.n_scored))}${tipRow("transparent", "Tagesfaktor", fx(x.mult))}`; } },
+              tooltip: { ...baseOption(c).tooltip, axisPointer: { type: "shadow" }, formatter: (ps) => { const x = ds[ps[0].dataIndex]; return `<b>${dl(x)}</b>${tipRow(c.s[0], "gesehen", n(x.n_opps))}${tipRow(c.s[1], "bewertet", n(scored(x)))}${tipRow("transparent", "Tagesfaktor", fx(x.mult))}`; } },
               xAxis: catAxis(c, ds.map(dl)), yAxis: valueAxis(c, (v) => n(v), { type: "log", min: 1, max: (v) => Math.max((L.opps_goal || 1) * 1.5, v.max) }),
               series: [
                 { name: "gesehen", type: "bar", barMaxWidth: 10, barGap: "20%", data: ds.map((x) => (x.n_opps > 0 ? x.n_opps : null)), itemStyle: { color: c.s[0], borderRadius: [3, 3, 0, 0] } },
-                { name: "bewertet", type: "bar", barMaxWidth: 10, data: ds.map((x) => (x.n_scored > 0 ? x.n_scored : null)), itemStyle: { color: c.s[1], borderRadius: [3, 3, 0, 0] },
+                { name: "bewertet", type: "bar", barMaxWidth: 10, data: ds.map((x) => (scored(x) > 0 ? scored(x) : null)), itemStyle: { color: c.s[1], borderRadius: [3, 3, 0, 0] },
                   markLine: { silent: true, symbol: "none", lineStyle: { color: c.good, width: 1 }, label: { color: c.good, formatter: `Ziel ${n(L.opps_goal)}`, position: "insideEndTop" }, data: [{ yAxis: L.opps_goal }] } },
               ],
             })} />
@@ -409,6 +414,10 @@ function Learning({ L, days }) {
               { k: "mean_net", l: "Ø netto", r: true, fmt: (x) => <b className={sign(x.mean_net)}>{pctSigned(x.mean_net, 1)}</b> },
               { k: "mean_source", l: "eigene Messung", r: true, fmt: (x) => (x.n_source ? <span className={sign(x.mean_source)} title={`${n(x.n_source)} Fälle, von der Quelle selbst gemessen`}>{pctSigned(x.mean_source, 1)}</span> : <span className="dim">–</span>) },
               { k: "rank_ic", l: "Rangkorrelation", r: true, fmt: (x) => (x.rank_ic == null ? <span className="dim">–</span> : <span className={sign(x.rank_ic)} title={`${n(x.n_pred)} Vorhersagen mit Ergebnis`}>{n(x.rank_ic, 2)}</span>) },
+              ...(L.labels ? [
+                { k: "label_ic", l: "Rangk. alle (1 h)", r: true, fmt: (x) => (x.label_ic == null ? <span className="dim">–</span> : <span className={sign(x.label_ic)} title={`${n(x.n_label)} Gelegenheiten 1 h verfolgt`}>{n(x.label_ic, 2)} <span className="dim">({n(x.n_label)})</span></span>) },
+                { k: "rug_rate", l: "Rug-Quote", r: true, fmt: (x) => (x.rug_rate == null ? <span className="dim">–</span> : <span className={x.rug_rate > 0.2 ? "down" : ""} title={`${n(x.n_rug)} verfolgt; Tief unter 10 % des Einstiegs in der ersten Stunde`}>{pct(x.rug_rate, 1)}</span>) },
+              ] : []),
               { k: "taken", l: "gekauft", r: true, fmt: (x) => n(x.taken) },
             ]} />
         </div>

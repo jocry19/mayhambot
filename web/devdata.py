@@ -231,6 +231,7 @@ def _brain_demo(conn, r, tokens, now):
     from brain import opportunities as bo
 
     bo.ensure(conn)
+    store.init(conn)  # label columns (brain/labels.py)
     srcs = (("sniper", 900), ("copytrade", 250), ("signals", 120), ("signals_v2", 60), ("market", 300), ("whale", 80))
     opp = []
     for d in range(7, -1, -1):
@@ -244,10 +245,12 @@ def _brain_demo(conn, r, tokens, now):
                 dec = "perform" if pred > 0.06 else "learn" if pred + r.gauss(0, 0.1) > 0 else "skip"
                 opp.append((src, f"{src}-{d}-{k}", f"Demo{src}{d}{k}", ts, ts - r.randint(1, 30), ts, json.dumps({"mc_usd": r.randint(5000, 400000)}),
                             r.choice(("took", "passed", "passed")), round(pred, 4), round(abs(r.gauss(0.1, 0.03)), 4), dec,
-                            ts + 600 * 25 if done else None, round(y, 4) if done else None,
-                            round(y + r.gauss(0, 0.05), 4) if src == "sniper" and done else None))
+                            ts + 600 * 25 if done and dec != "skip" else None, round(y, 4) if done and dec != "skip" else None,
+                            round(y + r.gauss(0, 0.05), 4) if src == "sniper" and done else None,
+                            ts + 3600 if done else None, round(y + r.gauss(0, 0.03), 4) if done else None, int(y <= -1) if done else None))
     conn.executemany("INSERT OR IGNORE INTO opportunities(source, ref, mint, ts, src_ts, reported_at, features, source_action, "
-                     "pred_mean, pred_sd, decision, evaluated_at, outcome_net, source_result) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", opp)
+                     "pred_mean, pred_sd, decision, evaluated_at, outcome_net, source_result, label_at, label_ret60, label_rug) "
+                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", opp)
     store.put(conn, "regime_history", [{"at": now - 3 * 86400 + 5000, "n": 31, "err": -0.042, "z": -3.1},
                                        {"at": now - 20000, "n": 27, "err": 0.035, "z": 2.7}])
     conn.executemany("INSERT OR REPLACE INTO brain_equity(ts, balance_sol, open_value_sol, equity_sol, learn_equity_sol) VALUES (?,?,?,?,?)",

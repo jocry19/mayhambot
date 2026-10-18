@@ -802,6 +802,10 @@ def test_brain_view(demo, empty, tmp_path):
     assert all(x["n"] >= 100 and x["lower95"] > 0 for x in pk["rows"] if x["released"]) and all(x["label"] and x["reason"] for x in pk["rows"])
     lc = d["learning"]  # learning curve: rank correlation, calibration, opportunities, net per trade over 7 days
     assert len(lc["days"]) == 14 and lc["opps_goal"] == 5000 and lc["source"] == lc["seen_source"] == "opportunities"
+    assert lc["labels"] and any(x.get("label_ic") is not None for x in lc["days"]) and lc["label_n"]  # every opportunity, 1 h
+    sn = next(x for x in lc["sources"] if x["source"] == "sniper")
+    assert sn["n_label"] >= sn["n_eval"] and 0 <= sn["rug_rate"] <= 1 and -1 <= sn["label_ic"] <= 1
+    assert Q.BRAIN_EXIT["exit_risk"]
     disc = {x["kind"]: x for x in lc["discrimination"]}  # brain's sharpness per source and the stake factor from it
     assert disc["whale"]["factor"] == 0.7 and disc["signal"]["factor"] == 0 and disc["signal_v2"]["factor"] == 0  # < 0 / < 30 results
     assert disc["whale"]["shared_n"] and -1 <= disc["whale"]["shared_rank_ic"] <= 1 and lc["disc_rule"] == {"min_n": 30, "full": 0.2}
