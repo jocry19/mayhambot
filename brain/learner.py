@@ -463,6 +463,44 @@ def _pool_outcome(conn, o, ya: dict, merged: list, cost: float, pi, now: float) 
                                           json.dumps({NAMES[i]: round(v, 5) for i, v in ya.items()}), oid))
 
 
+LABEL_WEIGHT = 0.5  # an hour on sampled prices: less than a minute-candle replay (1.0) or a real fill (2.0)
+
+
+def learn_labels(conn, pool, s, limit: int = 3000) -> int:
+    """The pool model learns every labelled opportunity (labels.py): each plan's net on the hour after the report.
+    The features are the ones the brain decided on where it decided, else what the source reported."""
+    if pool is None or not store.has(conn, "opportunities"):
+        return 0
+    cur = store.get(conn, "label_learn_cursor") or [0, 0]
+    try:
+        rows = conn.execute("SELECT id, source, features, label_at, label_outcomes FROM opportunities WHERE "
+                            "label_at IS NOT NULL AND (label_at>? OR (label_at=? AND id>?)) ORDER BY label_at, id "
+                            "LIMIT ?", (cur[0], cur[0], cur[1], limit)).fetchall()
+    except Exception:  # columns not there yet (a reader's connection)
+        return 0
+    if not rows:
+        return 0
+    pool.forget()
+    n = 0
+    for r in rows:
+        try:
+            outs = json.loads(r["label_outcomes"] or "{}")
+        except (TypeError, ValueError):
+            outs = {}
+        ys = {NAMES.index(k): v for k, v in outs.items() if k in NAMES and v is not None}
+        if not ys:
+            continue
+        o = conn.execute("SELECT features FROM brain_opps WHERE kind='pool' AND ref=?", (f"opp{r['id']}",)).fetchone()
+        try:
+            feats = json.loads(o[0]) if o else features.pool_reported(r)
+        except (TypeError, ValueError):
+            feats = features.pool_reported(r)
+        pool.update(features.tokens("pool", feats), ys, LABEL_WEIGHT)
+        n += 1
+    store.put(conn, "label_learn_cursor", [rows[-1]["label_at"], rows[-1]["id"]])
+    return n
+
+
 def _real_outcome(conn, o, pos) -> None:
     """A pooled opportunity the learning account bought: its real result after costs goes into the shared row at
     once (exit_plan 'real'), instead of waiting ~4 h for the final replay. The paper fill after a rug is the quote
