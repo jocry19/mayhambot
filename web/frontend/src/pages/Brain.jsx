@@ -10,6 +10,7 @@ const CoinLink = ({ r }) => (
 );
 
 const dayLabel = (ts) => { const d = new Date(ts * 1000); return `${String(d.getUTCDate()).padStart(2, "0")}.${String(d.getUTCMonth() + 1).padStart(2, "0")}.`; };
+const hhmm = (ts) => { const d = new Date(ts * 1000); return `${String(d.getHours()).padStart(2, "0")}:00`; };
 const fx = (v, d = 2) => (v == null ? "–" : `×${n(v, d)}`);
 const regimeText = (x) => `Regime gewechselt: die letzten ${n(x.n)} Ergebnisse lagen Ø ${pctSigned(x.err, 1)} neben der Vorhersage, altes Wissen halbiert`;
 
@@ -314,11 +315,12 @@ function Learning({ L, days }) {
   const tr = ds.filter((x) => x.trade_mean_7d != null || x.learn_trade_mean_7d != null);
   const lastTr = tr[tr.length - 1];
   const dl = (x) => dayLabel(x.ts);
+  const firstName = L.source === "brain_opps" ? "Gelegenheiten des Entscheiders (Ergebnis des Ausstiegsplans)" : "Käufe (Ergebnis nach Verkauf)";
   return (
     <Card title="Lernkurve" sub={`Wird der Entscheider besser? Jede Zahl vergleicht die Vorhersage zum Zeitpunkt der Entscheidung mit dem später gemessenen Ergebnis, also außerhalb der Trainingsdaten. Quelle: ${L.source === "opportunities" ? "gemeinsame Gelegenheits-Tabelle aller Quellen" : L.seen_source === "opportunities" ? "Vorhersagen des Entscheiders (die gemeinsame Tabelle hat noch keine bewerteten Vorhersagen)" : "Gelegenheiten des Entscheiders"}.`}>
       <div className="tiles wrap-sub" style={{ marginBottom: 12 }}>
         <Tile label="Rangkorrelation" value={L.rank_ic == null ? "–" : n(L.rank_ic, 2)} cls={sign(L.rank_ic)}
-          sub={<>Vorhersage gegen Ergebnis der Käufe, letzter Tag mit ≥ 10 Fällen; 0 = rät, 1 = perfekte Reihenfolge
+          sub={<>{firstName}, letzter Tag mit ≥ 10 Fällen; 0 = rät, 1 = perfekte Reihenfolge
             {L.labels && <><br />Alle Gelegenheiten (1 h verfolgt): <b className={sign(L.label_ic)}>{L.label_ic == null ? "–" : n(L.label_ic, 2)}</b> · {n(L.label_n)} Fälle</>}</>} />
         <Tile label="Netto je Trade, 7 Tage" value={pctSigned(lastTr?.trade_mean_7d, 1)} cls={sign(lastTr?.trade_mean_7d)}
           sub={lastTr ? <>Leistungskonto, 95 %: {pctSigned(lastTr.trade_lo_7d, 1)} bis {pctSigned(lastTr.trade_hi_7d, 1)} · {n(lastTr.n_trades_7d)} Trades
@@ -334,13 +336,13 @@ function Learning({ L, days }) {
           {ic.length ? <EChart height={180} deps={[L]} ariaLabel="Rangkorrelation je Tag"
             build={(c) => baseOption(c, {
               tooltip: { ...baseOption(c).tooltip, axisPointer: { type: "shadow" },
-                formatter: (ps) => { const x = ic[ps[0].dataIndex]; return `<b>${dl(x)}</b>${tipRow(c.s[0], "Käufe (Ergebnis)", `${x.rank_ic == null ? "–" : n(x.rank_ic, 3)} · ${n(x.n_scored)} Fälle`)}${L.labels ? tipRow(c.s[1], "alle Gelegenheiten (1 h)", `${x.label_ic == null ? "–" : n(x.label_ic, 3)} · ${n(x.n_label)} Fälle`) : ""}`; } },
+                formatter: (ps) => { const x = ic[ps[0].dataIndex]; return `<b>${dl(x)}</b>${tipRow(c.s[0], L.source === "brain_opps" ? "Plan-Ergebnis" : "Käufe (Ergebnis)", `${x.rank_ic == null ? "–" : n(x.rank_ic, 3)} · ${n(x.n_scored)} Fälle`)}${L.labels ? tipRow(c.s[1], "alle Gelegenheiten (1 h)", `${x.label_ic == null ? "–" : n(x.label_ic, 3)} · ${n(x.n_label)} Fälle`) : ""}`; } },
               xAxis: catAxis(c, ic.map(dl)), yAxis: valueAxis(c, (v) => n(v, 1), { min: (v) => Math.min(-0.2, v.min), max: (v) => Math.max(0.4, v.max) }),
               series: [["rank_ic", 0], ...(L.labels ? [["label_ic", 1]] : [])].map(([k, i]) => ({ type: "bar", barMaxWidth: 14, barGap: "20%",
                 data: ic.map((x) => ({ value: x[k], itemStyle: { color: c.s[i], borderRadius: (x[k] ?? 0) >= 0 ? [3, 3, 0, 0] : [0, 0, 3, 3] } })),
                 ...(i === 0 ? { markLine: { silent: true, symbol: "none", lineStyle: { color: c.muted, type: "dashed", width: 1 }, label: { show: false }, data: [{ yAxis: 0 }] } } : {}) })),
             })} /> : <Empty>Noch kein Tag mit 10 nachgeprüften Vorhersagen</Empty>}
-          {ic.length > 0 && L.labels && <div className="legend-row">{["Käufe (Ergebnis nach Verkauf)", "alle Gelegenheiten (1 h verfolgt)"].map((l, i) => <span key={l}><i style={{ background: `var(--series-${i + 1})` }} />{l}</span>)}</div>}
+          {ic.length > 0 && L.labels && <div className="legend-row">{[firstName, "alle Gelegenheiten (1 h verfolgt)"].map((l, i) => <span key={l}><i style={{ background: `var(--series-${i + 1})` }} />{l}</span>)}</div>}
         </div>
         <div>
           <div className="help">Netto je Trade, gleitend 7 Tage: Leistungskonto mit 95 %-Band, Lernkonto getrennt</div>
@@ -384,14 +386,34 @@ function Learning({ L, days }) {
           <div className="legend-row">{["gesehen", "bewertet"].map((l, i) => <span key={l}><i style={{ background: `var(--series-${i + 1})` }} />{l}</span>)}</div>
         </div>
       </div>
+      {L.label_hours?.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div className="help">Labels je Stunde, letzte 24 h: jede Gelegenheit 1 h nach der Meldung bewertet, gekauft oder nicht (Balken = Anzahl, Linie = Rangkorrelation der Vorhersage mit dem 1-h-Ergebnis)</div>
+          <div className="grid g2">
+            <EChart height={150} deps={[L]} ariaLabel="Gelabelte Gelegenheiten je Stunde"
+              build={(c) => baseOption(c, {
+                tooltip: { ...baseOption(c).tooltip, axisPointer: { type: "shadow" }, formatter: (ps) => { const x = L.label_hours[ps[0].dataIndex]; return `<b>${hhmm(x.ts)}</b>${tipRow(c.s[1], "gelabelt", n(x.n))}${tipRow("transparent", "davon Rug", n(x.rug))}${tipRow("transparent", "Ø 1-h-Ergebnis", pctSigned(x.mean_ret60, 1))}`; } },
+                xAxis: catAxis(c, L.label_hours.map((x) => hhmm(x.ts))), yAxis: valueAxis(c, (v) => n(v)),
+                series: [{ type: "bar", barMaxWidth: 12, data: L.label_hours.map((x) => x.n), itemStyle: { color: c.s[1], borderRadius: [3, 3, 0, 0] } }],
+              })} />
+            <EChart height={150} deps={[L]} ariaLabel="Rangkorrelation je Stunde"
+              build={(c) => baseOption(c, {
+                tooltip: { ...baseOption(c).tooltip, formatter: (ps) => { const x = L.label_hours[ps[0].dataIndex]; return `<b>${hhmm(x.ts)}</b>${tipRow(c.s[1], "Rangkorrelation", x.ic == null ? "–" : n(x.ic, 3))}${tipRow("transparent", "Fälle", n(x.n))}`; } },
+                xAxis: catAxis(c, L.label_hours.map((x) => hhmm(x.ts)), { boundaryGap: false }), yAxis: valueAxis(c, (v) => n(v, 1), { min: (v) => Math.min(-0.2, v.min), max: (v) => Math.max(0.4, v.max) }),
+                series: [{ type: "line", connectNulls: true, symbolSize: 6, lineStyle: { width: 2, color: c.s[1] }, itemStyle: { color: c.s[1] }, data: L.label_hours.map((x) => x.ic),
+                  markLine: { silent: true, symbol: "none", lineStyle: { color: c.muted, type: "dashed", width: 1 }, label: { show: false }, data: [{ yAxis: 0 }] } }],
+              })} />
+          </div>
+        </div>
+      )}
       {L.discrimination?.length > 0 && (
         <div style={{ marginTop: 12 }}>
-          <div className="help">Trennschärfe je Quelle und der Einsatzfaktor daraus: der Entscheider setzt nur so viel, wie seine Vorhersagen für diese Quelle über 7 Tage Gewinner von Verlierern getrennt haben (ab {n(L.disc_rule?.min_n)} Ergebnissen, voll ab einer Rangkorrelation von {n(L.disc_rule?.full, 1)}; bei 0 bleibt der kleine Einsatz)</div>
+          <div className="help">Trennschärfe je Quelle und der Einsatzfaktor daraus: der Entscheider setzt nur so viel, wie seine Vorhersagen für diese Quelle über 7 Tage Gewinner von Verlierern getrennt haben, gemessen am Ergebnis des gewählten Ausstiegsplans (ab {n(L.disc_rule?.min_n)} Ergebnissen, voll ab einer Rangkorrelation von {n(L.disc_rule?.full, 1)}; bei 0 bleibt der kleine Einsatz). * = nachgerechnet, solange der Entscheider den Wert nicht meldet</div>
           <Table rows={L.discrimination} rowKey={(x) => x.kind} initialSort={{ k: "n", d: "desc" }}
             cols={[
               { k: "label", l: "Quelle", fmt: (x) => <b>{x.label}</b> },
               { k: "n", l: "Ergebnisse", r: true, fmt: (x) => n(x.n) },
-              { k: "rank_corr", l: "Rangkorrelation", r: true, fmt: (x) => <b className={sign(x.rank_corr)}>{x.rank_corr == null ? "–" : n(x.rank_corr, 2)}</b> },
+              { k: "rank_corr", l: "Rangk. gegen Plan-Ergebnis", r: true, fmt: (x) => <b className={sign(x.rank_corr)} title={x.from_brain ? "vom Entscheider gemeldet" : "aus den Gelegenheiten des Entscheiders nachgerechnet"}>{x.rank_corr == null ? "–" : n(x.rank_corr, 2)}{x.from_brain ? "" : "*"}</b> },
               { k: "factor", l: "Einsatzfaktor", r: true, fmt: (x) => (
                 <span className="row" style={{ gap: 8, justifyContent: "flex-end" }} title={x.factor > 0 ? `Einsatz zu ${pct(x.factor, 0)} aus dem Vertrauen` : x.n < (L.disc_rule?.min_n || 30) ? "noch zu wenige Ergebnisse: kleiner Einsatz" : "trennt noch nicht: kleiner Einsatz"}>
                   <span style={{ width: 56, height: 6, borderRadius: 3, background: "var(--border)", overflow: "hidden", display: "inline-block" }}><span style={{ display: "block", height: "100%", width: `${x.factor * 100}%`, background: "var(--series-1)" }} /></span>

@@ -2488,6 +2488,7 @@ def _brain_pockets(conn, st):
             "positive": sum(1 for r in out if (r["lower95"] or 0) > 0)}
 
 
+BRAIN_SHARED_MIN = 100  # scored rows in the shared table before the curve switches to it
 BRAIN_OPPS_GOAL = 5000  # plan 18.10. "Richtung neu": scored opportunities per day
 BRAIN_CAL_CAP = (-1.0, 10.0)  # one coin at x10 000 (unit error or real) would swamp every decile mean
 
@@ -2551,8 +2552,9 @@ def _brain_learning(conn, now, days, st=None):
     for r in rows(conn, f"SELECT ts / 86400 * 86400 d, COUNT(*) n FROM {seen_t} WHERE ts>=? GROUP BY d", (lo,)):
         if r["d"] in out:
             out[r["d"]]["n_opps"] = r["n"]
-    scored = shared and scalar(conn, "SELECT COUNT(*) FROM opportunities WHERE ts>=? AND pred_mean IS NOT NULL "
-                                     "AND outcome_net IS NOT NULL", (lo,))
+    # a handful of sold rows says nothing: brain_opps stays the source until the shared table has enough
+    scored = shared and (scalar(conn, "SELECT COUNT(*) FROM opportunities WHERE ts>=? AND pred_mean IS NOT NULL "
+                                      "AND outcome_net IS NOT NULL", (lo,)) or 0) >= BRAIN_SHARED_MIN
     q = ("SELECT ts, pred_mean p, outcome_net y FROM opportunities" if scored else
          "SELECT ts, pred_mean p, realized_plan y FROM brain_opps")
     pairs = defaultdict(list)
@@ -2593,6 +2595,18 @@ def _brain_learning(conn, now, days, st=None):
         for d, ps in lp.items():
             if d in out:
                 out[d].update(n_label=len(ps), label_ic=_f(_spearman([p for p, _ in ps], [y for _, y in ps]), 4))
+    label_hours = []
+    if labels:  # labels written per hour over the last 24 h (when brain/labels.py finished each row) and their sharpness
+        hp = defaultdict(list)
+        for r in rows(conn, "SELECT label_at, pred_mean, label_ret60, label_rug FROM opportunities WHERE label_at>=? "
+                            "AND label_ret60 IS NOT NULL", (now - 24 * 3600,)):
+            hp[int(r["label_at"]) // 3600 * 3600].append(r)
+        for h in sorted(hp):
+            rs = hp[h]
+            ps = [(float(r["pred_mean"]), cap(float(r["label_ret60"]))) for r in rs if r["pred_mean"] is not None]
+            label_hours.append({"ts": h, "n": len(rs), "rug": sum(1 for r in rs if r["label_rug"]),
+                                "mean_ret60": _f(_mean([cap(float(r["label_ret60"])) for r in rs]), 4),
+                                "ic": _f(_spearman([p for p, _ in ps], [y for _, y in ps]), 4)})
     srcs = _opp_sources(conn, now, labels) if shared else []
     recent = [p for d, ps in pairs.items() if d >= t_end - 7 * 86400 for p in ps]
     deciles, gap = _calibration(recent)
@@ -2602,30 +2616,44 @@ def _brain_learning(conn, now, days, st=None):
     return {"days": series, "deciles": deciles, "cal_gap_7d": _f(gap, 4), "n_7d": len(recent),
             "rank_ic": last.get("rank_ic") if last else None, "opps_goal": BRAIN_OPPS_GOAL, "labels": bool(labels),
             "label_ic": last_l.get("label_ic") if last_l else None, "label_n": last_l.get("n_label") if last_l else None,
+            "label_hours": label_hours if labels else [],
             "cap": list(BRAIN_CAL_CAP), "source": "opportunities" if scored else "brain_opps", "seen_source": seen_t,
-            "sources": srcs, "discrimination": _brain_discrimination(st, srcs),
+            "sources": srcs, "discrimination": _brain_discrimination(st, srcs, _brain_plan_ic(conn, now)),
             "disc_rule": {"min_n": BRAIN_DISC_MIN_N, "full": BRAIN_DISC_FULL}}
 
 
 BRAIN_DISC_MIN_N, BRAIN_DISC_FULL = 30, 0.2  # brain/pockets.py: sharpness = rank corr / 0.2, from 30 results, 0..1
 
 
-def _brain_discrimination(st, sources):
+def _brain_plan_ic(conn, now):
+    """{kind: (n, rank correlation of pred_mean with realized_plan)} over 7 days of evaluations, as brain/pockets.py
+    discrimination counts it (signal v2 apart, the learning account's pool apart), read from brain_opps directly."""
+    by = defaultdict(list)
+    for r in rows(conn, "SELECT kind, features, pred_mean, realized_plan FROM brain_opps WHERE realized_plan IS NOT NULL "
+                        "AND pred_mean IS NOT NULL AND evaluated_at>=?", (now - 7 * 86400,)):
+        k = "signal_v2" if r["kind"] == "signal" and '"sig": "v2"' in (r["features"] or "") else r["kind"]
+        by[k].append((float(r["pred_mean"]), float(r["realized_plan"])))
+    return {k: (len(v), _spearman([p for p, _ in v], [y for _, y in v])) for k, v in by.items()}
+
+
+def _brain_discrimination(st, sources, plan_ic=None):
     """Per source the brain's own sharpness (brain_state "pockets" -> "discrimination": rank correlation of its
     predictions with the results over 7 days) and the stake factor that follows (0 until 30 results or at <= 0:
     the small stake stays), next to the rank correlation the shared table shows for the same source."""
     disc = ((st.get("pockets") or {}) if isinstance(st.get("pockets"), dict) else {}).get("discrimination") or {}
     own = {x["source"]: x for x in sources}
     alias = {"signal": "signals", "signal_v2": "signals_v2"}
+    plan_ic = plan_ic or {}
     out = []
-    for k, v in disc.items():
-        if not isinstance(v, dict):
-            continue
-        nn, rc = v.get("n") or 0, v.get("rank_corr")
+    for k in list(disc) + [k for k in plan_ic if k not in disc]:
+        v = disc.get(k) if isinstance(disc.get(k), dict) else {}
+        pn, pr = plan_ic.get(k, (0, None))
+        nn, rc = (v.get("n") or 0, v.get("rank_corr")) if v else (pn, pr)  # brain's own figure first, ours otherwise
         f = 0.0 if nn < BRAIN_DISC_MIN_N or rc is None else max(0.0, min(1.0, rc / BRAIN_DISC_FULL))
         o = own.get(k) or own.get(alias.get(k, k)) or {}
         out.append({"kind": k, "label": BRAIN_SOURCE.get(k, BRAIN_KIND.get(k, k)), "n": nn, "rank_corr": _f(rc, 4),
-                    "factor": round(f, 3), "shared_rank_ic": o.get("rank_ic"), "shared_n": o.get("n_pred")})
+                    "factor": round(f, 3), "from_brain": bool(v), "shared_rank_ic": o.get("rank_ic"), "shared_n": o.get("n_pred"),
+                    "label_ic": o.get("label_ic"), "label_n": o.get("n_label")})
     return sorted(out, key=lambda x: -x["n"])
 
 

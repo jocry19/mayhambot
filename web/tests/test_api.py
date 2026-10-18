@@ -767,6 +767,20 @@ def test_brain_factor_skips_transfer(tmp_path):
     assert day["mult"] == 1.0 and Q._brain_moved(Q._brain_transfers(conn), d0 + 60, d0 + 7200) == -0.6
 
 
+def test_learning_needs_enough_shared_rows(tmp_path):
+    from brain import store
+    from web import queries as Q
+
+    conn = sqlite3.connect(str(tmp_path / "t.db"))
+    store.init(conn)
+    conn.row_factory = sqlite3.Row
+    now = 1_790_000_000
+    conn.executemany("INSERT INTO opportunities(source, ref, mint, ts, pred_mean, outcome_net) VALUES ('sniper',?,?,?,0.01,-0.2)",
+                     [(f"r{i}", f"m{i}", now - 3600) for i in range(3)])  # three sold rows say nothing yet
+    v = Q.brain_view(conn, now=now)["learning"]
+    assert v["source"] == "brain_opps" and v["seen_source"] == "opportunities"
+
+
 def test_local_day0():
     import time as _t
     from web import queries as Q
@@ -813,6 +827,9 @@ def test_brain_view(demo, empty, tmp_path):
     sn = next(x for x in lc["sources"] if x["source"] == "sniper")
     assert sn["n_label"] >= sn["n_eval"] and 0 <= sn["rug_rate"] <= 1 and -1 <= sn["label_ic"] <= 1
     assert Q.BRAIN_EXIT["exit_risk"]
+    lh = lc["label_hours"]  # labels written per hour, last 24 h
+    assert lh and all(x["n"] >= x["rug"] for x in lh) and lh == sorted(lh, key=lambda x: x["ts"])
+    assert all("label_ic" in x for x in lc["discrimination"])
     disc = {x["kind"]: x for x in lc["discrimination"]}  # brain's sharpness per source and the stake factor from it
     assert disc["whale"]["factor"] == 0.7 and disc["signal"]["factor"] == 0 and disc["signal_v2"]["factor"] == 0  # < 0 / < 30 results
     assert disc["whale"]["shared_n"] and -1 <= disc["whale"]["shared_rank_ic"] <= 1 and lc["disc_rule"] == {"min_n": 30, "full": 0.2}
