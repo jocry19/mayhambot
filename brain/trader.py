@@ -24,6 +24,9 @@ log = logging.getLogger("brain.trader")
 DEDUP_S = 6 * 3600  # one opportunity per (whale entity or kind, coin) in this window: repeat buys are no new idea
 POOL_DRAWS = 3000  # the learning account's draws its quantile is taken over
 POOL_DRAWS_MIN = 200
+MIGRATION_COOL_S = 3600  # no buy this long after a launchpad coin got its pool
+LAUNCHPAD_SUFFIXES = ("pump", "bonk")
+PUMPED_H1_PCT = 50.0  # DexScreener change_h1 in %
 NAME_COPY_S = 6 * 3600  # a scam's name copies come within hours
 RECORD_N = 30  # the brain's own trades of a kind its exploring is judged on
 RECORD_MIN_N = 20
@@ -167,6 +170,7 @@ class Trader:
         self.supp = {"read": set(), "old": set(), "own": set()}  # supplemented row ids this hour (hour line)
         self.late_lag: list[tuple[float, float]] = []  # (tracker lag, brain lag) of those, seconds
         self.pending: dict[tuple[str, str], tuple] = {}  # (kind, ref) -> (row, entity, first seen): waiting for a pair
+        self._lab: tuple = (-1e18, [])  # (read at, carrying hypotheses of data/lab/report.json)
         self._records: dict = {}  # kind -> (checked at, (mean net, n) or None)
         self.pool_draws: collections.deque = collections.deque(maxlen=POOL_DRAWS)  # recent learning-account draws
         try:
@@ -482,6 +486,12 @@ class Trader:
 
     def _gate(self, kind: str, mint: str, snap, d, row=None, raw=None) -> str | None:
         """Hard limits the model never overrides: a market to trade, the rug check, risk limits."""
+        if kind != "pool" and self.s.main_trade != "on":
+            carry = self._lab_carries(kind)
+            if not carry:
+                # user 18.10. 17:06 ("Ja, pausieren"): the main account buys only where the lab's test bench says a
+                # pocket carries after costs (data/lab/report.json, verdict "traegt"); the learning account goes on
+                return "Hauptkonto pausiert: keine Tasche trägt laut Prüfstand"
         if kind != "pool":
             rec = self._record(kind)
             if rec:
@@ -498,6 +508,15 @@ class Trader:
                 return f"Nebenquelle: {n} Probekäufe in dieser Stunde, mehr erst wenn sie sich bewährt"
         if snap is None or not snap.price_sol:
             return "kein Marktpreis"
+        # loss avoidance (overhaul 18.10., backup 15:27): a buy within the first hour after a migration lost 36 % in
+        # that hour (720 migrations), and coins up more than 50 % in an hour fell 5-10 % in the next; every trigger
+        # fires after a move up, so these two stay a feature, never a reason to buy
+        age_s = (self.clock() * 1000 - snap.pair_created_ms) / 1000 if getattr(snap, "pair_created_ms", 0) else None
+        if (not features.on_curve(snap) and age_s is not None and 0 <= age_s < MIGRATION_COOL_S
+                and mint.endswith(LAUNCHPAD_SUFFIXES)):
+            return f"frisch migriert ({age_s / 60:.0f} min), die erste Stunde danach fällt im Mittel"
+        if (getattr(snap, "change_h1", None) or 0) >= PUMPED_H1_PCT:
+            return f"schon gepumpt (+{snap.change_h1:.0f} % in 1 h), danach fällt es im Mittel"
         if features.on_curve(snap):
             if snap.fdv < self.s.min_curve_mcap_usd:
                 return f"Bonding Curve noch zu klein (Market Cap ${snap.fdv:,.0f})"
@@ -913,6 +932,26 @@ class Trader:
         except Exception as e:
             log.exception("learning from trade %s failed: %s", p["id"], e)
         return True
+
+    def _lab_carries(self, kind: str) -> list:
+        """Hypotheses of the lab's last report with verdict 'traegt' that name this kind (the report is re-read once a
+        minute; missing or unreadable: none)."""
+        now = self.clock()
+        if now - self._lab[0] >= RECORD_EVERY_S:
+            res = []
+            try:
+                import os
+                from pathlib import Path
+
+                from core.config import ROOT
+
+                path = Path(os.getenv("LAB_DIR") or ROOT / "data" / "lab") / "report.json"
+                res = [r.get("hyp", "") for r in json.loads(path.read_text()).get("results", [])
+                       if r.get("verdict") == "traegt"]
+            except Exception:
+                res = []
+            self._lab = (now, res)
+        return [h for h in self._lab[1] if kind in h.lower()]
 
     def _name_copy(self, mint: str, symbol: str) -> str | None:
         """A coin named like another one that rugged or was dumped in the last hours: the same scam again (18.10.: two
