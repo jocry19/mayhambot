@@ -291,9 +291,9 @@ def test_signal_mode_uses_model_when_trained(env, monkeypatch):
 
     monkeypatch.setattr(model, "score_token", lambda mint, conn=None: {"score": 62.0, "grade": "A", "version": 3})
     _signal(conn, score=40)
-    follow_signals(conn, st)  # model 62 % (A): buy at 1.5x size
+    follow_signals(conn, st)  # model 62 % (A): buy, grade sizing is neutral (the top band loses most net)
     pos = conn.execute("SELECT * FROM ct_positions").fetchone()
-    assert pos and pos["size_sol"] == pytest.approx(control.preset(conn, "signal").size_sol * 1.5)
+    assert pos and pos["size_sol"] == pytest.approx(control.preset(conn, "signal").size_sol * strategy.GRADE_SIZE["A"])
 
 
 def test_geckoterminal_uses_shared_limiter(monkeypatch):
@@ -1122,6 +1122,28 @@ def test_thompson_draw_tries_unknown_wallets_and_rarely_proven_losers(env, monke
     assert learn.thompson(conn, {"n": 0, "n_eff": 0, "mean": 0.0}, "a")["draw"] == unknown["draw"]  # same seed
     tried = sum(learn.thompson(conn, {"n": 0, "n_eff": 0, "mean": 0.0}, f"sig{i}")["draw"] > 0 for i in range(400))
     assert 100 < tried < 180
+
+
+def test_thompson_prior_weight_is_measured_from_the_wallet_spread(env, monkeypatch):
+    import random
+
+    from copytrade import learn
+
+    s, conn, ex, state = env
+    rnd = random.Random(1)
+    # 40 wallets whose true edges spread 0.05 around -0.05, each copy +- 0.17: k = 0.17^2 / 0.05^2 = 11.6
+    by = {}
+    for w in range(40):
+        theta = rnd.gauss(-0.05, 0.05)
+        by[w] = [rnd.gauss(theta, 0.17) for _ in range(30)]
+    sp = learn._wallet_spread(by)
+    assert sp["k_wallets"] == 40 and 6 < sp["k"] < 25 and 0.15 < sp["sd_within"] < 0.19
+    assert learn._wallet_spread({w: v for w, v in list(by.items())[:5]}) == {}  # too few wallets: keep the default
+    monkeypatch.setattr(learn, "population_edge", lambda c: {"n": 1200, "mean": -0.066, "sd": 0.18, **sp})
+    unknown = learn.thompson(conn, {"n": 0, "n_eff": 0, "mean": 0.0}, "a")
+    assert unknown["k"] == pytest.approx(sp["k"], abs=0.05) and unknown["sd"] == pytest.approx(
+        sp["sd_within"] / sp["k"] ** 0.5)
+    assert unknown["p_pos"] < 0.15  # tried less often than with the fixed weight 6 (about 0.19)
 
 
 def test_strict_copy_follows_the_thompson_draw(env, monkeypatch):

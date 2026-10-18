@@ -518,8 +518,15 @@ def wallet_edge(conn, wallet: str) -> dict:
     return out
 
 
-THOMPSON_PRIOR_N = 6.0  # the population's average counts like this many own buys of a wallet
+THOMPSON_PRIOR_N = 6.0  # the population's average counts like this many own buys of a wallet (until measured)
 THOMPSON_SD_MIN = 0.05
+# the prior weight is measured instead (empirical Bayes): k = within-wallet variance / between-wallet variance of the
+# true edge, from wallets with this many replays. 10/18 backup: 66 wallets, within sd 0.169, between sd 0.05 -> k 11.5
+# (split-half persistence of wallet means 0.11): the fixed 6 drew unknown wallets about twice as often as the data
+# supports. Walk-forward on 1179 replays (4 splits): the wallet effect alone ranks the newer part slightly better than
+# the population (rho +0.02..+0.13), adding the stored context buckets made it worse (rho -0.03..-0.14)
+THOMPSON_K_MIN_WALLET_N, THOMPSON_K_MIN_WALLETS = 5, 20
+THOMPSON_K_RANGE = (3.0, 50.0)
 _POP_CACHE: dict = {}
 POP_CACHE_S = 600
 
@@ -532,7 +539,7 @@ def population_edge(conn) -> dict:
         return hit[1]
     variants = sim.GRID
     idx = sim.nearest(current_params(conn, "whale", None), variants)
-    vals, wts, now, seen = [], [], time.time(), set()
+    vals, wts, now, seen, by_wallet = [], [], time.time(), set(), {}
     for r in conn.execute("SELECT gains, ts, wallet, mint FROM ct_evals WHERE strategy='whale' AND grid_version=? "
                           "AND gains!='[]' AND kind IN ('whale_buy','trade') ORDER BY kind='trade'",
                           (sim.GRID_VERSION,)):
@@ -544,6 +551,7 @@ def population_edge(conn) -> dict:
         if len(g) == len(variants) and g[idx] is not None:
             vals.append(max(GAIN_CLIP[0], min(GAIN_CLIP[1], g[idx])))
             wts.append(decay(r[1], now))
+            by_wallet.setdefault(r[2], []).append(vals[-1])
     cost = extra_cost(conn, "whale")
     sw = sum(wts)
     if not vals or sw <= 0:
@@ -552,8 +560,28 @@ def population_edge(conn) -> dict:
         mean = sum(w * v for w, v in zip(wts, vals)) / sw
         var = sum(w * (v - mean) ** 2 for w, v in zip(wts, vals)) / sw
         out = {"n": len(vals), "mean": mean - cost, "sd": max(THOMPSON_SD_MIN, var ** 0.5)}
+        out.update(_wallet_spread(by_wallet))
     _POP_CACHE[id(conn)] = (time.time(), out)
     return out
+
+
+def _wallet_spread(by_wallet: dict) -> dict:
+    """Between- and within-wallet spread of replayed copy gains (method of moments over wallets with
+    THOMPSON_K_MIN_WALLET_N+ replays) -> {"k", "sd_within", "sd_between", "k_wallets"}, or {} with too few wallets."""
+    groups = [v for v in by_wallet.values() if len(v) >= THOMPSON_K_MIN_WALLET_N]
+    if len(groups) < THOMPSON_K_MIN_WALLETS:
+        return {}
+
+    def var(v, ddof=0):
+        m = sum(v) / len(v)
+        return sum((x - m) ** 2 for x in v) / (len(v) - ddof)
+
+    within = sum(var(v, 1) for v in groups) / len(groups)
+    means = [sum(v) / len(v) for v in groups]
+    tau2 = var(means) - sum(within / len(v) for v in groups) / len(groups)
+    k = within / tau2 if tau2 > 0 else THOMPSON_K_RANGE[1]
+    return {"k": max(THOMPSON_K_RANGE[0], min(THOMPSON_K_RANGE[1], k)), "sd_within": max(THOMPSON_SD_MIN, within ** 0.5),
+            "sd_between": max(tau2, 0.0) ** 0.5, "k_wallets": len(groups)}
 
 
 def thompson(conn, edge: dict, seed: str) -> dict:
@@ -567,12 +595,12 @@ def thompson(conn, edge: dict, seed: str) -> dict:
 
     pop = population_edge(conn)
     n = float(edge.get("n_eff") or 0.0)
-    k = THOMPSON_PRIOR_N
+    k = pop.get("k") or THOMPSON_PRIOR_N  # measured from the data once enough wallets have replays
     mean = (k * pop["mean"] + n * edge.get("mean", 0.0)) / (k + n)
-    sd = pop["sd"] / math.sqrt(k + n)
+    sd = (pop.get("sd_within") or pop["sd"]) / math.sqrt(k + n)
     draw = random.Random(seed).gauss(mean, sd)
     p_pos = 0.5 * (1 + math.erf(mean / (sd * math.sqrt(2))))
-    return {"draw": draw, "mean": mean, "sd": sd, "p_pos": p_pos, "prior": pop["mean"],
+    return {"draw": draw, "mean": mean, "sd": sd, "p_pos": p_pos, "prior": pop["mean"], "k": round(k, 1),
             "size_factor": max(0.25, min(1.5, draw / EDGE_SIZE_UNIT)) if draw > 0 else 0.0}
 
 

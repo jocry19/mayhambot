@@ -1210,7 +1210,11 @@ def wash_share(conn, mint: str) -> float | None:
 
 
 # ---------------------------------------------------------------------- research model hook
-GRADE_SIZE = {"A": 1.5, "B": 1.2, "C": 1.0, "D": 0.6, "E": 0.4}
+# stake by model grade: neutral. The grade is P(pump) and ranks volatility, not net: holdout quintiles of model v9 and
+# v10 (5.4k / 5.1k signals) lose most in the top fifth (mean net -13 % / -16 %, 4th fifth -7 % / -6 %), live v9
+# predictions 10/17 (493 with 1 h outcome): median 1 h -1 % under score 20, -16 % at 20-30, -23 % at 30-45,
+# -27 % from 45. The old 1.5x for A put the most money on the worst band
+GRADE_SIZE = {"A": 1.0, "B": 1.0, "C": 1.0, "D": 1.0, "E": 1.0}
 
 
 def model_view(sig, conn=None) -> dict | None:
