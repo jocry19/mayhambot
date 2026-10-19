@@ -172,6 +172,10 @@ class Service:
                     f"points {ex['thin']:.0%})")
             hist = (store.get(self.conn, "exit_skill_hist") or [])[-23:] + [[int(since), ex]]
             store.put(self.conn, "exit_skill_hist", hist)
+        cal = (store.get(self.conn, "brain_calibration") or {}).get("bins") or {}
+        if cal:
+            # the shift the learning account's top range gets per source (20477db), from its own last 24 h
+            out += ", calibration top range " + " ".join(f"{k or '?'} {v[-1][1]:+.1%}" for k, v in sorted(cal.items()) if v)
         return out
 
     def _main_buys(self, since: float) -> str:

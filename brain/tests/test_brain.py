@@ -1887,8 +1887,8 @@ def test_no_price_history_and_an_old_rug_block_every_account(conn, s):
     d0 = types.SimpleNamespace(explore=False)
     young = snap(mint=new_coin)
     young.pair_created_ms = (now - 1200) * 1000
-    t.rng = types.SimpleNamespace(random=lambda: 0.1)  # inside the learning account's sample
-    assert "kein Kursverlauf" not in (t._gate("pool", new_coin, young, d0) or "")
+    t.rng = types.SimpleNamespace(random=lambda: 0.0)  # no sample any more (09:00 19.10.: -13.3 % on 22)
+    assert "kein Kursverlauf" in (t._gate("pool", new_coin, young, d0) or "")
     assert "kein Kursverlauf" in (t._gate("whale", new_coin, young, d0) or "")
     t.rng = types.SimpleNamespace(random=lambda: 0.9)
     assert "kein Kursverlauf" in (t._gate("pool", new_coin, young, d0) or "")
@@ -2109,3 +2109,75 @@ def test_a_coin_that_gaps_down_and_stays_ends_every_rule_alike(conn, s):
     steady = [[t0 + 300 * i, 1 - 0.25 * i / 12] for i in range(13)]
     rules = _j.loads(labels.label(steady, 0.05)["label_rules"])
     assert rules["tp30sl15"] > rules["hold60"] + 0.05  # the stop sold on the way down
+
+
+def test_an_armed_trail_fires_inside_the_quiet_minutes(conn, s):
+    """09:00 19.10.: ELON max +60 % sold at -9.7 %, the peak came and went before the trail woke at 15 min."""
+    s.exit_mode = "trail"
+    set_tier(conn, WHALE, "ultra")
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    clock = [time.time()]
+    t = make_trader(conn, s, trained(), mk, clock=lambda: clock[0])
+    t.scan()
+    add_whale_buy(conn, "q", ts=clock[0])
+    assert t.scan() == 1
+    ref = json.loads(conn.execute("SELECT meta FROM brain_positions").fetchone()[0])["ref_price"]
+    mk.snaps[MINT] = snap(price=ref * 0.9)  # -10 % in the first minutes: no exit, the quiet holds for noise
+    clock[0] += 60
+    assert t.manage() == 0
+    mk.snaps[MINT] = snap(price=ref * 1.6)
+    clock[0] += 60
+    assert t.manage() == 0
+    mk.snaps[MINT] = snap(price=ref * 1.25)  # 22 % under the +60 % high at minute 3: sold, still in profit
+    clock[0] += 60
+    assert t.manage() == 1
+    p = conn.execute("SELECT exit_reason, pnl_pct FROM brain_positions").fetchone()
+    assert p["exit_reason"] == "trail" and p["pnl_pct"] > 0
+
+
+def test_the_calibration_is_stored_and_the_row_keeps_the_models_own_mean(conn, s):
+    from brain import opportunities as O
+    now = time.time()
+    for i in range(60):
+        O.report(conn, "copytrade", f"k{i}", f"Kal{i:040d}"[:44], now - 7200, {})
+        conn.execute("UPDATE opportunities SET label_at=?, pred_mean=?, label_ret60=? WHERE ref=?",
+                     (int(now) - 3600, 0.0, 0.5, f"k{i}"))  # predicted 0, made +50 %: shift +50 %
+    mk = Market()
+    t, _ = _pool_trader(conn, s, mk, src="copytrade")
+    mk.snaps[MINT] = snap()
+    O.report(conn, "copytrade", "new", MINT, time.time(), {"wallets_n": 3})
+    t.scan()
+    row = conn.execute("SELECT o.pred_mean, b.pred_mean, b.raw FROM opportunities o JOIN brain_opps b "
+                       "ON b.mint=o.mint WHERE o.ref='new'").fetchone()
+    raw = json.loads(row[2])
+    assert raw["calib"] == pytest.approx(0.5)
+    assert row[0] == pytest.approx(raw["pred_model"], abs=1e-5)  # the shared row: the model's own mean
+    assert row[1] == pytest.approx(raw["pred_model"] + 0.5, abs=1e-4)  # the decision: the shifted one
+    cal = store.get(conn, "brain_calibration")
+    assert cal["bins"]["copytrade"][-1] == [None, 0.5]
+
+
+def test_the_four_hour_label_comes_at_four_hours_and_the_sniper_gets_half_the_queue(conn, s, monkeypatch):
+    from brain import labels, opportunities as O
+    clock = [time.time()]
+
+    def snaps(mints):
+        return {m: snap(mint=m, price=2e-6, dex="raydium", liq=200_000) for m in mints}
+    lb = labels.Labeler(conn, s, snapshots=snaps, clock=lambda: clock[0], curve_now=lambda c, m, now: None)
+    lb.step()
+    O.report(conn, "copytrade", "a", MINT, clock[0], {"wallets_n": 3})
+    conn.execute("UPDATE opportunities SET reported_at=?", (int(clock[0]),))
+    for i in range(62):
+        clock[0] += 60
+        lb.step()
+    for i in range(18):  # to 4 h 30 min, a step every 12 min
+        clock[0] += 720
+        lb.step()
+    a = conn.execute("SELECT * FROM opportunities WHERE ref='a'").fetchone()
+    assert a["label_ret240"] == 0.0 and a["label_ret1440"] is None and len(lb.long) == 1
+    monkeypatch.setattr(labels, "MAX_LONG", 2)
+    lb.track = {"98": [MINT, clock[0] - 3700, "sniper"], "99": [MINT, clock[0] - 3700, "copytrade"]}
+    lb.paths[MINT] = [[clock[0] - 3700 + 60 * i, 2e-6] for i in range(60)]
+    lb._finish(clock[0])
+    assert "98" not in lb.long and "99" in lb.long  # the queue holds one, the sniper only gets half of it
