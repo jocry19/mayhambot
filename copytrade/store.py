@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS ct_events (
     ts INTEGER, level TEXT, kind TEXT, message TEXT, data TEXT
 );
 CREATE TABLE IF NOT EXISTS ct_state (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS ct_shadow (
+    sig TEXT, book TEXT, wallet TEXT, mint TEXT, ts INTEGER, gate TEXT, sol_amount REAL, price_sol REAL,
+    price_usd REAL, mcap_usd REAL, liq_usd REAL, dex TEXT, PRIMARY KEY (sig, book)
+);
 CREATE TABLE IF NOT EXISTS ct_detect (
     sig TEXT, wallet TEXT, side TEXT, source TEXT, block_ts INTEGER, notified_at REAL, detected_at REAL,
     sol REAL, PRIMARY KEY (sig, wallet)
@@ -148,6 +152,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
                      "WHERE intent IS NOT NULL")
     except sqlite3.IntegrityError:  # an old database with duplicates: keep the plain index
         pass
+    conn.commit()
+
+
+def shadow(conn: sqlite3.Connection, book: str, sw, gate: str, snap=None) -> None:
+    """One row of the shadow book: a buy we did not copy (book 'strict': the strict account would have; book
+    'user': every buy of the user's wallets), with the gate that decided. Outcomes come from ct_buy_outcomes and
+    the brain's labels of the same signature."""
+    conn.execute("INSERT OR IGNORE INTO ct_shadow(sig, book, wallet, mint, ts, gate, sol_amount, price_sol, price_usd,"
+                 " mcap_usd, liq_usd, dex) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (sw.signature, book, sw.wallet, sw.mint, int(time.time()), (gate or "")[:200], sw.sol_amount,
+                  snap.price_sol if snap and snap.price_sol else sw.price_sol, snap.price_usd if snap else None,
+                  snap.fdv if snap else None, snap.depth_usd if snap else None, snap.dex_id if snap else None))
     conn.commit()
 
 

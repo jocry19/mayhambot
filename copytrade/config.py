@@ -70,6 +70,14 @@ class Settings:
     watch_slots: int = field(default_factory=lambda: _i("CT_WATCH_SLOTS", 60))
     # the user's wallets in research/seed_wallets.txt, by the comment they carry there (source 'watch_user')
     user_seed_tags: str = field(default_factory=lambda: os.getenv("CT_USER_SEED_TAGS", "user 2026-10-18"))
+    # strict copies of whale buys (any tier): off since the review of 19.10. (68 strict copies -6.2 %, no tier better
+    # than none); what strict would have bought goes to the shadow book (ct_shadow, book 'strict')
+    strict_whale: bool = field(default_factory=lambda: _b("CT_STRICT_WHALE", False))
+    # whale copies on paper: a wide emergency stop and a trail instead of a tight stop (stops lost -23 % on average,
+    # a -30 % stop filled at -33 to -38 %); rug and liquidity exits unchanged
+    whale_emergency_stop: float = field(default_factory=lambda: _f("CT_WHALE_EMERGENCY_STOP", 0.50))
+    whale_trail_activate: float = field(default_factory=lambda: _f("CT_WHALE_TRAIL_ACTIVATE", 0.20))
+    whale_trail_drawdown: float = field(default_factory=lambda: _f("CT_WHALE_TRAIL_DRAWDOWN", 0.20))
     # volume bots: never block-0, never watched (9ZYMMX, 18.10.: 851 buys of 3 coins, 90 % of the inflow)
     volume_bots: list[str] = field(default_factory=lambda: [w.strip() for w in os.getenv(
         "CT_VOLUME_BOTS", "9ZYMMXvVPSfq6JdUjXBv9yCo1J1XbphPQMbWS5oDThJ").split(",") if w.strip()])

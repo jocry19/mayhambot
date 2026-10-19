@@ -302,6 +302,32 @@ def costs(conn, days: float = 7) -> dict:
                 "n_exit": len(d["exit"]), "lag": _median(d["lag"])} for k, d in sorted(acc.items())}
 
 
+def entry_cost_split(conn, days: float = 7, mode: str = "explore") -> dict:
+    """Median entry cost (fill / mid at the buy - 1) of closed whale copies split by what shapes it: fill source
+    (Jupiter quote or liquidity estimate), venue, liquidity band and stake (fixed fees weigh more on small stakes).
+    Review 19.10.: exploration paid 9.8 % at entry, strict 3.2 %."""
+    import json
+
+    rows = conn.execute(
+        "SELECT size_sol, entry_price_sol, meta FROM ct_positions WHERE status='closed' AND closed_at > ? AND mode=? "
+        "AND strategy='whale' AND entry_price_sol > 0", (int(time.time() - days * 86400), mode)).fetchall()
+    out: dict = {}
+    for r in rows:
+        try:
+            m = json.loads(r["meta"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not m.get("mid_sol"):
+            continue
+        c = r["entry_price_sol"] / m["mid_sol"] - 1
+        liq = m.get("liq_usd") or 0
+        band = "<5k" if liq < 5000 else "5-15k" if liq < 15000 else "15-50k" if liq < 50000 else "50k+"
+        for key in (f"src {m.get('fill_source') or '?'}", f"dex {m.get('dex') or '?'}", f"liq {band}",
+                    f"stake {r['size_sol']:g}"):
+            out.setdefault(key, []).append(c)
+    return {k: {"n": len(v), "median": _median(v)} for k, v in sorted(out.items())}
+
+
 def bookkeeping_line(conn, s: Settings) -> str:
     """One log line: ledger check per paper account and the measured costs per source."""
     def pct(x):
@@ -315,6 +341,17 @@ def bookkeeping_line(conn, s: Settings) -> str:
     for k, d in costs(conn).items():
         parts.append(f"cost {k}: n {d['n']}, entry {pct(d['entry'])} (n {d['n_entry']}), exit {pct(d['exit'])}"
                      f" (n {d['n_exit']}), whale lag {pct(d['lag'])}")
+    try:
+        sh = conn.execute("SELECT book, COUNT(*) FROM ct_shadow WHERE ts > ? GROUP BY book",
+                          (int(time.time()) - 86400,)).fetchall()
+        if sh:
+            parts.append("shadow book 24 h " + ", ".join(f"{b} {n}" for b, n in sh))
+    except Exception:  # table missing in an old database
+        pass
+    split = entry_cost_split(conn)
+    if split:
+        parts.append("explore entry cost by " + ", ".join(f"{k} {pct(d['median'])} (n {d['n']})"
+                                                         for k, d in split.items()))
     return "bookkeeping: " + "; ".join(parts or ["no paper account yet"])
 
 

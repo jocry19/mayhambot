@@ -291,13 +291,21 @@ class Strategy:
         """Copy a whale buy into the strict account (the live rules) and/or the exploration account. The returned id
         is the strict position if there is one. Every decision, taken or not, goes to the shared opportunity table
         (brain.opportunities, source 'strategy', ref = the whale's signature)."""
-        self._opp = {"snap": None, "draw": None, "why": None, "wait": False}
+        self._opp = {"snap": None, "draw": None, "why": None, "wait": False, "strict_shadow": False}
         try:
             res = self._on_whale_buy(swap, deferred)
         finally:
             opp, self._opp = self._opp, None
         if not opp["wait"]:
             self._report_whale(swap, opp, res)
+            if self._user_wallet(swap.wallet):  # every buy of the user's wallets, with the gate that decided (19.10.)
+                gate = ("kopiert (Erkundung)" if res else "strenges Kopieren aus (Schattenbuch)"
+                        if opp["strict_shadow"] else opp["why"] or f"Wal-Kauf unter der Mindestgröße "
+                        f"({swap.sol_amount:.3g} SOL) oder Wal-Modus aus")
+                try:
+                    store.shadow(self.conn, "user", swap, gate, opp["snap"])
+                except Exception as e:  # the shadow book never stops a copy
+                    log.debug("shadow row %s failed: %s", swap.signature[:8], e)
         return res
 
     def _report_whale(self, swap: Swap, opp: dict, pid: int | None) -> None:
@@ -500,6 +508,15 @@ class Strategy:
             return None
         first = None
         for acc in accounts:
+            if acc == "paper" and not s.strict_whale:
+                # strict whale copies are off (review 19.10.): what strict would have bought goes to the shadow book
+                self._opp["strict_shadow"] = True
+                self._opp["why"] = self._opp["why"] or "strenges Kopieren aus (Schattenbuch)"
+                try:
+                    store.shadow(self.conn, "strict", swap, "strenges Kopieren aus", snap)
+                except Exception as e:
+                    log.debug("shadow row %s failed: %s", swap.signature[:8], e)
+                continue
             if acc == "explore":
                 a_size = s.explore_size_sol * (BLOCK0_SIZE if block0 else 1)
                 a_reason = f"Erkundung ({'block0' if block0 else tier}): {reason}"
@@ -707,6 +724,11 @@ class Strategy:
         inflow = (1 if strategy == "whale" else 0) if inflow is None else inflow
         ex = (self.exs[account] if account else
               self.executor(strategy) if strategy in control.STRATEGIES else self.exs.get("paper"))
+        if strategy == "whale" and ex.mode in PAPER_MODES and self.s.whale_emergency_stop > 0:
+            # review 19.10.: whale stops lost -23 % on average and filled below the stop; a wide emergency stop and
+            # a trail instead (like the brain's exits), target stays, rug and liquidity exits stay
+            sl = self.s.whale_emergency_stop
+            trail = (self.s.whale_trail_activate, self.s.whale_trail_drawdown)
         intent = intent or (f"signal:{signal_id}" if signal_id else f"whale:{whale.signature}" if whale else None)
         if intent and ex.mode == "explore":
             intent = "explore:" + intent

@@ -97,6 +97,8 @@ class PaperExecutor:
             impact = float(q.get("priceImpactPct") or 0)
             src = "jupiter_quote"
         else:
+            if snap.depth_usd <= 0:  # no quote and no depth: _cp_impact would guess 50 %, a made-up fill
+                return Fill(False, error="kein Jupiter-Kurs und keine Pooltiefe (kein Kauf auf Verdacht)")
             impact = _cp_impact(spend, snap, market.sol_usd(self.s))
             tokens = spend / snap.price_sol * (1 - impact) * (1 - DEX_FEE_FALLBACK) if snap.price_sol else 0
             src = "liquidity_estimate"

@@ -78,7 +78,7 @@ def test_simulate_exit_stop_first():
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     s = Settings(db_path=tmp_path / "t.db", explore_unranked=True, thompson=False,
-                 explore_tiers="ultra,smart")  # paper exploration path, gates
+                 explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0)  # paper exploration path, gates
     conn = store.connect(s)
     snap = market.PairSnapshot(MINT, "MEME", "pool", "raydium", 0.0003, 3e-6, 80_000, 1e6, 5000, 30000,
                                10, 2, 120, 1.0, 5.0, int(time.time() * 1000) - 3600_000, time.time())
@@ -503,7 +503,7 @@ def _evals(conn, gain, n=10, kind="whale_buy"):
 
 def test_unranked_whales_only_measured_without_exploration(env):
     s, conn, ex, state = env
-    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", thompson=False), ex)
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False), ex)
     assert st.on_whale_buy(whale_buy()) is None
     msgs = [r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'")]
     assert any("nur mitgemessen" in m for m in msgs)
@@ -511,7 +511,7 @@ def test_unranked_whales_only_measured_without_exploration(env):
 
 def test_ranked_whale_needs_edge_after_costs(env):
     s, conn, ex, state = env
-    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", thompson=False), ex)
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False), ex)
     _rank(conn)
     _evals(conn, -0.05)
     assert st.on_whale_buy(whale_buy()) is None  # its past buys lost money with our exits
@@ -527,7 +527,7 @@ def test_ranked_whale_needs_edge_after_costs(env):
 def test_strict_copy_halves_size_after_a_5min_run(env, monkeypatch):
     from copytrade import learn
     s, conn, ex, state = env
-    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", thompson=False), ex)
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False), ex)
     _rank(conn)
     _evals(conn, 0.12)
     monkeypatch.setattr(learn, "intel_context", lambda *a: ({"run5": ">5%"}, {"px_ret_5m": 0.12}))
@@ -784,7 +784,7 @@ def test_exploration_account_trades_what_the_strict_rules_skip(env, monkeypatch)
     import dataclasses
 
     s, conn, ex, state = env
-    s = Settings(db_path=s.db_path, explore_tiers="ultra,smart", thompson=False)  # defaults: exploration on, unranked whales not copied by the strict account
+    s = Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False)  # defaults: exploration on, unranked whales not copied by the strict account
     tiers = {"t": "smart"}
     monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": tiers["t"]})
     st = strategy.Strategy(conn, s, ex)
@@ -809,7 +809,7 @@ def test_exploration_account_trades_what_the_strict_rules_skip(env, monkeypatch)
 
 def test_exploration_only_for_chosen_tiers_and_beside_strict_copies(env, monkeypatch):
     s, conn, ex, state = env
-    s = Settings(db_path=s.db_path, explore_tiers="ultra,smart", thompson=False)
+    s = Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False)
     tiers = {"t": "good"}
     monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": tiers["t"]})
     st = strategy.Strategy(conn, s, ex)
@@ -832,9 +832,9 @@ def test_exploration_only_for_chosen_tiers_and_beside_strict_copies(env, monkeyp
 def test_exploration_can_be_turned_off_and_its_positions_still_sell_on_their_own_account(env, monkeypatch):
     s, conn, ex, state = env
     monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": "smart"})
-    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", thompson=False), ex)
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False), ex)
     pid = st.on_whale_buy(whale_buy(sol=1.0))
-    off = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", thompson=False, explore=False), ex)
+    off = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False, explore=False), ex)
     assert off.on_whale_buy(chain.Swap("sigZ", W, int(time.time()) - 5, "buy", "OTHER", 1e6, 1.0, 3e-6)) is None
     paper_before = ex.balance(conn)
     p = conn.execute("SELECT * FROM ct_positions WHERE id=?", (pid,)).fetchone()
@@ -871,7 +871,7 @@ def test_exploration_whale_copy_from_lower_liquidity(env, monkeypatch):
     import dataclasses
 
     s, conn, ex, state = env
-    s = Settings(db_path=s.db_path, explore_tiers="ultra,smart", thompson=False)
+    s = Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False)
     monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": "smart"})
     st = strategy.Strategy(conn, s, ex)
     state["snap"] = dataclasses.replace(state["snap"], liquidity_usd=8000)
@@ -886,7 +886,7 @@ def test_bonding_curve_coins_only_explored_and_late_copies_skipped(env, monkeypa
     import dataclasses
 
     s, conn, ex, state = env
-    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", thompson=False), ex)
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False), ex)
     _rank(conn)
     _evals(conn, 0.12)
     state["snap"] = dataclasses.replace(state["snap"], dex_id="pumpfun")
@@ -909,7 +909,7 @@ def test_curve_depth_from_price_lets_exploration_buy_a_curve_coin(env, monkeypat
     assert market.curve_liquidity_usd("pumpswap", 30 / 1.073e9, 100.0) == 0
     s, conn, ex, state = env
     monkeypatch.setattr(strategy, "EXPLORE_CURVE", True)  # the curve path itself (block-0 copies use it)
-    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", thompson=False), ex)
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False), ex)
     monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": "smart"})
     state["snap"] = dataclasses.replace(state["snap"], dex_id="pumpfun", liquidity_usd=0.0)
     assert st.on_whale_buy(whale_buy(sol=1.0)) is None  # DexScreener's $0 and no curve depth: no buy
@@ -921,7 +921,7 @@ def test_curve_depth_from_price_lets_exploration_buy_a_curve_coin(env, monkeypat
 
 def test_buys_under_the_copy_minimum_leave_a_summary_line(env, monkeypatch):
     s, conn, ex, state = env
-    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", thompson=False), ex)
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False), ex)
     assert st.on_whale_buy(whale_buy(sol=0.3)) is None
     assert not conn.execute("SELECT 1 FROM ct_events WHERE kind='small'").fetchone()
     st._small[2] -= strategy.SMALL_SUMMARY_S
@@ -1129,7 +1129,7 @@ def test_ledger_check_and_measured_costs(env):
 
 def test_block0_group_is_explored_at_any_size_and_tagged(env, monkeypatch):
     s, conn, ex, state = env
-    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", thompson=False), ex)
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False), ex)
     monkeypatch.setattr(strategy, "launch_bot_share", lambda c, w: (20, 20))  # looks like a launch bot
     assert st.on_whale_buy(whale_buy(sol=0.005)) is None  # not in the group: under every minimum
     monkeypatch.setattr(tracker, "BLOCK0", {W})
@@ -1143,7 +1143,7 @@ def test_block0_group_is_explored_at_any_size_and_tagged(env, monkeypatch):
 
 def test_learning_universe_wallets_are_explored_never_copied_strictly(env, monkeypatch):
     s, conn, ex, state = env
-    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", thompson=False, explore_unranked=True), ex)
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False, explore_unranked=True), ex)
     monkeypatch.setattr(tracker, "WATCH", {W})
     st.on_whale_buy(whale_buy())
     assert {r[0] for r in conn.execute("SELECT mode FROM ct_positions")} <= {"explore"}
@@ -1218,7 +1218,7 @@ def test_strict_copy_follows_the_thompson_draw(env, monkeypatch):
     from copytrade import learn
 
     s, conn, ex, state = env
-    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", explore=False), ex)
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, explore=False), ex)
     monkeypatch.setattr(learn, "wallet_edge", lambda c, w: {"n": 3, "n_eff": 3.0, "mean": 0.02, "lower": -0.1,
                                                              "size_factor": 0.0})
     draw = {"draw": -0.01, "mean": -0.02, "sd": 0.1, "p_pos": 0.4, "prior": -0.05, "size_factor": 0.0}
@@ -1292,7 +1292,7 @@ def test_first_minute_curve_coin_priced_from_the_sniper_curve(env, monkeypatch):
 
     s, conn, ex, state = env
     monkeypatch.setattr(strategy, "EXPLORE_CURVE", True)  # the curve path itself (block-0 copies use it)
-    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", thompson=False), ex)
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False), ex)
     monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": "smart"})
     monkeypatch.setattr(market, "snapshot", lambda m, s=None: None)  # DexScreener: no pair yet
     assert st.on_whale_buy(whale_buy(sol=1.0)) is None  # and no curve state either: no price
@@ -1310,7 +1310,7 @@ def test_a_rug_blocked_coin_is_not_checked_again_on_every_repeat_buy(env, monkey
     import safety
 
     s, conn, ex, state = env
-    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", thompson=False), ex)
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False), ex)
     monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": "smart"})
     real, calls = safety.assess, []
     monkeypatch.setattr(safety, "assess", lambda *a, **k: calls.append(1) or real(*a, **k))
@@ -1326,7 +1326,7 @@ def test_a_coin_only_the_swaps_know_is_priced_from_them(env, monkeypatch):
     from copytrade import tracker
 
     s, conn, ex, state = env
-    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", thompson=False), ex)
+    st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False), ex)
     monkeypatch.setattr(market, "snapshot", lambda m, s=None: None)  # DexScreener: no pair, sniper: no curve state
     pump = "Pump1111111111111111111111111111111111pump"
     monkeypatch.setattr(tracker, "BLOCK0", {W})  # block-0 copies may buy curve coins
@@ -1350,3 +1350,59 @@ def test_exploration_takes_every_tier_by_default(env):
     st = strategy.Strategy(conn, Settings(db_path=s.db_path, thompson=False), ex)
     sw = chain.Swap("sigAll", "Unrated" + "u" * 37, int(time.time()), "buy", MINT, 1.0, 1.0, 0.001)
     assert st._explore_ok(sw)  # an unrated wallet is explored too (no tier predicts a copy, v13)
+
+
+def test_strict_whale_off_books_shadow_and_whale_stop_is_emergency_only(env):
+    """Review 19.10. (C1): strict whale copying off by default goes to the shadow book; whale paper copies carry only
+    the -50 % emergency stop and a trail."""
+    import dataclasses
+    s, conn, ex, state = env
+    s2 = dataclasses.replace(s, strict_whale=False, whale_emergency_stop=0.5)
+    st = strategy.Strategy(conn, s2, ex)
+    _rank(conn)
+    _evals(conn, 0.12)
+    assert st.on_whale_buy(whale_buy()) is None  # proven edge, but strict copying is off
+    assert conn.execute("SELECT COUNT(*) FROM ct_positions").fetchone()[0] == 0
+    r = conn.execute("SELECT book, gate, wallet FROM ct_shadow").fetchone()
+    assert r["book"] == "strict" and "strenges Kopieren aus" in r["gate"] and r["wallet"] == W
+    pid = strategy.Strategy(conn, dataclasses.replace(s2, strict_whale=True), ex).on_whale_buy(
+        chain.Swap("sigW2", W, int(time.time()) - 5, "buy", MINT, 5.0 / 3e-6, 5.0, 3e-6))
+    p = conn.execute("SELECT * FROM ct_positions WHERE id=?", (pid,)).fetchone()
+    assert p["stop_loss"] == pytest.approx(0.5)
+    assert p["trail_activate"] == pytest.approx(0.2) and p["trail_drawdown"] == pytest.approx(0.2)
+
+
+def test_user_wallet_buys_land_in_shadow_book_with_their_gate(env):
+    """Review 19.10. (C2): every buy of the user's wallets is booked with the gate that decided it."""
+    s, conn, ex, state = env
+    conn.execute("INSERT INTO ct_wallets(address, label, source, added_at) VALUES (?,?,?,?)",
+                 (W, "user", "watch_user", int(time.time())))
+    st = strategy.Strategy(conn, s, ex)
+    assert st.on_whale_buy(whale_buy(sol=0.1)) is None  # under the whale minimum
+    r = conn.execute("SELECT book, gate, sol_amount FROM ct_shadow").fetchone()
+    assert r["book"] == "user" and r["gate"] and r["sol_amount"] == pytest.approx(0.1)
+
+
+def test_paper_buy_without_quote_or_depth_is_refused(env):
+    """Review 19.10. (C3): no Jupiter quote and no pool depth gives no fill instead of a guessed 50 % impact."""
+    import dataclasses
+    s, conn, ex, state = env
+    state["snap"] = dataclasses.replace(state["snap"], liquidity_usd=0.0, curve_liq_usd=0.0)
+    f = ex.buy(MINT, 0.1, state["snap"])
+    assert not f.ok and "Pooltiefe" in f.error
+
+
+def test_entry_cost_split_groups_by_source_venue_band_and_stake(env):
+    import json as _json
+    s, conn, ex, state = env
+    now = int(time.time())
+    for i, (src, liq, cost) in enumerate([("jupiter_quote", 80_000, 0.02), ("estimate", 8_000, 0.12),
+                                          ("estimate", 9_000, 0.10)]):
+        conn.execute("INSERT INTO ct_positions(mint, strategy, mode, status, size_sol, entry_price_sol, opened_at, "
+                     "closed_at, meta) VALUES (?,?,?,?,?,?,?,?,?)",
+                     (MINT, "whale", "explore", "closed", 0.05 if i else 0.1, 1e-6 * (1 + cost), now - 100, now - 10,
+                      _json.dumps({"mid_sol": 1e-6, "fill_source": src, "liq_usd": liq, "dex": "raydium"})))
+    d = stats.entry_cost_split(conn)
+    assert d["src estimate"]["n"] == 2 and d["src estimate"]["median"] == pytest.approx(0.11)
+    assert d["liq 5-15k"]["n"] == 2 and d["liq 50k+"]["median"] == pytest.approx(0.02)
+    assert d["stake 0.05"]["n"] == 2 and d["dex raydium"]["n"] == 3

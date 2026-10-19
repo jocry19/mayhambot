@@ -267,7 +267,7 @@ def test_every_active_wallet_is_watched_live_best_first(env):
     got = tracker.ws_wallets(conn, s)
     # manual first, then the most buys in 24 h; the ultra tier earns no place (it predicts nothing, v13)
     assert got[0] == W and got[1] == others[3] and got[2] == others[1] and len(got) == 6
-    s2 = Settings(db_path=s.db_path, explore_tiers="ultra,smart", ws_max_wallets=2)
+    s2 = Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, ws_max_wallets=2)
     assert tracker.ws_wallets(conn, s2) == [W, others[3]]
 
 
@@ -283,7 +283,7 @@ def test_watcher_copies_from_its_own_thread_and_dedupes_two_streams(env, monkeyp
     monkeypatch.setattr(strat_mod.Strategy, "on_whale_buy", lambda self, sw, deferred=False: seen.append(sw.signature))
     a, b = FakeNode(), FakeNode()
     stop = threading.Event()
-    s2 = Settings(db_path=s.db_path, explore_tiers="ultra,smart", ws_urls=[f"ws://127.0.0.1:{a.port}", f"ws://127.0.0.1:{b.port}"], ws_parallel=2)
+    s2 = Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, ws_urls=[f"ws://127.0.0.1:{a.port}", f"ws://127.0.0.1:{b.port}"], ws_parallel=2)
     w = watch.Watcher(s2, rpc, {"paper": ex}, stop).start([W])
     try:
         assert _wait(lambda: W in w.covered() and all(W in st.covered() for st in w.streams))
@@ -450,7 +450,7 @@ def test_watcher_copies_a_pump_buy_without_any_rpc_call_and_verifies_later(env, 
     for b in full_tx["meta"]["preTokenBalances"] + full_tx["meta"]["postTokenBalances"]:
         b.update(owner=WHALE, mint=PMINT)
     rpc = _NoTxRpc(full_tx)
-    w = watch.Watcher(Settings(db_path=s.db_path, explore_tiers="ultra,smart", ws_urls=["off"]), rpc, {}, threading.Event())
+    w = watch.Watcher(Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, ws_urls=["off"]), rpc, {}, threading.Event())
     t0 = time.time()
     sw = w.handle(conn, Strat(), WHALE, "sigFast", t0, _logs(_trade_log(2.0, 40e6)))
     assert sw and seen == [sw] and rpc.reads == [] and time.time() - t0 < 0.5 and w.fast == 1
