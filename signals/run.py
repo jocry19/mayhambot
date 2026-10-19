@@ -9,6 +9,7 @@
 import argparse
 import logging
 import os
+import sqlite3
 import time
 
 from core import db, scoring, wallets
@@ -262,6 +263,42 @@ def held_mints(conn, now=None):
     return list(dict.fromkeys(out))
 
 
+PRICE_ALL = os.getenv("SIGNALS_PRICE_ALL", "1") not in ("0", "false", "")
+PRICE_ALL_MAX = 900          # extra mints per round (30 more DexScreener requests at most)
+MIGRATED_FOLLOW_S = 24 * 3600
+OPPORTUNITY_FOLLOW_S = 4 * 3600
+OLD_EVERY_S = 290            # past their first hour these get a price about every 5 min, young ones every round
+
+
+def price_mints(conn, now=None):
+    """Coins whose price path the labels and rule replays need but nobody watched (19.10.: only 208 of 2,012
+    migrated sniper coins had one, so rule replays covered 1,716 of 30,902 labels): sniper coins migrated in the last
+    MIGRATED_FOLLOW_S and every opportunity of the last OPPORTUNITY_FOLLOW_S. Young ones (< 1 h) every round, the rest
+    when their tokens row is older than OLD_EVERY_S. DexScreener only, no Helius."""
+    now = now or int(time.time())
+    young, old = [], []
+    for q, since in (("SELECT mint, migrated_ts FROM sniper_launches WHERE migrated_ts>? ORDER BY migrated_ts DESC",
+                      MIGRATED_FOLLOW_S),
+                     ("SELECT mint, MIN(ts) FROM opportunities WHERE ts>? GROUP BY mint ORDER BY MIN(ts) DESC",
+                      OPPORTUNITY_FOLLOW_S)):
+        try:
+            rows = conn.execute(q, (now - since,)).fetchall()
+        except sqlite3.OperationalError:  # sniper/ or brain/ not set up
+            continue
+        for m, t in rows:
+            (young if t and now - t < YOUNG_S else old).append(m)
+    ys = set(young)
+    old = list(dict.fromkeys(m for m in old if m not in ys))
+    if old:
+        fresh = set()
+        for i in range(0, len(old), 500):
+            ch = old[i:i + 500]
+            fresh |= {r[0] for r in conn.execute(f"SELECT mint FROM tokens WHERE mint IN ({','.join('?' * len(ch))}) "
+                                                 "AND last_updated>?", (*ch, now - OLD_EVERY_S))}
+        old = [m for m in old if m not in fresh]
+    return list(dict.fromkeys(young + old))[:PRICE_ALL_MAX]
+
+
 def refresh_tokens(conn, now=None):
     """Prices, momentum and activity (price_change_m5, txns_m5, volume_h1, last_updated) of every watched coin and
     of the calls still followed, written to tokens (+ a token_prices snapshot) without touching the watch flags."""
@@ -271,6 +308,12 @@ def refresh_tokens(conn, now=None):
     mints += [r[0] for r in conn.execute("SELECT DISTINCT mint FROM signals WHERE ts > ?",
                                          (now - plan.FOLLOW_HOURS * 3600,))]
     mints = list(dict.fromkeys(mints))[:TOKEN_REFRESH_MAX]
+    if PRICE_ALL:
+        try:
+            have = set(mints)
+            mints += [m for m in price_mints(conn, now) if m not in have]
+        except Exception as e:  # noqa: BLE001 - the extra price paths must never stop the refresh
+            log.warning("price_mints failed: %s", e)
     infos = market.token_info(mints)
     dense = dense_mints(conn, infos, now)
     db.retry_locked(conn, lambda: db.upsert_tokens(conn, infos, tracked=False, snap_every=SNAP_EVERY_S, dense=dense))

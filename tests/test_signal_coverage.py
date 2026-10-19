@@ -131,3 +131,22 @@ def test_held_and_bought_coins_get_prices(tmp_path):
                      [("OPEN", "open", now - 99999), ("JUSTSOLD", "closed", now - 600), ("OLD", "closed", now - 99999)])
     assert run.held_mints(conn, now) == ["OPEN", "JUSTSOLD"]
     assert {"OPEN", "JUSTSOLD"} <= run.followed_mints(conn, now)
+
+
+def test_price_paths_for_migrated_sniper_coins_and_opportunities(tmp_path):
+    from signals import run
+    c = db.connect(str(tmp_path / "p.db"))
+    now = 9_000_000
+    c.execute("CREATE TABLE sniper_launches (mint TEXT, migrated_ts INTEGER)")
+    c.execute("CREATE TABLE opportunities (mint TEXT, ts INTEGER)")
+    c.executemany("INSERT INTO sniper_launches VALUES (?,?)",
+                  [("YOUNG", now - 600), ("OLD", now - 5 * 3600), ("OLDFRESH", now - 5 * 3600), ("GONE", now - 30 * 3600)])
+    c.executemany("INSERT INTO opportunities VALUES (?,?)", [("OPP", now - 3600 * 2), ("OPPGONE", now - 5 * 3600)])
+    c.execute("INSERT INTO tokens(mint, last_updated, tracked) VALUES ('OLDFRESH', ?, 0)", (now - 60,))
+    c.commit()
+    assert run.price_mints(c, now) == ["YOUNG", "OLD", "OPP"]  # young first; a fresh old one waits for its 5 min
+
+
+def test_price_paths_without_sniper_or_brain_tables(tmp_path):
+    from signals import run
+    assert run.price_mints(db.connect(str(tmp_path / "q.db")), 9_000_000) == []
