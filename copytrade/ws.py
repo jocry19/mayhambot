@@ -48,6 +48,7 @@ class WalletStream:
     SUBS_PER_SEC = 4.0
     REST_AFTER_LIMIT_S = 600
     MIN_CAP = 20
+    REFUSED_WAIT_S = 300.0
     # shared by all streams in the process (the limit is per IP, not per connection): url -> cap / rest-until
     caps: dict[str, int] = {}
     rest_until: dict[str, float] = {}
@@ -142,6 +143,7 @@ class WalletStream:
         while not self._stop.is_set():
             url = self.url
             self._kick = None
+            txt = ""
             if self.rest_until.get(url, 0) > time.time() and any(
                     self.rest_until.get(u, 0) <= time.time() for u in self.urls):
                 self._idx = (self._idx + 1) % len(self.urls)  # resting after a subscription limit: next one
@@ -177,6 +179,8 @@ class WalletStream:
             wait = backoff if self._idx == 0 else 0.5
             if self._idx == 0:
                 backoff = min(backoff * 2, 60.0)
+                if "HTTP 429" in txt:  # the provider refuses connections (Helius, 19.10.): ask every 5 min, not 1
+                    wait = max(wait, self.REFUSED_WAIT_S)
             if self._stop.wait(wait):
                 break
 

@@ -48,6 +48,9 @@ def _is_pool_url(url: str) -> bool:
     return host in {urlparse(u).netloc for u in _core_http.public_rpc_urls()} or url.rstrip("/") == PUBLIC_RPC
 
 
+MF_OFF_MAX_S = 900  # longest public-only stretch after repeated Helius refusals
+
+
 class Rpc:
     """JSON-RPC client. Bulk reads (signatures, transactions, token supply) go to the free public RPC first and
     use the main RPC (Helius, paid in credits) only as fallback; live paths (balance, send, status) use the
@@ -81,8 +84,9 @@ class Rpc:
     def poll_fallbacks(self) -> int:
         return self.fallbacks
 
-    def call(self, method: str, params: list[Any], priority: str = "live") -> Any:
-        """priority 'live' (default: own trades, fresh whale buys) or 'bulk' (backfill, discovery, net polls)."""
+    def call(self, method: str, params: list[Any], priority: str = "live", retries: int | None = None) -> Any:
+        """priority 'live' (default: own trades, fresh whale buys) or 'bulk' (backfill, discovery, net polls).
+        retries: attempts on the main RPC (default http's 4; a Helius-first read takes 1 and falls back to public)."""
         self._id += 1
         payload = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params}
         if self.pooled:  # core picks the endpoint (live: fastest, bulk: most room), books latency and failures
@@ -101,12 +105,14 @@ class Rpc:
             self.lim.wait()
         kind = "public" if url != self.url or "helius" not in url else "helius"
         self.counts[f"{kind}:{method}"] = self.counts.get(f"{kind}:{method}", 0) + 1
-        d = http.post_json(url, payload, priority=priority, rpc_method=method)
+        d = http.post_json(url, payload, priority=priority, rpc_method=method,
+                           **({"retries": retries} if retries else {}))
         if "error" in d:
             raise RuntimeError(f"rpc {method}: {d['error']}")
         return d.get("result")
 
     MAIN_FIRST = frozenset({"getTransaction", "getSignaturesForAddress"})
+    _mf_strikes = 0  # Helius refusals in a row (429/401/403) of main-first reads
     MAIN_FIRST_PER_MIN = 160  # of copytrade's 180/min (76711b6): bursts above it overflow to mainnet-beta (429s, 18.10. 08:00)
 
     def _main_first(self, method: str) -> bool:
@@ -132,14 +138,19 @@ class Rpc:
         signature reads go to the main RPC first while main_first() allows (public on its errors)."""
         if self._main_first(method):
             try:
-                r = self.call(method, params, priority)
+                # one attempt: a refused Helius read must not hold a whale read for the 15/30/45 s 429 penalties
+                # (19.10. 12:03: Helius refused nearly every call, notification -> swap took 22 min)
+                r = self.call(method, params, priority, retries=1)
                 self.main_first_n += 1
+                self._mf_strikes = 0
                 return r
             except CreditsExhausted:
                 self._mf_off_until = time.time() + 300  # no hammering a refused key with every read
             except Exception as e:
                 if any(c in str(e) for c in ("429", "401", "403")):
-                    self._mf_off_until = time.time() + 60
+                    # refused again and again: public only for 1, 2, 4 ... up to 15 min
+                    self._mf_strikes = getattr(self, "_mf_strikes", 0) + 1
+                    self._mf_off_until = time.time() + min(60 * 2 ** (self._mf_strikes - 1), MF_OFF_MAX_S)
                 log.debug("main rpc %s failed, using public: %s", method,
                           re.sub(r"(api-key=)[^&\s'\"]+", r"\1***", str(e)))
             return self.public.call(method, params, priority)

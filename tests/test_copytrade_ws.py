@@ -1178,8 +1178,9 @@ def test_transaction_and_signature_reads_go_to_helius_first_within_a_share(monke
     rpc.public = Pub()
     main = {"fail": False}
 
-    def fake_call(self, m, p, priority="live"):
+    def fake_call(self, m, p, priority="live", retries=None):
         calls.append("main")
+        assert retries == 1  # Helius-first: one attempt, no 15/30/45 s penalty waits
         if main["fail"]:
             raise RuntimeError("429")
         return "main"
@@ -1202,15 +1203,26 @@ def test_transaction_and_signature_reads_go_to_helius_first_within_a_share(monke
     assert rpc.read("getTransaction", []) == "pub"
     # a refused key (credits used up, 429/401/403) is left alone for a while: public only, no try per read
     monkeypatch.setattr(chain.Rpc, "MAIN_FIRST_PER_MIN", 160)
-    rpc._mf_off_until = 0.0
+    rpc._mf_off_until, rpc._mf_strikes = 0.0, 0
     rpc.main_first = lambda: True
     main["fail"] = True
     calls.clear()
     assert rpc.read("getTransaction", []) == "pub" and rpc.read("getTransaction", []) == "pub"
     assert calls == ["main", "public", "public"]
+    off1 = rpc._mf_off_until - time.time()
+    rpc._mf_off_until = 0.0
+    rpc.read("getTransaction", [])  # refused again: the public-only stretch doubles (up to 15 min)
+    assert 100 < rpc._mf_off_until - time.time() <= 120 and 50 < off1 <= 60
+    rpc._mf_strikes = 20
+    rpc._mf_off_until = 0.0
+    rpc.read("getTransaction", [])
+    assert rpc._mf_off_until - time.time() <= chain.MF_OFF_MAX_S
+    main["fail"] = False
+    rpc._mf_off_until = 0.0
+    assert rpc.read("getTransaction", []) == "main" and rpc._mf_strikes == 0  # answered: count starts over
     rpc._mf_off_until = 0.0
 
-    def exhausted(self, m, p, priority="live"):
+    def exhausted(self, m, p, priority="live", retries=None):
         calls.append("main")
         raise chain.CreditsExhausted("used up")
 
@@ -1262,3 +1274,32 @@ def test_volume_bots_are_never_block0_and_switched_off(env):
     assert tracker.load_block0(conn, s) == [full] and tracker.BLOCK0 == {full}
     assert tuple(conn.execute("SELECT active, label FROM ct_wallets WHERE address=?", (bot,)).fetchone()) == (0, "volume bot")
     tracker.BLOCK0.clear()
+
+
+def test_stream_refused_with_429_asks_again_after_5_min(monkeypatch):
+    """19.10.: Helius refused the websocket with HTTP 429 every minute; the stream now waits REFUSED_WAIT_S."""
+    import asyncio
+
+    from copytrade import ws
+
+    if not ws.available():
+        pytest.skip("websockets not installed")
+    st = ws.WalletStream(Settings(), url="wss://example.invalid/")
+    waits = []
+
+    class Refused:
+        async def __aenter__(self):
+            raise RuntimeError("server rejected WebSocket connection: HTTP 429")
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(ws.websockets, "connect", lambda *a, **k: Refused())
+
+    def wait(t):
+        waits.append(t)
+        return len(waits) >= 2
+
+    monkeypatch.setattr(st._stop, "wait", wait)
+    asyncio.run(st._main())
+    assert waits and all(w >= ws.WalletStream.REFUSED_WAIT_S for w in waits)
