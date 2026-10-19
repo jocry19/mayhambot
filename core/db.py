@@ -1,7 +1,9 @@
 """SQLite storage. Schema is created on connect; columns are only ever added, never removed."""
+import logging
 import os
 import sqlite3
 import time
+import traceback
 from pathlib import Path
 
 from core.config import settings
@@ -174,7 +176,62 @@ def connect(path=None) -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     _migrate(conn)
     _optimize(conn)
+    watch_writes(conn)
     return conn
+
+
+LOCK_HOLD_WARN_S = float(os.getenv("DB_LOCK_HOLD_WARN_S", "10"))
+_WRITES = ("INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER")
+
+
+def watch_writes(conn, warn_s: float | None = None):
+    """Log who holds the write lock long ("database is locked" in the other services means some writer held it
+    longer than the 30 s busy timeout; 19.10. brain, copytrade and signals saw it without telling whom). A
+    transaction from BEGIN to COMMIT/ROLLBACK, or a single write statement in autocommit, that runs longer than
+    DB_LOCK_HOLD_WARN_S (10) gets one warning with its first statement and the Python stack. Cheap: a trace
+    callback per statement and a progress check every 100k VM steps; time spent waiting for a lock is not
+    counted (the VM does not run then)."""
+    warn_s = LOCK_HOLD_WARN_S if warn_s is None else warn_s
+    if not warn_s:
+        return
+    log = logging.getLogger("core.db")
+    st = {"txn": None, "first": "", "stmt": None, "sql": "", "warned": False}
+
+    def warn(kind, held, sql):
+        try:   # an exception in the progress handler would abort the statement
+            where = "".join(traceback.format_stack(limit=8)[:-2]).strip().replace("\n", " | ")
+            log.warning("write lock held %.0f s (%s, %s): %s | at %s", held, kind,
+                        os.getenv("MAYHAM_SERVICE", "?"), " ".join(sql.split())[:120], where[-900:])
+        except Exception:  # noqa: BLE001
+            pass
+
+    def trace(sql):
+        head = sql.lstrip()[:8].upper()
+        now = time.monotonic()
+        if head.startswith("BEGIN"):
+            st.update(txn=now, first="", warned=False)
+        elif head.startswith(("COMMIT", "END", "ROLLBACK")):
+            if st["txn"] is not None and not st["warned"] and now - st["txn"] >= warn_s:
+                warn("Transaktion", now - st["txn"], st["first"] or sql)
+            st.update(txn=None, warned=False)
+        elif st["txn"] is not None and not st["first"] and head.startswith(_WRITES):
+            st["first"] = sql
+        st["stmt"], st["sql"] = (now, sql) if head.startswith(_WRITES) else (None, "")
+        if st["txn"] is None:
+            st["warned"] = False
+
+    def progress():
+        now = time.monotonic()
+        if not st["warned"] and st["stmt"] is not None and now - st["stmt"] >= warn_s:
+            st["warned"] = True
+            warn("Anweisung", now - st["stmt"], st["sql"])
+        return 0
+
+    try:
+        conn.set_trace_callback(trace)
+        conn.set_progress_handler(progress, 100_000)
+    except (sqlite3.Error, AttributeError):
+        pass
 
 
 _optimized = {}

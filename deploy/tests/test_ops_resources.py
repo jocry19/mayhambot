@@ -159,7 +159,7 @@ def test_backup_logs_table_sizes(tmp_path, monkeypatch):
     assert json.loads((tmp_path / "data" / "db_sizes.json").read_text())[-1]["file_mb"] is not None
 
 
-def test_backup_checks_fully_every_six_hours_and_logs_its_phases(tmp_path, monkeypatch, capsys):
+def test_backup_checks_fully_once_a_night_and_logs_its_phases(tmp_path, monkeypatch, capsys):
     _setup(tmp_path, monkeypatch, {"BACKUP_DIR": str(tmp_path / "bk")})
     c = sqlite3.connect(tmp_path / "data" / "mayhambot.db")
     c.execute("CREATE TABLE t(x)")
@@ -171,7 +171,13 @@ def test_backup_checks_fully_every_six_hours_and_logs_its_phases(tmp_path, monke
     assert "Kopie" in out and "Prüfung voll" in out and "Packen" in out
     assert ops.backup(None) == 0
     assert "Prüfung kurz" in capsys.readouterr().out     # the next hour: quick_check only
-    assert ops._full_check_due(time.time() + 6 * 3600)
+    assert ops._full_check_due(time.time() + 31 * 3600)
+    last = time.mktime((2026, 10, 18, 3, 30, 0, 0, 0, -1))
+    (tmp_path / "data" / "backup_check.json").write_text(json.dumps({"full_check_at": last}))
+    at = lambda d, h: time.mktime((2026, 10, d, h, 5, 0, 0, 0, -1))  # noqa: E731
+    assert not ops._full_check_due(at(18, 20))            # same day
+    assert not ops._full_check_due(at(19, 2))             # next day, before 3
+    assert ops._full_check_due(at(19, 3))                 # next day from 3 on
 
 
 def test_retention_counts_only_when_switched_off(tmp_path, monkeypatch):

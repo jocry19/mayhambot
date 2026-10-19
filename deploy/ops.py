@@ -23,7 +23,8 @@ Settings (optional, in .env):
   BACKUP_KEEP_HOURS     keep every backup this long (default 24), then one per day ...
   BACKUP_KEEP_DAYS      ... for this many days (default 14)
   BACKUP_MAX_GB         and never more than this in total, oldest go first, the newest 3 always stay (default 5)
-  BACKUP_FULL_CHECK_HOURS full integrity_check of the copy this often (default 6), quick_check in between
+  BACKUP_FULL_CHECK_HOUR  full integrity_check of the copy once a day from this hour on (default 3), quick_check
+                          otherwise; BACKUP_FULL_CHECK_HOURS (30) at the latest
   BACKUP_GZIP_LEVEL     1 (fast, default) to 9 (smallest); level 6 took ~3x longer for ~5 % less size
   FEED_STALL_MIN        alert/restart when no new market data for this long (default 15)
   ALERT_REPEAT_HOURS    repeat an unresolved alert every N hours (default 6)
@@ -725,14 +726,19 @@ def _repair_indexes(path: Path, timeout: float = 60, names=None, check=True) -> 
 
 
 def _full_check_due(now: float | None = None) -> bool:
-    """The full integrity_check reads the whole copy once more (1.7 GB on 18.10., minutes of disk next to the
-    writers every hour); it runs every BACKUP_FULL_CHECK_HOURS (6), quick_check in between."""
-    every = cfg("BACKUP_FULL_CHECK_HOURS", 6.0)
+    """The full integrity_check reads the whole copy once more: 1707 s of the 04:37 backup on 19.10. (quick_check
+    4 to 311 s). It runs once a day in the first backup from BACKUP_FULL_CHECK_HOUR (3, local time) on, or when the
+    last one is more than BACKUP_FULL_CHECK_HOURS (30) old; quick_check in between."""
+    now = now or time.time()
     try:
         last = float(json.loads((ROOT / "data" / "backup_check.json").read_text()).get("full_check_at", 0))
     except (OSError, ValueError, AttributeError):
         last = 0.0
-    return not every or (now or time.time()) - last >= every * 3600 - 1800
+    age_h = (now - last) / 3600
+    if age_h >= cfg("BACKUP_FULL_CHECK_HOURS", 30.0):
+        return True
+    return age_h >= 12 and time.localtime(now).tm_hour >= cfg("BACKUP_FULL_CHECK_HOUR", 3) \
+        and time.localtime(last).tm_yday != time.localtime(now).tm_yday
 
 
 def _snapshot_db(src: Path, dst: Path, phases: dict | None = None, full: bool = True):
