@@ -345,7 +345,8 @@ class Strategy:
                  "strategy.rank_samples": rank["samples"] if rank else 0,
                  "strategy.thompson_draw": draw.get("draw"), "strategy.thompson_mean": draw.get("mean"),
                  "strategy.thompson_sd": draw.get("sd"), "strategy.p_pos": draw.get("p_pos"),
-                 "strategy.stake_mult": draw.get("size_factor"), "copytrade.block0": swap.wallet in tracker.BLOCK0}
+                 "strategy.stake_mult": draw.get("size_factor"), "copytrade.block0": swap.wallet in tracker.BLOCK0,
+                 "copytrade.user_wallet": self._user_wallet(swap.wallet)}  # wallet itself: ref = sig -> ct_swaps
             if snap:
                 f.update({"mc_usd": snap.fdv, "liq_usd": snap.depth_usd, "dex": snap.dex_id, "buys_5m": snap.buys_m5,
                           "pc_5m": snap.change_m5, "pc_1h": snap.change_h1, "vol_5m_usd": snap.volume_m5,
@@ -475,6 +476,10 @@ class Strategy:
                 cw = self._cost_gate(snap, s.explore_size_sol if acc == "explore" else size, "copy")
                 if cw:
                     accounts.remove(acc)
+                    try:  # what the cost gate kept out, so the gate itself can be measured (19.10.)
+                        store.shadow(self.conn, "cost", swap, cw, snap)
+                    except Exception as e:
+                        log.debug("shadow row %s failed: %s", swap.signature[:8], e)
                     if accounts:
                         self._skip("whale", swap.mint, f"{cw}; nur {'Erkundung' if accounts == ['explore'] else 'streng'}",
                                    snap, account=acc)

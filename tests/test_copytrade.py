@@ -1441,3 +1441,18 @@ def test_cost_offset_is_the_median_of_booked_minus_model(env):
     model = labcost.roundtrip("raydium", 80_000, 0.1, "copy")
     assert off["n"] == stats.COST_OFFSET_MIN_N and off["booked"] == pytest.approx(0.07)
     assert off["offset"] == pytest.approx(0.07 - model)
+
+
+def test_cost_gate_books_what_it_kept_out_and_brain_sees_the_wallet(env, monkeypatch):
+    """19.10.: buys the round-trip cost gate keeps out land in the shadow book (book 'cost'); the brain's opportunity
+    row says whether it is one of the user's wallets."""
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    monkeypatch.setattr(st, "_cost_gate", lambda *a: "erwartete Kosten 9,0 % je Umlauf > 5 %")
+    seen = {}
+    import brain.opportunities as bo
+    monkeypatch.setattr(bo, "report", lambda conn, src, ref, mint, ts, f, **k: seen.update(f))
+    assert st.on_whale_buy(whale_buy()) is None
+    r = conn.execute("SELECT book, gate FROM ct_shadow").fetchone()
+    assert r["book"] == "cost" and "erwartete Kosten" in r["gate"]
+    assert seen["copytrade.user_wallet"] is False and "copytrade.wallet" not in seen  # no address as a feature

@@ -55,8 +55,7 @@ class Engine:
         # backfill wallets we have no history for yet (a few per round, RPC is the bottleneck)
         for addr in tracker.backfill_due(c):
             try:
-                n = tracker.backfill(c, s, self.rpc, addr)
-                log.info("backfill %s… %d swaps", addr[:6], n)
+                tracker.backfill(c, s, self.rpc, addr)  # logs its own line with the breakdown
             except Exception as e:
                 log.warning("backfill failed: %s", e)
         try:

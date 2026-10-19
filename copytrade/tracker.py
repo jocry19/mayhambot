@@ -437,19 +437,34 @@ def backfill(conn, s: Settings, rpc: chain.Rpc, wallet: str, limit: int = 80) ->
                          "('manual','block0')", (wallet,))
             conn.execute("UPDATE ct_wallets SET backfilled_at=? WHERE address=?", (int(time.time()), wallet))
             conn.commit()
+            log.info("backfill %s… 0 swaps: %d transactions in %d min, marked as bot", wallet[:6], len(sigs), span // 60)
             return 0
     solusd = market.sol_usd(s)
-    swaps = []
+    swaps, failed, errs = [], 0, 0
     for sg in sigs:
         if sg.get("err"):
+            errs += 1
             continue
         try:
-            sw = chain.extract_swap(rpc.transaction(sg["signature"]), wallet, solusd)
+            tx = rpc.transaction(sg["signature"])
         except Exception:
+            tx = None
+        if not tx:
+            failed += 1
             continue
+        try:
+            sw = chain.extract_swap(tx, wallet, solusd)
+        except Exception:
+            sw = None
         if sw:
             swaps.append(sw)
     n = store.save_swaps(conn, swaps, solusd)
+    log.info("backfill %s… %d swaps (%d new): %d transactions, %d failed on chain, %d not loaded, %d no swap",
+             wallet[:6], len(swaps), n, len(sigs), errs, failed, len(sigs) - errs - failed - len(swaps))
+    if sigs and failed * 2 > len(sigs) - errs:  # most fetches refused (429): try again in a later round
+        conn.execute("UPDATE ct_wallets SET backfill_tries=COALESCE(backfill_tries, 0)+1 WHERE address=?", (wallet,))
+        conn.commit()
+        return n
     newest = sigs[0]["signature"] if sigs else None
     now = int(time.time())
     conn.execute("UPDATE ct_wallets SET last_sig=COALESCE(last_sig, ?), last_polled=?, backfilled_at=? WHERE address=?",
@@ -519,7 +534,10 @@ def poll(conn, s: Settings, rpc: chain.Rpc, wallet_row, priority: str = "bulk",
             log.debug("tx failed, retry next poll: %s", e)
             break  # the cursor stays before it: the next poll reads it again, nothing is skipped
         cursor = sg["signature"]
-        sw = chain.extract_swap(tx, wallet, solusd)
+        try:
+            sw = chain.extract_swap(tx, wallet, solusd)
+        except Exception:
+            sw = None
         if sw:
             out.append(sw)
     if out:

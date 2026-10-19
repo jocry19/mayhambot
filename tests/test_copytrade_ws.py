@@ -320,8 +320,8 @@ def test_websocket_path_applies_the_same_entry_rules(env, monkeypatch):
 
 
 class _SigRpc:
-    def __init__(self, fail=False):
-        self.fail = fail
+    def __init__(self, fail=False, refused=False):
+        self.fail, self.refused = fail, refused
 
     def signatures(self, wallet, limit=80, **kw):
         if self.fail:
@@ -329,7 +329,7 @@ class _SigRpc:
         return [{"signature": "sigB", "blockTime": int(time.time())}]
 
     def transaction(self, sig, **kw):
-        return None
+        return None if self.refused else {"meta": {}, "transaction": {}}  # loaded, no swap in it
 
 
 def test_backfill_loads_new_finds_once_best_first_and_gives_up_on_dead_wallets(env):
@@ -350,6 +350,8 @@ def test_backfill_loads_new_finds_once_best_first_and_gives_up_on_dead_wallets(e
         with pytest.raises(RuntimeError):
             tracker.backfill(conn, s, _SigRpc(fail=True), old)
     assert tracker.backfill_due(conn, 10) == [ultra, new]  # dead wallet no longer blocks a slot
+    tracker.backfill(conn, s, _SigRpc(refused=True), ultra)  # every fetch refused (429): not done, tried again
+    assert ultra in tracker.backfill_due(conn, 10)
 
 
 def test_migration_marks_wallets_with_history_as_backfilled(tmp_path):
