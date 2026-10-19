@@ -69,3 +69,24 @@ def test_no_fill_after_five_seconds_and_off_switch(conn):  # noqa: F811
     eng.tick(T0 + 7)
     assert eng.shadow.counts["late"] == 1 and not eng.shadow.open
     assert Engine(cfg(shadow=False), conn).shadow is None
+
+
+def test_shadow_launches_keep_their_price_on_the_program_stream(conn):  # noqa: F811
+    eng = Engine(cfg(), conn)
+    eng.free_stream = True                      # one program subscription: a "subscription" is a local filter only
+    cvs = [Curve(f"KEEP{i}") for i in range(5)]
+    for cv in cvs:
+        eng.handle(cv.create(0.5), T0)
+    eng.tick(T0 + 2.1)
+    eng.tick(T0 + 3.2)
+    assert len(eng.shadow.open) == 5
+    eng.cfg.max_subscribed = 2
+    for k in range(4, 200, 5):                  # quiet coins, more than max_subscribed of them
+        eng.tick(T0 + k)
+    assert all(eng.launches[cv.mint].subscribed for cv in cvs)
+    eng.tick(T0 + 3.2 + 3600)
+    eng.tick(T0 + 30 + 3600)
+    rows = [dict(r) for r in conn.execute("SELECT * FROM sniper_shadow")]
+    assert len(rows) == 10 and all(r["ret_60m"] is not None for r in rows)
+    rep = shadow.report(conn)
+    assert rep["pairs"]["fast"]["n"] == rep["pairs"]["decide"]["n"] == 5 and rep["no_price"] == {"fast": 0, "decide": 0}

@@ -328,7 +328,9 @@ class Engine:
                 self._prune_sub(st, now)
                 if st.done and mint not in self.book.open and not (self.shadow and self.shadow.holds(mint)):
                     self.launches.pop(mint, None)
-            subs = [s for s in self.launches.values() if s.subscribed]
+            # program stream: a subscription is only a local filter, so the shadow book's launches keep theirs
+            # until their hour is over (dropped ones had no price at the end: 91 of 131 legs on 19.10.)
+            subs = [s for s in self.launches.values() if s.subscribed and not self._shadow_keeps(s)]
             if len(subs) > self.cfg.max_subscribed:
                 # drop the least interesting first: stage-1 skips, oldest first
                 subs.sort(key=lambda s: (s.decision != "skip" or s.stage > 1, s.mint in self.book.open, s.created_ts))
@@ -345,8 +347,11 @@ class Engine:
             if st.source == "pumpportal":
                 self.to_unsub.add(st.mint)
 
+    def _shadow_keeps(self, st):
+        return bool(self.free_stream and self.shadow and self.shadow.holds(st.mint))
+
     def _prune_sub(self, st, now):
-        if not st.subscribed or st.mint in self.book.open:
+        if not st.subscribed or st.mint in self.book.open or (self._shadow_keeps(st) and not st.migrated):
             return
         quiet = now - (st.last_trade_ts or st.created_ts)
         if st.decision == "skip" and st.stage <= 1 and quiet >= self.cfg.quiet_unsub_sec and not self.free_stream:
@@ -525,6 +530,8 @@ class Engine:
                 live = st.subscribed and not st.migrated
                 if m in self.book.open and (not live or self.book.mark(st, now) <= 0):
                     out.append(m)     # also a curve position without a live price (dead curve after a restart)
+                elif st.migrated and self.shadow and self.shadow.holds(m) and now - (st.external_ts or 0) >= 300:
+                    out.append(m)     # a shadow leg after the migration: a DexScreener price every few minutes
                 elif not live and st.decided_ts and not st.done and any(
                         h not in st.outcomes and st.decided_ts + h * 60 <= now + ahead for h in self.cfg.horizons_min):
                     out.append(m)

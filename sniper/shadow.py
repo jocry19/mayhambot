@@ -240,14 +240,16 @@ def report(conn, since=0):
     except Exception:  # noqa: BLE001 - no table yet
         return {"n": 0}
     by = {leg: {r["mint"]: r for r in rows if r["leg"] == leg} for leg in LEGS}
-    pair = sorted(set(by["fast"]) & set(by["decide"]))
+    priced = {leg: {m for m, r in by[leg].items() if r["pnl_pct"] is not None} for leg in LEGS}
+    pair = sorted(priced["fast"] & priced["decide"])   # the same launches on both sides, each with a result
     clean = [m for m in pair if by["fast"][m]["final_reason"] not in LATER_RUG]
     out = {"n": len(rows), "fast_all": _stats(list(by["fast"].values())),
            "pairs": {leg: _stats([by[leg][m] for m in pair]) for leg in LEGS},
            "clean": {leg: _stats([by[leg][m] for m in clean]) for leg in LEGS},
-           "exits": {}}
+           "exits": {}, "no_price": {leg: len(by[leg]) - len(priced[leg]) for leg in LEGS}}
     for r in by["fast"].values():
-        out["exits"][r["exit_reason"] or "none"] = out["exits"].get(r["exit_reason"] or "none", 0) + 1
+        k = r["exit_reason"] or "kein Kurs"
+        out["exits"][k] = out["exits"].get(k, 0) + 1
     return out
 
 
@@ -266,7 +268,8 @@ def summary_lines(rep):
     return [f"Schatten-Einstieg (Trail 20 % ab +20 %, Notstopp −50 %, gleiche Kosten, nur gemessen), dieselben Launches: "
             f"2–5 s {_fmt(p['fast'])} | 20-s-Entscheid {_fmt(p['decide'])}",
             f"  ohne späteren Rug-, Bundle- oder Insider-Befund: 2–5 s {_fmt(c['fast'])} | 20 s {_fmt(c['decide'])}"
-            + " | Ausstiege 2–5 s: " + ", ".join(f"{k} {v}" for k, v in sorted(rep["exits"].items()))]
+            + " | Ausstiege 2–5 s: " + ", ".join(f"{k} {v}" for k, v in sorted(rep["exits"].items()))
+            + " | ohne Kurs am Ende (nicht gewertet): 2–5 s {fast}, 20 s {decide}".format(**rep.get("no_price", {"fast": 0, "decide": 0}))]
 
 
 def status(book):
