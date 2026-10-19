@@ -85,7 +85,17 @@ class Settings:
     labels: str = field(default_factory=lambda: _s("BRAIN_LABELS", "on").lower())  # labels.py: follow every row 1 h
     # the learning account buys a positive draw only when it is among this share of the best recent draws (calls and
     # band candidates always)
-    pool_sample: float = field(default_factory=lambda: _f("BRAIN_POOL_SAMPLE", 0.05))
+    # 19.10. review (E2): the top fiftieth of each source's recent draws, and only with a predicted mean of at least
+    # pool_min_pred (labels: top fiftieth with a trail +6.6 % net, pred_mean >= 0.05 +1.5 to +2.8 %)
+    pool_sample: float = field(default_factory=lambda: _f("BRAIN_POOL_SAMPLE", 0.02))
+    pool_min_pred: float = field(default_factory=lambda: _f("BRAIN_POOL_MIN_PRED", 0.05))
+    # sources the learning account never buys from (E1: sniper buys n 102 -28.3 %, t -6.9); they stay labels,
+    # features and the rug warning
+    pool_sources_off: str = field(default_factory=lambda: _s("BRAIN_POOL_SOURCES_OFF", "sniper").lower())
+    # E3: trail = every position leaves by a 20 % trail from +20 %, an emergency stop at -50 %, rug/liquidity exits,
+    # only rug and crash in the first 15 min, 60 min without an armed trail, 240 min at most; plan = the plans and
+    # the organic exit as before
+    exit_mode: str = field(default_factory=lambda: _s("BRAIN_EXIT_MODE", "trail").lower())
     max_launch_age_s: float = field(default_factory=lambda: _f("BRAIN_MAX_LAUNCH_AGE_S", 60))
     min_liquidity_usd: float = field(default_factory=lambda: _f("BRAIN_MIN_LIQ_USD", 3000))
     # pump.fun bonding curve: DexScreener reports no pool liquidity there, the curve itself is the market
