@@ -39,6 +39,10 @@ HIST_SPAN_S = 45 * 60  # a buy needs our own price history on the coin reaching 
 HIST_MIN_POINTS = 3  # ... with at least this many points in the last 6 h
 HIST_LOOK_S = 6 * 3600
 HIST_POOL_AGE_S = 60 * 60  # ... or a pool at least this old (the market's own price history)
+RPC_SLOW_S = 20  # a rug or staged check slower than this (429 retries) pauses them
+RPC_PAUSE_S = 300
+RPC_ERRORS = 3
+SCAN_BUDGET_S = 90  # one scan round decides for at most this long, then the exits run
 NO_HIST_POOL_SAMPLE = 0.0  # share of learning-account buys without price history that go through anyway (09:00 19.10.:
 # 22 such buys -13.3 % against +13.0 % on 29 with history; the labels still learn every coin without history)
 REENTRY_S = 6 * 3600  # no second brain position in a coin within this window: a coin we just lost on is no new idea
@@ -178,8 +182,13 @@ class Trader:
         self._momentum_at = -1e18
         self._snapshots = snapshots
         self._executor = executor
-        self.safety_check = safety_check or _default_safety
-        self.staged_check = staged_check or _default_staged
+        # the rug and staged checks go to the RPC; when it refuses or crawls (19.10. 14:03: Helius 429 on almost
+        # every call, the brain loop stood 14 min in their retries) a breaker skips them for RPC_PAUSE_S: no buys
+        # then (no buy without a rug check), but prices, exits and labels go on
+        self._rpc_off_until = -1e18
+        self._rpc_errors = 0
+        self.safety_check = self._breaker(safety_check or _default_safety)
+        self.staged_check = self._breaker(staged_check or _default_staged)
         self._staged: dict[str, tuple[float, bool, float | None]] = {}
         self.curve_now = curve_now or _default_curve
         self._held: dict[int, float] = {}  # position -> when the quote last contradicted its stop or target
@@ -408,7 +417,13 @@ class Trader:
             log.warning("snapshots failed: %s", e)
             snaps = {}
         opened = 0
+        t0 = time.monotonic()
         for kind, ref, row, ent in fresh:
+            if time.monotonic() - t0 > SCAN_BUDGET_S:
+                # the rest stays pending for the next round: the exits must not wait behind a slow round
+                log.warning("scan over %d s, %d decisions left for the next round", SCAN_BUDGET_S,
+                            sum(1 for k, r, _, _ in fresh if (k, r) in self.pending))
+                break
             snap = snaps.get(row["mint"])
             if (snap is None or not snap.price_sol) and now - self.pending[(kind, ref)][2] < PRICE_RETRY_S:
                 continue  # brand-new coins often show up at DexScreener a few seconds after the first buys
@@ -509,6 +524,31 @@ class Trader:
         if kind == "pool" and cur.rowcount:
             self._write_back(row["id"], d, block, pid, raw.get("calib") or 0.0)
         return pid
+
+    def _breaker(self, fn):
+        def call(*a, **kw):
+            now = self.clock()
+            if now < self._rpc_off_until:
+                raise RuntimeError("RPC pausiert")
+            t0 = time.monotonic()
+            try:
+                out = fn(*a, **kw)
+            except Exception:
+                self._rpc_errors += 1
+                if self._rpc_errors >= RPC_ERRORS:  # one bad coin is not a down RPC
+                    self._rpc_trip(now, f"{self._rpc_errors} errors in a row")
+                raise
+            self._rpc_errors = 0
+            took = time.monotonic() - t0
+            if took > RPC_SLOW_S:
+                self._rpc_trip(now, f"{took:.0f} s")
+            return out
+        return call
+
+    def _rpc_trip(self, now: float, why: str) -> None:
+        if now >= self._rpc_off_until:
+            log.warning("rug/staged checks paused for %d s (RPC %s): no buys meanwhile, exits go on", RPC_PAUSE_S, why)
+        self._rpc_off_until = now + RPC_PAUSE_S
 
     def _top_draw(self, draw: float, src: str = "") -> bool:
         """Is this draw among the best pool_sample share of the source's recent ones? Until enough draws are known: a
