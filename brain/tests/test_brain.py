@@ -37,6 +37,9 @@ def s(tmp_path, monkeypatch):
     st.pool_sample = 1.0  # the learning-account tests buy every positive draw; the sample has its own test
     st.main_trade = "on"  # the default pauses the main account until the lab finds a carrying pocket; own test
     st.pool_trade = "on"  # the default is shadow (paused); the pause has its own test
+    st.pool_min_pred = -1.0  # the learning-account floor, the sniper switch and the trail exit have their own tests
+    st.pool_sources_off = ""
+    st.exit_mode = "plan"
     return st
 
 
@@ -1614,8 +1617,10 @@ def test_the_learning_account_buys_only_its_best_draws(conn, s):
     t, _ = _pool_trader(conn, s, mk)
     s.pool_sample = 0.05
     t.pool_draws.clear()
-    t.pool_draws.extend(i / 1000 for i in range(T.POOL_DRAWS_MIN))  # 0 .. 0.199
-    assert t._top_draw(0.195) and not t._top_draw(0.15)
+    t.pool_draws["copytrade"].extend(i / 1000 for i in range(T.POOL_DRAWS_MIN))  # 0 .. 0.199
+    t.pool_draws["sniper"].extend(-1 + i / 1000 for i in range(T.POOL_DRAWS_MIN))
+    assert t._top_draw(0.195, "copytrade") and not t._top_draw(0.15, "copytrade")
+    assert t._top_draw(-0.805, "sniper")  # each source against its own draws (E2)
     s.pool_sample = 1.0
     assert t._top_draw(-1.0)
     s.pool_sample = 0.0
@@ -1987,3 +1992,82 @@ def test_the_learning_account_buys_at_most_its_hourly_number(conn, s):
         O.report(conn, "sniper", f"H{i}", m, now, {"buyers": 12})
     assert t.scan() == 1
     assert "Obergrenze 1" in conn.execute("SELECT note FROM brain_opps WHERE decision='skip'").fetchone()[0]
+
+
+def test_the_learning_account_skips_the_sniper_and_weak_predictions(conn, s):
+    s.pool_sources_off = "sniper"
+    mk = Market()
+    t, _ = _pool_trader(conn, s, mk)
+    d = types.SimpleNamespace(explore=True)
+    row = {"source": "sniper"}
+    assert "nicht aus sniper" in t._gate("pool", MINT, snap(), d, row)
+    row = {"source": "copytrade"}
+    assert "nicht aus" not in (t._gate("pool", MINT, snap(), d, row) or "")
+
+
+def test_every_position_leaves_by_the_trail_the_emergency_stop_or_time(conn, s):
+    s.exit_mode = "trail"
+    set_tier(conn, WHALE, "ultra")
+    mk = Market()
+    mk.snaps[MINT] = snap()
+    clock = [time.time()]
+    t = make_trader(conn, s, trained(), mk, clock=lambda: clock[0])
+    t.scan()
+    add_whale_buy(conn, "n", ts=clock[0])
+    assert t.scan() == 1
+    p = conn.execute("SELECT * FROM brain_positions").fetchone()
+    assert p["stop_loss"] == 0.5 and p["trail_activate"] == 0.2 and p["take_profit"] >= 1e9
+    ref = json.loads(p["meta"])["ref_price"]
+    mk.snaps[MINT] = snap(price=ref * 0.65)  # -35 %: the old stop, now only noise in the first minutes
+    clock[0] += 60
+    assert t.manage() == 0
+    mk.snaps[MINT] = snap(price=ref * 1.5)  # +50 %, inside the quiet minutes: no exit
+    clock[0] += 60
+    assert t.manage() == 0
+    clock[0] += 14 * 60
+    mk.snaps[MINT] = snap(price=ref * 1.45)
+    assert t.manage() == 0  # trail armed, 3 % under the high
+    mk.snaps[MINT] = snap(price=ref * 1.15)  # 23 % under the high
+    clock[0] += 5
+    assert t.manage() == 1
+    assert conn.execute("SELECT exit_reason FROM brain_positions").fetchone()[0] == "trail"
+    # a second coin: the emergency stop at -50 % fires at once, a flat coin goes after 60 min
+    for m, px, wait, why in (("Crsh" + MINT[4:], 0.45, 30, "stop"), ("Flat" + MINT[4:], 1.02, 61 * 60, "time")):
+        mk.snaps[m] = snap(mint=m)
+        add_whale_buy(conn, "b" + m[:4], mint=m, ts=clock[0])
+        assert t.scan() == 1
+        r = json.loads(conn.execute("SELECT meta FROM brain_positions WHERE mint=?", (m,)).fetchone()[0])["ref_price"]
+        mk.snaps[m] = snap(mint=m, price=r * px)
+        clock[0] += wait
+        assert t.manage() == 1
+        assert conn.execute("SELECT exit_reason FROM brain_positions WHERE mint=?", (m,)).fetchone()[0] == why
+
+
+def test_the_learning_account_needs_a_predicted_mean_over_its_floor(conn, s):
+    from brain import opportunities as O
+    s.pool_min_pred = 1.0
+    mk = Market()
+    t, _ = _pool_trader(conn, s, mk, src="copytrade")
+    mk.snaps[MINT] = snap()
+    O.report(conn, "copytrade", "f1", MINT, time.time(), {"wallets_n": 3})
+    assert t.scan() == 0
+    assert "Vorhersage" in conn.execute("SELECT note FROM brain_opps").fetchone()[0]
+
+
+def test_the_learning_account_samples_three_an_hour_at_night_and_skips_swing(conn, s, monkeypatch):
+    from brain import trader as T
+    assert T._berlin_hour(1792335960) == 17  # 18.10.2026 15:06 UTC is 17:06 in Berlin
+    s.pool_per_hour = 15
+    mk = Market()
+    t, _ = _pool_trader(conn, s, mk, src="copytrade")
+    d = types.SimpleNamespace(explore=True)
+    row = {"source": "copytrade"}
+    now = int(t.clock())
+    for i in range(3):
+        conn.execute("INSERT INTO brain_positions(kind, mint, status, opened_at) VALUES ('pool', ?, 'closed', ?)",
+                     (f"N{i}", now - 60))
+    monkeypatch.setattr(T, "_berlin_hour", lambda ts: 5)
+    assert "Obergrenze 3" in (t._gate("pool", MINT, snap(), d, row) or "")
+    monkeypatch.setattr(T, "_berlin_hour", lambda ts: 12)
+    assert "Obergrenze" not in (t._gate("pool", MINT, snap(), d, row) or "")
+    assert "swing" in T.POOL_PLANS_OFF

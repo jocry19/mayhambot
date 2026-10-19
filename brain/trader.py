@@ -17,7 +17,7 @@ import time
 
 from . import decide, exits, features, opportunities, pockets, store
 from .pool import Pool
-from .plans import BY_NAME, PLANS
+from .plans import BASE, BY_NAME, PLANS
 
 log = logging.getLogger("brain.trader")
 
@@ -46,6 +46,15 @@ PRICE_RETRY_S = 30  # a coin without a DexScreener pair yet gets this long to sh
 FLIP_MAX = 0.6
 RAN_5M_MAX = 0.05  # 10/2026: whale copies after >5 % in the 5 min before lost 9-20 % on average, flat ones about 0  # wallets that sell this share of their buys within FLIP_S are gone before a copy can follow
 POOL_RULE_MIN_N = 30  # top-tenth rows out of sample before the learning account follows a labels exit rule
+NIGHT_HOURS = (4, 8)  # Berlin time: learning buys only as a sample of NIGHT_PER_HOUR an hour
+NIGHT_PER_HOUR = 3
+POOL_PLANS_OFF = ("swing",)  # review 19.10.: learning account plan swing -27.5 %, n 57
+EMERGENCY_STOP = 0.50  # E3: the only price stop (a rug or crash), filled wherever the market is
+TRAIL_ARM = 0.20  # the trail arms once the high is this far over the buy ...
+TRAIL_DRAW = 0.20  # ... and sells this far under the high
+TRAIL_QUIET_MIN = 15  # no trail, idle or time exit in the first minutes (main account under 15 min: -14.9 %, n 67)
+TRAIL_IDLE_MIN = 60  # out after this long without an armed trail
+TRAIL_MAX_MIN = 240  # out after this long in any case (labels: 4 h above 1 h in the top tenths, 24 h below)
 HIGH_JUMP = 3.0  # see _manage: a single price this far above the last one is not a high yet
 NO_MARKET_S = 15 * 60  # an open position without any price this long is closed as "kein Markt"
 RUG_LIQ_DROP = 0.6  # pool (curve: curve depth) 60 % under the buy: LP pulled, before the price stop sees it
@@ -120,6 +129,17 @@ def _with_price(snap, px: float):
     return out
 
 
+def _berlin_hour(ts: float) -> int:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    return datetime.fromtimestamp(ts, ZoneInfo("Europe/Berlin")).hour
+
+
+def _off(spec: str) -> set:
+    return {x.strip() for x in (spec or "").split(",") if x.strip()}
+
+
 def _always_learn(row) -> bool:
     """A signals call, band candidate or near call (>= 2 smart groups bought, only a later gate said no; ~100 a day):
     always a learning buy (rare, and the model must measure them)."""
@@ -181,10 +201,12 @@ class Trader:
         self.pending: dict[tuple[str, str], tuple] = {}  # (kind, ref) -> (row, entity, first seen): waiting for a pair
         self._lab: tuple = (-1e18, [])  # (read at, carrying hypotheses of data/lab/report.json)
         self._records: dict = {}  # kind -> (checked at, (mean net, n) or None)
-        self.pool_draws: collections.deque = collections.deque(maxlen=POOL_DRAWS)  # recent learning-account draws
+        # recent learning-account draws per source (E2: the top fiftieth of each source, not of all together)
+        self.pool_draws: dict = collections.defaultdict(lambda: collections.deque(maxlen=POOL_DRAWS))
         try:
-            self.pool_draws.extend(r[0] for r in reversed(conn.execute(
-                "SELECT draw FROM opportunities WHERE draw IS NOT NULL ORDER BY id DESC LIMIT ?", (POOL_DRAWS,)).fetchall()))
+            for src, dr in reversed(conn.execute("SELECT source, draw FROM opportunities WHERE draw IS NOT NULL "
+                                                 "ORDER BY id DESC LIMIT ?", (POOL_DRAWS * 4,)).fetchall()):
+                self.pool_draws[src].append(dr)
         except Exception:  # no opportunities table yet
             pass
 
@@ -420,18 +442,23 @@ class Trader:
         if kind == "pool":
             d.size_sol = self.s.learn_size_sol  # the learning account always buys at the learning stake (18.10.:
             # Kelly on the brain's equity made one 0.12 SOL)
+            if d.plan in POOL_PLANS_OFF:
+                d.plan = BASE  # under the trail exit (E3) the plan only names the trade; its own exits are not used
             if _always_learn(row):
                 # a real call (1-3 a day) or a band candidate: the learning account always takes it at the learning
                 # stake, so the class gets cases of its own; the hard gates (rug, liquidity) still decide (signals
                 # thread 18.10.)
                 if not d.enter:
                     d.enter, d.explore, d.size_sol, d.why_not = True, True, self.s.learn_size_sol, ""
-            elif d.enter and not self._top_draw(d.sample):
+            elif d.enter and not self._top_draw(d.sample, row["source"] or ""):
                 # the learning account buys the best draws, not a random sample (09:00: the labels rank the pool
                 # model's mean, sniper +0.115): its trades measure execution, the labels teach the rest
                 d.enter, d.why_not = False, f"Lernkonto-Stichprobe: Ziehung nicht unter den besten {self.s.pool_sample:.0%}"
                 raw["gate"] = "Lernkonto-Stichprobe"
-            self.pool_draws.append(d.sample)
+            elif d.enter and d.mean < self.s.pool_min_pred:
+                d.enter, d.why_not = False, f"Lernkonto: Vorhersage {d.mean:+.1%} unter {self.s.pool_min_pred:+.0%}"
+                raw["gate"] = "Lernkonto-Vorhersage"
+            self.pool_draws[row["source"] or ""].append(d.sample)
             if d.enter and self.s.pool_trade == "shadow":
                 d.enter, d.why_not = False, "Lernkonto pausiert (nur Vorhersage, Labels lernen weiter)"
                 raw["gate"] = "Lernkonto pausiert"
@@ -472,17 +499,18 @@ class Trader:
             self._write_back(row["id"], d, block, pid)
         return pid
 
-    def _top_draw(self, draw: float) -> bool:
-        """Is this draw among the best pool_sample share of the recent ones? Until enough draws are known: a coin flip
-        with that share."""
+    def _top_draw(self, draw: float, src: str = "") -> bool:
+        """Is this draw among the best pool_sample share of the source's recent ones? Until enough draws are known: a
+        coin flip with that share."""
         share = self.s.pool_sample
         if share >= 1:
             return True
         if share <= 0:
             return False
-        if len(self.pool_draws) < POOL_DRAWS_MIN:
+        draws = self.pool_draws[src]
+        if len(draws) < POOL_DRAWS_MIN:
             return self.rng.random() < share
-        ranked = sorted(self.pool_draws)
+        ranked = sorted(draws)
         return draw >= ranked[min(len(ranked) - 1, int(len(ranked) * (1 - share)))]
 
     def _write_back(self, oid: int, d, block, pid) -> None:
@@ -620,11 +648,16 @@ class Trader:
         cap = self.s.pool_max_open if pool else self.s.max_open
         if cap and n_open >= cap:
             return f"technische Obergrenze: {n_open} {'Lernkonto-' if pool else ''}Positionen offen"
-        if pool and self.s.pool_per_hour:
+        if pool and row is not None and (row["source"] or "") in _off(self.s.pool_sources_off):
+            return f"Lernkonto kauft nicht aus {row['source']} (nur Label, Merkmal und Rug-Warnung)"
+        per_h = self.s.pool_per_hour
+        if pool and NIGHT_HOURS[0] <= _berlin_hour(self.clock()) < NIGHT_HOURS[1]:
+            per_h = min(per_h, NIGHT_PER_HOUR) if per_h else NIGHT_PER_HOUR  # 04-08 Uhr: -26.5 % a coin, n 103, t -6.7
+        if pool and per_h:
             n_h = c.execute("SELECT COUNT(*) FROM brain_positions WHERE kind='pool' AND opened_at>=?",
                             (int(self.clock()) - 3600,)).fetchone()[0]
-            if n_h >= self.s.pool_per_hour:
-                return f"Lernkonto: {n_h} Käufe in der letzten Stunde, Obergrenze {self.s.pool_per_hour}"
+            if n_h >= per_h:
+                return f"Lernkonto: {n_h} Käufe in der letzten Stunde, Obergrenze {per_h}"
         t0 = store.day_start(self.clock())
         if self.s.max_daily_loss_sol:
             lost = c.execute("SELECT COALESCE(SUM(pnl_sol),0) FROM brain_positions WHERE status='closed' "
@@ -664,8 +697,12 @@ class Trader:
         now = int(self.clock())
         src_ts = row["ts"] if kind == "whale" else None
         meta = {"fill_source": fill.source, "impact": fill.price_impact, "ref_price": snap.price_sol}
-        rule = self._pool_rule(now) if kind == "pool" else None
-        if rule:
+        rule = self._pool_rule(now) if kind == "pool" and self.s.exit_mode != "trail" else None
+        if self.s.exit_mode == "trail":
+            meta["exit_rule"] = "trail20@0.2"
+            p = dataclasses.replace(p, take_profit=1e9, stop_loss=EMERGENCY_STOP, trail_activate=TRAIL_ARM,
+                                    trail_drawdown=TRAIL_DRAW, max_hold_min=TRAIL_MAX_MIN, inflow_exit=0)
+        elif rule:
             # the learning account sells by the exit rule that won out of sample on the labels (hour line "exit 6h"),
             # so its real trades test that rule rather than a fixed plan
             meta["exit_rule"] = rule[0]
@@ -724,7 +761,9 @@ class Trader:
         for p in rows:
             snap = snaps.get(p["mint"])
             half = False
-            if organic and not (p["kind"] == "pool" and '"exit_rule"' in (p["meta"] or "")):
+            if self.s.exit_mode == "trail":
+                reason = self._trail_exit(p, snap, now)
+            elif organic and not (p["kind"] == "pool" and '"exit_rule"' in (p["meta"] or "")):
                 reason, half = self._organic(p, snap, now)
             else:
                 reason = self._exit_reason(p, snap, now)
@@ -930,6 +969,34 @@ class Trader:
         log.info("HALF %s %s %+.1f%%", p["kind"], p["symbol"] or p["mint"][:6], up * 100)
         self.notify(f"🧠 Teilverkauf {p['symbol'] or p['mint'][:6]}: Hälfte zu {up:+.1%}, der Rest läuft weiter")
         return True
+
+    def _trail_exit(self, p, snap, now: float) -> str | None:
+        """E3 (review 19.10.: stops lost most, -35.5 % on n 110 learning and -30.2 % on n 25 main, filled 5-6 points
+        under their level; trails were the only exits in profit, n 40 +20.6 %; on the labels a 20 % trail beat every
+        fixed target in each tenth from the fifth up). The same for every account and position, whatever it was
+        bought with: rug and liquidity exits, the emergency stop at -50 %, nothing else in the first 15 minutes; then a
+        20 % trail from the high once it is +20 %; 60 min without an armed trail, 240 min at most."""
+        if not snap or not snap.price_sol:
+            return "no_market" if now - (p["last_seen"] or p["opened_at"]) > NO_MARKET_S else None
+        entry = _ref_price(p)
+        px = snap.price_sol
+        high = max(p["high_price_sol"] or entry, px)
+        if p["entry_liq_usd"] and _depth(snap) < (1 - RUG_LIQ_DROP) * p["entry_liq_usd"]:
+            return "rug"
+        why = self._safety_exit(p, snap, now, high)
+        if why:
+            return why
+        if px <= entry * (1 - EMERGENCY_STOP):
+            return "stop"
+        held = (now - p["opened_at"]) / 60
+        if held < TRAIL_QUIET_MIN:
+            return None
+        armed = high / entry - 1 >= TRAIL_ARM
+        if armed and px <= high * (1 - TRAIL_DRAW):
+            return "trail"
+        if held >= TRAIL_MAX_MIN or (not armed and held >= TRAIL_IDLE_MIN):
+            return "time"
+        return None
 
     def _exit_reason(self, p, snap, now: float) -> str | None:
         held_min = (now - p["opened_at"]) / 60
