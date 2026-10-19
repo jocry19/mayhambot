@@ -764,15 +764,16 @@ def exit_skill(conn, lo: float, hi: float | None = None) -> dict | None:
     the best top-tenth mean in the first half is then judged on the second half only (out of sample): its mean and
     median there, and the same rule over all rows of the second half. None while there are too few rows."""
     try:
-        rows = conn.execute("SELECT source, mint, ts, pred_mean, label_outcomes, label_rules, label_n FROM opportunities "
+        rows = conn.execute("SELECT source, mint, ts, pred_mean, label_outcomes, label_rules, label_n, label_max60, "
+                            "label_min60, label_cost FROM opportunities "
                             "WHERE "
                             "label_at>=? AND label_at<? AND pred_mean IS NOT NULL AND label_rules IS NOT NULL "
                             "ORDER BY ts, id", (int(lo), int(hi if hi is not None else 2 ** 40))).fetchall()
     except Exception:
         return None
     seen, data = set(), []
-    same = thin = same_thin = 0  # rows whose rules all agree (a flat path or too few points to tell them apart)
-    for src, mint, ts, p, outs, rules, npts in rows:
+    same = thin = same_thin = same_flat = 0  # rows whose rules all agree (a flat path or too few points)
+    for src, mint, ts, p, outs, rules, npts, mx, mn, lc in rows:
         if (src, mint) in seen:
             continue
         seen.add((src, mint))
@@ -785,6 +786,9 @@ def exit_skill(conn, lo: float, hi: float | None = None) -> dict | None:
         if len(rv) == 1:
             same += 1
             same_thin += few
+            # E5: a path that never reached +20 % (no trail armed) nor -15 % (no stop hit) ends every rule alike
+            g = lc or 0.0  # max60/min60 are after costs; the rules arm and stop on the price itself
+            same_flat += int(mx is not None and mn is not None and mx + g < 0.2 and mn + g > -0.15)
         nets = {}
         for blob in (outs, rules):
             try:
@@ -796,7 +800,8 @@ def exit_skill(conn, lo: float, hi: float | None = None) -> dict | None:
             data.append((float(p), nets))
     n = len(data)
     k = max(1, len(seen))
-    agree = {"same": round(same / k, 3), "thin": round(thin / k, 3), "same_thin": round(same_thin / max(1, same), 3)}
+    agree = {"same": round(same / k, 3), "thin": round(thin / k, 3), "same_thin": round(same_thin / max(1, same), 3),
+             "same_flat": round(same_flat / max(1, same), 3)}
     if n < 100:
         return {"n": n, **agree}
     halves = data[: n // 2], data[n // 2:]
@@ -827,3 +832,43 @@ def exit_skill(conn, lo: float, hi: float | None = None) -> dict | None:
             "oos_median": round(oos[1], 4), "oos_n": oos[2], "all_mean": round(every[0], 4) if every else None,
             "top50_mean": round(f50[0], 4) if f50 else None, "top50_median": round(f50[1], 4) if f50 else None,
             "top50_n": f50[2] if f50 else 0, **agree}
+
+
+CALIB_S = 24 * 3600
+CALIB_MIN_N = 50  # labelled rows per source and bin
+
+
+def calibration(conn, now: float) -> dict:
+    """Per source: [(upper edge of pred_mean, mean of label_ret60 - pred_mean), ...] over the labels of the last
+    24 h, in up to ten bins by prediction (review 19.10.: the top tenth predicted +3.2 % and made -4.8 % at night,
+    the sniper's top was over-optimistic at every threshold). Built on the model's own pred_mean, never on a
+    calibrated one, so it does not feed on itself."""
+    try:
+        rows = conn.execute("SELECT source, pred_mean, label_ret60 FROM opportunities WHERE label_at>=? AND "
+                            "pred_mean IS NOT NULL AND label_ret60 IS NOT NULL", (int(now - CALIB_S),)).fetchall()
+    except Exception:
+        return {}
+    by: dict = {}
+    for src, p, r in rows:
+        by.setdefault(src or "", []).append((float(p), min(labels.CAP, float(r))))
+    out = {}
+    for src, xs in by.items():
+        k = min(10, len(xs) // CALIB_MIN_N)
+        if k < 1:
+            continue
+        xs.sort()
+        step = len(xs) / k
+        bins = []
+        for i in range(k):
+            part = xs[int(i * step): int((i + 1) * step)]
+            edge = part[-1][0] if i < k - 1 else float("inf")
+            bins.append((edge, round(sum(r - p for p, r in part) / len(part), 5)))
+        out[src] = bins
+    return out
+
+
+def calibrated_shift(calib: dict, src: str, pred: float) -> float:
+    for edge, bias in calib.get(src or "", ()):
+        if pred <= edge:
+            return bias
+    return 0.0

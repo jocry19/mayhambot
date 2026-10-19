@@ -89,6 +89,8 @@ class Settings:
     # pool_min_pred (labels: top fiftieth with a trail +6.6 % net, pred_mean >= 0.05 +1.5 to +2.8 %)
     pool_sample: float = field(default_factory=lambda: _f("BRAIN_POOL_SAMPLE", 0.02))
     pool_min_pred: float = field(default_factory=lambda: _f("BRAIN_POOL_MIN_PRED", 0.05))
+    # shift each learning-account prediction by the model's mean error of the last 24 h in its source and range
+    calibrate: bool = field(default_factory=lambda: _s("BRAIN_CALIBRATE", "on").lower() == "on")
     # sources the learning account never buys from (E1: sniper buys n 102 -28.3 %, t -6.9); they stay labels,
     # features and the rug warning
     pool_sources_off: str = field(default_factory=lambda: _s("BRAIN_POOL_SOURCES_OFF", "sniper").lower())

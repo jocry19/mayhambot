@@ -167,7 +167,8 @@ class Service:
                     f"all {ex['all_mean'] or 0:+.1%}"
                     + "".join(f"; top tenth {k} entered {v['entered']:.0%} mean {v['mean']:+.1%} median {v['median']:+.1%}"
                               for k, v in sorted(ex.items()) if k.startswith("dip") and isinstance(v, dict))
-                    + f"; rules agree {ex['same']:.0%} (of those under 4 points {ex['same_thin']:.0%}, rows under 4 "
+                    + f"; rules agree {ex['same']:.0%} (of those flat {ex.get('same_flat', 0):.0%}, under 4 points "
+                    f"{ex['same_thin']:.0%}, rows under 4 "
                     f"points {ex['thin']:.0%})")
             hist = (store.get(self.conn, "exit_skill_hist") or [])[-23:] + [[int(since), ex]]
             store.put(self.conn, "exit_skill_hist", hist)

@@ -15,7 +15,7 @@ import logging
 import random
 import time
 
-from . import decide, exits, features, opportunities, pockets, store
+from . import decide, exits, features, learner, opportunities, pockets, store
 from .pool import Pool
 from .plans import BASE, BY_NAME, PLANS
 
@@ -46,6 +46,7 @@ PRICE_RETRY_S = 30  # a coin without a DexScreener pair yet gets this long to sh
 FLIP_MAX = 0.6
 RAN_5M_MAX = 0.05  # 10/2026: whale copies after >5 % in the 5 min before lost 9-20 % on average, flat ones about 0  # wallets that sell this share of their buys within FLIP_S are gone before a copy can follow
 POOL_RULE_MIN_N = 30  # top-tenth rows out of sample before the learning account follows a labels exit rule
+CALIB_EVERY_S = 600
 NIGHT_HOURS = (4, 8)  # Berlin time: learning buys only as a sample of NIGHT_PER_HOUR an hour
 NIGHT_PER_HOUR = 3
 POOL_PLANS_OFF = ("swing",)  # review 19.10.: learning account plan swing -27.5 %, n 57
@@ -193,6 +194,7 @@ class Trader:
         self.on_close = on_close or (lambda pos: None)
         self.rng = rng or random.Random()
         self._rule_at = (-1e18, None)
+        self._calib: tuple = (-1e18, {})
         self.clock = clock
         self._safe = None  # the rug verdict of the opportunity being decided
         self.too_late = 0  # whale buys the tracker delivered after max_whale_delay_s
@@ -440,6 +442,13 @@ class Trader:
             st = dataclasses.replace(st, min_size_sol=self.s.learn_size_sol, explore_share=0.0, no_explore="")
         d = decide.choose(model, kind, feats, st, self.rng, equity=self.equity())
         if kind == "pool":
+            shift = self._calib_shift(row["source"] or "", d.mean)
+            if shift:
+                # the model's mean moved by its own recent error in this source and range (calibration, review 19.10.);
+                # pred_mean in the shared row stays the model's own, so the calibration never learns from itself
+                raw["calib"] = round(shift, 4)
+                d.mean += shift
+                d.sample += shift
             d.size_sol = self.s.learn_size_sol  # the learning account always buys at the learning stake (18.10.:
             # Kelly on the brain's equity made one 0.12 SOL)
             if d.plan in POOL_PLANS_OFF:
@@ -522,6 +531,20 @@ class Trader:
             "size_sol=?, decided_at=?, position_id=? WHERE id=?",
             (opportunities_model(self.pm), round(d.mean, 5), round(d.std, 5), round(q10, 5), round(d.sample, 5),
              dec, None if not pid else dec, d.size_sol if pid else None, int(self.clock()), pid, oid))
+
+    def _calib_shift(self, src: str, pred: float) -> float:
+        if not self.s.calibrate:
+            return 0.0
+        now = self.clock()
+        at, cal = self._calib
+        if now - at >= CALIB_EVERY_S:
+            try:
+                cal = learner.calibration(self.conn, now)
+            except Exception as e:
+                log.debug("calibration: %s", e)
+                cal = {}
+            self._calib = (now, cal)
+        return learner.calibrated_shift(cal, src, pred)
 
     def _pool_rule(self, now: float):
         """(name, labels rule) the learning account sells by: the latest 'exit 6h' rule when it is a labels rule
@@ -697,6 +720,14 @@ class Trader:
         now = int(self.clock())
         src_ts = row["ts"] if kind == "whale" else None
         meta = {"fill_source": fill.source, "impact": fill.price_impact, "ref_price": snap.price_sol}
+        # E4: the round trip's costs one by one (fee, impact, the fill against the market price, the delay since the
+        # source saw it), so the books can tell where the cost of a trade went
+        keys = row.keys() if hasattr(row, "keys") else ()
+        seen = (row["src_ts"] if "src_ts" in keys and row["src_ts"] else None) or (row["ts"] if "ts" in keys else None)
+        meta["cost"] = {"buy_fee_sol": round(getattr(fill, "fees_sol", 0.0) or 0.0, 6),
+                        "buy_impact": round(fill.price_impact or 0.0, 5),
+                        "buy_slip": round(fill.price_sol / snap.price_sol - 1, 5) if snap.price_sol else None,
+                        "delay_s": round(self.clock() - seen, 1) if seen else None}
         rule = self._pool_rule(now) if kind == "pool" and self.s.exit_mode != "trail" else None
         if self.s.exit_mode == "trail":
             meta["exit_rule"] = "trail20@0.2"
@@ -1068,9 +1099,15 @@ class Trader:
             meta["trigger"] = reason
             reason = "rug"
             c.execute("UPDATE brain_positions SET meta=? WHERE id=?", (json.dumps(meta), p["id"]))
+        cost = meta.get("cost") or {}
+        cost.update({"sell_fee_sol": round(getattr(fill, "fees_sol", 0.0) or 0.0, 6),
+                     "sell_impact": round(getattr(fill, "price_impact", 0.0) or 0.0, 5),
+                     "sell_slip": round(fill.price_sol / snap.price_sol - 1, 5) if snap and snap.price_sol else None,
+                     "sell_source": getattr(fill, "source", "")})
+        meta["cost"] = cost
         done = c.execute("UPDATE brain_positions SET status='closed', closed_at=?, exit_price_sol=?, proceeds_sol=?, "
-                         "pnl_sol=?, pnl_pct=?, exit_reason=? WHERE id=? AND status='open'",
-                         (now, fill.price_sol, proceeds, pnl, pct, reason, p["id"])).rowcount
+                         "pnl_sol=?, pnl_pct=?, exit_reason=?, meta=? WHERE id=? AND status='open'",
+                         (now, fill.price_sol, proceeds, pnl, pct, reason, json.dumps(meta), p["id"])).rowcount
         if not done:
             return False
         self._book(p["kind"], fill.sol)
