@@ -1,3 +1,4 @@
+import json
 from core import http
 
 
@@ -178,6 +179,55 @@ def test_helius_pause_moves_a_service_to_the_public_pool(monkeypatch, tmp_path):
     else:
         raise AssertionError("expected CreditsExhausted")
     assert http.credits_left_today("copytrade") == float("inf")          # others untouched
+
+
+def test_helius_refusing_everything_sends_services_away_for_a_while(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path, "brain")
+    clock = {"t": 1_000_000.0}
+    monkeypatch.setattr(http.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(http.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    monkeypatch.setattr(http, "pick_public_rpc", lambda *a, **k: "https://pool.example")
+    calls = []
+
+    class R:
+        def __init__(self, url):
+            self.url = url
+            self.status_code = 429 if "helius" in url else 200
+            self.headers = {}
+
+        def json(self):
+            return {"result": 1}
+
+    def req(m, url, **kw):
+        calls.append(url)
+        return R(url)
+    monkeypatch.setattr(http._session, "request", req)
+    helius = "https://beta.helius-rpc.com/?api-key=k"
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": ["x"]}
+    for _ in range(http.HELIUS_REFUSE_AFTER // 2 - 1):     # 4 429s in a row
+        try:
+            http.post_json(helius, payload, retries=1)
+        except Exception:  # noqa: BLE001  (429 twice: given up, as before)
+            pass
+    assert not http.helius_refused()
+    calls.clear()
+    assert http.post_json(helius, payload, retries=4) == {"result": 1}   # the 6th 429 in a row: off to the pool
+    assert calls == [helius, helius, "https://pool.example"]
+    assert http.helius_refused() > clock["t"]
+    assert http.helius_paused() and http.credits_left_today() == 0
+    assert "helius" not in http.rpc_url("getAccountInfo", helius)
+    assert http.rpc_url("sendTransaction", helius) == helius            # own transactions keep Helius
+    clock["t"] += http.HELIUS_REFUSE_S + 1                               # tried again after 5 min
+    assert not http.helius_refused()
+    calls.clear()
+    http.post_json(helius, payload, retries=4)                          # two more 429s: away again, longer
+    assert calls == [helius, helius, "https://pool.example"]
+    assert http.helius_refused() - clock["t"] >= 2 * http.HELIUS_REFUSE_S - 60
+    clock["t"] += 2 * http.HELIUS_REFUSE_S + 1
+    monkeypatch.setattr(R, "__init__", lambda self, url: (setattr(self, "url", url), setattr(self, "status_code", 200),
+                                                           setattr(self, "headers", {})) and None)
+    http.post_json(helius, payload)                                     # Helius answers: streak and doubling cleared
+    assert json.loads((tmp_path / "helius-refused.json").read_text())["n"] == 0
 
 
 def test_cap_forecast_at_todays_rate_with_and_without_the_sniper_stream(monkeypatch, tmp_path):

@@ -547,12 +547,91 @@ def plan_used_up():
     return bool(st.get("limit")) and st.get("used", 0) >= st["limit"]
 
 
+HELIUS_REFUSE_AFTER = int(os.getenv("HELIUS_REFUSE_AFTER", "6"))       # 429s in a row, all processes
+HELIUS_REFUSE_S = float(os.getenv("HELIUS_REFUSE_S", "300"))            # first time away, doubles
+HELIUS_REFUSE_MAX_S = float(os.getenv("HELIUS_REFUSE_MAX_S", "1800"))
+
+
+def _refused_update(fn):
+    import fcntl
+    import json
+    os.makedirs(_LOCK_DIR, exist_ok=True)
+    with open(os.path.join(_LOCK_DIR, "helius-refused.json"), "a+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.seek(0)
+            try:
+                st = json.loads(f.read() or "{}")
+            except ValueError:
+                st = {}
+            out = fn(st)
+            f.seek(0)
+            f.truncate()
+            json.dump(st, f)
+            return out
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def helius_refused(now=None) -> float:
+    """Until when (epoch s, 0 = not) every service stays off Helius because Helius itself answers 429 to
+    everything (19.10. from 12:03: all services, 4 of 4 calls refused, loops slept 5 s per call and the brain
+    stood 14 min). Not a throttle of ours: the calls go where they are answered (standard RPC to the public
+    pool, DAS/Enhanced raise CreditsExhausted at once), own transactions keep Helius. Set after
+    HELIUS_REFUSE_AFTER 429s in a row across all processes, HELIUS_REFUSE_S (300) first, doubling to 1800;
+    after that time Helius is tried again, two more 429s in a row send everything away again."""
+    try:
+        import json
+        with open(os.path.join(_LOCK_DIR, "helius-refused.json")) as f:
+            until = float(json.loads(f.read() or "{}").get("until", 0))
+    except (OSError, ValueError, AttributeError):
+        return 0.0
+    return until if until > (now or time.time()) else 0.0
+
+
+def _helius_answer(ok: bool):
+    """Book a Helius answer for helius_refused(): a success clears the streak and the doubling."""
+    if ok:
+        try:
+            with open(os.path.join(_LOCK_DIR, "helius-refused.json")) as f:
+                txt = f.read()
+                if '"streak": 0' in txt and '"n": 0' in txt and not helius_refused():
+                    return   # nothing to clear: no lock taken on the hot path
+        except OSError:
+            return
+    now = time.time()
+
+    def upd(st):
+        if ok:
+            st.update(streak=0, n=0)
+            return None
+        if float(st.get("until", 0)) > now:
+            return None
+        st["streak"] = int(st.get("streak", 0)) + 1
+        if st["streak"] < (HELIUS_REFUSE_AFTER if not st.get("n") else 2):
+            return None
+        st["n"] = int(st.get("n", 0)) + 1
+        st["until"] = now + min(HELIUS_REFUSE_S * 2 ** (st["n"] - 1), HELIUS_REFUSE_MAX_S)
+        st["streak"] = 0
+        return st["until"]
+    try:
+        until = _refused_update(upd)
+    except (ImportError, OSError):
+        return
+    if until:
+        log.warning("Helius lehnt alles mit 429 ab: alle Dienste meiden Helius bis %s (Standard-RPC über den "
+                    "öffentlichen Pool, DAS/Enhanced aus, eigene Transaktionen bleiben)",
+                    time.strftime("%H:%M:%S", time.localtime(until)))
+
+
 def helius_paused(service=None):
     """HELIUS_PAUSE=signals,sniper (the user's switch, nothing sets it on its own): those services leave Helius
     as if their share were used up, standard RPC goes to the public pool, DAS/Enhanced raise CreditsExhausted,
     own transactions (TX_METHODS) keep Helius. Order if the plan gets tight (18.10.): pause sniper's stream and
     signals first, research and brain next; safety and copytrade (whale detection) last."""
     svc = service if service is not None else _service
+    if svc and helius_refused():
+        return True
     return bool(svc) and svc in {x.strip() for x in (os.getenv("HELIUS_PAUSE") or "").split(",")}
 
 
@@ -841,14 +920,17 @@ def _shared_spacing(host, interval=None):
     except (ImportError, OSError):  # Windows / unwritable: fall back to per-process spacing
         return _wait_local(host, iv)
     try:
+        # reserve the next slot and sleep outside the lock: sleeping under it queued every process behind the
+        # sleeper, so penalize() itself waited for minutes (research stuck 45 min in _locked_state, 19.10.)
         last, factor = _read_state(f)
         factor = min(factor, _max_slowdown(host))
-        delay = last + iv * factor - time.time()
-        if delay > 0:
-            time.sleep(delay)
-        _write_state(f, time.time(), factor)
+        now = time.time()
+        slot = max(now, last + iv * factor)
+        _write_state(f, slot, factor)
     finally:
         _unlock(f)
+    if slot > now:
+        time.sleep(slot - now)
 
 
 def penalize(host, seconds):
@@ -1206,8 +1288,9 @@ def _pool_result(host, ok, ms=None, status=None, method=None):
 def _request(method, url, retries=4, timeout=20, priority="bulk", **kw):
     host = urlparse(url).netloc
     cost = credit_cost(url, kw)
-    if cost == 1 and method == "POST" and kw.get("public_fallback", True) \
-            and not (isinstance(kw.get("json"), dict) and kw["json"].get("method") in TX_METHODS):
+    may_go_public = cost == 1 and method == "POST" and kw.get("public_fallback", True) \
+        and not (isinstance(kw.get("json"), dict) and kw["json"].get("method") in TX_METHODS)
+    if may_go_public:
         left = credits_left_today()
         if left is not None and left < cost:  # today's Helius share used up: standard RPC goes to the public node
             url, host, cost = PUBLIC_RPC, urlparse(PUBLIC_RPC).netloc, 0
@@ -1239,6 +1322,11 @@ def _request(method, url, retries=4, timeout=20, priority="bulk", **kw):
             continue
         if pooled:
             _pool_result(host, r.status_code < 400, (time.time() - t_req) * 1000, r.status_code, rpc_method)
+        if r.status_code == 429 and group_of(host) == CREDIT_GROUP:
+            _helius_answer(False)
+            if may_go_public and _service and helius_refused():   # Helius refuses everything: the pool now
+                url, host, cost, pooled, rate_limited = PUBLIC_RPC, urlparse(PUBLIC_RPC).netloc, 0, True, False
+                continue
         if r.status_code == 429 or r.status_code >= 500:
             if attempt == retries:
                 raise requests.HTTPError(f"{r.status_code} for {redact(r.url)}")
@@ -1263,6 +1351,8 @@ def _request(method, url, retries=4, timeout=20, priority="bulk", **kw):
         if r.status_code >= 400:
             raise requests.HTTPError(f"{r.status_code} for {redact(r.url)}")
         relax(host)
+        if group_of(host) == CREDIT_GROUP:
+            _helius_answer(True)
         return r.json()
 
 
