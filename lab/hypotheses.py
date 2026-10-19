@@ -262,6 +262,8 @@ def signal_entries(conn, since: int, prices: pd.DataFrame) -> pd.DataFrame:
 
 LABEL_TOP_PRED = 0.05  # rueckschau 19.10.: labels netto +1.5 % from this prediction on, below clearly negative
 LABEL_TOP = "p05"
+LABEL_POOL_PRED = 0.08  # pool_top2_trail20: every source but the sniper, prediction >= 0.08, trail exit only
+LABEL_POOL = "p08"
 LABEL_COST = 0.055  # what labels.py takes off (simulator 3 % + pool 2.5 %); added back to get gross
 
 
@@ -290,6 +292,8 @@ def label_entries(conn, since: int) -> pd.DataFrame:
             out.append((f"label_{r.source}_{name}", r.mint, int(r.ts), dex, float(liq), kind, g))
             if r.pred_mean is not None and r.pred_mean == r.pred_mean and r.pred_mean >= LABEL_TOP_PRED:
                 out.append((f"label_{LABEL_TOP}_{r.source}_{name}", r.mint, int(r.ts), dex, float(liq), kind, g))
+                if (r.pred_mean >= LABEL_POOL_PRED and r.source != "sniper" and name.startswith("trail20@")):
+                    out.append((f"label_{LABEL_POOL}_pool_{name}", r.mint, int(r.ts), dex, float(liq), kind, g))
     return pd.DataFrame(out, columns=COLS) if out else _empty()
 
 

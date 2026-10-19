@@ -77,7 +77,7 @@ def evaluate(E: pd.DataFrame) -> list[dict]:
         else:
             verdict = "traegt nicht"
         out.append({"hyp": hyp, "brain_kind": brain_kind(hyp),
-                    "source": hyp[6:].rsplit("_", 1)[0].removeprefix(hypotheses.LABEL_TOP + "_")
+                    "source": hyp[6:].rsplit("_", 1)[0].removeprefix(hypotheses.LABEL_TOP + "_").removeprefix(hypotheses.LABEL_POOL + "_")
                     if hyp.startswith("label_") else None,
                     "n": n, "coins": int(coins), "gross": round(float(g.gross.mean()), 4),
                     "cost": round(float(g.cost.mean()), 4), "net": round(float(g.net.mean()), 4),

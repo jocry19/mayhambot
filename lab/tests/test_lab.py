@@ -119,15 +119,18 @@ def test_tempo_entries_by_delay_and_trail():
 def test_label_entries_top_prediction_pocket():
     c = _db()
     c.execute("ALTER TABLE opportunities ADD COLUMN pred_mean REAL")
-    for m, pm in (("a", 0.08), ("b", -0.1)):
-        c.execute("INSERT INTO opportunities VALUES ('copytrade', ?, 100, 5e4, 1e5, '{}', 1, 0, ?, ?)",
-                  (m, json.dumps({"trail20@0.2": 0.1}), pm))
+    for src, m, pm in (("copytrade", "a", 0.08), ("copytrade", "b", -0.1), ("sniper", "s", 0.2)):
+        c.execute("INSERT INTO opportunities VALUES (?, ?, 100, 5e4, 1e5, '{}', 1, 0, ?, ?)",
+                  (src, m, json.dumps({"trail20@0.2": 0.1, "hold60": 0.1}), pm))
     E = hypotheses.label_entries(c, 0)
     assert set(E[E.hyp == "label_p05_copytrade_trail20@0.2"].mint) == {"a"}
     assert len(E[E.hyp == "label_copytrade_trail20@0.2"]) == 2
     res = {r["hyp"]: r for r in pruefstand.evaluate(pruefstand.net_of_costs(E))}
     assert res["label_p05_copytrade_trail20@0.2"]["source"] == "copytrade"
     assert res["label_p05_copytrade_trail20@0.2"]["brain_kind"] == "pool"
+    assert set(E[E.hyp == "label_p08_pool_trail20@0.2"].mint) == {"a"}  # the sniper and the hold rule stay out
+    assert not len(E[E.hyp == "label_p08_pool_hold60"])
+    assert res["label_p08_pool_trail20@0.2"]["source"] == "pool"
 
 
 def test_evaluate_needs_all_thirds_and_enough_coins():
