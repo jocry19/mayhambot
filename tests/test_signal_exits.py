@@ -43,7 +43,7 @@ def test_verdict_needs_enough_calls_and_both_halves(tmp_path):
 
 
 def test_limit_entry_fills_on_the_dip_or_is_no_trade():
-    r15 = exits.RULES["limit -15 % (30 min), then sl-30, trail 30 % from +100"]
+    r15 = exits.LIMIT_RULES["limit -15 % (30 min), then sl-30, trail 30 % from +100"]
     # fills at 0.85 on the 0.75 print, then 2.2 high (+159 %), trail 30 % -> out at 1.5: 1.5/0.85-1
     assert round(exits.trade(PATH, 1.0, r15), 3) == round(1.5 / 0.85 - 1, 3)
     never = [(60, 0.95), (600, 1.4), (1200, 2.0)]                     # runs away without a dip: no fill, no cost

@@ -119,9 +119,10 @@ def peak_after_call(rows):
                median_max_ret_4h=_med(r["max_ret_4h"] for r in rows),
                median_peak_min_1h=_med(r["peak_min_1h"] for r in rows),
                median_dip_before_peak=_med(r["dd_before_peak_1h"] for r in rows))
-    planned = [r for r in rows if r["target_hit_ts"] or r["stop_hit_ts"]]
+    planned = [r for r in rows if r["target_hit_ts"] or r["stop_hit_ts"] or r["trail_hit_ts"]]
     if planned:
         out.update(target_hits=sum(1 for r in planned if r["target_hit_ts"]),
+                   trail_hits=sum(1 for r in planned if r["trail_hit_ts"]),
                    stop_hits=sum(1 for r in planned if r["stop_hit_ts"]))
     return out
 
@@ -141,7 +142,7 @@ def outcomes(conn, hours=168, cost=None, now=None, bands=(0, 20, 30, 40, 50, 60,
     burst, v2 accumulation). cost=None: each call's own round trip (signals.cost, lab.costs), COST where unknown."""
     now = now or int(time.time())
     rows = conn.execute("SELECT score, ret_1h, max_ret_1h, max_ret_15m, max_ret_4h, peak_min_1h, dd_before_peak_1h, "
-                        "target_hit_ts, stop_hit_ts, lag_first_s, lag_last_s, ret_4h, ret_24h, cost FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NOT NULL "
+                        "target_hit_ts, stop_hit_ts, trail_hit_ts, lag_first_s, lag_last_s, ret_4h, ret_24h, cost FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NOT NULL "
                         "AND COALESCE(kind,'v1')=?", (now - int(hours * 3600), now - 3900, kind)).fetchall()
     missing = conn.execute("SELECT COUNT(*) FROM signals WHERE ts>=? AND ts<=? AND ret_1h IS NULL AND COALESCE(kind,'v1')=?",
                            (now - int(hours * 3600), now - 3900, kind)).fetchone()[0]
@@ -242,6 +243,9 @@ def write_report(conn, path=None, now=None):
     from signals import exits  # exit rules replayed on the calls; switch only once verdict() says it is decidable
     rep["exits_7d"] = exits.compare(conn, 7, now, kind="v1")
     rep["exits_verdict_14d"] = exits.verdict(conn, 14, now, kind="v1")
+    # limit entries only still watched for the low_score rejects (19.10.: the only reason where -15 % looked good)
+    rep["exits_low_score_limit_14d"] = exits.compare(conn, 14, now, rules=exits.LIMIT_RULES, table="signal_shadow",
+                                                     reason_like="low_score%")
     # inflow band class: goal >= +5 % net over 50 paper cases with the trail from +100 % (plan 18.10.)
     rep.update(outcomes_band_7d=outcomes(conn, 168, now=now, kind="band"), exits_band_14d=exits.compare(conn, 14, now, kind="band"),
                plan_next_band=plan.levels(conn, now, kind="band"))

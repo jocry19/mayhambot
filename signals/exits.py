@@ -41,8 +41,17 @@ RULES = {
     "hold 1 h (no exits)": rule(hold_min=60),
     # winner study 17.10.: no fixed target under +100 %, trail 30 % once +100 %, stop -30 % (band class goal)
     "sl-30, trail 30 % from +100": rule(sl=-0.3, trail=(1.0, 0.3)),
-    # limit entries below the alert price (no fill in 30 min = no trade); -15 / -30 and the x2 target as in the
-    # Prüfstand's signal family (18.10.: calls held 4 h lose, limit15 with x2 target was positive on few cases)
+    # 19.10. plan for the calls (no 4 h hold, no tight stop): target or trail20 from +20 %, emergency stop -50 %
+    "trail 20 % from +20, sl-50": rule(sl=-0.5, trail=(0.2, 0.2)),
+    "tp+50 or trail 20 % from +20, sl-50": rule(tp=0.5, sl=-0.5, trail=(0.2, 0.2)),
+    "tp+100 or trail 20 % from +20, sl-50": rule(tp=1.0, sl=-0.5, trail=(0.2, 0.2)),
+}
+
+
+# limit entries below the alert price (no fill in 30 min = no trade). 19.10.: not better than buying at once over all
+# calls (waiting for a dip mostly catches falling coins), so only still replayed on the low_score rejects
+LIMIT_RULES = {
+    "now, trail 20 % from +20, sl-50": rule(sl=-0.5, trail=(0.2, 0.2)),
     "limit -15 % (30 min), then sl-30, trail 30 % from +100": rule(sl=-0.3, trail=(1.0, 0.3), entry_dip=0.15),
     "limit -30 % (30 min), then sl-30, trail 30 % from +100": rule(sl=-0.3, trail=(1.0, 0.3), entry_dip=0.3),
     "limit -15 % (30 min), then tp+50 sl-35": rule(tp=0.5, sl=-0.35, entry_dip=0.15),
@@ -50,6 +59,7 @@ RULES = {
     "limit -30 % (30 min), then tp+100 sl-35": rule(tp=1.0, sl=-0.35, entry_dip=0.3),
     "limit -30 % (30 min), then half at +50, rest trail 25 %": rule(sl=-0.35, partial=[(0.5, 0.5)], trail=(0.5, 0.25),
                                                                        entry_dip=0.3),
+    "limit -15 % (30 min), then trail 20 % from +20, sl-50": rule(sl=-0.5, trail=(0.2, 0.2), entry_dip=0.15),
 }
 
 
@@ -126,7 +136,7 @@ def paths(conn, days=7, now=None, kind=None, table="signals", reason_like=None):
 
 
 MIN_N_DECIDE = 30
-CURRENT = "paper now (tp+50 sl-20 trail 20/12)"
+CURRENT = "tp+50 or trail 20 % from +20, sl-50"  # what the alert's plan says since 19.10. (target ~ +50 %)
 
 
 def _score(ps, r):

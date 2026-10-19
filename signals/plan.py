@@ -5,14 +5,21 @@ calls touched, not the best case. Stop: deep enough that STOP_KEEP of the calls 
 their dip before the peak (dd_before_peak_1h), plus a small margin. Until MIN_N calls have results the defaults
 below hold (+50 % / -30 %, the copytrade paper preset).
 
-check_levels() runs every cycle: the first time the price crosses the target (or the stop before the target)
+check_levels() runs every cycle: the first time the price crosses the target, the trail or the emergency stop
 after a call, it stores the time and returns a follow-up alert, so someone trading by hand knows when to sell.
+
+19.10. (all data since 16.10.): calls held 4 h lost (-59 % net), a tight fixed stop sold the dip before the run.
+So: target or trail (once +TRAIL_FROM, out TRAIL_DD below the high, as the brain's trail20), stop only as an
+emergency at EMERGENCY_STOP, never tighter.
 """
 import os
 import time
 
 DEFAULT_TARGET = float(os.getenv("SIGNAL_TARGET_DEFAULT", 0.5))
-DEFAULT_STOP = float(os.getenv("SIGNAL_STOP_DEFAULT", -0.3))
+DEFAULT_STOP = float(os.getenv("SIGNAL_STOP_DEFAULT", -0.5))
+EMERGENCY_STOP = -0.5     # the stop is never tighter than this (a dip stop sold the calls before their run)
+TRAIL_FROM = 0.2
+TRAIL_DD = 0.2
 TARGET_SHARE = float(os.getenv("SIGNAL_TARGET_SHARE", 0.6))
 STOP_KEEP = 0.9
 MIN_N = int(os.getenv("SIGNAL_PLAN_MIN_N", 8))
@@ -46,8 +53,9 @@ def levels(conn, now=None, days=DAYS, min_n=MIN_N, kind="v1"):
         out["hit_rate_oos"] = round(sum(1 for x in mx[cut:] if x >= t_old) / len(mx[cut:]), 2)
     winners = [r for r in rows if r[0] >= out["target"]]
     dips = [r[1] for r in winners if r[1] is not None]
-    if len(rows) >= min_n and len(dips) >= 5:
-        out["stop"] = round(min(-0.1, max(-0.5, _q(dips, 1 - STOP_KEEP) - 0.05)), 2)
+    if len(rows) >= min_n and len(dips) >= 5:  # from past dips, but never tighter than the emergency stop
+        out["stop"] = round(min(EMERGENCY_STOP, _q(dips, 1 - STOP_KEEP) - 0.05), 2)
+    out.update(trail_from=TRAIL_FROM, trail_dd=TRAIL_DD)
     if rows:  # in sample, so ~TARGET_SHARE by construction once from history; unmeasured calls count as misses
         out["hit_rate"] = round(sum(1 for x in mx if x >= out["target"]) / (len(rows) + missing), 2)
     mins = [r[2] for r in winners if r[2] is not None]
@@ -72,14 +80,19 @@ def _prices(conn, mint, since, until):
     return [(t, p) for (t, _, _), p in zip(pts, clean)]
 
 
-def first_cross(pts, p0, target, stop):
-    """('target'|'stop', ts, ret) for the first crossing in time order, else None."""
+def first_cross(pts, p0, target, stop, trail=(TRAIL_FROM, TRAIL_DD)):
+    """('target'|'trail'|'stop', ts, ret) for the first crossing in time order, else None. trail=(from, dd):
+    once the high is +from, out at dd below the high; None = no trail."""
+    high = p0
     for t, p in pts:
         r = p / p0 - 1
+        high = max(high, p)
         if r >= target:
             return "target", t, r
         if r <= stop:
             return "stop", t, r
+        if trail and high / p0 - 1 >= trail[0] and p <= high * (1 - trail[1]):
+            return "trail", t, r
     return None
 
 
@@ -100,7 +113,7 @@ def check_staged(conn, now=None):
     now = now or int(time.time())
     out = []
     for s in conn.execute("SELECT id, ts, mint, symbol, price_usd, call_no, kind FROM signals WHERE ts>? AND staged_ts IS NULL "
-                          "AND target_hit_ts IS NULL AND stop_hit_ts IS NULL", (now - FOLLOW_HOURS * 3600,)).fetchall():
+                          "AND target_hit_ts IS NULL AND stop_hit_ts IS NULL AND trail_hit_ts IS NULL", (now - FOLLOW_HOURS * 3600,)).fetchall():
         if not _staged(conn, s["mint"]):
             continue
         conn.execute("UPDATE signals SET staged_ts=? WHERE id=?", (now, s["id"]))
@@ -120,9 +133,10 @@ def check_levels(conn, now=None):
     out = []
     for s in conn.execute("SELECT id, ts, mint, symbol, price_usd, target_ret, stop_ret, call_no, kind FROM signals "
                           "WHERE ts>? AND target_ret IS NOT NULL AND target_hit_ts IS NULL AND stop_hit_ts IS NULL "
-                          "AND price_usd>0", (now - FOLLOW_HOURS * 3600,)).fetchall():
+                          "AND trail_hit_ts IS NULL AND price_usd>0", (now - FOLLOW_HOURS * 3600,)).fetchall():
         hit = first_cross(_prices(conn, s["mint"], s["ts"], min(now, s["ts"] + FOLLOW_HOURS * 3600)),
-                          s["price_usd"], s["target_ret"], s["stop_ret"] if s["stop_ret"] is not None else -1.0)
+                          s["price_usd"], s["target_ret"],
+                          min(EMERGENCY_STOP, s["stop_ret"]) if s["stop_ret"] is not None else EMERGENCY_STOP)
         if not hit:
             continue
         kind, t, r = hit

@@ -52,7 +52,7 @@ def test_check_levels_alerts_once_and_only_fresh(tmp_path):
     c.execute("INSERT INTO signals(ts, mint, symbol, score, price_usd, target_ret, stop_ret) VALUES (?,?,?,?,?,?,?)",
               (now - 3 * 3600, "B", "BBB", 40, 1.0, 0.5, -0.3))
     c.execute("INSERT INTO token_prices(mint, ts, price_usd) VALUES ('A',?,1.6)", (now - 300,))
-    c.execute("INSERT INTO token_prices(mint, ts, price_usd) VALUES ('B',?,0.6)", (now - 2 * 3600,))  # old crossing
+    c.execute("INSERT INTO token_prices(mint, ts, price_usd) VALUES ('B',?,0.45)", (now - 2 * 3600,))  # old crossing
     c.commit()
     ev = plan.check_levels(c, now)
     assert [(e["symbol"], e["kind"], e["minutes"]) for e in ev] == [("AAA", "target", 15)]
@@ -76,7 +76,8 @@ def test_alert_has_plan_and_liquidity(tmp_path):
               "'[]',20000,0.5,-0.3,1)")
     s = c.execute("SELECT * FROM signals").fetchone()
     txt = notifier.format_signal(s)
-    assert "Liquidität $20,000" in txt and "Ziel <b>+50 %</b> (0.003 $)" in txt and "Stopp -30 % (0.0014 $)" in txt
+    assert "Liquidität $20,000" in txt and "Ziel <b>+50 %</b> (0.003 $)" in txt and "Notstopp -50 % (0.001 $)" in txt
+    assert "Trail: ab +20 % raus bei 20 % unter dem Hoch" in txt
     assert "Call Nr." not in txt
 
 
@@ -238,3 +239,10 @@ def test_staged_pump_exit_alert_once(tmp_path, monkeypatch):
     assert [(e["kind"], round(e["ret"], 2), e["minutes"]) for e in ev] == [("staged", 0.8, 15)]
     assert "inszenierter Pump" in notifier.format_followup(ev[0])
     assert plan.check_staged(c, now + 60) == []
+
+
+def test_trail_exit_after_plus_20_and_no_tight_stop():
+    pts = [(10, 0.85), (20, 1.3), (30, 1.1), (40, 1.0)]       # -15 % dip is no exit, +30 % high, then -20 % off it
+    assert plan.first_cross(pts, 1.0, 0.5, plan.EMERGENCY_STOP)[:2] == ("trail", 40)
+    assert plan.first_cross([(10, 0.55), (20, 0.49)], 1.0, 0.5, plan.EMERGENCY_STOP)[:2] == ("stop", 20)
+    assert plan.first_cross([(10, 1.1), (20, 0.9)], 1.0, 0.5, plan.EMERGENCY_STOP) is None  # +10 % high: no trail yet

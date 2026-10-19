@@ -5,6 +5,7 @@ import logging
 
 from core.config import settings
 from core.http import post_json
+from signals import plan
 
 log = logging.getLogger("mayhambot.notify")
 
@@ -71,9 +72,10 @@ def format_signal(s) -> str:
                      + (" · Preis vor dem Kauf prüfen" if lag > 600 and not v2 else ""))
     if "target_ret" in keys and s["target_ret"] is not None and s["price_usd"]:
         p0 = s["price_usd"]
-        stop = s["stop_ret"] if s["stop_ret"] is not None else None
+        stop = min(plan.EMERGENCY_STOP, s["stop_ret"]) if s["stop_ret"] is not None else plan.EMERGENCY_STOP
         lines.append(f"📋 Plan: Einstieg ~{p0:.8g} $ · Ziel <b>{s['target_ret'] * 100:+.0f} %</b> ({p0 * (1 + s['target_ret']):.8g} $)"
-                     + (f" · Stopp {stop * 100:.0f} % ({p0 * (1 + stop):.8g} $)" if stop is not None else ""))
+                     + f" · sonst Trail: ab +{plan.TRAIL_FROM * 100:.0f} % raus bei {plan.TRAIL_DD * 100:.0f} % unter dem Hoch"
+                     + (f" · Notstopp {stop * 100:.0f} % ({p0 * (1 + stop):.8g} $)" if stop is not None else ""))
     if not v2 and (s["smart_buyers"] or 0) >= 3:  # hypothesis under test (funnel.CONFIDENCE_GROUPS), not a size rule
         lines.append("⭐ Konfidenz hoch: 3+ unabhängige Smart-Gruppen (bisher 33 % davon mit +50 % in 1 h)")
     if "prediction" in keys and s["prediction"] is not None:
@@ -109,11 +111,14 @@ def format_followup(e) -> str:
     if e["kind"] == "staged":
         head = f"⚠️ <b>{name}{call}: inszenierter Pump erkannt</b> ({e['ret'] * 100:+.0f} % seit Call, nach {e['minutes']} min)"
         tail = "Muster: 3 von 4 solcher Coins waren binnen 60 min nach dem Hoch leer. Gewinne sichern."
+    elif e["kind"] == "trail":
+        head = f"📉 <b>{name}{call}: Trail-Ausstieg bei {e['ret'] * 100:+.0f} %</b> nach {e['minutes']} min"
+        tail = f"Kurs {plan.TRAIL_DD * 100:.0f} % unter dem Hoch seit dem Call. Laut Plan raus."
     elif e["kind"] == "target":
         head = f"🎯 <b>{name}{call}: Ziel {e['ret'] * 100:+.0f} % erreicht</b> nach {e['minutes']} min"
         tail = "Gewinn sichern oder Stopp nachziehen."
     else:
-        head = f"🔻 <b>{name}{call}: Stopp {e['ret'] * 100:.0f} % erreicht</b> nach {e['minutes']} min"
+        head = f"🔻 <b>{name}{call}: Notstopp {e['ret'] * 100:.0f} % erreicht</b> nach {e['minutes']} min"
         tail = "Laut Plan raus."
     return "\n".join([head, f"Preis {e['price']:.8g} $ · {tail}", f"<code>{e['mint']}</code>",
                       f'<a href="https://dexscreener.com/solana/{e["mint"]}">DexScreener</a>'])
