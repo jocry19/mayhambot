@@ -8,6 +8,7 @@ exactly where coins drop out: smart buyers, distinct entities, net inflow, score
 import argparse
 import json
 import os
+import sqlite3
 import time
 
 from core import db
@@ -213,6 +214,26 @@ def report_due(path=None, every=REPORT_EVERY):
         return True
 
 
+PRICE_LOAD = {}  # set by run.refresh_tokens: the extra price paths of migrated sniper coins and opportunities
+DS_HOST, DS_CAP_PER_MIN = "api.dexscreener.com", 240  # 0.25 s spacing across all processes (core/http.py)
+
+
+def price_load(conn, now):
+    """What the price paths cost: extra mints per round, token_prices rows in the last hour, DexScreener calls in
+    the last minute per service against the shared cap (19.10.: no Helius in this path)."""
+    from core import http
+    out = dict(PRICE_LOAD, dexscreener_cap_per_min=DS_CAP_PER_MIN)
+    try:
+        out["token_prices_rows_1h"] = conn.execute("SELECT COUNT(*) FROM token_prices WHERE ts>?",
+                                                   (now - 3600,)).fetchone()[0]
+    except sqlite3.OperationalError:
+        pass
+    per = {svc: d["groups"][DS_HOST].get("last_min") for svc, d in http.usage(all_services=True).items()
+           if isinstance(d, dict) and isinstance((d.get("groups") or {}).get(DS_HOST), dict)}
+    out.update(dexscreener_last_min=per, dexscreener_last_min_total=sum(v or 0 for v in per.values()))
+    return out
+
+
 def write_report(conn, path=None, now=None):
     """Hourly self-report for threads that may read logs but not the DB: reports/signals_report.json next to
     the DB (data/ on the Mac; funnel 4 h / 24 h, outcomes by band 24 h / 7 d, newest EV calibration). Small, no secrets, overwritten."""
@@ -257,6 +278,10 @@ def write_report(conn, path=None, now=None):
                narrative_exits_14d=exits.compare(conn, 14, now, kind="narrative", table="signal_shadow",
                                                  reason_like="% leader"),
                narrative_ready=narrative.ready(conn, now))
+    try:
+        rep["price_load"] = price_load(conn, now)
+    except Exception:  # noqa: BLE001 - load figures must never stop the report
+        pass
     rs = rep["recent_signals"]
     rep["tradable_strict_share"] = round(sum(r["tradable_strict"] for r in rs) / len(rs), 3) if rs else None
     tmp = path.with_suffix(".tmp")

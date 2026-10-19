@@ -311,7 +311,9 @@ def refresh_tokens(conn, now=None):
     if PRICE_ALL:
         try:
             have = set(mints)
-            mints += [m for m in price_mints(conn, now) if m not in have]
+            extra = [m for m in price_mints(conn, now) if m not in have]
+            mints += extra
+            funnel.PRICE_LOAD.update(extra_mints_last_round=len(extra), round_mints=len(mints), ts=now)
         except Exception as e:  # noqa: BLE001 - the extra price paths must never stop the refresh
             log.warning("price_mints failed: %s", e)
     infos = market.token_info(mints)

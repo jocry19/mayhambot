@@ -150,3 +150,18 @@ def test_price_paths_for_migrated_sniper_coins_and_opportunities(tmp_path):
 def test_price_paths_without_sniper_or_brain_tables(tmp_path):
     from signals import run
     assert run.price_mints(db.connect(str(tmp_path / "q.db")), 9_000_000) == []
+
+
+def test_price_load_in_report(tmp_path, monkeypatch):
+    from core import http
+    from signals import funnel
+    c = db.connect(str(tmp_path / "l.db"))
+    now = 9_000_000
+    c.executemany("INSERT INTO token_prices(mint, ts, price_usd) VALUES (?,?,1)", [("A", now - 60), ("B", now - 7200)])
+    c.commit()
+    monkeypatch.setattr(http, "usage", lambda all_services=False: {
+        "signals": {"groups": {"api.dexscreener.com": {"last_min": 40}}}, "brain": {"groups": {}}})
+    monkeypatch.setattr(funnel, "PRICE_LOAD", {"extra_mints_last_round": 700})
+    pl = funnel.price_load(c, now)
+    assert pl["token_prices_rows_1h"] == 1 and pl["extra_mints_last_round"] == 700
+    assert pl["dexscreener_last_min"] == {"signals": 40} and pl["dexscreener_last_min_total"] == 40
