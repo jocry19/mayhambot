@@ -126,6 +126,7 @@ class Strategy:
         self._opp: dict | None = None  # the whale decision in progress, reported to brain.opportunities
         self._staged: dict[str, tuple[float, bool]] = {}  # mint -> (checked at, staged pump pattern)
         self._blocked: dict[str, tuple[float, dict, str]] = {}  # mint -> (blocked at, safety info, reason)
+        self._cost_off: tuple[float, dict] = (0.0, {})  # (measured at, stats.cost_offset)
         self._high_ts: dict[int, float] = {}  # position -> when its high was last raised (this process)
         self._pending: list[tuple[float, Swap]] = []  # whale buys waiting for the learned entry delay
         self._small = [0, 0.0, time.time()]  # whale buys too small for either account since the last summary
@@ -206,6 +207,30 @@ class Strategy:
         if ex.balance(self.conn) < size + 0.01:
             return "Guthaben zu klein"
         return None
+
+    def _expected_cost(self, snap, size_sol: float, kind: str) -> tuple[float, dict]:
+        """Expected round trip of a buy: the lab's cost model at this venue, depth and stake plus the offset the
+        booked fills show against that model (stats.cost_offset, refreshed every COST_OFFSET_TTL_S)."""
+        from lab import costs as labcost
+
+        from . import stats
+
+        at, off = self._cost_off
+        if time.time() - at > COST_OFFSET_TTL_S:
+            try:
+                off = stats.cost_offset(self.conn)
+            except Exception as e:  # noqa: BLE001 - a broken read keeps the last offset, it never blocks trading
+                log.warning("cost offset: %s", e)
+            self._cost_off = (time.time(), off)
+        model = labcost.roundtrip(snap.dex_id, snap.depth_usd, size_sol, kind)
+        return model + (off.get("offset") or 0.0), {**off, "model": round(model, 4)}
+
+    def _cost_gate(self, snap, size_sol: float, kind: str) -> str | None:
+        exp, info = self._expected_cost(snap, size_sol, kind)
+        if exp <= MAX_ROUNDTRIP_COST:
+            return None
+        return (f"erwartete Kosten {exp:.1%} je Umlauf > {MAX_ROUNDTRIP_COST:.0%} (Modell {info['model']:.1%}"
+                f" + gebucht gemessen {info.get('offset') or 0:+.1%} aus {info.get('n', 0)} Trades)")
 
     def _safety(self, strategy: str, mint: str, cached: bool = False) -> tuple[dict, str | None]:
         """Rug/honeypot/insider check (safety/) right before every buy, paper and live alike: the stored result while
@@ -445,6 +470,16 @@ class Strategy:
         avg_m5 = snap.buys_h1 / 12 if snap.buys_h1 else 0
         if avg_m5 and snap.buys_m5 > 3 * avg_m5 and snap.change_m5 > 30:
             return self._skip("whale", swap.mint, "Copy-Trader sind schon drin", snap)
+        if not block0:  # block 0 keeps its test (plan 10.2 #5: small stake until n 30)
+            for acc in list(accounts):
+                cw = self._cost_gate(snap, s.explore_size_sol if acc == "explore" else size, "copy")
+                if cw:
+                    accounts.remove(acc)
+                    if accounts:
+                        self._skip("whale", swap.mint, f"{cw}; nur {'Erkundung' if accounts == ['explore'] else 'streng'}",
+                                   snap, account=acc)
+                    else:
+                        return self._skip("whale", swap.mint, cw, snap, wallet=swap.wallet)
         safe, sw_why = self._safety("whale", swap.mint, cached=True)
         if sw_why:
             return self._skip("whale", swap.mint, sw_why, snap, wallet=swap.wallet, safety=safe)
@@ -634,6 +669,12 @@ class Strategy:
             return self._skip("signal", mint, f"Market Cap zu groß (${snap.fdv:,.0f})", snap)
         if sig["price_usd"] and snap.price_usd / sig["price_usd"] - 1 > 0.5:
             return self._skip("signal", mint, "seit dem Signal schon +50 %", snap)
+        if not why:
+            why = self._cost_gate(snap, p.size_sol * SIGNAL_PROBE_SIZE, "market")
+        ecw = self._cost_gate(snap, self.s.explore_size_sol, "market") if expl else None
+        if why and (not expl or ecw):
+            return self._skip("signal", mint, why if not ecw or ecw == why else f"{why}; {ecw}", snap)
+        expl = expl and not ecw
         safe, sw_why = self._safety("signal", mint)
         if sw_why:
             return self._skip("signal", mint, sw_why, snap, safety=safe)
@@ -1376,6 +1417,8 @@ def wash_share(conn, mint: str) -> float | None:
 # predictions 10/17 (493 with 1 h outcome): median 1 h -1 % under score 20, -16 % at 20-30, -23 % at 30-45,
 # -27 % from 45. The old 1.5x for A put the most money on the worst band
 STRICT_SIGNAL_NEEDS_NET_MODEL = True  # 10/18: strict signal trades n 4, -24 %; signals measure -8..-13 % after costs
+MAX_ROUNDTRIP_COST = 0.05  # plan 18.10. 10.2 #10: strategy buys only where a round trip costs at most 5 %
+COST_OFFSET_TTL_S = 600
 SIGNAL_PROBE_SIZE = 0.25  # x the signal preset's size_sol (0.5 -> 0.125 SOL), like learn.THOMPSON_PROBE_SIZE
 GRADE_SIZE = {"A": 1.0, "B": 1.0, "C": 1.0, "D": 1.0, "E": 1.0}
 

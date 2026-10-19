@@ -328,6 +328,38 @@ def entry_cost_split(conn, days: float = 7, mode: str = "explore") -> dict:
     return {k: {"n": len(v), "median": _median(v)} for k, v in sorted(out.items())}
 
 
+COST_OFFSET_MIN_N = 20  # closed positions with both market prices booked before the offset counts
+
+
+def cost_offset(conn, days: float = 7) -> dict:
+    """Booked round trip (fill against the market price at the buy and at the sale, fees included) minus the lab's
+    cost model for the same venue, liquidity and stake, median over closed positions. Plan 18.10. 10.2 #10: the
+    expected cost of a buy is the model plus this measured offset, not the model alone.
+    -> {"offset", "n", "booked", "model"} (offset 0.0 under COST_OFFSET_MIN_N)"""
+    import json
+
+    from lab import costs as labcost
+
+    rows = conn.execute(
+        "SELECT strategy, size_sol, entry_price_sol, exit_price_sol, meta FROM ct_positions WHERE status='closed' "
+        "AND closed_at > ? AND entry_price_sol > 0 AND exit_price_sol > 0", (int(time.time() - days * 86400),))
+    booked, model = [], []
+    for r in rows:
+        try:
+            m = json.loads(r["meta"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not m.get("mid_sol") or not m.get("exit_mid_sol") or m.get("exit_source") == "no_route":
+            continue
+        booked.append(r["entry_price_sol"] / m["mid_sol"] - r["exit_price_sol"] / m["exit_mid_sol"])
+        model.append(labcost.roundtrip(m.get("dex"), m.get("liq_usd"), r["size_sol"],
+                                       "copy" if r["strategy"] == "whale" else "market"))
+    n = len(booked)
+    off = _median([b - c for b, c in zip(booked, model)]) if n >= COST_OFFSET_MIN_N else None
+    return {"offset": max(0.0, off) if off is not None else 0.0, "n": n,
+            "booked": _median(booked), "model": _median(model)}
+
+
 def bookkeeping_line(conn, s: Settings) -> str:
     """One log line: ledger check per paper account and the measured costs per source."""
     def pct(x):

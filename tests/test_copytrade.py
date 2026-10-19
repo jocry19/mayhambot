@@ -910,6 +910,7 @@ def test_curve_depth_from_price_lets_exploration_buy_a_curve_coin(env, monkeypat
     s, conn, ex, state = env
     monkeypatch.setattr(strategy, "EXPLORE_CURVE", True)  # the curve path itself (block-0 copies use it)
     st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False), ex)
+    monkeypatch.setattr(strategy, "MAX_ROUNDTRIP_COST", 1.0)  # the curve mechanics, not its cost
     monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": "smart"})
     state["snap"] = dataclasses.replace(state["snap"], dex_id="pumpfun", liquidity_usd=0.0)
     assert st.on_whale_buy(whale_buy(sol=1.0)) is None  # DexScreener's $0 and no curve depth: no buy
@@ -1293,6 +1294,7 @@ def test_first_minute_curve_coin_priced_from_the_sniper_curve(env, monkeypatch):
     s, conn, ex, state = env
     monkeypatch.setattr(strategy, "EXPLORE_CURVE", True)  # the curve path itself (block-0 copies use it)
     st = strategy.Strategy(conn, Settings(db_path=s.db_path, explore_tiers="ultra,smart", strict_whale=True, whale_emergency_stop=0.0, thompson=False), ex)
+    monkeypatch.setattr(strategy, "MAX_ROUNDTRIP_COST", 1.0)  # the curve mechanics, not its cost
     monkeypatch.setattr(store, "wallet_info", lambda c, w: {"tier": "smart"})
     monkeypatch.setattr(market, "snapshot", lambda m, s=None: None)  # DexScreener: no pair yet
     assert st.on_whale_buy(whale_buy(sol=1.0)) is None  # and no curve state either: no price
@@ -1406,3 +1408,36 @@ def test_entry_cost_split_groups_by_source_venue_band_and_stake(env):
     assert d["src estimate"]["n"] == 2 and d["src estimate"]["median"] == pytest.approx(0.11)
     assert d["liq 5-15k"]["n"] == 2 and d["liq 50k+"]["median"] == pytest.approx(0.02)
     assert d["stake 0.05"]["n"] == 2 and d["dex raydium"]["n"] == 3
+
+
+def test_buys_skip_pools_whose_booked_costs_exceed_five_percent(env, monkeypatch):
+    from copytrade import stats
+
+    s, conn, ex, state = env
+    st = strategy.Strategy(conn, s, ex)
+    monkeypatch.setattr(stats, "cost_offset", lambda c: {"offset": 0.04, "n": 54, "booked": 0.07, "model": 0.03})
+    assert st.on_whale_buy(whale_buy()) is None  # model ~3 % + 4 % measured on booked fills: over 5 %
+    msg = [r[0] for r in conn.execute("SELECT message FROM ct_events WHERE kind='skip'")]
+    assert any("erwartete Kosten" in m and "aus 54 Trades" in m for m in msg)
+    st._cost_off = (0.0, {})
+    monkeypatch.setattr(stats, "cost_offset", lambda c: {"offset": 0.0, "n": 5, "booked": None, "model": None})
+    assert st.on_whale_buy(chain.Swap("sigC2", W, int(time.time()) - 5, "buy", MINT, 5 / 3e-6, 5.0, 3e-6))
+
+
+def test_cost_offset_is_the_median_of_booked_minus_model(env):
+    import json as _json
+
+    from copytrade import stats
+    from lab import costs as labcost
+
+    s, conn, ex, state = env
+    now = int(time.time())
+    for i in range(stats.COST_OFFSET_MIN_N):
+        meta = {"mid_sol": 1.0, "exit_mid_sol": 1.0, "dex": "raydium", "liq_usd": 80_000}
+        conn.execute("INSERT INTO ct_positions(mode, wallet, mint, opened_at, entry_price_sol, size_sol, tokens, status,"
+                     " closed_at, exit_price_sol, meta, strategy) VALUES ('paper','w','m',?,1.04,0.1,1,'closed',?,0.97,"
+                     "?,'whale')", (now, now, _json.dumps(meta)))
+    off = stats.cost_offset(conn)
+    model = labcost.roundtrip("raydium", 80_000, 0.1, "copy")
+    assert off["n"] == stats.COST_OFFSET_MIN_N and off["booked"] == pytest.approx(0.07)
+    assert off["offset"] == pytest.approx(0.07 - model)
