@@ -265,17 +265,17 @@ LABEL_TOP = "p05"
 LABEL_POOL_PRED = 0.08  # pool_top2_trail20: every source but the sniper, prediction >= 0.08, trail exit only
 LABEL_POOL = "p08"
 LABEL_POOL_CS = ("copytrade", "strategy")  # rueckschau 19.10.: the two sources positive in both halves
-LABEL_COST = 0.055  # what labels.py takes off (simulator 3 % + pool 2.5 %); added back to get gross
+LABEL_COST = 0.055  # what labels.py took off before it wrote label_cost per row (simulator 3 % + pool 2.5 %)
 
 
 def label_entries(conn, since: int) -> pd.DataFrame:
     """The labelled opportunities of every source under each exit rule the labeller replays (label_rules)."""
     q = ("SELECT source, mint, ts, liq_usd, mcap_usd, features, label_rug, label_rules{} FROM opportunities "
          "WHERE label_at IS NOT NULL AND label_rules IS NOT NULL AND ts>=?")
-    try:
-        O = pd.read_sql(q.format(", pred_mean"), conn, params=(since,))
-    except Exception:  # databases from before the brain wrote its prediction back
-        O = pd.read_sql(q.format(", NULL pred_mean"), conn, params=(since,))
+    have = {row[1] for row in conn.execute("PRAGMA table_info(opportunities)")}
+    # older databases have neither the brain's prediction nor the labeller's cost per row
+    extra = "".join(f", {c}" if c in have else f", NULL {c}" for c in ("pred_mean", "label_cost"))
+    O = pd.read_sql(q.format(extra), conn, params=(since,))
     out = []
     for r in O.itertuples():
         try:
@@ -286,10 +286,12 @@ def label_entries(conn, since: int) -> pd.DataFrame:
         dex = str(f.get("dex") or "")
         liq = r.liq_usd or f.get("liq_usd") or 0
         kind = "launch" if r.source == "sniper" else ("copy" if r.source in ("copytrade", "strategy") else "market")
+        # the labels are net of the labeller's own cost; add back what it took off this row, not a flat rate
+        back = r.label_cost if r.label_cost is not None and r.label_cost == r.label_cost else LABEL_COST
         for name, v in rules.items():
             if v is None:
                 continue
-            g = -1.0 if (r.label_rug and name == "hold60") else max(-1.0, min(CAP, float(v) + LABEL_COST))
+            g = -1.0 if (r.label_rug and name == "hold60") else max(-1.0, min(CAP, float(v) + back))
             out.append((f"label_{r.source}_{name}", r.mint, int(r.ts), dex, float(liq), kind, g))
             if r.pred_mean is not None and r.pred_mean == r.pred_mean and r.pred_mean >= LABEL_TOP_PRED:
                 out.append((f"label_{LABEL_TOP}_{r.source}_{name}", r.mint, int(r.ts), dex, float(liq), kind, g))

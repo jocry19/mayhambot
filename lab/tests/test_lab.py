@@ -173,3 +173,15 @@ def test_run_waits_for_the_last_report_and_a_running_retrain(tmp_path):
     os.utime(tmp_path / "TRAINING", (now, now))
     assert next_round(out, db, 6 * 3600, now=now) == 600  # report due, but a retrain runs: wait
     assert next_round(out, db, 6 * 3600, now=now + 2 * 3600) == 0  # marker older than 90 min: stale
+
+
+def test_label_entries_add_back_the_labellers_own_cost():
+    c = _db()
+    c.execute("ALTER TABLE opportunities ADD COLUMN pred_mean REAL")
+    c.execute("ALTER TABLE opportunities ADD COLUMN label_cost REAL")
+    for m, lc in (("a", 0.12), ("b", None)):
+        c.execute("INSERT INTO opportunities VALUES ('copytrade', ?, 100, 5e4, 1e5, '{}', 1, 0, ?, 0.0, ?)",
+                  (m, json.dumps({"trail20@0.2": 0.1}), lc))
+    g = hypotheses.label_entries(c, 0).set_index("mint").gross
+    assert abs(g["a"] - 0.22) < 1e-9  # the row's own cost
+    assert abs(g["b"] - (0.1 + hypotheses.LABEL_COST)) < 1e-9  # rows labelled before label_cost existed
