@@ -131,6 +131,9 @@ def test_label_entries_top_prediction_pocket():
     assert set(E[E.hyp == "label_p08_pool_trail20@0.2"].mint) == {"a"}  # the sniper and the hold rule stay out
     assert not len(E[E.hyp == "label_p08_pool_hold60"])
     assert res["label_p08_pool_trail20@0.2"]["source"] == "pool"
+    assert set(E[E.hyp == "label_p08_copytrade_trail20@0.2"].mint) == {"a"}
+    assert set(E[E.hyp == "label_p08_cs_trail20@0.2"].mint) == {"a"}
+    assert not len(E[E.hyp == "label_p08_sniper_trail20@0.2"])
 
 
 def test_evaluate_needs_all_thirds_and_enough_coins():
