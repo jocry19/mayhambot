@@ -2031,6 +2031,8 @@ def test_every_position_leaves_by_the_trail_the_emergency_stop_or_time(conn, s):
     clock[0] += 5
     assert t.manage() == 1
     assert conn.execute("SELECT exit_reason FROM brain_positions").fetchone()[0] == "trail"
+    cost = json.loads(conn.execute("SELECT meta FROM brain_positions").fetchone()[0])["cost"]
+    assert {"buy_fee_sol", "buy_impact", "buy_slip", "delay_s", "sell_fee_sol", "sell_impact", "sell_slip"} <= set(cost)
     # a second coin: the emergency stop at -50 % fires at once, a flat coin goes after 60 min
     for m, px, wait, why in (("Crsh" + MINT[4:], 0.45, 30, "stop"), ("Flat" + MINT[4:], 1.02, 61 * 60, "time")):
         mk.snaps[m] = snap(mint=m)
@@ -2071,3 +2073,39 @@ def test_the_learning_account_samples_three_an_hour_at_night_and_skips_swing(con
     monkeypatch.setattr(T, "_berlin_hour", lambda ts: 12)
     assert "Obergrenze" not in (t._gate("pool", MINT, snap(), d, row) or "")
     assert "swing" in T.POOL_PLANS_OFF
+
+
+def test_the_learning_account_calibrates_each_source_by_its_recent_labels(conn, s):
+    from brain import opportunities as O
+    now = time.time()
+    for i in range(120):  # sniper: predicted +10 %, made -20 % -> shift -30 %; copytrade: predicted 0, made +2 %
+        src = "sniper" if i < 60 else "copytrade"
+        O.report(conn, src, f"c{i}", f"Cal{i:040d}"[:44], now - 7200, {})
+        conn.execute("UPDATE opportunities SET label_at=?, pred_mean=?, label_ret60=? WHERE ref=?",
+                     (int(now) - 3600, 0.1 if src == "sniper" else 0.0, -0.2 if src == "sniper" else 0.02, f"c{i}"))
+    cal = learner.calibration(conn, now)
+    assert learner.calibrated_shift(cal, "sniper", 0.1) == pytest.approx(-0.3)
+    assert learner.calibrated_shift(cal, "copytrade", 0.5) == pytest.approx(0.02)
+    assert learner.calibrated_shift(cal, "signals", 0.1) == 0.0  # too few rows: no shift
+    mk = Market()
+    t, _ = _pool_trader(conn, s, mk, src="sniper")
+    assert t._calib_shift("sniper", 0.1) == pytest.approx(-0.3)
+    s.calibrate = False
+    t._calib = (-1e18, {})
+    assert t._calib_shift("sniper", 0.1) == 0.0
+
+
+def test_a_coin_that_gaps_down_and_stays_ends_every_rule_alike(conn, s):
+    """E5 check (19.10.): 1,191 rows with all rules alike and ret60 = min60 at -15 to -32 %. Not a stop bug: on a
+    sampled path the stop fills at the first price under it (the gap, labels sample every 1-5 min), and a coin that
+    falls in one step and stays there ends every rule at that price. A steady fall stops at the first price under -15 %."""
+    import json as _j
+    from brain import labels
+    t0 = 1_000_000
+    gap = [[t0, 1.0]] + [[t0 + 300 * i, 0.75] for i in range(1, 13)]
+    lab = labels.label(gap, 0.05)
+    exits_ = {k: v for k, v in _j.loads(lab["label_rules"]).items() if not k.startswith("dip")}
+    assert len(set(exits_.values())) == 1 and lab["label_ret60"] == lab["label_min60"]
+    steady = [[t0 + 300 * i, 1 - 0.25 * i / 12] for i in range(13)]
+    rules = _j.loads(labels.label(steady, 0.05)["label_rules"])
+    assert rules["tp30sl15"] > rules["hold60"] + 0.05  # the stop sold on the way down
