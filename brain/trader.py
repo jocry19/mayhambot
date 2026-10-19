@@ -39,7 +39,8 @@ HIST_SPAN_S = 45 * 60  # a buy needs our own price history on the coin reaching 
 HIST_MIN_POINTS = 3  # ... with at least this many points in the last 6 h
 HIST_LOOK_S = 6 * 3600
 HIST_POOL_AGE_S = 60 * 60  # ... or a pool at least this old (the market's own price history)
-NO_HIST_POOL_SAMPLE = 0.2  # share of learning-account buys without price history that go through anyway
+NO_HIST_POOL_SAMPLE = 0.0  # share of learning-account buys without price history that go through anyway (09:00 19.10.:
+# 22 such buys -13.3 % against +13.0 % on 29 with history; the labels still learn every coin without history)
 REENTRY_S = 6 * 3600  # no second brain position in a coin within this window: a coin we just lost on is no new idea
 TRAIL_MIN_HOLD_S = 60  # the trail arms after a minute: the first quotes after a buy are noise, not a run
 PRICE_RETRY_S = 30  # a coin without a DexScreener pair yet gets this long to show one before it is decided
@@ -443,6 +444,7 @@ class Trader:
         d = decide.choose(model, kind, feats, st, self.rng, equity=self.equity())
         if kind == "pool":
             shift = self._calib_shift(row["source"] or "", d.mean)
+            raw["pred_model"] = round(d.mean, 5)
             if shift:
                 # the model's mean moved by its own recent error in this source and range (calibration, review 19.10.);
                 # pred_mean in the shared row stays the model's own, so the calibration never learns from itself
@@ -505,7 +507,7 @@ class Trader:
         opp_id = cur.lastrowid
         pid = self.open(opp_id, kind, row, snap, d, note, symbol) if d.enter and cur.rowcount else None
         if kind == "pool" and cur.rowcount:
-            self._write_back(row["id"], d, block, pid)
+            self._write_back(row["id"], d, block, pid, raw.get("calib") or 0.0)
         return pid
 
     def _top_draw(self, draw: float, src: str = "") -> bool:
@@ -522,14 +524,17 @@ class Trader:
         ranked = sorted(draws)
         return draw >= ranked[min(len(ranked) - 1, int(len(ranked) * (1 - share)))]
 
-    def _write_back(self, oid: int, d, block, pid) -> None:
-        """The brain's view on a pooled opportunity, in its own row: prediction, draw, decision, stake."""
-        q10 = d.mean - 1.2816 * d.std
+    def _write_back(self, oid: int, d, block, pid, shift: float = 0.0) -> None:
+        """The brain's view on a pooled opportunity, in its own row: prediction, draw, decision, stake. pred_mean is
+        the model's own mean, before the calibration shift (09:00 19.10.: 20477db wrote the shifted one, so the
+        calibration and the label skill judged a mean the calibration had already moved)."""
+        mean = d.mean - shift
+        q10 = mean - 1.2816 * d.std
         dec = "skip" if not pid else ("learn" if d.explore else "perform")
         self.conn.execute(
             "UPDATE opportunities SET model=?, pred_mean=?, pred_sd=?, pred_q10=?, draw=?, decision=?, account=?, "
             "size_sol=?, decided_at=?, position_id=? WHERE id=?",
-            (opportunities_model(self.pm), round(d.mean, 5), round(d.std, 5), round(q10, 5), round(d.sample, 5),
+            (opportunities_model(self.pm), round(mean, 5), round(d.std, 5), round(q10, 5), round(d.sample, 5),
              dec, None if not pid else dec, d.size_sol if pid else None, int(self.clock()), pid, oid))
 
     def _calib_shift(self, src: str, pred: float) -> float:
@@ -544,6 +549,10 @@ class Trader:
                 log.debug("calibration: %s", e)
                 cal = {}
             self._calib = (now, cal)
+            # visible to the hour line and the readers (09:00 19.10.: nothing showed the calibration was on)
+            store.put(self.conn, "brain_calibration", {"at": int(now), "bins": {k: [[None if e == float("inf") else
+                                                                                       round(e, 5), b] for e, b in v]
+                                                                                 for k, v in cal.items()}})
         return learner.calibrated_shift(cal, src, pred)
 
     def _pool_rule(self, now: float):
@@ -1005,8 +1014,8 @@ class Trader:
         """E3 (review 19.10.: stops lost most, -35.5 % on n 110 learning and -30.2 % on n 25 main, filled 5-6 points
         under their level; trails were the only exits in profit, n 40 +20.6 %; on the labels a 20 % trail beat every
         fixed target in each tenth from the fifth up). The same for every account and position, whatever it was
-        bought with: rug and liquidity exits, the emergency stop at -50 %, nothing else in the first 15 minutes; then a
-        20 % trail from the high once it is +20 %; 60 min without an armed trail, 240 min at most."""
+        bought with: rug and liquidity exits, the emergency stop at -50 %, a 20 % trail from the high once it is +20 %
+        (from the first minute on); no time exit in the first 15 minutes, 60 min without an armed trail, 240 min at most."""
         if not snap or not snap.price_sol:
             return "no_market" if now - (p["last_seen"] or p["opened_at"]) > NO_MARKET_S else None
         entry = _ref_price(p)
@@ -1020,11 +1029,14 @@ class Trader:
         if px <= entry * (1 - EMERGENCY_STOP):
             return "stop"
         held = (now - p["opened_at"]) / 60
-        if held < TRAIL_QUIET_MIN:
-            return None
         armed = high / entry - 1 >= TRAIL_ARM
         if armed and px <= high * (1 - TRAIL_DRAW):
+            # an armed trail also in the quiet minutes (09:00 19.10.: ELON max +60 % sold at -9.7 %, PCAT max +93 % at
+            # -8.5 %: the peak came and went inside the first 15 min, the trail only woke after it); the labels' trail
+            # rules have no quiet window either. The quiet stays for the time exits
             return "trail"
+        if held < TRAIL_QUIET_MIN:
+            return None
         if held >= TRAIL_MAX_MIN or (not armed and held >= TRAIL_IDLE_MIN):
             return "time"
         return None

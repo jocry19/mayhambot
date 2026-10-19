@@ -266,10 +266,20 @@ class Labeler:
                 continue
             self._write(oid, {"label_at": int(now), **lab, "label_cost": round(c, 5)})
             n += 1
-            if len(self.long) < MAX_LONG:
+            # the sniper's flood (12k rows a night) filled the whole queue and left the other sources without long
+            # labels (09:00 19.10.); it gets half the room
+            if len(self.long) < (MAX_LONG // 2 if src == "sniper" else MAX_LONG):
                 self.long[oid] = [mint, t0]
-        for oid, (mint, t0) in list(self.long.items()):
+        for oid, v in list(self.long.items()):
+            mint, t0 = v[0], v[1]
             if now - t0 < LONG_S[-1] + 600 and self.miss.get(mint, 0) < DS_MISS_STOP:
+                if len(v) < 3 and now - t0 >= LONG_S[0] + 600:
+                    # the 4 h horizon is written at 4 h, not with the day's (09:00 19.10.: label_ret240 stood still
+                    # for 20 h after each row's hour)
+                    lab = long_labels(list(self.paths.get(mint, [])), t0)
+                    if lab.get("label_ret240") is not None:
+                        self._write(oid, lab)
+                    self.long[oid] = [mint, t0, 1]
                 continue
             del self.long[oid]
             pts = list(self.paths.get(mint, []))
