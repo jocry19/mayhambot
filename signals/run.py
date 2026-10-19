@@ -384,7 +384,7 @@ def cycle(conn, i):
     notifier.notify(conn, sigs)
     engine.last_funnel.update(alert_s=round(time.time() - t0, 1), fetch_s=round(t_fetch, 1))
     try:  # v2: smart money accumulating over hours (own type, own cooldown; same alerts and outcome rating)
-        sigs2 = accum.evaluate(conn)
+        sigs2 = db.retry_locked(conn, lambda: accum.evaluate(conn))  # one commit at its end: safe to repeat
         notifier.notify(conn, sigs2)
         sigs = sigs + sigs2
     except Exception:  # noqa: BLE001 - v2 must never stop v1
