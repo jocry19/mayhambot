@@ -20,6 +20,8 @@ Ergebnis: `data/lab/report.json` (für Dashboard und Entscheider) und `data/lab/
 | `nach_migration_Nm_60m` | `sniper_launches.migrated_ts` + `token_prices` | N min nach der Migration | 60 min halten |
 | `launch_mcA-B_*` | `sniper_paths`, ohne Marken-Masche (Ersteller ≥ 75 % oder Ersteller plus Start-Block ≥ 70 %, die safety hart sperrt) | beim Entscheid des Snipers, nach MC-Band in SOL | Ziel ×k / Stopp s (Fill 3 % unter der Marke) oder halten |
 | `signal_<gruppe>_<einstieg>_<ausstieg>` | `signals` (Gruppe `call`) und `signal_shadow` (`schatten_<grund>`, vom Trichter abgelehnt) + `token_prices` | `sofort` (≥ 60 s nach dem Alarm) oder `limit15` / `limit30` (erst wenn der Kurs binnen 2 h 15 / 30 % unter den Alarmkurs fällt) | 60 bzw. 240 min halten oder `tp100_240m` (Verkauf bei ×2); eigene Art `signal`, gibt also keine Markt-Käufe frei |
+| `launch_tempoNs_*` | `sniper_curve` + `sniper_launches.created_ts`, ohne Marken-Masche | N = 2 / 5 / 10 / 20 s nach dem Create, erster Kurvenpunkt (≤ 3 s später) | `halten60` (letzter Punkt in 60 min) oder `trail20` (Trail 20 % ab +20 %, Notstopp −50 %) |
+| `label_p05_<quelle>_<regel>` | wie `label_*`, nur Gelegenheiten mit `pred_mean` ≥ 0,05 | Label-Einstieg | wie `label_*` |
 | `label_<quelle>_<regel>` | `opportunities.label_rules` | Label-Einstieg | jede Ausstiegsregel der Labels, Kosten neu gerechnet |
 
 Neue Hypothesen kommen als Eintrag in `PANEL_HYPS` oder als eigene Familie dazu; Namen nie umbenennen, damit die

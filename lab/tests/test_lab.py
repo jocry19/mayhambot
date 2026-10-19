@@ -15,7 +15,8 @@ def _db():
     CREATE TABLE token_prices (mint TEXT, ts INTEGER, price_usd REAL, mcap_usd REAL, liquidity_usd REAL);
     CREATE TABLE tokens (mint TEXT PRIMARY KEY, dex TEXT, pair_created_at INTEGER);
     CREATE TABLE sniper_launches (mint TEXT, migrated INTEGER, migrated_ts INTEGER, mcap_decide_sol REAL, sol_usd REAL,
-        dev_buy_pct REAL, bundle_pct REAL);
+        dev_buy_pct REAL, bundle_pct REAL, created_ts INTEGER);
+    CREATE TABLE sniper_curve (mint TEXT, ts INTEGER, mcap_sol REAL, v_sol REAL, n_trades INTEGER);
     CREATE TABLE sniper_paths (mint TEXT, created_ts INTEGER, decided_ts INTEGER, points_json TEXT);
     CREATE TABLE opportunities (source TEXT, mint TEXT, ts INTEGER, liq_usd REAL, mcap_usd REAL, features TEXT,
         label_at INTEGER, label_rug INTEGER, label_rules TEXT);
@@ -97,6 +98,36 @@ def test_signal_entries_at_once_and_on_a_dip():
     assert "signal_call_limit30_60m" not in E  # never came back 30 %
     assert "signal_schatten_low_net_sofort_60m" in E
     assert pruefstand.brain_kind("signal_call_sofort_60m") == "signal"
+
+
+def test_tempo_entries_by_delay_and_trail():
+    c = _db()
+    c.execute("INSERT INTO sniper_launches (mint, sol_usd, dev_buy_pct, bundle_pct, created_ts) VALUES "
+              "('f', 180, 5, 0, 1000), ('m', 180, 79.31, 0, 1000)")
+    path = [(0, 30), (2, 30), (5, 33), (10, 45), (20, 60), (60, 90), (120, 70), (3000, 40)]
+    for mint in ("f", "m"):
+        for dt, mc in path:
+            c.execute("INSERT INTO sniper_curve VALUES (?, ?, ?, 0, 0)", (mint, 1000 + dt, mc))
+    E = hypotheses.tempo_entries(c, 0)
+    assert set(E.mint) == {"f"}  # the brand scam stays out
+    g = E.set_index("hyp").gross
+    assert abs(g["launch_tempo2s_halten60"] - (40 / 30 - 1)) < 1e-9
+    assert abs(g["launch_tempo2s_trail20"] - (70 / 30 - 1)) < 1e-9  # peak 90, sold at 70 (> 20 % off the peak)
+    assert abs(g["launch_tempo20s_halten60"] - (40 / 60 - 1)) < 1e-9
+
+
+def test_label_entries_top_prediction_pocket():
+    c = _db()
+    c.execute("ALTER TABLE opportunities ADD COLUMN pred_mean REAL")
+    for m, pm in (("a", 0.08), ("b", -0.1)):
+        c.execute("INSERT INTO opportunities VALUES ('copytrade', ?, 100, 5e4, 1e5, '{}', 1, 0, ?, ?)",
+                  (m, json.dumps({"trail20@0.2": 0.1}), pm))
+    E = hypotheses.label_entries(c, 0)
+    assert set(E[E.hyp == "label_p05_copytrade_trail20@0.2"].mint) == {"a"}
+    assert len(E[E.hyp == "label_copytrade_trail20@0.2"]) == 2
+    res = {r["hyp"]: r for r in pruefstand.evaluate(pruefstand.net_of_costs(E))}
+    assert res["label_p05_copytrade_trail20@0.2"]["source"] == "copytrade"
+    assert res["label_p05_copytrade_trail20@0.2"]["brain_kind"] == "pool"
 
 
 def test_evaluate_needs_all_thirds_and_enough_coins():

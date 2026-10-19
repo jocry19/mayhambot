@@ -260,13 +260,19 @@ def signal_entries(conn, since: int, prices: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(out, columns=COLS) if out else _empty()
 
 
+LABEL_TOP_PRED = 0.05  # rueckschau 19.10.: labels netto +1.5 % from this prediction on, below clearly negative
+LABEL_TOP = "p05"
 LABEL_COST = 0.055  # what labels.py takes off (simulator 3 % + pool 2.5 %); added back to get gross
 
 
 def label_entries(conn, since: int) -> pd.DataFrame:
     """The labelled opportunities of every source under each exit rule the labeller replays (label_rules)."""
-    O = pd.read_sql("SELECT source, mint, ts, liq_usd, mcap_usd, features, label_rug, label_rules FROM opportunities "
-                    "WHERE label_at IS NOT NULL AND label_rules IS NOT NULL AND ts>=?", conn, params=(since,))
+    q = ("SELECT source, mint, ts, liq_usd, mcap_usd, features, label_rug, label_rules{} FROM opportunities "
+         "WHERE label_at IS NOT NULL AND label_rules IS NOT NULL AND ts>=?")
+    try:
+        O = pd.read_sql(q.format(", pred_mean"), conn, params=(since,))
+    except Exception:  # databases from before the brain wrote its prediction back
+        O = pd.read_sql(q.format(", NULL pred_mean"), conn, params=(since,))
     out = []
     for r in O.itertuples():
         try:
@@ -282,6 +288,59 @@ def label_entries(conn, since: int) -> pd.DataFrame:
                 continue
             g = -1.0 if (r.label_rug and name == "hold60") else max(-1.0, min(CAP, float(v) + LABEL_COST))
             out.append((f"label_{r.source}_{name}", r.mint, int(r.ts), dex, float(liq), kind, g))
+            if r.pred_mean is not None and r.pred_mean == r.pred_mean and r.pred_mean >= LABEL_TOP_PRED:
+                out.append((f"label_{LABEL_TOP}_{r.source}_{name}", r.mint, int(r.ts), dex, float(liq), kind, g))
+    return pd.DataFrame(out, columns=COLS) if out else _empty()
+
+
+TEMPO_DELAYS_S = (2, 5, 10, 20)  # seconds after the create (rueckschau 19.10.: 2 s x2 31 %, 20 s 18 %)
+TEMPO_TOL_S = 3
+TEMPO_HORIZON_S = 3600
+TEMPO_EXITS = (("halten60", None), ("trail20", 0.2))
+
+
+def _tempo(ts, mc, j, trail):
+    """Gross result of a curve entry at index j: held to the last point within the hour, or with a trail of 20 %
+    armed at +20 % and an emergency stop at -50 %; a fall below RUG of the entry is a rug (-100 %)."""
+    pe = mc[j]
+    k = np.searchsorted(ts, ts[j] + TEMPO_HORIZON_S, side="right")
+    peak = pe
+    for x in mc[j + 1:k]:
+        if x <= pe * RUG:
+            return -1.0
+        if trail is not None:
+            peak = max(peak, x)
+            if peak >= pe * (1 + trail) and x <= peak * (1 - trail):
+                return min(CAP, x / pe - 1)
+            if x <= pe * 0.5:
+                return x / pe - 1
+    return min(CAP, mc[k - 1] / pe - 1)
+
+
+def tempo_entries(conn, since: int) -> pd.DataFrame:
+    """Sniper entry speed: buying a launch 2 / 5 / 10 / 20 s after its create on the bonding curve (sniper_curve,
+    market cap in SOL), held an hour or sold on a trail. Brand-scam launches (safety hard veto) are left out."""
+    L = pd.read_sql("SELECT mint, created_ts, sol_usd, dev_buy_pct dev, bundle_pct bundle FROM sniper_launches "
+                    "WHERE created_ts>=?", conn, params=(since,))
+    if L.empty:
+        return _empty()
+    L = L[[not _masche(d, b) for d, b in zip(L.dev, L.bundle)]].set_index("mint")
+    C = pd.read_sql("SELECT c.mint, c.ts, c.mcap_sol FROM sniper_curve c JOIN sniper_launches l USING(mint) "
+                    "WHERE l.created_ts>=? AND c.ts<=l.created_ts+? AND c.mcap_sol>0", conn,
+                    params=(since, max(TEMPO_DELAYS_S) + TEMPO_HORIZON_S))  # only the first hour of each curve
+    out = []
+    for m, g in C[C.mint.isin(L.index)].sort_values(["mint", "ts"]).groupby("mint"):
+        ts, mc = g.ts.to_numpy(), g.mcap_sol.to_numpy()
+        r = L.loc[m]
+        for d in TEMPO_DELAYS_S:
+            t = r.created_ts + d
+            j = np.searchsorted(ts, t)
+            if j >= len(ts) - 1 or ts[j] - t > TEMPO_TOL_S:
+                continue
+            liq = mc[j] * (r.sol_usd or 180) * 0.3
+            for xname, trail in TEMPO_EXITS:
+                out.append((f"launch_tempo{d}s_{xname}", m, int(ts[j]), "pumpfun", liq, "launch",
+                            _tempo(ts, mc, j, trail)))
     return pd.DataFrame(out, columns=COLS) if out else _empty()
 
 
@@ -292,7 +351,8 @@ def all_entries(conn, since: int) -> tuple[pd.DataFrame, dict]:
                        "panel_points": len(P)}
     for name, fn in (("panel", lambda: panel_entries(P)), ("migration", lambda: migration_entries(conn, since, prices)),
                      ("snipe", lambda: snipe_entries(conn, since)), ("labels", lambda: label_entries(conn, since)),
-                     ("signal", lambda: signal_entries(conn, since, prices))):
+                     ("signal", lambda: signal_entries(conn, since, prices)),
+                     ("tempo", lambda: tempo_entries(conn, since))):
         try:
             parts.append(fn())
         except Exception as e:  # one broken family must not cost the others
