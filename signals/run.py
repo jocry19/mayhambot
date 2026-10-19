@@ -127,8 +127,9 @@ def fetch_trades(conn, watch, budget=None):
             log.info("trades budget used after %d/%d due tokens, rest next cycle", done, len(due))
             break
         done += 1
-        conn.execute("UPDATE tokens SET last_trades_fetch=? WHERE mint=?", (int(time.time()), r["mint"]))
-        conn.commit()  # never hold the write lock across the network call below
+        db.retry_locked(conn, lambda: (conn.execute("UPDATE tokens SET last_trades_fetch=? WHERE mint=?",
+                                                    (int(time.time()), r["mint"])),
+                                       conn.commit()))  # never hold the write lock across the network call below
         try:
             trades = market.pool_trades(_row_token(r))
         except Exception as e:  # noqa: BLE001

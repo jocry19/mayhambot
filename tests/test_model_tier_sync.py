@@ -95,3 +95,21 @@ def test_rescore_skips_without_new_trades(tmp_path, monkeypatch):
     now[0] += scoring.RESCORE_MAX_AGE_S
     scoring.rescore_all(conn)  # nothing new for ten minutes: prices moved, runs again
     assert len(runs) == 4
+
+
+def test_rescore_writes_only_changed_positions(tmp_path, monkeypatch):
+    conn = _conn(tmp_path)
+    cols = scoring.POS_COLS
+    keep = dict(wallet="A", mint="M", **{c: 1 for c in cols})
+    moved = dict(wallet="A", mint="N", **{c: 2 for c in cols})
+    ph = ", ".join("?" * (2 + len(cols)))
+    sql = f"INSERT INTO wallet_positions(wallet, mint, {', '.join(cols)}) VALUES ({ph})"
+    conn.execute(sql, ("A", "M", *[1] * len(cols)))
+    conn.execute(sql, ("A", "N", *[1] * len(cols)))
+    conn.execute(sql, ("B", "GONE", *[1] * len(cols)))
+    conn.commit()
+    monkeypatch.setattr(scoring, "compute_positions", lambda c: [dict(keep, last_ts=1), dict(moved, last_ts=1)])
+    monkeypatch.setattr(scoring, "WRITE_BATCH", 1)
+    scoring.rescore_all(conn, force=True)
+    rows = {(w, m): t for w, m, t in conn.execute("SELECT wallet, mint, trades FROM wallet_positions")}
+    assert rows == {("A", "M"): 1, ("A", "N"): 2}       # changed row rewritten, vanished one deleted

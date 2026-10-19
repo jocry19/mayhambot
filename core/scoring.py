@@ -245,15 +245,30 @@ def rescore_all(conn, cfg=settings, force=False) -> int:
     return n
 
 
+POS_COLS = ("buy_usd", "sell_usd", "buy_tokens", "sell_tokens", "realized_pnl_usd", "unrealized_pnl_usd", "roi",
+            "first_buy_ts", "first_buy_price", "peak_multiple", "trades")
+WRITE_BATCH = 2000  # rows per write transaction: the DB stays free for the other writers in between
+
+
+def _batched(conn, sql, rows):
+    n = WRITE_BATCH
+    for i in range(0, len(rows), n):
+        conn.executemany(sql, rows[i:i + n])
+        conn.commit()
+
+
 def _rescore(conn, cfg) -> int:
     positions = compute_positions(conn)
-    conn.execute("DELETE FROM wallet_positions")
-    conn.executemany(
-        "INSERT INTO wallet_positions(wallet, mint, buy_usd, sell_usd, buy_tokens, sell_tokens, realized_pnl_usd, "
-        "unrealized_pnl_usd, roi, first_buy_ts, first_buy_price, peak_multiple, trades) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        [(p["wallet"], p["mint"], p["buy_usd"], p["sell_usd"], p["buy_tokens"], p["sell_tokens"],
-          p["realized_pnl_usd"], p["unrealized_pnl_usd"], p["roi"], p["first_buy_ts"], p["first_buy_price"],
-          p["peak_multiple"], p["trades"]) for p in positions])
+    # 19.10.: DELETE all + INSERT all held the write lock 15-31 s every rescore and locked brain / live out. Only
+    # the rows that changed are written now, in short batches; the reads above and here take no write lock.
+    old = {(r[0], r[1]): tuple(r[2:]) for r in conn.execute(
+        f"SELECT wallet, mint, {', '.join(POS_COLS)} FROM wallet_positions")}
+    new = {(p["wallet"], p["mint"]): tuple(p[c] for c in POS_COLS) for p in positions}
+    gone = [k for k in old if k not in new]
+    changed = [(*k, *v) for k, v in new.items() if old.get(k) != v]
+    _batched(conn, "DELETE FROM wallet_positions WHERE wallet=? AND mint=?", gone)
+    _batched(conn, f"INSERT OR REPLACE INTO wallet_positions(wallet, mint, {', '.join(POS_COLS)}) "
+                   f"VALUES ({', '.join('?' * (2 + len(POS_COLS)))})", changed)
     by = defaultdict(list)
     for p in positions:
         by[p["wallet"]].append(p)
@@ -268,9 +283,8 @@ def _rescore(conn, cfg) -> int:
         rows.append((q["score"], tier, is_smart, is_bot, q["n"], q["win_rate"], q["early_rate"],
                      sum(p["realized_pnl_usd"] for p in ps), q["total_pnl"], q["roi"], q["median_peak"],
                      q["consistency"], max(p["last_ts"] for p in ps), now, w))
-    conn.executemany(
-        """UPDATE wallets SET score=?, tier=?, is_smart=?, is_bot=?, tokens_traded=?, win_rate=?, early_rate=?,
-               realized_pnl_usd=?, total_pnl_usd=?, roi=?, median_peak_multiple=?, consistency=?,
+    _batched(conn, """UPDATE wallets SET score=?, tier=?, is_smart=?, is_bot=?, tokens_traded=?, win_rate=?,
+               early_rate=?, realized_pnl_usd=?, total_pnl_usd=?, roi=?, median_peak_multiple=?, consistency=?,
                last_trade_ts=?, updated_at=? WHERE address=?""", rows)
     conn.execute("UPDATE wallets SET is_smart=1, tier=COALESCE(tier,'smart') WHERE manual=1 AND is_bot=0")
     if sync_model_tiers(conn) is None:

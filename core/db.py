@@ -318,11 +318,19 @@ PRICE_ROW_EVERY_S = int(os.getenv("PRICE_ROW_EVERY_S") or 45)
 PRICE_ROW_MOVE = 0.03
 
 
+UPSERT_BATCH = 300
+
+
 def upsert_tokens(conn, tokens, tracked=None, snap_every=0, dense=()):
     """tracked=None/True marks tokens as watched; False only stores price data (never un-watches).
     snap_every: a token_prices snapshot only if the mint's last one is at least this old (default
     PRICE_ROW_EVERY_S, and always when the price moved PRICE_ROW_MOVE); mints in `dense` always get one.
-    One executemany per table, so the write transaction stays short with many writers on the file."""
+    One executemany per table and UPSERT_BATCH tokens per write transaction, so the write lock stays short with
+    many writers on the file (19.10.: 1,800 mints per refresh since the price paths)."""
+    if len(tokens) > UPSERT_BATCH:
+        for i in range(0, len(tokens), UPSERT_BATCH):
+            upsert_tokens(conn, tokens[i:i + UPSERT_BATCH], tracked, snap_every, dense)
+        return
     now = int(time.time())
     dense = set(dense)
     every = snap_every or PRICE_ROW_EVERY_S
