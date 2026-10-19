@@ -402,7 +402,18 @@ def run_once(alert=ops.send_alert, now=None, health=None) -> str:
     st["deploying"] = {"head": head, "target": target, "at": now}
     _save(st)
     t_u = time.time()
-    r = _run_group([_python(), "mayham.py", "update"], ops.cfg("AUTO_UPDATE_TIMEOUT_MIN", 45) * 60, _gate_env())
+    # data/DEPLOYING while the gate runs and the services restart: the research service starts no retrain then
+    # (a retrain begun during the 5-25 min test gate was killed by the restart that followed)
+    marker = ops.db_path().parent / "DEPLOYING"
+    try:
+        marker.write_text(str(int(t_u)))
+    except OSError:
+        marker = None
+    try:
+        r = _run_group([_python(), "mayham.py", "update"], ops.cfg("AUTO_UPDATE_TIMEOUT_MIN", 45) * 60, _gate_env())
+    finally:
+        if marker is not None:
+            marker.unlink(missing_ok=True)
     log((r.stdout + r.stderr).strip()[-4000:])
     log(f"update step took {time.time() - t_u:.0f} s (exit {r.returncode})")
     if r.returncode != 0 or "Update ok" not in r.stdout:

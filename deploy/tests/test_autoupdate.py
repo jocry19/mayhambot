@@ -167,6 +167,21 @@ def test_deploy_waits_for_a_running_retrain_unless_urgent(repo):
     assert autoupdate.run_once(alerts.append, health=ok, now=1e9 + 601).startswith("eingespielt")
 
 
+def test_deploy_marks_itself_while_the_gate_runs(repo, monkeypatch):
+    work, push, head, alerts = repo
+    seen = []
+    real = autoupdate._run_group
+
+    def run(*a, **k):
+        seen.append((ops.db_path().parent / "DEPLOYING").exists())   # the research service starts no retrain now
+        return real(*a, **k)
+    monkeypatch.setattr(autoupdate, "_run_group", run)
+    push("a")
+    assert autoupdate.run_once(alerts.append, health=lambda: (True, "2 von 2 Dienste laufen stabil"),
+                               now=1e9).startswith("eingespielt")
+    assert seen == [True] and not (ops.db_path().parent / "DEPLOYING").exists()
+
+
 def test_dirty_checkout_waits(repo):
     work, push, head, alerts = repo
     (work / "mayham.py").write_text(FAKE_MAYHAM + "\n# local edit\n")
