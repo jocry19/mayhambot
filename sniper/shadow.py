@@ -231,6 +231,28 @@ def _stats(rows):
             "age": round(statistics.median(r["fill_age_sec"] for r in rows), 1)}
 
 
+def _t(xs):
+    if len(xs) < 3:
+        return None
+    sd = statistics.stdev(xs)
+    return round(statistics.mean(xs) / (sd / len(xs) ** 0.5), 2) if sd > 0 else None
+
+
+def robust(rows):
+    """How much the mean rests on a few big winners (plan 19.10.: Ø +5 % at a median of -11 %): the mean of the top
+    fifth, the share above +100 %, the mean without the three best, the t value and the three time thirds."""
+    rs = sorted((r for r in rows if r["pnl_pct"] is not None), key=lambda r: r["fill_ts"])
+    xs = [r["pnl_pct"] for r in rs]
+    if len(xs) < 10:
+        return {"n": len(xs)}
+    top = sorted(xs, reverse=True)
+    k = max(1, len(xs) // 5)
+    third = len(xs) // 3
+    return {"n": len(xs), "top5th": round(statistics.mean(top[:k]), 4), "over100": round(sum(x > 1 for x in xs) / len(xs), 3),
+            "without3": round(statistics.mean(top[3:]), 4), "best": round(top[0], 4), "t": _t(xs),
+            "thirds": [round(statistics.mean(xs[i * third:(i + 1) * third if i < 2 else len(xs)]), 4) for i in range(3)]}
+
+
 def report(conn, since=0):
     """Fast shadow entry against the 20 s decision on the same launches (pairs: both legs finished)."""
     try:
@@ -246,7 +268,10 @@ def report(conn, since=0):
     out = {"n": len(rows), "fast_all": _stats(list(by["fast"].values())),
            "pairs": {leg: _stats([by[leg][m] for m in pair]) for leg in LEGS},
            "clean": {leg: _stats([by[leg][m] for m in clean]) for leg in LEGS},
-           "exits": {}, "no_price": {leg: len(by[leg]) - len(priced[leg]) for leg in LEGS}}
+           "exits": {}, "no_price": {leg: len(by[leg]) - len(priced[leg]) for leg in LEGS},
+           "robust": {leg: robust([by[leg][m] for m in pair]) for leg in LEGS}}
+    diff = [by["fast"][m]["pnl_pct"] - by["decide"][m]["pnl_pct"] for m in pair]
+    out["diff"] = {"n": len(diff), "mean": round(statistics.mean(diff), 4) if diff else None, "t": _t(diff)}
     for r in by["fast"].values():
         k = r["exit_reason"] or "kein Kurs"
         out["exits"][k] = out["exits"].get(k, 0) + 1
@@ -265,11 +290,23 @@ def summary_lines(rep):
     if not rep or not rep.get("n"):
         return []
     p, c = rep["pairs"], rep["clean"]
-    return [f"Schatten-Einstieg (Trail 20 % ab +20 %, Notstopp −50 %, gleiche Kosten, nur gemessen), dieselben Launches: "
+    out = [f"Schatten-Einstieg (Trail 20 % ab +20 %, Notstopp −50 %, gleiche Kosten, nur gemessen), dieselben Launches: "
             f"2–5 s {_fmt(p['fast'])} | 20-s-Entscheid {_fmt(p['decide'])}",
             f"  ohne späteren Rug-, Bundle- oder Insider-Befund: 2–5 s {_fmt(c['fast'])} | 20 s {_fmt(c['decide'])}"
             + " | Ausstiege 2–5 s: " + ", ".join(f"{k} {v}" for k, v in sorted(rep["exits"].items()))
             + " | ohne Kurs am Ende (nicht gewertet): 2–5 s {fast}, 20 s {decide}".format(**rep.get("no_price", {"fast": 0, "decide": 0}))]
+    rb, d = rep.get("robust") or {}, rep.get("diff") or {}
+    if all((rb.get(leg) or {}).get("n", 0) >= 10 for leg in LEGS):
+        def one(r):
+            th = "/".join(f"{100 * v:+.1f}" for v in r["thirds"])
+            t = "?" if r["t"] is None else f"{r['t']:.2f}"
+            return (f"oberes Fünftel Ø {100 * r['top5th']:+.0f} %, über +100 % {100 * r['over100']:.1f} %, "
+                    f"ohne die 3 besten Ø {100 * r['without3']:+.1f} % (bester {100 * r['best']:+.0f} %), t {t}, "
+                    f"Drittel {th} %")
+        dt = "?" if d.get("t") is None else f"{d['t']:.2f}"
+        out.append(f"  Belastbarkeit: 2–5 s {one(rb['fast'])} | 20 s {one(rb['decide'])} | "
+                   f"2–5 s minus 20 s je Launch Ø {100 * (d.get('mean') or 0):+.1f} Punkte, t {dt}")
+    return out
 
 
 def status(book):

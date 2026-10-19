@@ -90,3 +90,18 @@ def test_shadow_launches_keep_their_price_on_the_program_stream(conn):  # noqa: 
     assert len(rows) == 10 and all(r["ret_60m"] is not None for r in rows)
     rep = shadow.report(conn)
     assert rep["pairs"]["fast"]["n"] == rep["pairs"]["decide"]["n"] == 5 and rep["no_price"] == {"fast": 0, "decide": 0}
+
+
+def test_report_says_how_much_the_mean_rests_on_a_few_winners(conn):  # noqa: F811
+    shadow.ensure_schema(conn)
+    for i in range(30):
+        for leg, pnl in (("fast", 3.0 if i == 0 else -0.1), ("decide", -0.15)):
+            conn.execute("INSERT INTO sniper_shadow(mint, leg, fill_ts, fill_age_sec, pnl_pct, ret_60m, x2) "
+                         "VALUES (?,?,?,?,?,?,?)", (f"M{i}", leg, T0 + i, 3.0, pnl, pnl, int(pnl > 1)))
+    conn.commit()
+    rep = shadow.report(conn)
+    r = rep["robust"]["fast"]
+    assert r["n"] == 30 and r["best"] == 3.0 and abs(r["without3"] + 0.1) < 1e-9 and abs(r["over100"] - 1 / 30) < 1e-3
+    assert rep["diff"]["n"] == 30 and rep["diff"]["mean"] > 0
+    lines = shadow.summary_lines(rep)
+    assert len(lines) == 3 and "ohne die 3 besten Ø -10.0 %" in lines[2] and "2–5 s minus 20 s" in lines[2]
