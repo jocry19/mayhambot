@@ -297,6 +297,13 @@ def load_core_smart(conn, limit: int = 30) -> int:
                                 "LIMIT ?", (tier, limit)).fetchall()
             added += store.add_wallets(conn, [r[0] for r in rows], f"model_{tier}")
         if added or conn.execute("SELECT 1 FROM wallets WHERE tier IS NOT NULL LIMIT 1").fetchone():
+            # the source follows the model's current tier (19.10.: v15 had no ultra left, 71 rows still said
+            # model_ultra); a wallet that lost both tiers is 'model_former'
+            conn.execute("""UPDATE ct_wallets SET source = COALESCE(
+                                (SELECT CASE WHEN w.tier IN ('ultra','smart') THEN 'model_' || w.tier END
+                                 FROM wallets w WHERE w.address = ct_wallets.address), 'model_former')
+                            WHERE source IN ('model_ultra','model_smart','model_former')""")
+            conn.commit()
             return added
     except Exception as e:
         log.debug("wallets.tier unavailable: %s", e)

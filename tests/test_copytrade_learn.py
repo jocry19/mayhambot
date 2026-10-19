@@ -471,3 +471,17 @@ def test_user_wallets_from_the_seed_file_are_tracked_like_everyone(env, tmp_path
     assert conn.execute("SELECT active FROM ct_wallets WHERE address=?", (u1,)).fetchone()[0] == 0
     assert tracker.load_user_seeds(conn, dataclasses.replace(s2, user_seed_tags=""), f) == 0
     tracker.WATCH.clear()
+
+
+def test_model_wallet_source_follows_the_current_tier(env):
+    """19.10.: v15 had no ultra left while 71 ct_wallets rows still said model_ultra."""
+    from copytrade import tracker
+    s, conn, ex, state = env
+    _wallet_row(conn, W, "ultra", score=91)
+    _wallet_row(conn, W2, "smart", score=70)
+    tracker.load_core_smart(conn)
+    conn.execute("UPDATE wallets SET tier='smart' WHERE address=?", (W,))
+    conn.execute("UPDATE wallets SET tier='good' WHERE address=?", (W2,))
+    tracker.load_core_smart(conn)
+    src = dict(conn.execute("SELECT address, source FROM ct_wallets").fetchall())
+    assert src == {W: "model_smart", W2: "model_former"}
