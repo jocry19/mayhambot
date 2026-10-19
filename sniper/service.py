@@ -11,7 +11,7 @@ import time
 
 from core import http
 from sniper.launchblock import TX_VERSION
-from sniper import feed, rpcws, store
+from sniper import feed, rpcws, shadow, store
 from sniper.engine import Engine
 from sniper.enrich import Budget, Enricher
 
@@ -654,7 +654,7 @@ class Service:
             "ts": int(now), "connected": self.any_connected(), "pumpportal_connected": self.connected,
             "trade_sources": self.trade_sources(now), "ws_msgs": self.ws_msgs, "subscribed": subs, "in_memory": n,
             "queue": self.q.qsize(), "open_positions": len(self.engine.book.open), "budget": budget,
-            "counters": dict(self.engine.counters), "pump_api_ok": self.enricher.pump_ok if self.cfg.use_pump_api else None,
+            "counters": dict(self.engine.counters), "shadow": shadow.status(self.engine.shadow), "pump_api_ok": self.enricher.pump_ok if self.cfg.use_pump_api else None,
             "trade_source": self.trades_via, "rpc_ws_connected": self.logs.connected, "rpc_ws_subs": len(self.logs.subs),
             "rpc_ws_msgs": self.logs.msgs, "rpc_ws_mode": self.logs.mode, "rpc_ws_wanted": len(self.logs.want),
             "rpc_ws_attempts": self.logs.attempts, "rpc_ws_rejects": self.logs.rejects,
@@ -720,6 +720,12 @@ class Service:
         oc = opportunity.COUNTS
         log.info("Gelegenheiten seit Start: %d Queue-Launches beim ersten Blick gemeldet, %d davon nach dem Tiefencheck "
                  "ergänzt, %d direkt entschieden gemeldet", oc["early"], oc["supplemented"], oc["reported"])
+        sh = shadow.status(self.engine.shadow)
+        if sh:
+            log.info("Schatten-Einstieg seit Start: %d mit 2 s geprüft, %d gefüllt (2–5 s) und %d als 20-s-Zwilling, "
+                     "%d zu spät, %d ohne Fill, %d offen, %d geschrieben | gesperrt nach Grund: %s", sh["checked"],
+                     sh["filled_fast"], sh["filled_decide"], sh["late"], sh["no_fill"], sh["open"], sh["written"],
+                     ", ".join(f"{k} {v}" for k, v in sorted(sh["blocked"].items(), key=lambda kv: -kv[1])) or "keine")
 
     def research_round(self):
         """Hourly: research on the real outcomes (own DB connection, CPU only, no network); an accepted rule is

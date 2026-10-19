@@ -147,6 +147,16 @@ class SniperSettings:
     exit_on_insider_sell: bool = field(default_factory=lambda: _b("SNIPER_EXIT_ON_INSIDER_SELL", True))
     insider_sell_min_pct: float = field(default_factory=lambda: _f("SNIPER_INSIDER_SELL_MIN_PCT", 25))
 
+    # ---- shadow book "schneller Einstieg" (plan 19.10. S1): measured only, never a buy of any account
+    shadow: bool = field(default_factory=lambda: _b("SNIPER_SHADOW", True))
+    shadow_entry_sec: float = field(default_factory=lambda: _f("SNIPER_SHADOW_ENTRY_SEC", 2))     # decide at this age
+    shadow_max_sec: float = field(default_factory=lambda: _f("SNIPER_SHADOW_MAX_SEC", 5))         # no fill later than this
+    shadow_latency_sec: float = field(default_factory=lambda: _f("SNIPER_SHADOW_LATENCY_SEC", 1))  # decision -> fill
+    shadow_trail_from_pct: float = field(default_factory=lambda: _f("SNIPER_SHADOW_TRAIL_FROM_PCT", 20))
+    shadow_trail_pct: float = field(default_factory=lambda: _f("SNIPER_SHADOW_TRAIL_PCT", 20))
+    shadow_stop_pct: float = field(default_factory=lambda: _f("SNIPER_SHADOW_STOP_PCT", 50))
+    shadow_hold_min: float = field(default_factory=lambda: _f("SNIPER_SHADOW_HOLD_MIN", 60))
+
     horizons_min: tuple = (1, 5, 15, 60)
 
     def exit_params(self):

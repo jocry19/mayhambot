@@ -100,6 +100,38 @@ Rund 40 % der pump.fun-Launches werden nicht mehr in SOL, sondern in PUMP oder e
 
 Kauft der Creator die Curve schon beim Erstellen fast ganz (79,31 %), migriert der Coin sofort, und die Käufe danach laufen über den pump-AMM, nicht über die Curve. Der Datenstrom sieht sie nicht. `launch_block_round` (alle 15 s) liest für entschiedene Launches, die binnen 60 s nach dem Erstellen migriert sind, die ersten Signaturen des Mints (`getSignaturesForAddress`, öffentlicher RPC) und je Transaktion der ersten 3 Slots, wer den Token bekam und wie viel SOL er dafür zahlte (`sniper/launchblock.py`). Das Ergebnis landet in `sniper_launch_wallets` mit der Rolle `launch_block` und in `sniper_launches.block_buyers` und `block_buy_sol`, für das Masche-Veto der Rug-Prüfung. Der SOL-Einsatz je Käufer ist der Verlust an nativem plus gewrapptem SOL (WSOL-Konten desselben Besitzers): wer 5000 SOL wrappt und 4999 im WSOL-Konto liegen lässt, hat 1 SOL eingesetzt. `getTransaction` fragt mit `maxSupportedTransactionVersion: 1` (Launch-Block, Tiefencheck, bonk-Signer), weil es auf Mainnet v1-Transaktionen gibt und der RPC sonst mit -32015 ablehnt. Trades, die vor ihrem Create ankommen (gleicher Slot, zweiter Strom oder Bundle), hält die Engine bis zu 30 s fest und spielt sie nach dem Create ein (Zähler `orphans_replayed`); vorher gingen sie verloren. Migrationen, deren Curve schon das Erstellen allein gefüllt hat (Dev kauft alles, kein einziger Curve-Trade), zählen in der Abdeckung getrennt („sofort beim Erstellen migriert“, `coverage_1h.migrate_instant`), weil kein Datenstrom einen Trade sehen kann. Die Stundenzeile „Abdeckung“ läuft zur Uhrzeit (hh:07); kurz nach einem Neustart nennt sie das kürzere Fenster („22 min seit Start“).
 
+### Schattenbuch „schneller Einstieg“ (seit 19.10., nur gemessen)
+
+Die Auswertung vom 19.10. zeigt: Ein Einstieg 2 s nach dem Launch erreicht deutlich öfter ×2 als der heutige Entscheid nach 20 s (31 % gegen 18 %, brutto). `sniper/shadow.py` misst das live und mit echten Kosten. Es kauft nichts, weder im Papierbuch noch im Lern- oder Hauptkonto, und meldet nichts an das Gehirn.
+
+Ablauf je pump.fun-Launch:
+
+1. **Rug-Prüfung bei 2 s** (`SNIPER_SHADOW_ENTRY_SEC`). Sie nutzt nur, was so früh bekannt ist: die Bundle-Schätzung der Curve, harte Befunde, Dev-Verkauf ≥ 50 %, die Masche (Dev-Kauf ≥ 75 %), die Dev-Historie (≥ 2 schlechte Launches), bekannte Bundler und Rugger und das Rug-Modell (`SNIPER_RUG_P_BLOCK`).
+2. **Schneller Fill.** Wer die Prüfung besteht, wird `SNIPER_SHADOW_LATENCY_SEC` (1 s) später auf dem Curve-Stand dieses Moments gefüllt, nie später als `SNIPER_SHADOW_MAX_SEC` (5 s) nach dem Create.
+3. **20-s-Zwilling.** Derselbe Launch wird bei `SNIPER_DECIDE_SEC` (20 s) mit derselben Latenz noch einmal gefüllt. Zwilling und schneller Fill haben dieselben Ausstiege und dieselben Kosten.
+
+Ausstieg:
+
+- Trail 20 % vom Hoch, sobald der Kurs einmal 20 % über dem Einstieg lag.
+- Notstopp bei −50 %.
+- Sonst Halten bis zum Ende. Jeder Fill wird 60 min verfolgt, die Zeile trägt also auch das Ergebnis des reinen Haltens (`ret_60m`).
+
+Fill und Verkauf rechnen mit den Formeln des Papierbuchs: Curve-Gebühr aus den Trades, 3 % Rutsch je Seite, Priority- und Netzgebühr je Transaktion. Ein Umlauf kostet so rund 10 %. Nach der Migration gibt es nur dann einen Kurs, wenn DexScreener einen höchstens 10 min alten Kurs liefert.
+
+Die Zeilen stehen in `sniper_shadow`, eine je Mint und Bein (`fast`, `decide`), sobald das Bein fertig ist. Bei einem Neustart gehen offene Beine verloren und werden nie gebucht. Die Spalten für den Prüfstand:
+
+- `decide_ts` (Prüfung), `fill_ts`, `fill_age_sec` (Fill nach dem Empfang des Creates)
+- `fill_price_sol` (Preis je Token inklusive Kosten), `spot_price_sol`, `fill_mcap_sol`
+- `curve_fee_pct`, `adverse_slippage`, `fees_sol`, `buy_cost_pct`
+- `exit_reason`, `pnl_pct`, `max_ret`, `x2`, `ret_60m`, `precheck_json`, `params_json`
+
+`created_ts` ist der Empfang des Creates, nicht die Blockzeit. Die reale Verzögerung ab der Blockzeit ist daher um die Laufzeit des Datenstroms größer.
+
+Wo die Ergebnisse stehen:
+
+- **Forschungsbericht** (stündlich im Log): die Zeile „Schatten-Einstieg“ mit n, Ø netto, Median, ×2-Quote und Halten bis 60 min für den Einstieg nach 2 bis 5 s gegen den 20-s-Entscheid auf denselben Launches. Eine zweite Zeile zeigt dasselbe ohne die Launches, die der Tiefencheck oder der Rug-Schutz später sperrte.
+- **Stundenzeile:** „Schatten-Einstieg seit Start“ zählt Prüfungen, Fills, gesperrte Launches nach Grund und zu späte Launches.
+
 ### Frühmeldung in die Gelegenheiten-Tabelle (seit 18.10.)
 
 Jeder pump.fun-Launch geht beim ersten Blick (20 s, `SNIPER_DECIDE_SEC`) in die gemeinsame Tabelle `opportunities` (`ref` = Mint), auch die, die in die Warteschlange zum Tiefencheck gehen (`source_action` = `queued`, Merkmale aus Stufe 1). Nach dem Tiefencheck, oder wenn ein wartender Launch aus Budgetgründen übersprungen wird, liefert `opportunity.report_decision(..., followup=True)` per `brain.opportunities.supplement` in dieselbe Zeile nach: Funder-Gruppen, Bundle und Insider nach Slot, Safety, `risk`, `rug_p` und das Endurteil (`sniper.final_action`, `sniper.final_reason`, `sniper.deep`). Aktivitätsmerkmale bleiben beim Stand von 20 s. Launches ohne Trades werden weiter beim zweiten Blick (75 s) gemeldet. Das Stundenlog zählt beides unter „Gelegenheiten seit Start“.
@@ -197,6 +229,7 @@ oder ≤ −50 % nach Dev-/Insider-Abverkauf. Pump-Launches mit kaputtem Basispr
 | `SNIPER_WS_URL` / `SNIPER_WS_MAX_SUBS` | wss://api.mainnet-beta.solana.com / 150 | RPC-Log-Datenstrom |
 | `SNIPER_WS_URL2` | wss://solana-rpc.publicnode.com | zweiter Programm-Datenstrom auf einem anderen RPC (füllt die Lücken der 1002-Trennungen; doppelte Trades fallen per Signatur weg); leer = aus |
 | `SNIPER_WS_URL2_FALLBACKS` | (leer) | weitere RPCs für Strom 2, kommagetrennt: nach 3 Verbindungen, die das Abo bestätigen und dann nichts liefern, wechselt Strom 2 auf den nächsten (im Kreis) |
+| `SNIPER_SHADOW` | 1 | Schattenbuch „schneller Einstieg“ (nur gemessen, `sniper_shadow`); `SNIPER_SHADOW_ENTRY_SEC` 2, `SNIPER_SHADOW_MAX_SEC` 5, `SNIPER_SHADOW_LATENCY_SEC` 1, `SNIPER_SHADOW_TRAIL_FROM_PCT` 20, `SNIPER_SHADOW_TRAIL_PCT` 20, `SNIPER_SHADOW_STOP_PCT` 50, `SNIPER_SHADOW_HOLD_MIN` 60 |
 | `SNIPER_WS_URL3` | (leer) | dritter Programm-Datenstrom auf einem eigenen RPC (nie derselbe Host wie Strom 1 oder 2); die 5-min-Diagnose zählt, wie viele Launch-Trades jeder Strom als Erster lieferte („zuerst über Strom 1/2/3“); leer = aus. Standard aus seit 18.10.: das öffentliche wss://solana.drpc.org trennte jedes Programm-Abo sofort nach dem Verbinden (55 Versuche in 48 min, 0 Trades, 0 MB) |
 | `SNIPER_WS_HELIUS` | 1 | Strom 2 zuerst über den Helius-Standard-Websocket, wenn `HELIUS_API_KEY` gesetzt ist (SNIPER_WS_URL2 und die Ersatz-RPCs folgen). Die Daten kosten 2 Credits je 0,1 MB, werden im gemeinsamen Credit-Buch gebucht und im 5-min-Bericht („Datenvolumen…“) hochgerechnet; läuft der Helius-Monat dem Kalender voraus (`core.http.plan_pace`, ratio > 1) oder erreicht er seine Reserve, wechselt Strom 2 auf die öffentlichen RPCs (zurück unter 0,95); Wal-Erkennung und Rug-Prüfung behalten Helius |
 | `SNIPER_WS_HELIUS_CREDITS_DAY` | 0 | zusätzliche Tagesgrenze in Credits für Strom 2 auf Helius (0 = nur die Monatsreserve); erreicht, wechselt Strom 2 bis Mitternacht auf die öffentlichen RPCs |

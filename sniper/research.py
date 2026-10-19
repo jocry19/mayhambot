@@ -568,6 +568,8 @@ def run(conn, cfg=None, hours=0, save=False, now=None):
                         "rows": entry_timing(rows, paths, best, side_cost, tx_cost)}
         # candidate from the winners study: a running curve (MC >= 50 SOL) with >= 5 buyers at the decision
         rep["mc50_buyers5"] = signature_test(rows, paths, cfg, conds=[("mcap_decide_sol", 50), ("n_buyers", 5)])
+    from sniper import shadow
+    rep["shadow"] = shadow.report(conn, since=now - hours * 3600 if hours else 0)
     if save:
         store.set_state(conn, "research_report", json.dumps(rep))
         # mc50_buyers5 stays a measurement (the user, 18.10.: no fixed rules; the decision maker learns from every
@@ -601,6 +603,11 @@ def matches(rule, feats):
             except Exception:  # noqa: BLE001
                 r[k] = None
     return _match(r, [tuple(c) for c in rule.get("conditions") or []])
+
+
+def shadow_lines(rep):
+    from sniper import shadow
+    return shadow.summary_lines(rep)
 
 
 def summary(rep, top=8):
@@ -651,6 +658,10 @@ def summary(rep, top=8):
                  + "; ".join(f"Einstieg nach {e['sec']} s {100 * e['net']:+.1f} % (n {e['n']}, untere Grenze "
                              f"{100 * e['ci_low']:+.1f} %, beim Entscheid {100 * e['at_decision']:+.1f} %)"
                              for e in en["rows"]))
+    sh = shadow_lines(rep.get("shadow"))
+    if sh:
+        L.append("")
+        L.extend(sh)
     for key, title in (("block0", "Block-0-Signatur (>= 3 Mini-Käufe in 5 s)"),
                        ("mc50_buyers5", "MC >= 50 SOL und >= 5 Käufer beim Entscheid")):
         b0 = rep.get(key)

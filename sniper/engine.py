@@ -12,7 +12,7 @@ import threading
 import time
 from collections import OrderedDict, deque
 
-from sniper import opportunity, research, store
+from sniper import opportunity, research, shadow, store
 from sniper.analyze import analyze
 from sniper.paper import PaperBook
 from sniper.state import LaunchState, curve_progress
@@ -97,6 +97,7 @@ class Engine:
         self.learned = None        # accepted rule from sniper.research (refreshed by the service), None = fixed rules
         self.stream_pools = None   # pools whose trades we receive (None = all); the RPC log stream decodes pump only
         self.book = PaperBook(cfg, conn)
+        self.shadow = shadow.ShadowBook(cfg, self.book, self.conn) if getattr(cfg, "shadow", False) else None
         self.counters = {"creates": 0, "trades": 0, "migrations": 0, "stage1": 0, "stage2": 0, "entries": 0}
         # stream coverage (plan 18.10., goal >= 90 %): (ts, had trades) per pump decision and per migration
         self.cover = {"decide": deque(maxlen=20000), "migrate": deque(maxlen=5000), "migrate_instant": deque(maxlen=5000)}
@@ -235,6 +236,8 @@ class Engine:
                     self.late_first.append((st.zero_decide_ts, now - st.zero_decide_ts))
                 if mint in self.book.open:
                     self.book.check(self.conn, st, now, self.quote_fn)
+                if self.shadow and self.shadow.holds(mint):
+                    self.shadow.check(st, now)      # memory only; the loop thread writes finished legs
                 return st
         return None
 
@@ -301,6 +304,11 @@ class Engine:
         cands = []
         with self.lock:
             for mint, st in list(self.launches.items()):
+                if self.shadow:
+                    try:
+                        self.shadow.step(self.conn, st, self, now)
+                    except Exception:  # noqa: BLE001 - a measurement never stops the pipeline
+                        log.exception("shadow step %s failed", mint[:6])
                 if st.decision == "pending" and now - st.created_ts >= self.cfg.decide_sec:
                     if not st.n_seen and st.source == "pumpportal" and st.pool == "pump" and self.trades_live \
                             and now - st.created_ts < self.cfg.recheck_sec:
@@ -318,7 +326,7 @@ class Engine:
                     self.book.check(self.conn, st, now)  # on the curve: no network in the loop thread (no live
                     #                                      price yet: apply_external quotes and exits it)
                 self._prune_sub(st, now)
-                if st.done and mint not in self.book.open:
+                if st.done and mint not in self.book.open and not (self.shadow and self.shadow.holds(mint)):
                     self.launches.pop(mint, None)
             subs = [s for s in self.launches.values() if s.subscribed]
             if len(subs) > self.cfg.max_subscribed:
@@ -326,6 +334,8 @@ class Engine:
                 subs.sort(key=lambda s: (s.decision != "skip" or s.stage > 1, s.mint in self.book.open, s.created_ts))
                 for s in subs[: len(subs) - self.cfg.max_subscribed]:
                     self._unsub(s)
+            if self.shadow:
+                self.shadow.flush(self.conn)
         cands.sort(key=lambda s: -(s.prescore or 0))
         return cands
 
