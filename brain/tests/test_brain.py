@@ -2181,3 +2181,33 @@ def test_the_four_hour_label_comes_at_four_hours_and_the_sniper_gets_half_the_qu
     lb.paths[MINT] = [[clock[0] - 3700 + 60 * i, 2e-6] for i in range(60)]
     lb._finish(clock[0])
     assert "98" not in lb.long and "99" in lb.long  # the queue holds one, the sniper only gets half of it
+
+
+def test_a_refusing_rpc_pauses_the_rug_checks_and_the_exits_go_on(conn, s, monkeypatch):
+    """19.10. 14:03: Helius answered 429 to almost every call and the brain loop stood 14 min in the check's retries."""
+    from brain import trader as T
+    calls = []
+
+    def down(conn_, mint):
+        calls.append(mint)
+        raise RuntimeError("429")
+    mk = Market()
+    clock = [time.time()]
+    t = make_trader(conn, s, trained(), mk, clock=lambda: clock[0], safety_check=down)
+    for _ in range(T.RPC_ERRORS):
+        with pytest.raises(RuntimeError):
+            t.safety_check(conn, MINT)
+    n = len(calls)
+    with pytest.raises(RuntimeError, match="pausiert"):
+        t.safety_check(conn, MINT)
+    assert len(calls) == n  # paused: not even tried
+    d = types.SimpleNamespace(explore=False, size_sol=0.03)
+    assert "Rug-Prüfung nicht möglich" in (t._gate("pool", MINT, snap(), d, {"source": "copytrade"}) or "")
+    clock[0] += T.RPC_PAUSE_S + 1
+    with pytest.raises(RuntimeError, match="429"):
+        t.safety_check(conn, MINT)  # tried again after the pause
+    monkeypatch.setattr(T, "RPC_SLOW_S", -1)  # a slow but answering check pauses them too
+    t2 = make_trader(conn, s, trained(), mk, clock=lambda: clock[0], safety_check=lambda c, m: ("ok", False, True, []))
+    assert t2.safety_check(conn, MINT)[0] == "ok"
+    with pytest.raises(RuntimeError, match="pausiert"):
+        t2.safety_check(conn, MINT)
