@@ -127,7 +127,18 @@ class Engine:
                 self.launches[m] = LaunchState(mint=m, created_ts=p["opened_ts"], source="pumpportal", pool="pump",
                                                symbol=p.get("symbol") or "", creator="", create_sig="")
                 self.launches[m].decision, self.launches[m].stage, self.launches[m].done = "enter", 2, True
-        for m in open_mints:
+        held = self.shadow.resume(self.conn, now) if self.shadow else set()
+        for m in held - set(self.launches):
+            r = self.conn.execute("SELECT * FROM sniper_launches WHERE mint=?", (m,)).fetchone()
+            p = self.shadow.open.get((m, "fast")) or self.shadow.open.get((m, "decide"))
+            self.launches[m] = self._stub(r) if r else LaunchState(
+                mint=m, created_ts=p["created_ts"], source="pumpportal", pool=p.get("pool") or "pump",
+                symbol="", creator="", create_sig="")
+            if not r:
+                self.launches[m].decision, self.launches[m].stage, self.launches[m].done = "skip", 1, True
+        for m in held:
+            self.launches[m]._shadow = {"state": "resumed"}     # no second rug check or twin after a restart
+        for m in open_mints | held:
             if m in self.launches and not self.launches[m].migrated:
                 self.launches[m].subscribed = True
                 self.to_sub.add(m)
@@ -337,7 +348,7 @@ class Engine:
                 for s in subs[: len(subs) - self.cfg.max_subscribed]:
                     self._unsub(s)
             if self.shadow:
-                self.shadow.flush(self.conn)
+                self.shadow.flush(self.conn, now)
         cands.sort(key=lambda s: -(s.prescore or 0))
         return cands
 

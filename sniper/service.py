@@ -723,8 +723,9 @@ class Service:
         sh = shadow.status(self.engine.shadow)
         if sh:
             log.info("Schatten-Einstieg seit Start: %d mit 2 s geprüft, %d gefüllt (2–5 s) und %d als 20-s-Zwilling, "
-                     "%d zu spät, %d ohne Fill, %d offen, %d geschrieben | gesperrt nach Grund: %s", sh["checked"],
-                     sh["filled_fast"], sh["filled_decide"], sh["late"], sh["no_fill"], sh["open"], sh["written"],
+                     "%d zu spät, %d ohne Fill, %d offen (%d nach dem Neustart übernommen), %d geschrieben | gesperrt nach "
+                     "Grund: %s", sh["checked"], sh["filled_fast"], sh["filled_decide"], sh["late"], sh["no_fill"],
+                     sh["open"], sh.get("resumed", 0), sh["written"],
                      ", ".join(f"{k} {v}" for k, v in sorted(sh["blocked"].items(), key=lambda kv: -kv[1])) or "keine")
 
     def research_round(self):

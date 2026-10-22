@@ -14,8 +14,10 @@ followed SNIPER_SHADOW_HOLD_MIN (60 min) from its fill, so the row also carries 
 Fills and sells use the paper book's own formulas (curve fee from the trades, adverse slippage, priority and
 network fee per transaction), so a round trip costs about 10 % like every other sniper measurement.
 
-Rows go to sniper_shadow (one per mint and leg) when a leg is finished; legs still open at a restart are lost
-and never booked. The lab reads decide_ts, fill_ts, fill_price_sol and the cost columns from there."""
+Rows go to sniper_shadow (one per mint and leg) when a leg is finished. Open legs are copied to sniper_shadow_open
+every minute and taken up again after a restart (the app restarted every 17 to 28 min from 19.10. 21:58, so no leg
+reached its hour and nothing was written for three days); gap_sec counts the seconds a leg was not watched, in
+which its high, trail or stop may have been missed. The lab reads decide_ts, fill_ts, fill_price_sol and the cost columns from there."""
 import logging
 import statistics
 
@@ -29,13 +31,17 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS sniper_shadow (
     fill_mcap_sol REAL, fill_price_sol REAL, spot_price_sol REAL, size_sol REAL, tokens REAL,
     curve_fee_pct REAL, adverse_slippage REAL, fees_sol REAL, buy_cost_pct REAL, fill_src TEXT,
     peak_price_sol REAL, max_ret REAL, x2 INTEGER, exit_ts REAL, exit_reason TEXT, exit_sol REAL, pnl_pct REAL,
-    end_ts REAL, end_sol REAL, ret_60m REAL, end_src TEXT, precheck_json TEXT, params_json TEXT,
+    end_ts REAL, end_sol REAL, ret_60m REAL, end_src TEXT, precheck_json TEXT, params_json TEXT, gap_sec REAL,
     PRIMARY KEY (mint, leg)
 )"""
+OPEN_SCHEMA = """CREATE TABLE IF NOT EXISTS sniper_shadow_open (
+    mint TEXT, leg TEXT, saved_ts REAL, leg_json TEXT, PRIMARY KEY (mint, leg)
+)"""
+SAVE_SEC = 60
 COLS = ("mint", "leg", "pool", "created_ts", "decide_ts", "fill_ts", "fill_age_sec", "fill_mcap_sol",
         "fill_price_sol", "spot_price_sol", "size_sol", "tokens", "curve_fee_pct", "adverse_slippage", "fees_sol",
         "buy_cost_pct", "fill_src", "peak_price_sol", "max_ret", "x2", "exit_ts", "exit_reason", "exit_sol",
-        "pnl_pct", "end_ts", "end_sol", "ret_60m", "end_src", "precheck_json", "params_json")
+        "pnl_pct", "end_ts", "end_sol", "ret_60m", "end_src", "precheck_json", "params_json", "gap_sec")
 LEGS = ("fast", "decide")
 # the sniper's later verdict that the 2 s check could not see yet (deep check, rug protection)
 LATER_RUG = ("bundle", "insider", "hard", "safety", "rug_p", "dev_sold")
@@ -43,6 +49,9 @@ LATER_RUG = ("bundle", "insider", "hard", "safety", "rug_p", "dev_sold")
 
 def ensure_schema(conn):
     db.retry_locked(conn, lambda: conn.execute(SCHEMA))
+    db.retry_locked(conn, lambda: conn.execute(OPEN_SCHEMA))
+    if "gap_sec" not in {r[1] for r in conn.execute("PRAGMA table_info(sniper_shadow)")}:
+        db.retry_locked(conn, lambda: conn.execute("ALTER TABLE sniper_shadow ADD COLUMN gap_sec REAL"))
     db.retry_locked(conn, lambda: conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sniper_shadow_fill ON sniper_shadow(fill_ts)"))
     return conn
@@ -53,7 +62,8 @@ class ShadowBook:
         self.cfg, self.book = cfg, book
         self.open = {}        # (mint, leg) -> leg dict, in memory until finished
         self.done = []        # finished legs, written by flush() in the loop thread
-        self.counts = {"checked": 0, "filled_fast": 0, "filled_decide": 0, "late": 0, "no_fill": 0, "written": 0}
+        self.counts = {"checked": 0, "filled_fast": 0, "filled_decide": 0, "late": 0, "no_fill": 0, "written": 0, "resumed": 0}
+        self._saved = 0.0
         self.blocked = {}     # precheck reason -> count
         if conn is not None:
             ensure_schema(conn)
@@ -149,7 +159,7 @@ class ShadowBook:
             "fill_price_sol": price, "spot_price_sol": spot, "size_sol": size, "tokens": tokens,
             "curve_fee_pct": st.fee_pct or self.cfg.curve_fee_pct, "adverse_slippage": self.cfg.adverse_slippage,
             "fees_sol": self.book._fees(), "buy_cost_pct": round(1 - tokens * spot / size, 4), "fill_src": src,
-            "peak_price_sol": price, "precheck_json": store.j(pre), "params_json": store.j(self.params())}
+            "peak_price_sol": price, "gap_sec": 0.0, "precheck_json": store.j(pre), "params_json": store.j(self.params())}
         self.counts["filled_" + leg] += 1
         return True
 
@@ -200,7 +210,40 @@ class ShadowBook:
             if p:
                 self._finish(st, p, now, self.book.mark(st, now) if st else 0.0)
 
-    def flush(self, conn):
+    def save_open(self, conn, now, force=False):
+        """Copy the open legs so a restart takes them up again instead of losing them."""
+        if not force and now - self._saved < SAVE_SEC:
+            return
+        self._saved = now
+        rows = [(m, leg, now, store.j(p)) for (m, leg), p in self.open.items()]
+
+        def write():
+            conn.execute("DELETE FROM sniper_shadow_open")
+            conn.executemany("INSERT INTO sniper_shadow_open VALUES (?,?,?,?)", rows)
+            conn.commit()
+        try:
+            db.retry_locked(conn, write)
+        except Exception as e:  # noqa: BLE001 - the next minute tries again
+            log.warning("sniper_shadow_open: not saved: %s", e)
+
+    def resume(self, conn, now):
+        """Open legs saved before a restart, back in memory with the unwatched time in gap_sec. Returns their mints."""
+        import json
+        mints = set()
+        for r in conn.execute("SELECT mint, leg, saved_ts, leg_json FROM sniper_shadow_open").fetchall():
+            try:
+                p = json.loads(r["leg_json"])
+            except (TypeError, ValueError):
+                continue
+            p["gap_sec"] = round((p.get("gap_sec") or 0) + max(0.0, now - (r["saved_ts"] or now)), 1)
+            self.open[(r["mint"], r["leg"])] = p
+            mints.add(r["mint"])
+        self.counts["resumed"] += len(self.open)
+        return mints
+
+    def flush(self, conn, now=None):
+        if now is not None:
+            self.save_open(conn, now)
         if not self.done:
             return 0
         rows, self.done = self.done, []

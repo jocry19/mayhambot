@@ -118,7 +118,7 @@ Ausstieg:
 
 Fill und Verkauf rechnen mit den Formeln des Papierbuchs: Curve-Gebühr aus den Trades, 3 % Rutsch je Seite, Priority- und Netzgebühr je Transaktion. Ein Umlauf kostet so rund 10 %. Nach der Migration gibt es nur dann einen Kurs, wenn DexScreener einen höchstens 10 min alten Kurs liefert.
 
-Die Zeilen stehen in `sniper_shadow`, eine je Mint und Bein (`fast`, `decide`), sobald das Bein fertig ist. Bei einem Neustart gehen offene Beine verloren und werden nie gebucht. Die Spalten für den Prüfstand:
+Die Zeilen stehen in `sniper_shadow`, eine je Mint und Bein (`fast`, `decide`), sobald das Bein fertig ist. Offene Beine kopiert der Sniper jede Minute nach `sniper_shadow_open` und nimmt sie nach einem Neustart wieder auf (vom 19.10. 21:58 an startete die App alle 17 bis 28 min neu, kein Bein erreichte seine Stunde, drei Tage lang wurde nichts geschrieben). `gap_sec` zählt die Sekunden, in denen ein Bein nicht beobachtet wurde; Hoch, Trail oder Notstopp in dieser Zeit können fehlen. Nach einem Neustart gibt es keine zweite Rug-Prüfung und keinen späten 20-s-Zwilling. Die Spalten für den Prüfstand:
 
 - `decide_ts` (Prüfung), `fill_ts`, `fill_age_sec` (Fill nach dem Empfang des Creates)
 - `fill_price_sol` (Preis je Token inklusive Kosten), `spot_price_sol`, `fill_mcap_sol`

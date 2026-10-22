@@ -105,3 +105,32 @@ def test_report_says_how_much_the_mean_rests_on_a_few_winners(conn):  # noqa: F8
     assert rep["diff"]["n"] == 30 and rep["diff"]["mean"] > 0
     lines = shadow.summary_lines(rep)
     assert len(lines) == 3 and "ohne die 3 besten Ø -10.0 %" in lines[2] and "2–5 s minus 20 s" in lines[2]
+
+
+def test_open_legs_survive_a_restart(conn, monkeypatch):  # noqa: F811
+    eng = Engine(cfg(), conn)
+    cv = Curve("RESTART1")
+    eng.handle(cv.create(0.5), T0)
+    eng.handle(cv.buy("W1", 0.3), T0 + 0.5)
+    eng.tick(T0 + 2.1)
+    eng.tick(T0 + 3.2)
+    for k in range(4, 26):
+        _run(eng, cv, T0 + k, n=1, sol=0.5)
+        eng.tick(T0 + k + 0.5)
+    assert set(eng.shadow.open) == {("RESTART1", "fast"), ("RESTART1", "decide")}
+    eng.tick(T0 + 100)                          # a minute later the open legs are copied
+    assert conn.execute("SELECT COUNT(*) FROM sniper_shadow_open").fetchone()[0] == 2
+    import sniper.engine as engine_mod
+    monkeypatch.setattr(engine_mod.time, "time", lambda: T0 + 400)
+    eng2 = Engine(cfg(), conn)                  # the restart: 300 s unwatched
+    assert set(eng2.shadow.open) == {("RESTART1", "fast"), ("RESTART1", "decide")}
+    assert eng2.shadow.counts["resumed"] == 2 and eng2.launches["RESTART1"].subscribed
+    assert eng2.shadow.open[("RESTART1", "fast")]["gap_sec"] == 300
+    eng2.handle(cv.buy("W2", 0.5), T0 + 500)    # a price again after the restart
+    eng2.tick(T0 + 3.2 + 3600)
+    eng2.tick(T0 + 30 + 3600)
+    rows = {r["leg"]: dict(r) for r in conn.execute("SELECT * FROM sniper_shadow")}
+    assert set(rows) == {"fast", "decide"} and rows["fast"]["gap_sec"] == 300 and rows["fast"]["ret_60m"] is not None
+    assert eng2.shadow.counts["filled_fast"] == 0 and not eng2.shadow.open    # no second fill after the restart
+    eng2.tick(T0 + 31 + 3600 + 60)
+    assert conn.execute("SELECT COUNT(*) FROM sniper_shadow_open").fetchone()[0] == 0
