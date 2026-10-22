@@ -69,11 +69,14 @@ def refresh_watchlist(conn, cycle):
 
 def smart_active_mints(conn, now=None, limit=100):
     """Coins with an Ultra/Smart buy inside the signal window, watched or not: the signal only needs the tiered
-    wallets' own trades, which wallet tracking and backfill already store."""
+    wallets' own trades, which wallet tracking and backfill already store. Model tiers and manual wallets only:
+    score_token counts no heuristic tier, so those coins all ended as 'no smart buyer' (22.10.)."""
     now = now or int(time.time())
+    model = conn.execute("SELECT 1 FROM wallets WHERE tier_source='model' LIMIT 1").fetchone() is not None
     return [r[0] for r in conn.execute(
         """SELECT tr.mint FROM trades tr JOIN wallets w ON w.address=tr.wallet
-           WHERE w.tier IN ('ultra','smart') AND tr.side='buy' AND tr.ts > ? AND tr.ts <= ?
+           WHERE w.tier IN ('ultra','smart') AND tr.side='buy' AND tr.ts > ? AND tr.ts <= ?"""
+        + (" AND (w.tier_source = 'model' OR w.manual = 1)" if model else "") + """
            GROUP BY tr.mint ORDER BY COUNT(DISTINCT tr.wallet) DESC, MAX(tr.ts) DESC LIMIT ?""",
         (now - settings.signal_window_min * 60, now, limit))]
 
