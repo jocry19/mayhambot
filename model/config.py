@@ -59,6 +59,8 @@ class ModelSettings:
     event_min_score: float = _f("MODEL_EVENT_MIN_SCORE", 40)  # untiered wallets this good also trigger research events
     event_dedupe_min: int = int(_f("MODEL_EVENT_DEDUPE_MIN", 10))
     retrain_hours: float = _f("MODEL_RETRAIN_HOURS", 6)
+    retrain_max_min: float = _f("MODEL_RETRAIN_MAX_MIN", 170)  # own limit, below the watchdog's 3 h for TRAINING
+    deploy_hold_min: float = _f("MODEL_DEPLOY_HOLD_MIN", 45)  # no retrain start while data/DEPLOYING is younger
     wallet_weight_prior_n: float = _f("MODEL_WALLET_WEIGHT_PRIOR_N", 400)  # evidence needed to trust learned weights 50 %
     wallet_weight_cap: float = _f("MODEL_WALLET_WEIGHT_CAP", 0.25)  # no single wallet component above this share
     min_train_events: int = int(_f("MODEL_MIN_TRAIN_EVENTS", 40))

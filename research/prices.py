@@ -49,6 +49,34 @@ MIN_LIQ_SHARE = 0.02  # snapshot prints need liquidity >= 2 % of the market cap
 SPIKE = 5.0  # a single print 5x above (or below) both neighbours is a bad print, not a price
 
 
+CHUNK_ROWS = 200_000
+
+
+def iter_rows(conn, cols, table, where="", args=(), size=None, chunked=True):
+    """SELECT cols FROM table [WHERE where] in rowid chunks: every chunk is its own finished statement, so a
+    retrain reading millions of rows never holds one read snapshot for minutes (that kept the WAL checkpoint
+    from emptying the file, 10/2026). Rows come as plain tuples. chunked=False (a few coins, live scoring): one
+    plain query, which can use the mint index instead of walking the table in rowid order."""
+    size = size or CHUNK_ROWS
+    cur = conn.cursor()
+    cur.row_factory = None
+    if not chunked:
+        yield from cur.execute(f"SELECT {cols} FROM {table}" + (f" WHERE {where}" if where else ""), args)
+        return
+    cond = f" AND ({where})" if where else ""
+    last = -1
+    while True:
+        rows = cur.execute(f"SELECT rowid, {cols} FROM {table} WHERE rowid > ?{cond} ORDER BY rowid LIMIT ?",
+                           (last, *args, size)).fetchall()
+        if not rows:
+            return
+        last = rows[-1][0]
+        for r in rows:
+            yield r[1:]
+        if len(rows) < size:
+            return
+
+
 def _arr(code, vals):
     """array of vals, or the list itself when a value does not fit (e.g. fractional times in a test)."""
     try:
@@ -90,17 +118,19 @@ class PriceIndex:
             mints = list(mints)
             cond, args = f" AND mint IN ({','.join('?' * len(mints))})", tuple(mints)
         trade_pts = defaultdict(list)
-        for r in conn.execute("SELECT mint, ts, price_usd, source FROM trades WHERE price_usd > 0" + cond, args):
+        for r in iter_rows(conn, "mint, ts, price_usd, source", "trades", "price_usd > 0" + cond, args,
+                           chunked=mints is None):
             trade_pts[r[0]].append((r[1], r[2], r[3]))
         # snapshots whose pool is far too thin for the quoted market cap (liquidity < 2 % of it) show prices nobody
         # can trade at (e.g. "264 M$" at 2-6 k$ liquidity); swaps and candles stay, they are real trades
-        for r in conn.execute("SELECT mint, ts, price_usd, mcap_usd, liquidity_usd FROM token_prices WHERE price_usd > 0"
-                              + cond, args):
+        for r in iter_rows(conn, "mint, ts, price_usd, mcap_usd, liquidity_usd", "token_prices", "price_usd > 0" + cond,
+                           args, chunked=mints is None):
             if r[3] and r[4] is not None and r[4] < MIN_LIQ_SHARE * r[3]:
                 continue
             pts[r[0]].append((r[1], r[2]))
         cand = defaultdict(list)
-        for r in conn.execute("SELECT mint, tf_sec, ts, h, l, c FROM research_candles WHERE c > 0" + cond, args):
+        for r in iter_rows(conn, "mint, tf_sec, ts, h, l, c", "research_candles", "c > 0" + cond, args,
+                           chunked=mints is None):
             cand[r[0]].append((r[1], r[2], r[3], r[4], r[5]))
         # wallet-history prices are derived (SOL price today, multi-hop swaps) and can be far off: when a coin
         # has candles, only candles + pool-feed trades count; otherwise all trades are used

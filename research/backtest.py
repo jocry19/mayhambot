@@ -110,7 +110,9 @@ def _coin_events(ds, tmap, a, b, ms):
     return out
 
 
-def run(ds, ms=msettings, max_points=24):
+def run(ds, ms=msettings, max_points=24, deadline=None):
+    """deadline (epoch s): raise TimeoutError at the next checkpoint past it, so a retrain ends with a
+    'retrain failed' line of its own before the watchdog would stop the service."""
     cps = checkpoints(ds.ts_list, max_points)
     res = dict(checkpoints=cps, events=[], wallet_events=[], preds={h[0]: [] for h in ms.horizons},
                weights=[], tier_counts=[], tier_forward={}, wallet_rank={}, wallet_rank_h={})
@@ -120,6 +122,8 @@ def run(ds, ms=msettings, max_points=24):
     h_wallet = "1h" if any(h[0] == "1h" for h in ms.horizons) else ms.horizons[0][0]
     bounds = cps + [ds.end + 1]
     for k, c in enumerate(cps):
+        if deadline and time.time() > deadline:
+            raise TimeoutError(f"retrain over its time limit at checkpoint {k + 1}/{len(cps)}")
         nxt = bounds[k + 1]
         st, _ = wallet_stats.compute(ds, c, use_flags=False)
         done = [we for we in res["wallet_events"] if we["ts"] + we["sec"] <= c]

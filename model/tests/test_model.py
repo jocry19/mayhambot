@@ -115,14 +115,30 @@ def test_retrain_if_due_keeps_last_success_on_failure(monkeypatch):
 
     marker = os.path.join(os.path.dirname(conn.execute("PRAGMA database_list").fetchone()[2]), "TRAINING")
 
-    def boom(c):
-        calls.append(os.path.exists(marker))   # the updater sees the retrain running
+    def boom(c, deadline=None):
+        calls.append((os.path.exists(marker), deadline > time.time()))   # the updater sees the retrain running
         raise RuntimeError("database is locked?")
+    monkeypatch.setattr(train, "_retry_at", {"t": 0.0})
     monkeypatch.setattr(train, "run_once", boom)
-    assert train.retrain_if_due(conn, 3600, 0.0) == 0.0  # failed: still due next cycle
-    assert calls == [True] and not os.path.exists(marker)
-    monkeypatch.setattr(train, "run_once", lambda c: None)
+    assert train.retrain_if_due(conn, 3600, 0.0) == 0.0  # failed: still due
+    assert calls == [(True, True)] and not os.path.exists(marker)
+    assert train.retrain_if_due(conn, 3600, 0.0) == 0.0 and len(calls) == 1  # but not again the next minute
+    train._retry_at["t"] = 0.0
+    deploying = os.path.join(os.path.dirname(marker), "DEPLOYING")
+    open(deploying, "w").close()
+    assert train.retrain_if_due(conn, 3600, 0.0) == 0.0 and len(calls) == 1  # updater at work: no start
+    os.remove(deploying)
+    monkeypatch.setattr(train, "run_once", lambda c, deadline=None: None)
     assert train.retrain_if_due(conn, 3600, time.time() - 60) > 0  # not due: untouched, no call
+
+
+def test_backtest_stops_at_its_deadline(tmp_path):
+    import pytest
+    from research import backtest, data, fixtures
+    conn, _, _ = fixtures.build(str(tmp_path / "d.db"), days=2, n_tokens=30)
+    ds = data.load(conn)
+    with pytest.raises(TimeoutError):
+        backtest.run(ds, deadline=time.time() - 1)
 
 
 def test_selection_log_explains_rejections():
@@ -659,4 +675,18 @@ def test_discovery_failure_releases_the_write_lock(tmp_path, monkeypatch):
         train._discovery_loop({})
     except SystemExit:
         pass
+    assert not conn.in_transaction
+
+
+def test_iter_rows_reads_in_chunks_and_matches_one_query(tmp_path):
+    import sqlite3
+    from research.prices import iter_rows
+    conn = sqlite3.connect(str(tmp_path / "c.db"))
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE x (a INTEGER, b TEXT)")
+    conn.executemany("INSERT INTO x VALUES (?, ?)", [(i, "k" if i % 3 else "z") for i in range(1000)])
+    conn.commit()
+    want = [tuple(r) for r in conn.execute("SELECT a, b FROM x WHERE b = ?", ("k",))]
+    assert list(iter_rows(conn, "a, b", "x", "b = ?", ("k",), size=7)) == want
+    assert list(iter_rows(conn, "a, b", "x", "b = ?", ("k",), chunked=False)) == want
     assert not conn.in_transaction
