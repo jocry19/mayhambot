@@ -581,6 +581,23 @@ def fresh_buyers(m, last):
     return sum(1 for w in m.get("wallets") or [] if w.get("tier") in ("ultra", "smart") and w.get("wallet") not in before)
 
 
+def _why_no_smart(conn, mint, base, f, now, cfg=settings):
+    """22.10.: 25 of 25 coins 'no smart buyer' for a day while the DB had Ultra / Smart buys every hour. Splits the
+    no_smart coins: wallets.tier says a tiered wallet bought in the window (db_tiered), the heuristic / tier map
+    counted one (pre_model) but the model's tiers did not (model_zeroed). Funnel keys, one example logged."""
+    n_db = conn.execute("SELECT COUNT(DISTINCT t.wallet) FROM trades t JOIN wallets w ON w.address=t.wallet "
+                        "WHERE t.mint=? AND t.side='buy' AND t.ts>=? AND t.ts<=? AND w.tier IN ('ultra','smart')",
+                        (mint, now - cfg.signal_window_min * 60, now)).fetchone()[0]
+    if n_db:
+        f["no_smart_db_tiered"] = f.get("no_smart_db_tiered", 0) + 1
+    if base["smart_buyers"] > 0:
+        f["no_smart_model_zeroed"] = f.get("no_smart_model_zeroed", 0) + 1
+    if (n_db or base["smart_buyers"] > 0) and not f.get("_no_smart_logged"):
+        f["_no_smart_logged"] = True
+        log.info("no_smart %s: %d tiered buyers in wallets.tier, %d before the model, 0 after (window %d min)",
+                 mint[:6], n_db, base["smart_buyers"], cfg.signal_window_min)
+
+
 def evaluate(conn, mints, cfg=settings, now=None):
     """Compute + store metrics for each mint; create signals that pass thresholds. Returns new signal rows."""
     now = now or int(time.time())
@@ -600,7 +617,8 @@ def evaluate(conn, mints, cfg=settings, now=None):
         if not_a_memecoin(tok):
             f["excluded"] = f.get("excluded", 0) + 1
             continue
-        m = apply_market(conn, mint, apply_safety(conn, mint, apply_model(conn, mint, now, token_metrics(conn, mint, qc, now, cfg))), now)
+        base = token_metrics(conn, mint, qc, now, cfg)
+        m = apply_market(conn, mint, apply_safety(conn, mint, apply_model(conn, mint, now, base)), now)
         m = dict(m, min_net=min_net, liquidity_usd=tok["liquidity_usd"] if tok else None, dex=tok["dex"] if tok else None)
         if ev_table:
             e, n, k = ev_mod.predict(ev_table, m.get("entities", m["smart_buyers"]), m["net_usd"], m.get("sellers", 0),
@@ -634,6 +652,8 @@ def evaluate(conn, mints, cfg=settings, now=None):
         if why in BAND_OVERRIDES and in_band(m):  # own class: the inflow band fires on entities + net, not the score
             kind, why = "band", None
             f["band"] = f.get("band", 0) + 1
+        if why == "no_smart":
+            _why_no_smart(conn, mint, base, f, now, cfg)
         if why:
             f[why] += 1
             _shadow(conn, mint, why, m, tok, now)

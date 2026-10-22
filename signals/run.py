@@ -432,6 +432,9 @@ def cycle(conn, i):
                  fu["low_net"], fu["min_score"], fu["low_score"], fu["low_ev"], fu["safety_drop"], fu["cooldown"],
                  fu["fired"], fu["max_score"], "active" if fu["ev_active"] else "off",
                  "-" if fu["max_ev"] is None else f"{fu['max_ev']:+.1%}")
+        if fu.get("no_smart_db_tiered") or fu.get("no_smart_model_zeroed"):
+            log.info("no smart buyer split: %d with a wallets.tier buyer in the window, %d zeroed by the model",
+                     fu.get("no_smart_db_tiered", 0), fu.get("no_smart_model_zeroed", 0))
         mg = fu.get("model") or {}
         if mg.get("fallbacks"):
             log.warning("model fallbacks this cycle: %d of %d coins used the heuristic (%s)", mg["fallbacks"],
