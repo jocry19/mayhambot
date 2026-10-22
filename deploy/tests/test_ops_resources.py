@@ -72,6 +72,39 @@ def test_research_may_grow_while_it_retrains_and_only_it_restarts(tmp_path, monk
     assert any("Nur research neu gestartet" in m for m in sent)
 
 
+def test_big_wal_is_checkpointed_not_restarted(tmp_path, monkeypatch):
+    import types
+    _setup(tmp_path, monkeypatch)
+    state, sent, restarts, cps = {"last_summary": 2e9}, [], [], []
+    clock = [1_000_000.0]
+    monkeypatch.setattr(ops.time, "time", lambda: clock[0])
+    monkeypatch.setattr(ops, "load_state", lambda: state)
+    monkeypatch.setattr(ops, "save_state", lambda s: None)
+    monkeypatch.setattr(ops, "send_alert", lambda m: sent.append(m) or True)
+    monkeypatch.setattr(ops, "restart_app", lambda why: restarts.append(why) or "App neu gestartet")
+    monkeypatch.setattr(ops, "rotate_logs", lambda **k: 0)
+    monkeypatch.setattr(ops, "new_lock_errors", lambda st: 0)
+    monkeypatch.setattr(ops, "collect", lambda: {"problems": {"wal_big": "WAL 2481 MB."}})
+    monkeypatch.setattr(ops, "build_summary", lambda: "x")
+    result = ["3 von 9 Seiten übertragen, leeren nicht möglich"]
+    monkeypatch.setattr(ops, "wal_checkpoint", lambda: cps.append(1) or result[0])
+    for name in ("nightly_maintenance", "check_planned_restarts", "check_credit_alerts", "check_service_budgets"):
+        monkeypatch.setattr(ops, name, lambda *a, **k: None)
+    args = types.SimpleNamespace(no_restart=False)
+    for _ in range(30):                       # an hour of a big WAL: checkpoints, no restart
+        ops.watchdog(args)
+        clock[0] += 120
+    assert restarts == [] and len(cps) == 30
+    clock[0] += 6 * 3600                      # failing for 6 h: one restart, then none for 6 h
+    for _ in range(10):
+        ops.watchdog(args)
+        clock[0] += 1200
+    assert len(restarts) == 1
+    result[0] = "ok, 9 von 9 Seiten übertragen und geleert"
+    ops.watchdog(args)
+    assert "wal_big" not in state["problems"]
+
+
 def test_hung_service_and_big_wal(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch, {"WAL_WARN_MB": "0.001"})
     monkeypatch.setattr(ops, "_rss_mb", lambda pid: None)
@@ -300,3 +333,18 @@ def test_credits_line_shows_the_plan_not_the_old_day_shares():
     assert ops.credits_line(c).endswith(", Kappe bei aktueller Rate am 19.10. 13:05 (ohne Sniper-Strom 2: 25.10. 09:00)")
     c["cap_at_no_stream"] = None
     assert ops.credits_line(c).endswith("(ohne Sniper-Strom 2: nach Monatsende)")
+
+
+def test_wal_checkpoint_empties_the_wal(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    c = sqlite3.connect(tmp_path / "data" / "mayhambot.db")
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA wal_autocheckpoint=0")
+    c.execute("CREATE TABLE t(x)")
+    c.executemany("INSERT INTO t VALUES (?)", [(i,) for i in range(5000)])
+    c.commit()
+    wal = tmp_path / "data" / "mayhambot.db-wal"
+    assert wal.stat().st_size > 0
+    assert ops.wal_checkpoint().startswith("ok")
+    assert wal.stat().st_size == 0
+    c.close()

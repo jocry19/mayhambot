@@ -414,6 +414,29 @@ def _proc_age_s(pid: int) -> float | None:
     return secs + int(days or 0) * 86400
 
 
+def wal_checkpoint(busy_ms: int = 2000) -> str:
+    """Fold the WAL back and truncate it: PASSIVE first (never waits), then TRUNCATE, which waits for readers at
+    most busy_ms while new writers queue behind it. 'ok …' when the WAL was emptied, else why not."""
+    try:
+        c = sqlite3.connect(str(db_path()), timeout=busy_ms / 1000, isolation_level=None)
+    except sqlite3.Error as e:
+        return f"nicht möglich ({e})"
+    try:
+        c.execute(f"PRAGMA busy_timeout={int(busy_ms)}")
+        busy, log_pages, done = c.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        try:
+            tbusy, *_ = c.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        except sqlite3.OperationalError:
+            tbusy = 1
+        if not tbusy:
+            return f"ok, {done} von {log_pages} Seiten übertragen und geleert"
+        return f"{done} von {log_pages} Seiten übertragen, leeren nicht möglich (ein Leser hält noch eine alte Sicht)"
+    except sqlite3.Error as e:
+        return f"fehlgeschlagen ({e})"
+    finally:
+        c.close()
+
+
 RUNAWAY: dict = {}   # service -> pid over MEM_RESTART_MB in the last check_resources()
 
 
@@ -435,10 +458,11 @@ def check_resources(procs: dict, now: float | None = None) -> dict:
         if mb is None:
             continue
         if mb > hard and name == "research" and training(now, cfg("MEM_TRAINING_MAX_MIN", 180)) \
-                and mb <= cfg("MEM_TRAINING_HARD_MB", 6000.0):
+                and mb <= cfg("MEM_TRAINING_HARD_MB", 10000.0):
             # the wallet-model retrain needs > 3 GB (60k wallets, 19.10.); restarting it every 17 min killed every
             # retrain for 2.5 days. While data/TRAINING is younger than MEM_TRAINING_MAX_MIN it may, up to
-            # MEM_TRAINING_HARD_MB; past either research alone restarts, which also ends an endless retrain
+            # MEM_TRAINING_HARD_MB (10 GB: the Mac has 32 GB, 75 % free on 22.10.); past either research alone
+            # restarts, which also ends an endless retrain
             big.append(f"{name} {mb:.0f} MB (trainiert)")
         elif mb > hard:
             runaway.append(f"{name} {mb:.0f} MB")
@@ -454,7 +478,7 @@ def check_resources(procs: dict, now: float | None = None) -> dict:
         wal_mb = wal.stat().st_size / 1e6
         if wal_mb > cfg("WAL_WARN_MB", 1000.0):
             problems["wal_big"] = (f"Datenbank-Journal (WAL) ist {wal_mb:.0f} MB groß: ein Leser hält den Checkpoint "
-                                   "auf. Neustart räumt das auf.")
+                                   "auf. Ich versuche einen Checkpoint.")
     except OSError:
         pass
     stalled = []
@@ -636,6 +660,13 @@ def watchdog(args) -> int:
     restartable = {"app_down", "service_down", "dashboard_down", "feed_stalled", "copytrade_stalled",
                    "sniper_stalled", "service_hung", "mem_runaway", "wal_big"}
     need_restart = []
+    if "wal_big" in r["problems"]:
+        # a restart did not shrink the WAL (2366 MB right after the 11:06 restart, 22.10.) but stopped every
+        # service 3 times an hour: checkpoint it instead; restart only if that fails for WAL_RESTART_HOURS (6)
+        res = wal_checkpoint() if not training(now, cfg("MEM_TRAINING_MAX_MIN", 180)) else "Training läuft, später"
+        r["problems"]["wal_big"] += f" Checkpoint: {res}."
+        if res.startswith("ok"):
+            r["problems"].pop("wal_big")
 
     for key, msg in r["problems"].items():
         p = seen.setdefault(key, {"first": now, "count": 0, "alerted": 0})
@@ -643,8 +674,14 @@ def watchdog(args) -> int:
         p["msg"] = msg
         if p["count"] < CONFIRM_RUNS:
             continue
-        if key in restartable and not (key == "service_down" and supervised()
-                                       and now - p["first"] < cfg("SERVICE_DOWN_RESTART_MIN", 15) * 60):
+        if key == "wal_big" and (now - p["first"] < cfg("WAL_RESTART_HOURS", 6) * 3600
+                                 or training(now, cfg("MEM_TRAINING_MAX_MIN", 180))):
+            pass   # checkpoints first (above); a whole-app restart only after hours of failed ones
+        elif key in ("wal_big", "mem_runaway") and now - st.setdefault("app_restart_by", {}).get(key, 0) \
+                < cfg("SAME_REASON_RESTART_HOURS", 6) * 3600 and not (key == "mem_runaway" and supervised()):
+            pass   # at most one whole-app restart per 6 h for the same slow reason; the alert below still goes
+        elif key in restartable and not (key == "service_down" and supervised()
+                                         and now - p["first"] < cfg("SERVICE_DOWN_RESTART_MIN", 15) * 60):
             # one service in its crash backoff is the supervisor's job; restarting the whole app for it would
             # stop the 9 healthy ones too. Only when it stays down past the backoff does the watchdog step in.
             need_restart.append(key)
@@ -682,6 +719,9 @@ def watchdog(args) -> int:
                 st["loop_alerted"] = now
         else:
             action = restart_app(", ".join(need_restart))
+            for k in need_restart:
+                if k in ("wal_big", "mem_runaway"):
+                    st.setdefault("app_restart_by", {})[k] = now
             st["last_restart"] = now
             st["restarts"] = recent + [now]
             send_alert(f"🔁 {action} wegen: {', '.join(seen[k]['msg'] for k in need_restart)}")
