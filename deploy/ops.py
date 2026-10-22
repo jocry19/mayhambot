@@ -430,6 +430,10 @@ def wal_checkpoint(busy_ms: int = 2000) -> str:
             tbusy = 1
         if not tbusy:
             return f"ok, {done} von {log_pages} Seiten übertragen und geleert"
+        if log_pages >= 0 and done >= log_pages:
+            # everything is in the database, only the file keeps its size until a TRUNCATE gets through:
+            # nothing a restart would fix
+            return f"ok, alle {log_pages} Seiten übertragen (Datei bleibt groß, bis sie geleert werden kann)"
         return f"{done} von {log_pages} Seiten übertragen, leeren nicht möglich (ein Leser hält noch eine alte Sicht)"
     except sqlite3.Error as e:
         return f"fehlgeschlagen ({e})"
