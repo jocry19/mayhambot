@@ -44,6 +44,7 @@ import re
 import os
 import platform
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -413,12 +414,16 @@ def _proc_age_s(pid: int) -> float | None:
     return secs + int(days or 0) * 86400
 
 
+RUNAWAY: dict = {}   # service -> pid over MEM_RESTART_MB in the last check_resources()
+
+
 def check_resources(procs: dict, now: float | None = None) -> dict:
     """Memory per service, a growing SQLite WAL, and services that are alive but stopped logging."""
     now = now or time.time()
     problems = {}
     soft, hard = cfg("MEM_WARN_MB", 1500.0), cfg("MEM_RESTART_MB", 3000.0)
     big, runaway = [], []
+    RUNAWAY.clear()
     for name, alive in procs.items():
         if not alive:
             continue
@@ -429,8 +434,15 @@ def check_resources(procs: dict, now: float | None = None) -> dict:
         mb = _rss_mb(pid)
         if mb is None:
             continue
-        if mb > hard:
+        if mb > hard and name == "research" and training(now, cfg("MEM_TRAINING_MAX_MIN", 180)) \
+                and mb <= cfg("MEM_TRAINING_HARD_MB", 6000.0):
+            # the wallet-model retrain needs > 3 GB (60k wallets, 19.10.); restarting it every 17 min killed every
+            # retrain for 2.5 days. While data/TRAINING is younger than MEM_TRAINING_MAX_MIN it may, up to
+            # MEM_TRAINING_HARD_MB; past either research alone restarts, which also ends an endless retrain
+            big.append(f"{name} {mb:.0f} MB (trainiert)")
+        elif mb > hard:
             runaway.append(f"{name} {mb:.0f} MB")
+            RUNAWAY[name] = pid
         elif mb > soft:
             big.append(f"{name} {mb:.0f} MB")
     if runaway:
@@ -564,12 +576,13 @@ def ops_report() -> str:
 COMPACTING = "COMPACTING"   # written by mayham.py next to the DB while the one-time VACUUM runs before the services
 
 
-def training(now: float | None = None) -> bool:
+def training(now: float | None = None, max_min: float | None = None) -> bool:
     """True while the research service retrains the wallet model (data/TRAINING, written by model/train.py; a
-    marker older than TRAINING_MAX_MIN is stale: the process died without removing it)."""
+    marker older than TRAINING_MAX_MIN (90, or max_min) is stale: the process died without removing it)."""
     f = db_path().parent / "TRAINING"
+    max_min = cfg("TRAINING_MAX_MIN", 90) if max_min is None else max_min
     try:
-        return 0 <= (now or time.time()) - f.stat().st_mtime < cfg("TRAINING_MAX_MIN", 90) * 60
+        return 0 <= (now or time.time()) - f.stat().st_mtime < max_min * 60
     except OSError:
         return False
 
@@ -644,6 +657,22 @@ def watchdog(args) -> int:
     st["restarts"] = recent
     if need_restart and update_in_progress(now):
         need_restart = []   # the updater restarts the app itself; a second restart mid-round would race it
+    if "mem_runaway" in need_restart and RUNAWAY and supervised():
+        # memory: only the service that grew, the supervisor (mayham.py run) starts it again after 10 s; a whole-
+        # app restart stopped brain, copytrade, signals and sniper every 17 min for research's retrain (19.10.-22.10.)
+        need_restart.remove("mem_runaway")
+        done = st.setdefault("svc_restarts", {})
+        for name, pid in RUNAWAY.items():
+            if now - done.get(name, 0) <= RESTART_COOLDOWN or args.no_restart:
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+                done[name] = now
+                print(f"Speicher: nur {name} neu gestartet (pid {pid})")
+                send_alert(f"🔁 Nur {name} neu gestartet wegen: {seen['mem_runaway']['msg']} Die anderen Dienste "
+                           "laufen weiter.")
+            except OSError as e:
+                print(f"Speicher: {name} nicht beendet: {e}")
     if need_restart and not args.no_restart and now - st.get("last_restart", 0) > RESTART_COOLDOWN:
         if len(recent) >= cfg("MAX_RESTARTS_PER_HOUR", 3):
             # a real defect must not turn into a restart loop: alarm once per hour, leave the bot as it is

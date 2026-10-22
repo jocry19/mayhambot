@@ -32,6 +32,46 @@ def test_memory_thresholds(tmp_path, monkeypatch):
     assert "mem_runaway" in p and "mem_runaway" not in ops.check_resources({"signals": False, "web": True})
 
 
+def test_research_may_grow_while_it_retrains_and_only_it_restarts(tmp_path, monkeypatch):
+    import types
+    _setup(tmp_path, monkeypatch)
+    for n, pid in (("research", 21), ("brain", 22)):
+        (tmp_path / "data" / "pids" / f"{n}.pid").write_text(str(pid))
+    rss = {21: 4200.0, 22: 300.0}
+    monkeypatch.setattr(ops, "_rss_mb", lambda pid: rss[pid])
+    procs = {"research": True, "brain": True}
+    marker = tmp_path / "data" / "TRAINING"
+    marker.write_text("1")
+    p = ops.check_resources(procs)
+    assert "mem_runaway" not in p and "research 4200 MB (trainiert)" in p["mem_high"]
+    old = time.time() - 181 * 60                  # a retrain past 3 h is not waited for any longer
+    os.utime(marker, (old, old))
+    assert "mem_runaway" in ops.check_resources(procs) and ops.RUNAWAY == {"research": 21}
+    marker.unlink()
+
+    state, sent, restarts, killed = {"last_summary": 2e9}, [], [], []
+    clock = [1_000_000.0]
+    monkeypatch.setattr(ops.time, "time", lambda: clock[0])
+    monkeypatch.setattr(ops, "load_state", lambda: state)
+    monkeypatch.setattr(ops, "save_state", lambda s: None)
+    monkeypatch.setattr(ops, "send_alert", lambda m: sent.append(m) or True)
+    monkeypatch.setattr(ops, "restart_app", lambda why: restarts.append(why) or "App neu gestartet")
+    monkeypatch.setattr(ops, "rotate_logs", lambda **k: 0)
+    monkeypatch.setattr(ops, "new_lock_errors", lambda st: 0)
+    monkeypatch.setattr(ops, "collect", lambda: {"problems": ops.check_resources(procs)})
+    monkeypatch.setattr(ops, "build_summary", lambda: "x")
+    monkeypatch.setattr(ops, "supervised", lambda: True)
+    monkeypatch.setattr(ops.os, "kill", lambda pid, sig: killed.append(pid))
+    for name in ("nightly_maintenance", "check_planned_restarts", "check_credit_alerts", "check_service_budgets"):
+        monkeypatch.setattr(ops, name, lambda *a, **k: None)
+    args = types.SimpleNamespace(no_restart=False)
+    for _ in range(3):
+        ops.watchdog(args)
+        clock[0] += 120
+    assert restarts == [] and killed == [21]      # research alone, once per cooldown; brain keeps running
+    assert any("Nur research neu gestartet" in m for m in sent)
+
+
 def test_hung_service_and_big_wal(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch, {"WAL_WARN_MB": "0.001"})
     monkeypatch.setattr(ops, "_rss_mb", lambda pid: None)
