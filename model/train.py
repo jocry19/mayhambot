@@ -35,7 +35,7 @@ def _peak_mb():
         return None
 
 
-def run_once(conn=None, now=None, write_files=True):
+def run_once(conn=None, now=None, write_files=True, deadline=None):
     conn = ensure_schema(conn) if conn is not None else connect()
     now = int(now or time.time())
     t0 = time.time()
@@ -45,7 +45,7 @@ def run_once(conn=None, now=None, write_files=True):
         return None
     # the watchdog restarts a service above MEM_RESTART_MB: say where a retrain's memory goes
     log.info("retrain data: %d trades, %d coins priced, peak %s MB", len(ds.trades), len(ds.pidx.ts), _peak_mb())
-    bt = backtest.run(ds, msettings)
+    bt = backtest.run(ds, msettings, deadline=deadline)
     log.info("retrain backtest done after %.0f s, peak %s MB", time.time() - t0, _peak_mb())
     # production weights: all wallet buys whose outcome is known by now, learned on the target whose ranking made
     # the most net money walk-forward (net after costs, excess over the coin's other buyers, pumped, prior)
@@ -59,6 +59,8 @@ def run_once(conn=None, now=None, write_files=True):
                                                      if we.get(targets[chosen]) is not None],
                                                     cap=0 if chosen == "pumped" else None)
     winfo["variant"] = chosen
+    if deadline and time.time() > deadline:
+        raise TimeoutError("retrain over its time limit after the backtest")
     st, _ = wallet_stats.compute(ds, now + 1)
     tiers = tier_all(st, weights)
     champ = {}
@@ -196,17 +198,30 @@ def _champions(conn, vid):
     return " ".join(f"{h}={(m.get('cfg') or {}).get('algo', m.get('kind'))}" for h, m in models.items())
 
 
+def _young(path, max_age_s):
+    try:
+        return 0 <= time.time() - path.stat().st_mtime < max_age_s
+    except OSError:
+        return False
+
+
+_retry_at = {"t": 0.0}  # after a failed retrain the next one waits this long, not just the next minute's tick
+FAIL_RETRY_MIN = 30
+
+
 def retrain_if_due(conn, every, last_ok):
     """Retrain when the last successful one is older than `every` seconds (or there never was one).
-    Returns the new last-success time; a failure keeps the old one so the next cycle tries again."""
-    if time.time() - last_ok < every:
+    Returns the new last-success time; a failure keeps the old one and tries again FAIL_RETRY_MIN later."""
+    if time.time() - last_ok < every or time.time() < _retry_at["t"]:
         return last_ok
+    db_file = conn.execute("PRAGMA database_list").fetchone()[2]
+    if db_file and _young(Path(db_file).parent / "DEPLOYING", msettings.deploy_hold_min * 60):
+        return last_ok  # the updater is testing / restarting: a retrain begun now would be killed half way
     from core.db import retry_locked
     t0 = time.time()
     log.info("retrain started (last successful %s)", _utc(last_ok) if last_ok else "never")
     # data/TRAINING next to the DB while a retrain runs: the auto-updater holds its deploy (a restart killed the
     # ~30-min retrain on the Mac whenever deploys came every 30 min, 18.10.)
-    db_file = conn.execute("PRAGMA database_list").fetchone()[2]
     marker = Path(db_file).parent / "TRAINING" if db_file else None
     try:
         if marker:
@@ -214,10 +229,12 @@ def retrain_if_due(conn, every, last_ok):
     except OSError:
         marker = None
     try:
-        vid = retry_locked(conn, lambda: run_once(conn), attempts=2)
+        deadline = t0 + msettings.retrain_max_min * 60
+        vid = retry_locked(conn, lambda: run_once(conn, deadline=deadline), attempts=2)
     except Exception:  # noqa: BLE001
         conn.rollback()
-        log.exception("retrain failed after %.0f s, retrying next cycle", time.time() - t0)
+        log.exception("retrain failed after %.0f s, retrying in %d min", time.time() - t0, FAIL_RETRY_MIN)
+        _retry_at["t"] = time.time() + FAIL_RETRY_MIN * 60
         return last_ok
     finally:
         if marker:

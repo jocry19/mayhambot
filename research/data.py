@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from core.config import settings
-from research.prices import PriceIndex
+from research.prices import PriceIndex, iter_rows
 from research.stats import median
 
 POOL_SOURCES = {"geckoterminal", "rpc_early", "test_pool"}  # pool-wide trade feeds (all wallets of a coin)
@@ -110,14 +110,14 @@ def shared(conn):
 def load(conn, since_ts=0, mints=None, shared=None):
     """mints=None: everything (training). mints=[...]: those coins only (live scoring); funding links are then
     skipped (only training builds clusters) and `shared` (see Shared) saves the per-call flag/intel setup."""
-    cond, args = "WHERE ts >= ?", [since_ts]
+    cond, args = "ts >= ?", [since_ts]
     if mints is not None:
         mints = list(mints)
         cond += f" AND mint IN ({','.join('?' * len(mints))})"
         args += mints
     trades, ratios, names = [], [], {}
-    for r in conn.execute(f"SELECT wallet, mint, side, ts, token_amount, usd_amount, sol_amount, price_usd, source "
-                          f"FROM trades {cond}", args):
+    for r in iter_rows(conn, "wallet, mint, side, ts, token_amount, usd_amount, sol_amount, price_usd, source",
+                       "trades", cond, args, chunked=mints is None):
         # sqlite hands out a fresh str per row: one shared copy per wallet/mint saves ~40 % of the trade memory
         t = T(names.setdefault(r[0], r[0]), names.setdefault(r[1], r[1]), names.setdefault(r[2], r[2]), int(r[3] or 0), r[4] or 0.0, r[5] or 0.0, r[6] or 0.0, r[7] or 0.0,
               (r[8] or "") in POOL_SOURCES)
