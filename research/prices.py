@@ -9,33 +9,52 @@ whole candle lies inside it (start after a, end at or before b). Otherwise a hig
 the entry candle would count as reached after the entry. Candle closes count as prints at the candle end.
 """
 import bisect
+from array import array
 from collections import defaultdict
 
 from research.config import rsettings
 
 
 class _Sparse:
-    """O(1) range max/min over a fixed array."""
+    """Range max/min over a fixed array: a sparse table over blocks of BLOCK values plus a scan of the two edge
+    blocks. A sparse table over every value held n*log(n) entries per coin and grew the research service past
+    its 3 GB limit during the retrain (10/2026); this keeps n/BLOCK*log entries at the same answers."""
+    BLOCK = 64
 
     def __init__(self, vals, fn):
-        self.fn = fn
-        self.t = [list(vals)]
+        self.fn, self.vals, b = fn, vals, self.BLOCK
+        blocks = [fn(vals[i:i + b]) for i in range(0, len(vals), b)]
+        self.t = [blocks]
         j = 1
-        while (1 << j) <= len(vals):
+        while (1 << j) <= len(blocks):
             prev = self.t[-1]
             half = 1 << (j - 1)
-            self.t.append([fn(prev[i], prev[i + half]) for i in range(len(vals) - (1 << j) + 1)])
+            self.t.append([fn(prev[i], prev[i + half]) for i in range(len(blocks) - (1 << j) + 1)])
             j += 1
 
     def query(self, i, j):  # inclusive i..j
         if i > j:
             return None
-        k = (j - i + 1).bit_length() - 1
-        return self.fn(self.t[k][i], self.t[k][j - (1 << k) + 1])
+        b, fn, vals = self.BLOCK, self.fn, self.vals
+        bi, bj = i // b, j // b
+        if bi == bj or bj - bi == 1:
+            return fn(vals[i:j + 1])
+        edge = fn(fn(vals[i:(bi + 1) * b]), fn(vals[bj * b:j + 1]))
+        lo, hi = bi + 1, bj - 1
+        k = (hi - lo + 1).bit_length() - 1
+        return fn(edge, self.t[k][lo], self.t[k][hi - (1 << k) + 1])
 
 
 MIN_LIQ_SHARE = 0.02  # snapshot prints need liquidity >= 2 % of the market cap
 SPIKE = 5.0  # a single print 5x above (or below) both neighbours is a bad print, not a price
+
+
+def _arr(code, vals):
+    """array of vals, or the list itself when a value does not fit (e.g. fractional times in a test)."""
+    try:
+        return array(code, vals)
+    except (TypeError, OverflowError):
+        return list(vals)
 
 
 def _drop_spikes(pts):
@@ -85,15 +104,16 @@ class PriceIndex:
             cand[r[0]].append((r[1], r[2], r[3], r[4], r[5]))
         # wallet-history prices are derived (SOL price today, multi-hop swaps) and can be far off: when a coin
         # has candles, only candles + pool-feed trades count; otherwise all trades are used
-        for mint, tp in trade_pts.items():
+        for mint in list(trade_pts):
             pool_only = mint in cand
-            pts[mint].extend((t, p) for t, p, src in tp if not pool_only or src in ("geckoterminal", "test_pool"))
+            pts[mint].extend((t, p) for t, p, src in trade_pts.pop(mint)
+                             if not pool_only or src in ("geckoterminal", "test_pool"))
         idx = cls()
         for mint, cs in cand.items():
             for tf, ts, h, l, c in cs:
                 pts[mint].append((ts + tf - 1, c))
-        for mint, p in pts.items():
-            idx._add(mint, p, candles=[(tf, ts, h, l) for tf, ts, h, l, _ in cand.get(mint, [])])
+        for mint in list(pts):  # popped as they go: the raw tuples of all coins are never held twice
+            idx._add(mint, pts.pop(mint), candles=[(tf, ts, h, l) for tf, ts, h, l, _ in cand.get(mint, [])])
         for r in conn.execute("SELECT mint, price_usd, mcap_usd FROM tokens WHERE price_usd > 0 AND mcap_usd > 0"
                               + cond, args):
             idx.supply[r[0]] = r[2] / r[1]
@@ -130,14 +150,21 @@ class PriceIndex:
         for i, pr in enumerate(prices):
             nb = [prices[i - 1]] if i > 0 else []
             conf.append(pr if not nb or any(pr <= 3 * x for x in nb) else min(nb))
-        hp = sorted([(t, c) for (t, _), c in zip(pts, conf)] + list(highs))
-        lp = sorted([(t, p) for t, p in pts] + list(lows))
-        self.ts[mint] = [t for t, _ in pts]
-        self.px[mint] = prices
-        self.hi_ts[mint] = [t for t, _ in hp]
-        self.hi[mint] = [p for _, p in hp]
-        self.lo_ts[mint] = [t for t, _ in lp]
-        self.lo[mint] = [p for _, p in lp]
+        # flat arrays (8 bytes a value instead of a list slot plus a float object); without extra highs/lows the
+        # high and low series share the print times (and the low series the prices) instead of copying them
+        ts = _arr("q", [t for t, _ in pts])
+        px = _arr("d", prices)
+        self.ts[mint], self.px[mint] = ts, px
+        if highs:
+            hp = sorted([(t, c) for (t, _), c in zip(pts, conf)] + list(highs))
+            self.hi_ts[mint], self.hi[mint] = _arr("q", [t for t, _ in hp]), _arr("d", [p for _, p in hp])
+        else:
+            self.hi_ts[mint], self.hi[mint] = ts, px if conf == prices else _arr("d", conf)
+        if lows:
+            lp = sorted(list(pts) + list(lows))
+            self.lo_ts[mint], self.lo[mint] = _arr("q", [t for t, _ in lp]), _arr("d", [p for _, p in lp])
+        else:
+            self.lo_ts[mint], self.lo[mint] = ts, px
         self._max.pop(mint, None)
         self._min.pop(mint, None)
 

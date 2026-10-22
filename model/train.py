@@ -24,6 +24,17 @@ def _previous(conn):
                 auc=(m.get("1h") or {}).get("auc"))
 
 
+def _peak_mb():
+    """Peak resident memory of this process so far (macOS reports bytes, Linux KiB)."""
+    try:
+        import resource
+        import sys
+        r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return r / 1e6 if sys.platform == "darwin" else r / 1e3
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def run_once(conn=None, now=None, write_files=True):
     conn = ensure_schema(conn) if conn is not None else connect()
     now = int(now or time.time())
@@ -32,7 +43,10 @@ def run_once(conn=None, now=None, write_files=True):
     if not ds.trades:
         log.warning("no trades in the database yet")
         return None
+    # the watchdog restarts a service above MEM_RESTART_MB: say where a retrain's memory goes
+    log.info("retrain data: %d trades, %d coins priced, peak %s MB", len(ds.trades), len(ds.pidx.ts), _peak_mb())
     bt = backtest.run(ds, msettings)
+    log.info("retrain backtest done after %.0f s, peak %s MB", time.time() - t0, _peak_mb())
     # production weights: all wallet buys whose outcome is known by now, learned on the target whose ranking made
     # the most net money walk-forward (net after costs, excess over the coin's other buyers, pumped, prior)
     known = [we for we in bt["wallet_events"] if we["ts"] + we["sec"] <= now]
@@ -230,11 +244,13 @@ def _discovery_loop(state):
                 log.info("public seeds: %s", public_seeds.run(conn))
             except Exception:  # noqa: BLE001
                 log.exception("public seeding failed")
+                conn.rollback()
             last_seed = time.time()
         try:
             discovery.run_once(conn)
         except Exception:  # noqa: BLE001
             log.exception("discovery failed")
+            conn.rollback()  # a half-done write must not keep the write lock (and the WAL) for the next round
         state["round_started"] = None
         time.sleep(rsettings.discover_every_min * 60)
 

@@ -618,3 +618,45 @@ def test_truncated_address_is_skipped_not_retried(monkeypatch):
     assert not rpc.is_pubkey("0OIl" * 9)
     monkeypatch.setattr(rpc, "call", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no RPC call")))
     assert rpc.wallet_trades("3nC5HEoyffo8A3peLNX5BtvzQ6qKSgNE36oW3m9SNz2") == []
+
+
+def test_price_index_block_sparse_matches_scan_and_shares_series():
+    import random
+    from array import array
+    from research.prices import PriceIndex, _Sparse
+
+    rng = random.Random(3)
+    for n in (1, 2, 63, 64, 65, 129, 700):
+        vals = array("d", (rng.uniform(0, 10) for _ in range(n)))
+        mx, mn = _Sparse(vals, max), _Sparse(vals, min)
+        for _ in range(300):
+            i = rng.randrange(n)
+            j = rng.randrange(i, n)
+            assert mx.query(i, j) == max(vals[i:j + 1]) and mn.query(i, j) == min(vals[i:j + 1])
+        assert mx.query(5, 4) is None
+    idx = PriceIndex()
+    idx._add("m", [(t, 1.0 + (t % 7)) for t in range(0, 6000, 30)])
+    assert idx.lo_ts["m"] is idx.ts["m"] and idx.lo["m"] is idx.px["m"] and idx.hi_ts["m"] is idx.ts["m"]
+    assert idx.max_between("m", 0, 600) == 7.0 and idx.min_between("m", 0, 600) == 1.0
+
+
+def test_discovery_failure_releases_the_write_lock(tmp_path, monkeypatch):
+    from model import train
+    from research import discovery, store
+
+    conn = store.connect(str(tmp_path / "t.db"))
+
+    def boom(c):
+        c.execute("INSERT INTO research_wallets(address) VALUES ('x')")  # half-done write, then a failure
+        raise RuntimeError("locked for good")
+    calls = []
+    monkeypatch.setattr(discovery, "run_once", boom)
+    monkeypatch.setattr(train, "connect", lambda: conn)
+    monkeypatch.setattr(train.time, "sleep", lambda s: (calls.append(s), (_ for _ in ()).throw(SystemExit)))
+    from research import public_seeds
+    monkeypatch.setattr(public_seeds, "run", lambda c: {})
+    try:
+        train._discovery_loop({})
+    except SystemExit:
+        pass
+    assert not conn.in_transaction

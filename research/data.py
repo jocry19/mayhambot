@@ -10,7 +10,7 @@ from research.stats import median
 POOL_SOURCES = {"geckoterminal", "rpc_early", "test_pool"}  # pool-wide trade feeds (all wallets of a coin)
 
 
-@dataclass
+@dataclass(slots=True)  # millions of trades in a retrain: no per-object dict
 class T:
     wallet: str
     mint: str
@@ -115,10 +115,11 @@ def load(conn, since_ts=0, mints=None, shared=None):
         mints = list(mints)
         cond += f" AND mint IN ({','.join('?' * len(mints))})"
         args += mints
-    trades, ratios = [], []
+    trades, ratios, names = [], [], {}
     for r in conn.execute(f"SELECT wallet, mint, side, ts, token_amount, usd_amount, sol_amount, price_usd, source "
                           f"FROM trades {cond}", args):
-        t = T(r[0], r[1], r[2], int(r[3] or 0), r[4] or 0.0, r[5] or 0.0, r[6] or 0.0, r[7] or 0.0,
+        # sqlite hands out a fresh str per row: one shared copy per wallet/mint saves ~40 % of the trade memory
+        t = T(names.setdefault(r[0], r[0]), names.setdefault(r[1], r[1]), names.setdefault(r[2], r[2]), int(r[3] or 0), r[4] or 0.0, r[5] or 0.0, r[6] or 0.0, r[7] or 0.0,
               (r[8] or "") in POOL_SOURCES)
         trades.append(t)
         if t.sol > 0.01 and t.usd > 1 and len(ratios) < 50000:

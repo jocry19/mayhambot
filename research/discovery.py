@@ -108,7 +108,7 @@ def run_once(conn=None):
         toks.append(Token(mint=p["mint"], symbol=p["name"].split("/")[0].strip(), pool_address=p["pool"],
                           price_usd=p["price"], mcap_usd=p["mcap"], liquidity_usd=p["liquidity"],
                           pair_created_at=p["created_at"], price_change_h1=p["ch_h1"], price_change_h24=p["ch_h24"]))
-    retry(lambda: db.upsert_tokens(conn, toks, tracked=False))
+    retry(lambda: db.upsert_tokens(conn, toks, tracked=False), conn=conn)
     done = {r[0] for r in conn.execute("SELECT mint FROM research_tokens WHERE early_fetched_at > 0")}
     max_age = rsettings.max_token_age_days * 86400
     young = [p for p in pools if p["created_at"] and now - p["created_at"] <= max_age and p["mint"] not in done]
@@ -136,7 +136,7 @@ def run_once(conn=None):
                 recent = market.pool_trades(Token(mint=p["mint"], pool_address=p["pool"]))
             except Exception as e:  # noqa: BLE001
                 log.warning("pool trades %s failed: %s", p["mint"][:6], e)
-        summary["trades_added"] += retry(lambda: db.insert_trades(conn, early + recent))
+        summary["trades_added"] += retry(lambda: db.insert_trades(conn, early + recent), conn=conn)
         peak_mult = None
         if cs:
             first = next((c[4] for c in cs if c[4] > 0), 0)
@@ -191,11 +191,11 @@ def run_once(conn=None):
         if tr is None:  # failed or incomplete: not marked, so the next run tries again
             summary["wallets_backfill_failed"] = summary.get("wallets_backfill_failed", 0) + 1
             continue
-        summary["wallet_trades_added"] += retry(lambda: db.insert_trades(conn, tr))
+        summary["wallet_trades_added"] += retry(lambda: db.insert_trades(conn, tr), conn=conn)
         for t in tr:
             new_mints[t.mint] += 1
         retry(lambda: (conn.execute("UPDATE research_wallets SET backfilled_at=?, n_backfills=n_backfills+1 WHERE address=?",
-                                    (now, w)), conn.commit()))
+                                    (now, w)), conn.commit()), conn=conn)
     summary["wallets_backfilled"] = len(due) - summary.get("wallets_backfill_failed", 0)
     # funding source of the best wallets (same funder = same person, counted as one group)
     try:
@@ -212,7 +212,7 @@ def run_once(conn=None):
            WHERE c.mint IS NULL GROUP BY t.mint ORDER BY COUNT(*) DESC LIMIT 200""")]
     need += [m for m in pending if m not in need and m not in recent_tried and _mine(m)]
     infos = {t.mint: t for t in market.token_info(need[:150])} if need else {}
-    retry(lambda: db.upsert_tokens(conn, list(infos.values()), tracked=False))
+    retry(lambda: db.upsert_tokens(conn, list(infos.values()), tracked=False), conn=conn)
     for m in need:
         t = infos.get(m)
         upsert_research_token(conn, m, researched_at=now, pool=t.pool_address if t else None,
