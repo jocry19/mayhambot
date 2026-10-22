@@ -1303,3 +1303,36 @@ def test_stream_refused_with_429_asks_again_after_5_min(monkeypatch):
     monkeypatch.setattr(st._stop, "wait", wait)
     asyncio.run(st._main())
     assert waits and all(w >= ws.WalletStream.REFUSED_WAIT_S for w in waits)
+
+
+def test_watchdog_moves_every_stream_when_all_are_silent_and_polling_finds_gaps():
+    """22.10. 10:36: two publicnode streams, 0 notifications, 54 gaps; one kick per 10 min left one deaf."""
+    w = _fake_streams()
+    a, b = w.streams
+    now = time.time()
+    a.last_notification, b.last_notification = now - 900, now - 800
+    tracker.GAPS.clear()
+    for _ in range(3):
+        tracker.GAPS.append((now - 60, W))
+    assert sorted(w.watchdog(now)) == sorted([a.name, b.name])
+    tracker.GAPS.clear()
+
+
+def test_two_streams_take_different_nodes_when_they_can():
+    a, b = FakeNode(), FakeNode()
+    urls = [f"ws://127.0.0.1:{a.port}", f"ws://127.0.0.1:{b.port}"]
+    ws.WalletStream.in_use.clear()
+    s1 = ws.WalletStream(Settings(), url=urls, name="t-ws-0")
+    s2 = ws.WalletStream(Settings(), url=urls, name="t-ws-1")
+    for st in (s1, s2):
+        st.set_wallets([W])
+    s1.start()
+    try:
+        assert _wait(lambda: W in s1.covered())
+        s2.start()
+        assert _wait(lambda: W in s2.covered())
+        assert s1.url != s2.url  # the second one skipped the node the first one holds
+    finally:
+        s1.stop()
+        s2.stop()
+        ws.WalletStream.in_use.clear()

@@ -406,10 +406,14 @@ class Watcher:
         live = [a for a in self.streams if a.connected and now - a.connected_at > 300 and a.name not in kicked]
         own = {a.name: sum(1 for w in gap_w if w in a.covered()) for a in live}
         if live and now - self._last_gap_kick > 600 and max(own.values()) >= 3:
-            a = max(live, key=lambda x: (own[x.name], -x.last_notification))
-            gaps = own[a.name]
-            a.reconnect(f"{gaps} gaps found by polling")
-            kicked.append(a.name)
+            # every stream silent for 5 min while polling finds gaps: none delivers, all move on (22.10. 10:36: two
+            # silent publicnode streams, one kick per 10 min left the other one deaf)
+            silent = [a for a in live if now - (a.last_notification or a.connected_at) > 300 and own[a.name] >= 3]
+            targets = silent if len(silent) == len(live) else [
+                max(live, key=lambda x: (own[x.name], -x.last_notification))]
+            for a in targets:
+                a.reconnect(f"{own[a.name]} gaps found by polling")
+                kicked.append(a.name)
             self._last_gap_kick = now
         for name in kicked:
             self._kicked_at[name] = now

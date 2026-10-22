@@ -52,6 +52,9 @@ class WalletStream:
     # shared by all streams in the process (the limit is per IP, not per connection): url -> cap / rest-until
     caps: dict[str, int] = {}
     rest_until: dict[str, float] = {}
+    # url -> name of the stream connected to it: two streams on one node go silent together (22.10. 10:36: both on
+    # publicnode, 0 notifications, 54 gaps found by polling), so a stream takes another free endpoint when it can
+    in_use: dict[str, str] = {}
 
     def __init__(self, s: Settings, url: str | list[str] | None = None, events: queue.Queue | None = None,
                  name: str = "wallet-ws", complement: bool = False):
@@ -129,6 +132,9 @@ class WalletStream:
             return True
         return False
 
+    def _taken(self, url: str) -> bool:
+        return self.in_use.get(url, self.name) != self.name
+
     def saw(self, sig: str) -> bool:
         return sig in self.recent
 
@@ -148,10 +154,15 @@ class WalletStream:
                     self.rest_until.get(u, 0) <= time.time() for u in self.urls):
                 self._idx = (self._idx + 1) % len(self.urls)  # resting after a subscription limit: next one
                 continue
+            if self._taken(url) and any(not self._taken(u) and self.rest_until.get(u, 0) <= time.time()
+                                        for u in self.urls):
+                self._idx = (self._idx + 1) % len(self.urls)  # another stream is on this node: a different one
+                continue
             try:
                 async with websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=2 ** 22,
                                               open_timeout=15) as sock:
                     self.connected, self.connected_at = True, time.time()
+                    self.in_use[url] = self.name
                     self.stats["connects"] += 1
                     backoff = 1.0
                     log.info("wallet websocket connected (%s)", url.split("?")[0])
@@ -172,6 +183,8 @@ class WalletStream:
                     log.info("wallet websocket %s dropped: %s", url.split("?")[0], _redact(txt)[:120])
             finally:
                 self.connected = False
+                if self.in_use.get(url) == self.name:
+                    self.in_use.pop(url, None)
                 with self._lock:
                     self._subs.clear()
             # next endpoint right away; after a full round through the list wait with growing backoff
